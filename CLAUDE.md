@@ -23,7 +23,7 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 ### Code Quality
 - `cargo fmt` - Format code according to Rust standards
 - `cargo clippy` - Run the Rust linter for code improvements
-- `cargo check` - Quick compilation check without producing binaries
+- `cargo check` - Quick compilation check without producing binaries (preferred for validating code changes)
 
 ## Project Structure
 

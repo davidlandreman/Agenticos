@@ -5,8 +5,10 @@ mod memory;
 mod debug;
 mod color;
 mod frame_buffer;
+mod font;
 mod core_text;
 mod core_gfx;
+mod text_buffer;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo};
@@ -44,55 +46,67 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Initialize framebuffer if available
     debug_info!("Checking for framebuffer...");
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
-        debug_info!("Framebuffer found! Initializing frame buffer driver...");
-        let mut fb_writer = frame_buffer::init(framebuffer);
-        debug_info!("Frame buffer initialized successfully!");
+        debug_info!("Framebuffer found! Initializing text buffer...");
         
-        // Get dimensions before creating text renderer
-        let (fb_width, fb_height) = fb_writer.get_dimensions();
+        // Initialize the text buffer
+        text_buffer::init(framebuffer);
+        debug_info!("Text buffer initialized successfully!");
         
-        // Create a text renderer and display welcome message
-        let mut text_renderer = core_text::TextRenderer::with_default_font(&mut fb_writer);
+        // Demonstrate the print! and println! macros
+        println!("Welcome to AgenticOS!");
+        println!("======================");
+        println!();
         
-        // Set a nice color for the welcome text (cyan)
-        text_renderer.set_color(color::Color::CYAN);
+        // Print memory information
+        println!("Memory Statistics:");
+        println!("  Total usable memory: {} MB", stats.usable_memory / (1024 * 1024));
+        println!("  Total memory: {} MB", stats.total_memory / (1024 * 1024));
+        println!();
         
-        // Draw the welcome message centered on screen
-        text_renderer.draw_text_centered("Hello", fb_width / 2, fb_height / 2);
+        // Demonstrate color support
+        text_buffer::set_color(color::Color::CYAN);
+        println!("This text is in cyan!");
         
-        // Create graphics renderer and draw some shapes
-        let mut graphics = core_gfx::Graphics::new(&mut fb_writer);
+        text_buffer::set_color(color::Color::GREEN);
+        println!("This text is in green!");
         
-        // Draw a border around the screen
-        graphics.set_stroke_color(color::Color::WHITE);
-        graphics.set_stroke_width(2);
-        graphics.draw_rect(10, 10, fb_width - 20, fb_height - 20);
+        text_buffer::set_color(color::Color::YELLOW);
+        println!("This text is in yellow!");
         
-        // Draw some colorful circles
-        graphics.set_fill_color(color::Color::RED);
-        graphics.fill_circle(100, 100, 30);
+        text_buffer::set_color(color::Color::WHITE);
+        println!();
         
-        graphics.set_fill_color(color::Color::GREEN);
-        graphics.fill_circle(200, 100, 30);
+        // Demonstrate scrolling by printing many lines
+        println!("Testing scrolling functionality:");
+        println!("================================");
         
-        graphics.set_fill_color(color::Color::BLUE);
-        graphics.fill_circle(300, 100, 30);
+        for i in 0..30 {
+            text_buffer::set_color(if i % 2 == 0 { color::Color::WHITE } else { color::Color::GRAY });
+            println!("Line {}: This is a test of the scrolling text buffer", i + 1);
+        }
         
-        // Draw a triangle
-        graphics.set_stroke_color(color::Color::YELLOW);
-        graphics.set_stroke_width(3);
-        graphics.draw_triangle(150, 200, 250, 200, 200, 300);
+        text_buffer::set_color(color::Color::MAGENTA);
+        println!();
+        println!("Scrolling test complete!");
         
-        // Draw an ellipse
-        graphics.set_stroke_color(color::Color::MAGENTA);
-        graphics.draw_ellipse(fb_width / 2, fb_height - 100, 80, 40);
+        // Demonstrate tab support
+        text_buffer::set_color(color::Color::WHITE);
+        println!();
+        println!("Tab test:");
+        println!("Column:\t1\t2\t3\t4");
+        println!("Value:\tA\tB\tC\tD");
         
-        debug_info!("Welcome message displayed on frame buffer");
+        // Final message
+        println!();
+        text_buffer::set_color(color::Color::CYAN);
+        println!("AgenticOS kernel initialized successfully!");
+        text_buffer::set_color(color::Color::WHITE);
+        println!("System ready.");
+        
     } else {
         debug_warn!("No framebuffer available from bootloader");
     }
     
-
     debug_info!("Kernel initialization complete. Entering idle loop...");
     loop {}
 }
@@ -100,5 +114,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     debug_error!("KERNEL PANIC: {}", info);
+    
+    // Try to display panic on screen if text buffer is available
+    text_buffer::set_color(color::Color::RED);
+    println!();
+    println!("!!! KERNEL PANIC !!!");
+    println!("{}", info);
+    
     loop {}
 }

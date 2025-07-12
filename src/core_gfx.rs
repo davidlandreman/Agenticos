@@ -127,7 +127,7 @@ impl<'a> Graphics<'a> {
         
         while x >= y {
             for t in 0..self.stroke_width {
-                let r = radius as isize + t as isize;
+                let _r = radius as isize + t as isize;
                 self.draw_circle_points(center_x as isize, center_y as isize, x + t as isize, y, color);
                 self.draw_circle_points(center_x as isize, center_y as isize, y, x + t as isize, color);
             }

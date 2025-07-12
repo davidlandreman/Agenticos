@@ -31,15 +31,51 @@ impl FrameBufferWriter {
             color: Color::WHITE,
         };
         debug_debug!("Clearing framebuffer...");
-        writer.clear();
+        writer.clear(Color::BLACK);
         debug_debug!("FrameBufferWriter created successfully!");
         writer
     }
 
-    pub fn clear(&mut self) {
-        self.fill_rect(0, 0, self.width(), self.height(), Color::BLACK);
+    pub fn clear(&mut self, color: Color) {
+        self.fill_rect(0, 0, self.width(), self.height(), color);
         self.x_pos = 0;
         self.y_pos = 0;
+    }
+    
+    pub fn get_pixel(&self, x: usize, y: usize) -> Color {
+        if x >= self.width() || y >= self.height() {
+            return Color::BLACK;
+        }
+
+        let info = self.framebuffer.info();
+        let byte_offset = y * info.stride + x;
+        let pixel_offset = byte_offset * info.bytes_per_pixel;
+
+        let pixel_buffer = self.framebuffer.buffer();
+
+        match info.pixel_format {
+            PixelFormat::Rgb => {
+                Color::new(
+                    pixel_buffer[pixel_offset],
+                    pixel_buffer[pixel_offset + 1],
+                    pixel_buffer[pixel_offset + 2],
+                )
+            }
+            PixelFormat::Bgr => {
+                Color::new(
+                    pixel_buffer[pixel_offset + 2],
+                    pixel_buffer[pixel_offset + 1],
+                    pixel_buffer[pixel_offset],
+                )
+            }
+            _ => {
+                Color::new(
+                    pixel_buffer[pixel_offset + 2],
+                    pixel_buffer[pixel_offset + 1],
+                    pixel_buffer[pixel_offset],
+                )
+            }
+        }
     }
 
     pub fn width(&self) -> usize {
