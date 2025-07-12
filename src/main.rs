@@ -6,6 +6,7 @@ mod debug;
 mod color;
 mod frame_buffer;
 mod font;
+mod font_data;
 mod core_text;
 mod core_gfx;
 mod text_buffer;
