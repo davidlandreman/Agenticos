@@ -109,9 +109,9 @@ impl Writer {
 }
 
 pub fn print_hello() {
-    use qemu_print::qemu_println;
+    use crate::debug_trace;
     
-    qemu_println!("print_hello: Starting VGA buffer initialization");
+    debug_trace!("print_hello: Starting VGA buffer initialization");
     
     let mut writer = Writer {
         column_position: 0,
@@ -119,18 +119,18 @@ pub fn print_hello() {
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
     };
     
-    qemu_println!("print_hello: Writer created");
+    debug_trace!("print_hello: Writer created");
 
     // Clear the screen first
-    qemu_println!("print_hello: Starting screen clear");
+    debug_trace!("print_hello: Starting screen clear");
     for row in 0..BUFFER_HEIGHT {
         writer.clear_row(row);
     }
-    qemu_println!("print_hello: Screen cleared");
+    debug_trace!("print_hello: Screen cleared");
     
     // Print Hello World at the top
     writer.column_position = 0;
-    qemu_println!("print_hello: Writing string");
+    debug_trace!("print_hello: Writing string");
     writer.write_string("Hello World from AgenticOS!");
-    qemu_println!("print_hello: String written, function complete");
+    debug_trace!("print_hello: String written, function complete");
 }

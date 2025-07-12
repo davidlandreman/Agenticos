@@ -1,5 +1,5 @@
 use bootloader_api::info::{MemoryRegions, MemoryRegion, MemoryRegionKind};
-use qemu_print::qemu_println;
+use crate::{debug_info, debug_debug};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryStats {
@@ -32,7 +32,7 @@ impl MemoryManager {
     }
 
     pub fn init(&mut self, memory_regions: &MemoryRegions, phys_mem_offset: Option<u64>) {
-        qemu_println!("\n=== Initializing Memory Manager ===");
+        debug_info!("=== Initializing Memory Manager ===");
         
         self.physical_memory_offset = phys_mem_offset;
         self.region_count = 0;
@@ -54,12 +54,12 @@ impl MemoryManager {
             }
         }
         
-        qemu_println!("Memory manager initialized with {} regions", self.region_count);
+        debug_info!("Memory manager initialized with {} regions", self.region_count);
     }
 
     pub fn print_memory_map(&self) {
-        qemu_println!("\n=== Memory Map ===");
-        qemu_println!("Total memory regions: {}", self.region_count);
+        debug_info!("=== Memory Map ===");
+        debug_info!("Total memory regions: {}", self.region_count);
         
         for i in 0..self.region_count {
             if let Some(region) = &self.regions[i] {
@@ -67,7 +67,7 @@ impl MemoryManager {
                 let end = region.end;
                 let size = end - start;
                 
-                qemu_println!("Region {}: 0x{:016x} - 0x{:016x} ({} bytes, {} MB)",
+                debug_debug!("Region {}: 0x{:016x} - 0x{:016x} ({} bytes, {} MB)",
                     i, start, end, size, size / (1024 * 1024));
                 
                 let kind_str = match region.kind {
@@ -77,7 +77,7 @@ impl MemoryManager {
                     MemoryRegionKind::UnknownUefi(_) => "Unknown UEFI",
                     _ => "Unknown",
                 };
-                qemu_println!("  Type: {}", kind_str);
+                debug_debug!("  Type: {}", kind_str);
             }
         }
         
@@ -85,18 +85,18 @@ impl MemoryManager {
     }
 
     pub fn print_summary(&self) {
-        qemu_println!("\n=== Memory Summary ===");
-        qemu_println!("Total memory: {} MB ({} bytes)", 
+        debug_info!("=== Memory Summary ===");
+        debug_info!("Total memory: {} MB ({} bytes)", 
             self.stats.total_memory / (1024 * 1024), self.stats.total_memory);
-        qemu_println!("Usable memory: {} MB ({} bytes)", 
+        debug_info!("Usable memory: {} MB ({} bytes)", 
             self.stats.usable_memory / (1024 * 1024), self.stats.usable_memory);
-        qemu_println!("Bootloader memory: {} MB ({} bytes)", 
+        debug_info!("Bootloader memory: {} MB ({} bytes)", 
             self.stats.bootloader_memory / (1024 * 1024), self.stats.bootloader_memory);
-        qemu_println!("Reserved memory: {} MB ({} bytes)", 
+        debug_info!("Reserved memory: {} MB ({} bytes)", 
             self.stats.reserved_memory / (1024 * 1024), self.stats.reserved_memory);
         
         if let Some(offset) = self.physical_memory_offset {
-            qemu_println!("\nPhysical memory offset: 0x{:016x}", offset);
+            debug_debug!("Physical memory offset: 0x{:016x}", offset);
         }
     }
 
