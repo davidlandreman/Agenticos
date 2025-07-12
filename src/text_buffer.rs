@@ -3,7 +3,7 @@ use bootloader_api::info::{FrameBuffer, PixelFormat};
 use core::fmt;
 use spin::Mutex;
 use crate::debug_info;
-use crate::font::IBM_PLEX_FONT;
+use crate::core_font::IBM_PLEX_FONT;
 
 const DEFAULT_COLOR: Color = Color::WHITE;
 const BACKGROUND_COLOR: Color = Color::BLACK;

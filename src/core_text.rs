@@ -1,16 +1,13 @@
 use crate::color::Color;
 use crate::frame_buffer::FrameBufferWriter;
-use crate::font::{BMFont, VFNTFont, Embedded8x8Font};
+use crate::core_font::{VFNTFont, Embedded8x8Font};
 use core::str;
 
 pub enum Font {
     Embedded8x8(&'static Embedded8x8Font),
-    BMFont(&'static BMFont),
     VFNT(&'static VFNTFont),
 }
 
-// Include the IBM Plex font data
-pub static IBM_PLEX_DATA: &[u8] = include_bytes!("../assets/ibmplex-large.fnt");
 
 pub struct TextRenderer<'a> {
     frame_buffer: &'a mut FrameBufferWriter,
@@ -30,12 +27,8 @@ impl<'a> TextRenderer<'a> {
     }
     
     pub fn with_default_font(frame_buffer: &'a mut FrameBufferWriter) -> Self {
-        // Use the default 8x8 font from font.rs
-        Self::new(frame_buffer, Font::Embedded8x8(&crate::font::DEFAULT_8X8_FONT))
-    }
-    
-    pub fn with_bmfont(frame_buffer: &'a mut FrameBufferWriter, font: &'static BMFont) -> Self {
-        Self::new(frame_buffer, Font::BMFont(font))
+        // Use the default 8x8 font from core_font.rs
+        Self::new(frame_buffer, Font::Embedded8x8(&crate::core_font::DEFAULT_8X8_FONT))
     }
 
     pub fn set_color(&mut self, color: Color) {
@@ -82,45 +75,6 @@ impl<'a> TextRenderer<'a> {
                     8 // Return character width
                 } else {
                     8 // Return default width for unsupported chars
-                }
-            }
-            Font::BMFont(font) => {
-                if let Some(char_info) = font.get_char(ch) {
-                    // Draw background if set
-                    if let Some(bg_color) = self.background_color {
-                        self.frame_buffer.fill_rect(
-                            (x as isize + char_info.xoffset as isize) as usize,
-                            (y as isize + char_info.yoffset as isize) as usize,
-                            char_info.width as usize,
-                            char_info.height as usize,
-                            bg_color
-                        );
-                    }
-                    
-                    // Draw character from texture atlas
-                    let texture_width = font.scale_w as usize;
-                    let bytes_per_pixel = 4; // Assuming RGBA format
-                    
-                    for row in 0..char_info.height {
-                        for col in 0..char_info.width {
-                            let src_x = char_info.x as usize + col as usize;
-                            let src_y = char_info.y as usize + row as usize;
-                            let src_idx = (src_y * texture_width + src_x) * bytes_per_pixel;
-                            
-                            if src_idx + 3 < font.texture_data.len() {
-                                let alpha = font.texture_data[src_idx + 3];
-                                if alpha > 128 { // Simple threshold
-                                    let dst_x = (x as isize + char_info.xoffset as isize + col as isize) as usize;
-                                    let dst_y = (y as isize + char_info.yoffset as isize + row as isize) as usize;
-                                    self.frame_buffer.draw_pixel(dst_x, dst_y, color);
-                                }
-                            }
-                        }
-                    }
-                    
-                    char_info.xadvance as usize
-                } else {
-                    8 // Default width for missing characters
                 }
             }
             Font::VFNT(font) => {
@@ -173,7 +127,6 @@ impl<'a> TextRenderer<'a> {
         let mut current_line_width = 0;
         let line_height = match &self.font {
             Font::Embedded8x8(_) => 8,
-            Font::BMFont(font) => font.line_height as usize,
             Font::VFNT(font) => font.height as usize,
         };
         
@@ -187,11 +140,6 @@ impl<'a> TextRenderer<'a> {
             } else {
                 let char_width = match &self.font {
                     Font::Embedded8x8(_) => 8,
-                    Font::BMFont(font) => {
-                        font.get_char(ch)
-                            .map(|info| info.xadvance as usize)
-                            .unwrap_or(8)
-                    }
                     Font::VFNT(font) => font.width as usize,
                 };
                 current_line_width += char_width;
@@ -208,7 +156,6 @@ impl<'a> TextRenderer<'a> {
     pub fn draw_multiline_text(&mut self, text: &str, x: usize, mut y: usize) {
         let line_height = match &self.font {
             Font::Embedded8x8(_) => 8,
-            Font::BMFont(font) => font.line_height as usize,
             Font::VFNT(font) => font.height as usize,
         };
         
