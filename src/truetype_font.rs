@@ -26,10 +26,10 @@ const HHEA_TAG: u32 = 0x68686561; // 'hhea'
 
 impl TrueTypeFont {
     pub fn from_ttf_data(data: &'static [u8], render_size: u16) -> Option<Self> {
-        debug_info!("TTF: Parsing TrueType font, size: {} bytes", data.len());
+        crate::debug_info!("TTF: Starting to parse TrueType font, size: {} bytes, render_size: {}", data.len(), render_size);
         
         if data.len() < 12 {
-            debug_info!("TTF: File too small");
+            crate::debug_info!("TTF: File too small");
             return None;
         }
         
@@ -37,11 +37,11 @@ impl TrueTypeFont {
         let version = read_u32(data, 0);
         let num_tables = read_u16(data, 4);
         
-        debug_info!("TTF: Version: 0x{:08x}, Tables: {}", version, num_tables);
+        crate::debug_info!("TTF: Version: 0x{:08x}, Tables: {}", version, num_tables);
         
         // Verify it's a TrueType font (version 1.0)
         if version != 0x00010000 && version != 0x74727565 { // 'true'
-            debug_info!("TTF: Invalid version");
+            crate::debug_info!("TTF: Invalid version");
             return None;
         }
         
@@ -69,7 +69,7 @@ impl TrueTypeFont {
         let units_per_em = if let Some(offset) = head_offset {
             read_u16(data, offset + 18)
         } else {
-            debug_info!("TTF: No head table found");
+            crate::debug_info!("TTF: No head table found");
             return None;
         };
         
@@ -81,12 +81,14 @@ impl TrueTypeFont {
                 read_i16(data, offset + 8),
             )
         } else {
-            debug_info!("TTF: No hhea table found");
+            crate::debug_info!("TTF: No hhea table found");
             (units_per_em as i16 * 3 / 4, -(units_per_em as i16 / 4), 0)
         };
         
-        debug_info!("TTF: units_per_em: {}, ascender: {}, descender: {}", 
+        crate::debug_info!("TTF: units_per_em: {}, ascender: {}, descender: {}", 
                    units_per_em, ascender, descender);
+        
+        crate::debug_info!("TTF: Starting to create glyph bitmaps...");
         
         // Pre-render all ASCII glyphs
         let mut glyphs = [GlyphBitmap {
@@ -163,6 +165,8 @@ impl TrueTypeFont {
             glyphs[i] = bitmap;
         }
         
+        crate::debug_info!("TTF: Font creation complete, returning TrueTypeFont instance");
+        
         Some(Self {
             data,
             units_per_em,
@@ -192,6 +196,7 @@ impl TrueTypeFont {
 // Helper functions to read big-endian data
 fn read_u32(data: &[u8], offset: usize) -> u32 {
     if offset + 4 > data.len() {
+        crate::debug_info!("TTF: read_u32 out of bounds: offset {} + 4 > len {}", offset, data.len());
         return 0;
     }
     u32::from_be_bytes([

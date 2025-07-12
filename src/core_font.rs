@@ -123,15 +123,37 @@ static ARIAL_TTF_DATA: &[u8] = include_bytes!("../assets/arial.ttf");
 
 // Create static instance of Arial font
 pub static ARIAL_FONT: spin::Lazy<Option<TrueTypeFont>> = spin::Lazy::new(|| {
-    TrueTypeFont::from_ttf_data(ARIAL_TTF_DATA, 16) // 16 pixel size
+    crate::debug_info!("ARIAL_FONT: Starting lazy initialization...");
+    crate::debug_info!("ARIAL_FONT: Arial TTF data size: {} bytes", ARIAL_TTF_DATA.len());
+    
+    let result = TrueTypeFont::from_ttf_data(ARIAL_TTF_DATA, 16); // 16 pixel size
+    
+    match &result {
+        Some(_) => crate::debug_info!("ARIAL_FONT: Successfully created TrueTypeFont"),
+        None => crate::debug_info!("ARIAL_FONT: Failed to create TrueTypeFont"),
+    }
+    
+    result
 });
 
 pub fn get_arial_font() -> Option<FontRef> {
     ARIAL_FONT.as_ref().map(|font| FontRef::new(font as &dyn Font))
 }
 
-// Get default font - returns Arial font with fallback to embedded font
+// Get default font - try Arial with proper debugging
 pub fn get_default_font() -> FontRef {
-    // Try Arial first, fall back to embedded font if it fails
-    get_arial_font().unwrap_or_else(|| get_embedded_font())
+    crate::debug_info!("Getting default font...");
+    
+    // Try to load Arial font
+    crate::debug_info!("About to access ARIAL_FONT lazy static...");
+    match ARIAL_FONT.as_ref() {
+        Some(font) => {
+            crate::debug_info!("Arial font loaded successfully!");
+            FontRef::new(font as &dyn Font)
+        }
+        None => {
+            crate::debug_info!("Arial font failed to load, using embedded font");
+            get_embedded_font()
+        }
+    }
 }

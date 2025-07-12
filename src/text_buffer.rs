@@ -7,8 +7,9 @@ use crate::core_font::get_default_font;
 
 const DEFAULT_COLOR: Color = Color::WHITE;
 const BACKGROUND_COLOR: Color = Color::BLACK;
-const CHAR_WIDTH: usize = 9;
-const CHAR_HEIGHT: usize = 17;
+// These should match the font dimensions
+const CHAR_WIDTH: usize = 12;  // Arial at 16px height = 12px width (3/4 ratio)
+const CHAR_HEIGHT: usize = 16; // Arial render size
 
 
 pub struct TextBuffer {
@@ -27,8 +28,15 @@ impl TextBuffer {
         let info = framebuffer.info();
         let width = info.width;
         let height = info.height;
-        let text_cols = width / CHAR_WIDTH;
-        let text_rows = height / CHAR_HEIGHT;
+        
+        // Get font dimensions dynamically
+        let font = get_default_font();
+        let font_width = font.char_width();
+        let font_height = font.char_height();
+        debug_info!("Font dimensions: {}x{}", font_width, font_height);
+        
+        let text_cols = width / font_width.max(CHAR_WIDTH);
+        let text_rows = height / font_height.max(CHAR_HEIGHT);
         
         debug_info!("TextBuffer dimensions: {}x{} pixels, {}x{} chars", width, height, text_cols, text_rows);
         
@@ -128,6 +136,9 @@ impl TextBuffer {
     fn draw_char(&mut self, ch: char, x: usize, y: usize, color: Color) {
         // Get the default font (Arial with embedded fallback)
         let font = get_default_font();
+        
+        debug_info!("Drawing character '{}' at ({}, {}), font size: {}x{}", 
+                   ch, x, y, font.char_width(), font.char_height());
         
         if let Some(bitmap) = font.get_char_bitmap(ch) {
             // Draw background
