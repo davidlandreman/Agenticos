@@ -33,13 +33,18 @@ const LINE_SPACING: usize = 2;
 
 impl FrameBufferWriter {
     pub fn new(framebuffer: &'static mut FrameBuffer) -> Self {
+        use crate::debug_debug;
+        
+        debug_debug!("Creating new FrameBufferWriter...");
         let mut writer = Self {
             framebuffer,
             x_pos: 0,
             y_pos: 0,
             color: Color::WHITE,
         };
+        debug_debug!("Clearing framebuffer...");
         writer.clear();
+        debug_debug!("FrameBufferWriter created successfully!");
         writer
     }
 
@@ -50,11 +55,11 @@ impl FrameBufferWriter {
     }
 
     pub fn width(&self) -> usize {
-        self.framebuffer.info().horizontal_resolution
+        self.framebuffer.info().width
     }
 
     pub fn height(&self) -> usize {
-        self.framebuffer.info().vertical_resolution
+        self.framebuffer.info().height
     }
 
     pub fn set_color(&mut self, color: Color) {
@@ -73,12 +78,12 @@ impl FrameBufferWriter {
         let pixel_buffer = self.framebuffer.buffer_mut();
 
         match info.pixel_format {
-            PixelFormat::RGB => {
+            PixelFormat::Rgb => {
                 pixel_buffer[pixel_offset] = color.red;
                 pixel_buffer[pixel_offset + 1] = color.green;
                 pixel_buffer[pixel_offset + 2] = color.blue;
             }
-            PixelFormat::BGR => {
+            PixelFormat::Bgr => {
                 pixel_buffer[pixel_offset] = color.blue;
                 pixel_buffer[pixel_offset + 1] = color.green;
                 pixel_buffer[pixel_offset + 2] = color.red;
@@ -148,13 +153,15 @@ impl FrameBufferWriter {
 
     fn scroll(&mut self) {
         let info = self.framebuffer.info();
-        let buffer = self.framebuffer.buffer_mut();
         let bytes_per_pixel = info.bytes_per_pixel;
         let stride = info.stride;
         let scroll_height = CHAR_HEIGHT + LINE_SPACING;
+        let height = info.height;
         
-        let copy_height = self.height() - scroll_height;
+        let copy_height = height - scroll_height;
         let copy_size = copy_height * stride * bytes_per_pixel;
+        
+        let buffer = self.framebuffer.buffer_mut();
         
         unsafe {
             ptr::copy(
@@ -179,8 +186,18 @@ impl fmt::Write for FrameBufferWriter {
     }
 }
 
-const FONT_8X16: &[u8] = include_bytes!("font8x16.bin");
+const FONT_8X16: &[u8] = &[0; 128 * 16]; // Temporary placeholder for 8x16 font data
 
 pub fn init(framebuffer: &'static mut FrameBuffer) -> FrameBufferWriter {
+    use crate::debug_info;
+    
+    let info = framebuffer.info();
+    debug_info!("Framebuffer Information:");
+    debug_info!("  Resolution: {}x{} pixels", info.width, info.height);
+    debug_info!("  Pixel format: {:?}", info.pixel_format);
+    debug_info!("  Bytes per pixel: {}", info.bytes_per_pixel);
+    debug_info!("  Stride: {} pixels", info.stride);
+    debug_info!("  Buffer size: {} bytes", framebuffer.buffer().len());
+    
     FrameBufferWriter::new(framebuffer)
 }

@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
 
-mod vga_buffer;
 mod memory;
 mod debug;
+mod frame_buffer;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo};
@@ -38,10 +38,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     debug_info!("Memory manager reports {} MB of usable memory available", 
         stats.usable_memory / (1024 * 1024));
     
-    // Clear the screen and print Hello World
-    debug_info!("Initializing VGA buffer...");
-    vga_buffer::print_hello();
-    debug_info!("VGA buffer initialized and Hello World printed!");
+    // Initialize framebuffer if available
+    debug_info!("Checking for framebuffer...");
+    if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
+        debug_info!("Framebuffer found! Initializing frame buffer driver...");
+        let _fb_writer = frame_buffer::init(framebuffer);
+        debug_info!("Frame buffer initialized successfully!");
+    } else {
+        debug_warn!("No framebuffer available from bootloader");
+    }
+    
 
     debug_info!("Kernel initialization complete. Entering idle loop...");
     loop {}
