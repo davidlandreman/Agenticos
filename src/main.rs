@@ -8,6 +8,7 @@ mod frame_buffer;
 mod core_font;
 mod embedded_font;
 mod vfnt;
+mod truetype_font;
 mod font_data;
 mod core_text;
 mod core_gfx;
