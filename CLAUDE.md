@@ -29,11 +29,15 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 
 The project structure for OS development:
 - `src/main.rs` - Kernel entry point with `#![no_std]` and `#![no_main]`
+- `src/debug.rs` - Debug subsystem for structured kernel logging
+- `src/memory.rs` - Memory management implementation
+- `src/vga_buffer.rs` - VGA text mode display driver
 - `Cargo.toml` - Project manifest with OS-specific dependencies
 - `rust-toolchain.toml` - Specifies nightly Rust with required components
 - `.cargo/config.toml` - Build configuration and target settings
 - `target/` - Build artifacts (gitignored)
 - `IMPLEMENTATION_PLAN.md` - Phased development roadmap
+- `ARCHITECTURE.md` - Detailed architecture documentation for kernel subsystems
 
 ## OS Development Specifics
 
@@ -50,4 +54,5 @@ The project structure for OS development:
 
 ### Important Resources
 - Implementation plan: `IMPLEMENTATION_PLAN.md`
+- Architecture documentation: `architecture.md`
 - Tutorial reference: https://os.phil-opp.com/

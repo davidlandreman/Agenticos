@@ -21,7 +21,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     debug_info!("=== AgenticOS Kernel Starting ===");
     debug_info!("Kernel entry point reached successfully!");
     debug_debug!("Boot info address: {:p}", boot_info);
-    
+
     // Initialize memory manager
     memory::init(&boot_info.memory_regions, boot_info.physical_memory_offset.into_option());
     
