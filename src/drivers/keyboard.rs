@@ -101,6 +101,14 @@ fn process_scancode(scancode: u8) {
         return;
     }
     
+    // Check for debug key (F12 = 0x07 in scancode set 2)
+    if scancode == 0x07 {
+        debug_info!("F12 Debug key pressed - triggering breakpoint!");
+        crate::lib::software_breakpoint();
+        state.is_extended = false;
+        return;
+    }
+    
     // Only process make codes (key press)
     if let Some(character) = scancode_set2_to_ascii(scancode) {
         debug_trace!("Keyboard: converted scancode 0x{:02X} to character '{}'", scancode, character);

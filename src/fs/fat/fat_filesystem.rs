@@ -209,8 +209,7 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
                     &file_buffer[handle.position as usize..handle.position as usize + to_copy]
                 );
                 
-                // Update position
-                handle.position += to_copy as u64;
+                // Don't update position here - it's handled by the File handle layer
                 
                 Ok(to_copy)
             }

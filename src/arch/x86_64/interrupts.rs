@@ -130,6 +130,9 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     println!();
     println!("EXCEPTION: BREAKPOINT");
     println!("{:#?}", stack_frame);
+    
+    // Call our enhanced debug breakpoint handler
+    crate::lib::debug_breakpoint::debug_breakpoint();
 }
 
 extern "x86-interrupt" fn page_fault_handler(
