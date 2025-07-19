@@ -51,10 +51,12 @@ impl Process for ShellProcess {
                     buffer.swap_buffers();
                 });
                 
-                // Just halt after drawing the image
-                loop {
-                    x86_64::instructions::hlt();
-                }
+                // Calculate cursor position below the bitmap
+                // Bitmap is at Y=100, add its height, then convert to text rows
+                let bitmap_bottom_y = 100 + land_image.height();
+                let text_row = bitmap_bottom_y / 8; // 8 is the font height
+                display::set_cursor_y(text_row + 1); // Add 1 for some spacing
+                
             }
             Err(_e) => {
                 println!("Failed to parse BMP");
@@ -80,16 +82,7 @@ impl Process for ShellProcess {
         
         display::set_color(Color::WHITE);
         println!();
-        
-        // Demonstrate scrolling
-        println!("Testing scrolling functionality:");
-        println!("================================");
-        
-        /*for i in 0..300 {
-            display::set_color(if i % 2 == 0 { Color::WHITE } else { Color::GRAY });
-            println!("Line {}: This is a test of the scrolling text buffer", i + 1);
-        }*/
-        
+    
         display::set_color(Color::MAGENTA);
         println!();
         println!("Scrolling test complete!");

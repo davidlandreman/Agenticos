@@ -72,6 +72,23 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
   - Classic arrow cursor with background save/restore
 - Foundation ready for future scheduling/threading
 
+#### Graphics and Image Support ✓
+- **Status**: Partially Complete
+- **BMP Support**: Full Windows bitmap format support
+  - 4/8/16/24/32-bit color depths
+  - Palette handling for indexed colors
+  - Bottom-up and top-down image formats
+- **PNG Support**: Basic implementation (in progress)
+  - PNG header and IHDR chunk parsing
+  - Color type validation (Grayscale, RGB, Palette, Alpha variants)
+  - Bit depth validation
+  - **TODO**: DEFLATE decompression for IDAT chunks
+  - **TODO**: PNG filtering algorithms
+  - **TODO**: Additional chunk support (PLTE, tRNS, etc.)
+- **Image Rendering**: Integration with double-buffered display
+  - Direct framebuffer image drawing
+  - Cursor positioning after image display
+
 ### 🔄 Recent Architectural Improvements
 
 #### Code Organization Refactor (Completed)
@@ -185,6 +202,12 @@ agenticos/
 │   │   ├── color.rs
 │   │   ├── core_text.rs
 │   │   ├── core_gfx.rs
+│   │   ├── mouse_cursor.rs
+│   │   ├── images/
+│   │   │   ├── mod.rs
+│   │   │   ├── image.rs
+│   │   │   ├── bmp.rs
+│   │   │   └── png.rs
 │   │   └── fonts/
 │   │       ├── core_font.rs
 │   │       ├── embedded_font.rs
@@ -199,7 +222,7 @@ agenticos/
 │       ├── mod.rs
 │       ├── process.rs
 │       └── shell.rs
-├── assets/              # Font files
+├── assets/              # Font and image files
 ├── tests/              # Integration tests
 ├── .cargo/
 │   └── config.toml     # Cargo configuration
@@ -230,9 +253,12 @@ agenticos/
 - [x] Supports multiple font formats
 - [x] Implements graphics primitives
 - [x] Double buffering for performance
+- [x] BMP image format support
+- [x] Mouse and keyboard input handling
+- [x] Basic process abstraction
 
 ### ⏳ In Progress
-- [ ] Hardware interrupt handling (timer, keyboard)
+- [ ] PNG image format support (decompression needed)
 - [ ] Virtual memory with paging
 - [ ] Heap allocation support
 - [ ] Async/await infrastructure
@@ -253,6 +279,9 @@ agenticos/
 - Implement proper clipping algorithms
 - Add dirty region tracking for efficiency
 - Support for multiple display resolutions
+- Complete PNG support with DEFLATE decompression
+- Add support for additional image formats (JPEG, GIF)
+- Implement image scaling and transformation
 
 ### Memory Management
 - Complete paging implementation
