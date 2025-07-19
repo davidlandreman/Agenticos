@@ -106,84 +106,162 @@ impl Process for ShellProcess {
 impl ShellProcess {
     fn explore_filesystem(&self) {
         use crate::fs;
+        use alloc::{vec::Vec, string::String, format};
         
-        // Check if we have a mounted filesystem
-        println!("Checking for files in mounted filesystem...");
+        println!("Exploring mounted filesystem...");
         
-        // List common files that might exist
-        let test_files = &[
-            "/TEST.TXT",
-            "/README.TXT",
-            "/assets/TEST.TXT",
-            "/assets/test.txt",
-            "/assets/agentic-banner.png",
-            "/assets/LAND3.BMP",
-            "/CONFIG.SYS",
-            "/AUTOEXEC.BAT"
-        ];
+        // Start recursive exploration from root
+        self.explore_directory("/", 0);
         
-        println!("\nLooking for files:");
-        for path in test_files {
-            if fs::exists(path) {
-                print!("  ✓ Found: {}", path);
-                
-                // Try to get file metadata
-                if let Ok(metadata) = fs::metadata(path) {
-                    println!(" ({} bytes)", metadata.size);
+        // Demonstrate Arc-based file operations on discovered files
+        self.demonstrate_file_operations();
+    }
+    
+    fn explore_directory(&self, path: &str, depth: usize) {
+        use crate::fs;
+        use crate::fs::filesystem::FileType;
+        use alloc::format;
+        
+        // Limit recursion depth to prevent infinite loops
+        if depth > 3 {
+            println!("{}  (max depth reached)", "  ".repeat(depth));
+            return;
+        }
+        
+        // Display current directory
+        if depth == 0 {
+            println!("\nDirectory listing:");
+        }
+        println!("{}📁 {}", "  ".repeat(depth), if path == "/" { "/ (root)" } else { path });
+        
+        // Try to open directory using our Arc-based Directory handle
+        match fs::Directory::open(path) {
+            Ok(directory) => {
+                let entries = directory.entries();
+                if entries.is_empty() {
+                    if depth == 0 {
+                        println!("{}  (Directory appears empty or listing not fully supported)", "  ".repeat(depth + 1));
+                    }
                 } else {
-                    println!();
+                    // Display each entry
+                    for entry in &entries {
+                        let name = entry.name_str();
+                        let file_type_icon = match entry.file_type {
+                            FileType::File => "📄",
+                            FileType::Directory => "📁",
+                            _ => "❓",
+                        };
+                        
+                        println!("{}  {} {} ({} bytes)", 
+                            "  ".repeat(depth + 1), 
+                            file_type_icon, 
+                            name, 
+                            entry.size
+                        );
+                        
+                        // Recursively explore subdirectories
+                        if entry.file_type == FileType::Directory {
+                            let full_path = if path == "/" {
+                                format!("/{}", name)
+                            } else {
+                                format!("{}/{}", path.trim_end_matches('/'), name)
+                            };
+                            self.explore_directory(&full_path, depth + 1);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if depth == 0 {
+                    println!("{}  (Failed to open directory: {})", "  ".repeat(depth + 1), e);
                 }
             }
         }
+    }
+    
+    fn demonstrate_file_operations(&self) {
+        use crate::fs;
         
-        // Try to read a text file if it exists
-        println!("\nTrying to read text files:");
+        println!("\n--- File Operations Demo ---");
         
-        // Try TEST.TXT first
-        if fs::exists("/TEST.TXT") {
-            match fs::read_to_string::<256>("/TEST.TXT") {
-                Ok((content, size)) => {
-                    println!("  Content of /TEST.TXT ({} bytes):", size);
-                    println!("  {}", &content[..size.min(200)]);
-                    if size > 200 {
-                        println!("  ... (truncated)");
+        // Look for the first text file we can find
+        let test_files = ["/TEST.TXT", "/assets/TEST.TXT", "/assets/test.txt"];
+        let mut demo_file = None;
+        
+        for &path in &test_files {
+            if fs::exists(path) {
+                demo_file = Some(path);
+                break;
+            }
+        }
+        
+        if let Some(file_path) = demo_file {
+            println!("Demonstrating file operations with: {}", file_path);
+            
+            // 1. Basic file opening and reading
+            match fs::File::open_read(file_path) {
+                Ok(file) => {
+                    println!("✓ File opened successfully");
+                    println!("  Path: {}", file.path());
+                    println!("  Size: {} bytes", file.size());
+                    println!("  Position: {}", file.position());
+                    println!("  Is open: {}", file.is_open());
+                    
+                    // 2. Read content
+                    match file.read_to_string() {
+                        Ok(content) => {
+                            println!("✓ Content read successfully ({} bytes)", content.len());
+                            if content.len() > 100 {
+                                println!("  Preview: {}...", &content[..97]);
+                            } else if !content.trim().is_empty() {
+                                println!("  Content: {}", content.trim());
+                            } else {
+                                println!("  (File is empty)");
+                            }
+                        }
+                        Err(e) => {
+                            println!("✗ Failed to read content: {}", e);
+                        }
+                    }
+                    
+                    // 3. Demonstrate shared ownership
+                    let file_clone = file.clone();
+                    println!("✓ Created shared file handle");
+                    println!("  Original handle open: {}", file.is_open());
+                    println!("  Clone handle open: {}", file_clone.is_open());
+                    
+                    // 4. Demonstrate seeking
+                    if file.size() > 10 {
+                        match file.seek(5) {
+                            Ok(pos) => {
+                                println!("✓ Seeked to position: {}", pos);
+                                
+                                // Read a small portion from the new position
+                                let mut buffer = [0u8; 10];
+                                match file.read(&mut buffer) {
+                                    Ok(bytes_read) => {
+                                        println!("✓ Read {} bytes from position {}", bytes_read, pos);
+                                    }
+                                    Err(e) => {
+                                        println!("✗ Failed to read from position {}: {}", pos, e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!("✗ Seek failed: {}", e);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
-                    println!("  Failed to read /TEST.TXT: {:?}", e);
-                }
-            }
-        } else if fs::exists("/assets/test.txt") {
-            // Try the assets directory
-            match fs::read_to_string::<256>("/assets/test.txt") {
-                Ok((content, size)) => {
-                    println!("  Content of /assets/test.txt ({} bytes):", size);
-                    println!("  {}", &content[..size.min(200)]);
-                }
-                Err(e) => {
-                    println!("  Failed to read /assets/test.txt: {:?}", e);
+                    println!("✗ Failed to open {}: {}", file_path, e);
                 }
             }
         } else {
-            println!("  No text files found to read.");
-            println!("  (Note: Filesystem may not be mounted yet during kernel init)");
+            println!("No text files found for demonstration");
+            println!("(Filesystem may not be mounted or no readable files available)");
         }
         
-        // Test the callback-based file API if we have a file
-        if fs::exists("/TEST.TXT") || fs::exists("/assets/test.txt") {
-            let test_path = if fs::exists("/TEST.TXT") { "/TEST.TXT" } else { "/assets/test.txt" };
-            
-            println!("\nTesting callback-based file API with {}:", test_path);
-            match fs::read_with(test_path, |handle, filesystem| {
-                let mut buffer = [0u8; 64];
-                let bytes_read = filesystem.read(handle, &mut buffer)
-                    .map_err(|_| fs::FsError::IoError)?;
-                println!("  Read {} bytes using callback API", bytes_read);
-                Ok(bytes_read)
-            }) {
-                Ok(_) => println!("  ✓ Callback API test successful"),
-                Err(e) => println!("  ✗ Callback API test failed: {:?}", e)
-            }
-        }
+        println!("--- End Demo ---\n");
     }
 }

@@ -1,7 +1,10 @@
 
 use crate::fs::vfs::{VirtualFilesystem, get_vfs, vfs_open, vfs_read_dir, vfs_stat};
 use crate::fs::filesystem::{FileHandle as FsFileHandle, FileMode, DirectoryEntry, FilesystemError};
+use crate::fs::file_handle::{File, FileError, FileResult};
+use crate::lib::arc::Arc;
 use crate::drivers::block::BlockDevice;
+use alloc::{string::{String, ToString}, vec::Vec};
 use core::fmt;
 
 pub struct FileSystemManager;
@@ -41,33 +44,48 @@ impl FileSystemManager {
     }
 
     pub fn read<const N: usize>(path: &str) -> FsResult<([u8; N], usize)> {
-        read_with(path, |handle, fs| {
-            let mut buffer = [0u8; N];
-            let bytes_read = fs.read(handle, &mut buffer)
-                .map_err(|_| FsError::IoError)?;
-            Ok((buffer, bytes_read))
-        })
-    }
-
-    pub fn read_to_string<const N: usize>(path: &str) -> FsResult<(&'static str, usize)> {
-        static mut BUFFER: [u8; 4096] = [0u8; 4096];
-        
-        read_with(path, |handle, fs| {
-            let bytes_read = unsafe {
-                fs.read(handle, &mut BUFFER[..N.min(4096)])
-                    .map_err(|_| FsError::IoError)?
-            };
-            
-            unsafe {
-                let s = core::str::from_utf8(&BUFFER[..bytes_read])
-                    .map_err(|_| FsError::IoError)?;
-                Ok((core::mem::transmute(s), bytes_read))
+        match File::open_read(path) {
+            Ok(file) => {
+                let mut buffer = [0u8; N];
+                match file.read(&mut buffer) {
+                    Ok(bytes_read) => Ok((buffer, bytes_read)),
+                    Err(_) => Err(FsError::IoError),
+                }
             }
-        })
+            Err(_) => Err(FsError::FileNotFound),
+        }
     }
 
-    pub fn write(_path: &str, _contents: &[u8]) -> FsResult<()> {
-        Err(FsError::NotImplemented)
+    pub fn read_to_string<const N: usize>(path: &str) -> FsResult<(String, usize)> {
+        match File::open_read(path) {
+            Ok(file) => {
+                match file.read_to_string() {
+                    Ok(content) => {
+                        let len = content.len();
+                        let truncated = if content.len() > N {
+                            content[..N].to_string()
+                        } else {
+                            content
+                        };
+                        Ok((truncated, len))
+                    }
+                    Err(_) => Err(FsError::IoError),
+                }
+            }
+            Err(_) => Err(FsError::FileNotFound),
+        }
+    }
+
+    pub fn write(path: &str, contents: &[u8]) -> FsResult<()> {
+        match File::open_write(path) {
+            Ok(file) => {
+                match file.write(contents) {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(FsError::IoError),
+                }
+            }
+            Err(_) => Err(FsError::AccessDenied),
+        }
     }
 
     pub fn exists(path: &str) -> bool {
@@ -208,7 +226,7 @@ pub fn read<const N: usize>(path: &str) -> FsResult<([u8; N], usize)> {
     FileSystemManager::read(path)
 }
 
-pub fn read_to_string<const N: usize>(path: &str) -> FsResult<(&'static str, usize)> {
+pub fn read_to_string<const N: usize>(path: &str) -> FsResult<(String, usize)> {
     FileSystemManager::read_to_string::<N>(path)
 }
 
@@ -228,29 +246,21 @@ pub fn read_dir(path: &'static str) -> FsResult<crate::fs::filesystem::Directory
     FileSystemManager::read_dir(path)
 }
 
-/// Read the entire contents of a file into a static buffer
+/// Read the entire contents of a file into a Vec<u8>
 /// Returns the buffer and the number of bytes read
-pub fn read_entire_file(path: &str) -> FsResult<(&'static [u8], usize)> {
-    const BUFFER_SIZE: usize = 8192;
-    static mut FILE_BUFFER: [u8; BUFFER_SIZE] = [0u8; BUFFER_SIZE];
-    
-    read_with(path, |handle, fs| {
-        let mut total_read = 0;
-        unsafe {
-            loop {
-                let bytes_read = fs.read(handle, &mut FILE_BUFFER[total_read..])
-                    .map_err(|_| FsError::IoError)?;
-                if bytes_read == 0 {
-                    break;
+pub fn read_entire_file(path: &str) -> FsResult<(Vec<u8>, usize)> {
+    match File::open_read(path) {
+        Ok(file) => {
+            match file.read_to_vec() {
+                Ok(content) => {
+                    let len = content.len();
+                    Ok((content, len))
                 }
-                total_read += bytes_read;
-                if total_read >= BUFFER_SIZE {
-                    break;
-                }
+                Err(_) => Err(FsError::IoError),
             }
-            Ok((&FILE_BUFFER[..total_read], total_read))
         }
-    })
+        Err(_) => Err(FsError::FileNotFound),
+    }
 }
 
 /// Process a file line by line using a callback
@@ -258,52 +268,62 @@ pub fn for_each_line<F>(path: &str, mut f: F) -> FsResult<()>
 where
     F: FnMut(&str) -> FsResult<()>,
 {
-    read_with(path, |handle, fs| {
-        let mut buffer = [0u8; 512];
-        let mut line_buffer = [0u8; 256];
-        let mut line_pos = 0;
-        let mut buffer_pos = 0;
-        let mut buffer_len = 0;
-        
-        loop {
-            // Refill buffer if needed
-            if buffer_pos >= buffer_len {
-                buffer_len = fs.read(handle, &mut buffer)
-                    .map_err(|_| FsError::IoError)?;
-                buffer_pos = 0;
-                
-                if buffer_len == 0 {
-                    // Process final line if any
-                    if line_pos > 0 {
-                        let line = core::str::from_utf8(&line_buffer[..line_pos])
-                            .map_err(|_| FsError::IoError)?;
+    match File::open_read(path) {
+        Ok(file) => {
+            match file.read_to_string() {
+                Ok(content) => {
+                    for line in content.lines() {
                         f(line)?;
                     }
-                    break;
+                    Ok(())
                 }
-            }
-            
-            // Process bytes from buffer
-            while buffer_pos < buffer_len && line_pos < line_buffer.len() {
-                let byte = buffer[buffer_pos];
-                buffer_pos += 1;
-                
-                if byte == b'\n' {
-                    let line = core::str::from_utf8(&line_buffer[..line_pos])
-                        .map_err(|_| FsError::IoError)?;
-                    f(line)?;
-                    line_pos = 0;
-                } else if byte != b'\r' {
-                    line_buffer[line_pos] = byte;
-                    line_pos += 1;
-                }
-            }
-            
-            if line_pos >= line_buffer.len() {
-                return Err(FsError::BufferTooSmall);
+                Err(_) => Err(FsError::IoError),
             }
         }
-        
-        Ok(())
-    })
+        Err(_) => Err(FsError::FileNotFound),
+    }
+}
+
+/// Create a new file with Arc-based handle
+pub fn create_file(path: &str) -> FsResult<Arc<File>> {
+    File::create(path)
+        .map_err(|_| FsError::AccessDenied)
+}
+
+/// Open a file for reading with Arc-based handle
+pub fn open_file_read(path: &str) -> FsResult<Arc<File>> {
+    File::open_read(path)
+        .map_err(|_| FsError::FileNotFound)
+}
+
+/// Open a file for writing with Arc-based handle
+pub fn open_file_write(path: &str) -> FsResult<Arc<File>> {
+    File::open_write(path)
+        .map_err(|_| FsError::AccessDenied)
+}
+
+/// Write a string to a file (convenience function)
+pub fn write_string(path: &str, content: &str) -> FsResult<()> {
+    match File::open_write(path) {
+        Ok(file) => {
+            match file.write_string(content) {
+                Ok(_) => Ok(()),
+                Err(_) => Err(FsError::IoError),
+            }
+        }
+        Err(_) => Err(FsError::AccessDenied),
+    }
+}
+
+/// Read entire file contents as a string (convenience function)
+pub fn read_file_to_string(path: &str) -> FsResult<String> {
+    match File::open_read(path) {
+        Ok(file) => {
+            match file.read_to_string() {
+                Ok(content) => Ok(content),
+                Err(_) => Err(FsError::IoError),
+            }
+        }
+        Err(_) => Err(FsError::FileNotFound),
+    }
 }

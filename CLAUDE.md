@@ -80,6 +80,7 @@ The project follows a modular architecture with clear separation of concerns:
 
 - `src/lib/` - Core libraries and utilities
   - `debug.rs` - Debug logging system with macros
+  - `arc.rs` - Atomic reference counting (Arc/Weak) implementation
 
 - `src/mm/` - Memory management
   - `memory.rs` - Physical memory manager with heap initialization
@@ -142,6 +143,34 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
 ```
 
 **Important**: The heap allocator must be initialized before using any `alloc` features. This happens automatically during kernel initialization.
+
+### Arc (Atomic Reference Counting)
+
+The kernel now includes a custom `Arc<T>` implementation for thread-safe shared ownership:
+
+```rust
+use crate::lib::arc::{Arc, Weak};
+
+// Create shared data
+let data = Arc::new(vec![1, 2, 3, 4, 5]);
+let data_clone = data.clone();
+
+// Both references point to the same data
+assert_eq!(data[0], 1);
+assert_eq!(data_clone[0], 1);
+assert_eq!(Arc::strong_count(&data), 2);
+
+// Create weak references
+let weak = Arc::downgrade(&data);
+assert!(weak.upgrade().is_some());
+```
+
+**Key features:**
+- Thread-safe atomic reference counting
+- Support for weak references to break cycles
+- Compatible with `!Sized` types
+- Integrated with the kernel's heap allocator
+- Memory efficient with proper cleanup
 
 ### Testing Approach
 - Custom test framework for `no_std` environment
@@ -229,6 +258,7 @@ Tests are organized in the `src/tests/` directory by topic:
 - `basic.rs` - Basic functionality and sanity tests
 - `memory.rs` - Memory management tests
 - `heap.rs` - Heap allocator and dynamic memory tests
+- `arc.rs` - Arc and Weak reference counting tests
 - `display.rs` - Display and graphics tests
 - `interrupts.rs` - Interrupt handler tests
 

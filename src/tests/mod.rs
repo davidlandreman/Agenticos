@@ -8,6 +8,8 @@ pub mod display;
 pub mod interrupts;
 #[cfg(feature = "test")]
 pub mod heap;
+#[cfg(feature = "test")]
+pub mod arc;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -22,6 +24,7 @@ pub fn run_tests() {
     let display_tests = display::get_tests();
     let interrupts_tests = interrupts::get_tests();
     let heap_tests = heap::get_tests();
+    let arc_tests = arc::get_tests();
     
     let mut total_tests = 0;
     
@@ -61,6 +64,14 @@ pub fn run_tests() {
     debug_info!("\n[Heap Tests]");
     debug_info!("Running {} tests", heap_tests.len());
     for test in heap_tests {
+        test.run();
+        total_tests += 1;
+    }
+    
+    // Run Arc tests
+    debug_info!("\n[Arc Tests]");
+    debug_info!("Running {} tests", arc_tests.len());
+    for test in arc_tests {
         test.run();
         total_tests += 1;
     }

@@ -147,6 +147,20 @@ pub trait Filesystem {
     /// List directory contents
     fn read_dir(&self, path: &str) -> Result<DirectoryIterator, FilesystemError>;
     
+    /// Enumerate directory entries into a Vec (convenience method)
+    fn enumerate_dir(&self, path: &str) -> Result<alloc::vec::Vec<DirectoryEntry>, FilesystemError> {
+        // Default implementation that tries to use read_dir
+        // Individual filesystems can override this for better performance
+        let mut entries = alloc::vec::Vec::new();
+        let mut dir_iter = self.read_dir(path)?;
+        
+        while let Some(entry) = dir_iter.next_entry() {
+            entries.push(entry);
+        }
+        
+        Ok(entries)
+    }
+    
     /// Get file/directory metadata
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError>;
     
@@ -187,6 +201,8 @@ pub struct DirectoryIterator<'a> {
     path: [u8; 256],
     path_len: usize,
     index: usize,
+    entries: alloc::vec::Vec<DirectoryEntry>,
+    loaded: bool,
 }
 
 impl<'a> DirectoryIterator<'a> {
@@ -201,7 +217,56 @@ impl<'a> DirectoryIterator<'a> {
             path: path_buf,
             path_len: len,
             index: 0,
+            entries: alloc::vec::Vec::new(),
+            loaded: false,
         }
+    }
+    
+    /// Get the path as a string slice
+    pub fn path_str(&self) -> &str {
+        core::str::from_utf8(&self.path[..self.path_len]).unwrap_or("")
+    }
+    
+    /// Load directory entries from the filesystem
+    fn load_entries(&mut self) {
+        if self.loaded {
+            return;
+        }
+        
+        // For now, we'll use a workaround since we can't easily access the FAT-specific
+        // directory iteration from the generic filesystem trait.
+        // This is a bridge implementation that could be improved with better filesystem abstractions.
+        
+        // We can't directly access filesystem-specific directory reading here since
+        // the trait doesn't expose it. For a complete implementation, we'd need to
+        // either:
+        // 1. Add a method to the Filesystem trait to enumerate entries
+        // 2. Use filesystem-specific casting 
+        // 3. Store entries when the DirectoryIterator is created
+        
+        // For now, this will remain empty, but the framework is in place
+        self.loaded = true;
+    }
+    
+    /// Get the next directory entry
+    pub fn next_entry(&mut self) -> Option<DirectoryEntry> {
+        self.load_entries();
+        
+        if self.index < self.entries.len() {
+            let entry = self.entries[self.index].clone();
+            self.index += 1;
+            Some(entry)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> Iterator for DirectoryIterator<'a> {
+    type Item = DirectoryEntry;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_entry()
     }
 }
 
