@@ -1,10 +1,10 @@
-use crate::color::Color;
-use crate::double_buffer::DoubleBufferedFrameBuffer;
+use crate::graphics::color::Color;
+use super::double_buffer::DoubleBufferedFrameBuffer;
 use bootloader_api::info::FrameBuffer;
 use core::fmt;
 use spin::Mutex;
 use crate::debug_info;
-use crate::core_font::get_default_font;
+use crate::graphics::fonts::core_font::get_default_font;
 
 const DEFAULT_COLOR: Color = Color::WHITE;
 const BACKGROUND_COLOR: Color = Color::BLACK;

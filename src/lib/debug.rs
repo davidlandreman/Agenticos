@@ -22,7 +22,7 @@ pub fn get_debug_level() -> DebugLevel {
 #[macro_export]
 macro_rules! debug_error {
     ($($arg:tt)*) => {
-        if $crate::debug::get_debug_level() >= $crate::debug::DebugLevel::Error {
+        if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Error {
             qemu_print::qemu_print!("[ERROR] ");
             qemu_print::qemu_println!($($arg)*);
         }
@@ -32,7 +32,7 @@ macro_rules! debug_error {
 #[macro_export]
 macro_rules! debug_warn {
     ($($arg:tt)*) => {
-        if $crate::debug::get_debug_level() >= $crate::debug::DebugLevel::Warn {
+        if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Warn {
             qemu_print::qemu_print!("[WARN ] ");
             qemu_print::qemu_println!($($arg)*);
         }
@@ -42,7 +42,7 @@ macro_rules! debug_warn {
 #[macro_export]
 macro_rules! debug_info {
     ($($arg:tt)*) => {
-        if $crate::debug::get_debug_level() >= $crate::debug::DebugLevel::Info {
+        if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Info {
             qemu_print::qemu_print!("[INFO ] ");
             qemu_print::qemu_println!($($arg)*);
         }
@@ -52,7 +52,7 @@ macro_rules! debug_info {
 #[macro_export]
 macro_rules! debug_debug {
     ($($arg:tt)*) => {
-        if $crate::debug::get_debug_level() >= $crate::debug::DebugLevel::Debug {
+        if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Debug {
             qemu_print::qemu_print!("[DEBUG] ");
             qemu_print::qemu_println!($($arg)*);
         }
@@ -62,7 +62,7 @@ macro_rules! debug_debug {
 #[macro_export]
 macro_rules! debug_trace {
     ($($arg:tt)*) => {
-        if $crate::debug::get_debug_level() >= $crate::debug::DebugLevel::Trace {
+        if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Trace {
             qemu_print::qemu_print!("[TRACE] ");
             qemu_print::qemu_println!($($arg)*);
         }

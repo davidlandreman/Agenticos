@@ -1,5 +1,5 @@
-use crate::color::Color;
-use crate::frame_buffer::FrameBufferWriter;
+use super::color::Color;
+use crate::drivers::display::frame_buffer::FrameBufferWriter;
 use core::cmp::{max, min};
 
 pub struct Graphics<'a> {

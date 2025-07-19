@@ -1,6 +1,6 @@
-use crate::color::Color;
-use crate::frame_buffer::FrameBufferWriter;
-use crate::core_font::FontRef;
+use super::color::Color;
+use crate::drivers::display::frame_buffer::FrameBufferWriter;
+use super::fonts::core_font::FontRef;
 use core::str;
 
 pub struct TextRenderer<'a> {
@@ -22,7 +22,7 @@ impl<'a> TextRenderer<'a> {
     
     pub fn with_default_font(frame_buffer: &'a mut FrameBufferWriter) -> Self {
         // Use the default 8x8 font from core_font.rs
-        Self::new(frame_buffer, crate::core_font::get_default_font())
+        Self::new(frame_buffer, super::fonts::core_font::get_default_font())
     }
 
     pub fn set_color(&mut self, color: Color) {

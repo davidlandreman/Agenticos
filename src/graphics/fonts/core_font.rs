@@ -1,6 +1,6 @@
-use crate::embedded_font::{Embedded8x8Font, DEFAULT_8X8_FONT};
-use crate::vfnt::VFNTFont;
-use crate::truetype_font::TrueTypeFont;
+use super::embedded_font::{Embedded8x8Font, DEFAULT_8X8_FONT};
+use super::vfnt::VFNTFont;
+use super::truetype_font::TrueTypeFont;
 
 // Unified font trait that all font types must implement
 pub trait Font {
@@ -92,8 +92,8 @@ impl FontRef {
 }
 
 // Include IBM Plex font data
-static IBM_PLEX_DATA: &[u8] = include_bytes!("../assets/ibmplex.fnt");
-static IBM_PLEX_LARGE_DATA: &[u8] = include_bytes!("../assets/ibmplex-large.fnt");
+static IBM_PLEX_DATA: &[u8] = include_bytes!("../../../assets/ibmplex.fnt");
+static IBM_PLEX_LARGE_DATA: &[u8] = include_bytes!("../../../assets/ibmplex-large.fnt");
 
 // Create static instances of IBM Plex fonts
 pub static IBM_PLEX_FONT: spin::Lazy<Option<VFNTFont>> = spin::Lazy::new(|| {
@@ -119,7 +119,7 @@ pub fn get_ibm_plex_large_font() -> Option<FontRef> {
 }
 
 // Include Arial TTF data
-static ARIAL_TTF_DATA: &[u8] = include_bytes!("../assets/arial.ttf");
+static ARIAL_TTF_DATA: &[u8] = include_bytes!("../../../assets/arial.ttf");
 
 // Create static instance of Arial font
 pub static ARIAL_FONT: spin::Lazy<Option<TrueTypeFont>> = spin::Lazy::new(|| {

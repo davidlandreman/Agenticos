@@ -1,7 +1,7 @@
 use bootloader_api::info::{FrameBuffer, PixelFormat};
 use core::fmt;
 use core::ptr;
-use crate::color::Color;
+use crate::graphics::color::Color;
 
 pub struct FrameBufferWriter {
     framebuffer: &'static mut FrameBuffer,

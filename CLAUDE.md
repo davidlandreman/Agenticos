@@ -27,22 +27,52 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 
 ## Project Structure
 
-The project structure for OS development:
-- `src/main.rs` - Kernel entry point with `#![no_std]` and `#![no_main]`
-- `src/debug.rs` - Debug subsystem for structured kernel logging
-- `src/memory.rs` - Memory management implementation
-- `src/display.rs` - Unified display interface (routes between single/double buffering)
-- `src/text_buffer.rs` - Direct framebuffer text rendering
-- `src/double_buffer.rs` - Double buffering implementation for framebuffer
-- `src/double_buffered_text.rs` - Text rendering with double buffering
-- `src/frame_buffer.rs` - Low-level framebuffer abstraction
-- `src/vga_buffer.rs` - VGA text mode display driver (legacy)
+The project follows a modular architecture with clear separation of concerns:
+
+### Core Files
+- `src/main.rs` - Minimal kernel entry point (< 25 lines)
+- `src/kernel.rs` - Kernel initialization and boot sequence
+- `src/panic.rs` - Custom panic handler
+
+### Module Organization
+- `src/arch/` - Architecture-specific code
+  - `x86_64/` - Intel x86-64 specific implementations
+    - `interrupts.rs` - Interrupt handling and IDT
+
+- `src/drivers/` - Hardware drivers
+  - `display/` - Display and framebuffer drivers
+    - `display.rs` - Unified display interface
+    - `frame_buffer.rs` - Low-level framebuffer abstraction
+    - `text_buffer.rs` - Direct framebuffer text rendering
+    - `double_buffer.rs` - Double buffering implementation
+    - `double_buffered_text.rs` - Text rendering with double buffering
+
+- `src/graphics/` - Graphics subsystem
+  - `color.rs` - Color definitions and utilities
+  - `core_text.rs` - Text rendering engine
+  - `core_gfx.rs` - Graphics primitives (lines, circles, etc.)
+  - `fonts/` - Font rendering systems
+    - `core_font.rs` - Unified font interface
+    - `embedded_font.rs` - Built-in bitmap fonts
+    - `vfnt.rs` - VFNT font format support
+    - `truetype_font.rs` - TrueType font support
+    - `font_data.rs` - Font data definitions
+
+- `src/lib/` - Core libraries and utilities
+  - `debug.rs` - Debug logging system with macros
+
+- `src/mm/` - Memory management
+  - `memory.rs` - Physical memory manager
+
+### Configuration Files
 - `Cargo.toml` - Project manifest with OS-specific dependencies
 - `rust-toolchain.toml` - Specifies nightly Rust with required components
 - `.cargo/config.toml` - Build configuration and target settings
-- `target/` - Build artifacts (gitignored)
+
+### Documentation
 - `IMPLEMENTATION_PLAN.md` - Phased development roadmap
-- `ARCHITECTURE.md` - Detailed architecture documentation for kernel subsystems
+- `ARCHITECTURE.md` - Detailed architecture documentation
+- `CLAUDE.md` - This file, AI assistant guidance
 
 ## OS Development Specifics
 
@@ -65,7 +95,7 @@ The project structure for OS development:
 ## Graphics and Display Subsystem
 
 ### Double Buffering Implementation
-The framebuffer display system supports both single and double buffering modes, controlled by the `USE_DOUBLE_BUFFER` flag in `src/display.rs`.
+The framebuffer display system supports both single and double buffering modes, controlled by the `USE_DOUBLE_BUFFER` flag in `src/drivers/display/display.rs`.
 
 **Key Learnings:**
 1. **Direct framebuffer access is slow** - Writing pixel-by-pixel to framebuffer memory has poor performance due to slow memory access

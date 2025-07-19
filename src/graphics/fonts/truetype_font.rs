@@ -1,4 +1,3 @@
-use crate::debug_info;
 
 // TrueType font structure for parsing TTF files
 #[derive(Debug)]

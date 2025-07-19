@@ -1,4 +1,4 @@
-use crate::font_data::DEFAULT_8X8_FONT_DATA;
+use super::font_data::DEFAULT_8X8_FONT_DATA;
 
 // Create a static instance of the default 8x8 font
 pub static DEFAULT_8X8_FONT: Embedded8x8Font = Embedded8x8Font {
