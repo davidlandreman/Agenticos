@@ -17,8 +17,10 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - `cargo build --release` - Build optimized release version
 
 ### Testing
-- `cargo test` - Run all tests
-- `cargo test <test_name>` - Run a specific test
+- `./test.sh` - Run kernel tests in QEMU with automatic exit
+- `cargo build --features test` - Build kernel with test features enabled
+- Tests run automatically on kernel boot when built with test feature
+- QEMU exits with success/failure code based on test results
 
 ### Code Quality
 - `cargo fmt` - Format code according to Rust standards
@@ -91,6 +93,48 @@ The project follows a modular architecture with clear separation of concerns:
 - Implementation plan: `IMPLEMENTATION_PLAN.md`
 - Architecture documentation: `architecture.md`
 - Tutorial reference: https://os.phil-opp.com/
+
+## Testing Framework
+
+The project includes a custom unit testing framework that runs tests directly in the kernel:
+
+### Architecture
+- **Test Runner**: Custom test runner based on os.phil-opp.com patterns
+- **Test Utilities**: Located in `src/lib/test_utils.rs`
+  - `Testable` trait for test functions
+  - `test_runner()` function to execute tests
+  - QEMU exit functions for test completion
+- **Panic Handler**: Different behavior in test mode (exits QEMU with failure)
+
+### Writing Tests
+Tests are organized in the `src/tests/` directory by topic:
+- `basic.rs` - Basic functionality and sanity tests
+- `memory.rs` - Memory management tests
+- `display.rs` - Display and graphics tests
+
+To add a new test:
+1. Add the test function to the appropriate module
+2. Add it to the module's `get_tests()` function
+3. Tests will automatically run when using `./test.sh`
+
+Example test:
+```rust
+fn test_example() {
+    assert_eq!(2 + 2, 4);
+}
+```
+
+### Running Tests
+1. Run `./test.sh` to build and execute tests
+2. Tests run automatically during kernel boot
+3. QEMU exits with appropriate status code:
+   - Exit code 33 (0x10 << 1 | 1) = Success
+   - Exit code 35 (0x11 << 1 | 1) = Failure
+
+### Test Output
+- Tests print to serial debug output
+- Each test shows its name and [ok] on success
+- Failed tests trigger panic handler and QEMU exit
 
 ## Graphics and Display Subsystem
 

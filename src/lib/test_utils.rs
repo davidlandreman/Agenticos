@@ -1,3 +1,5 @@
+use crate::{debug_info, debug_debug};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum QemuExitCode {
@@ -16,7 +18,6 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
 
 #[cfg(feature = "test")]
 pub fn exit_qemu_success() {
-    use crate::debug_info;
     debug_info!("Exiting QEMU with success status...");
     exit_qemu(QemuExitCode::Success);
 }
@@ -26,4 +27,28 @@ pub fn exit_qemu_failed() {
     use crate::debug_error;
     debug_error!("Exiting QEMU with failure status...");
     exit_qemu(QemuExitCode::Failed);
+}
+
+pub trait Testable {
+    fn run(&self) -> ();
+}
+
+impl<T> Testable for T
+where
+    T: Fn(),
+{
+    fn run(&self) {
+        debug_info!("{}...\t", core::any::type_name::<T>());
+        self();
+        debug_debug!("[ok]");
+    }
+}
+
+#[cfg(feature = "test")]
+pub fn test_runner(tests: &[&dyn Testable]) {
+    debug_info!("Running {} tests", tests.len());
+    for test in tests {
+        test.run();
+    }
+    exit_qemu_success();
 }

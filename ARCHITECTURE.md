@@ -20,6 +20,17 @@ src/
 └── mm/                  # Memory management
 ```
 
+### Testing Framework
+
+AgenticOS includes a custom unit testing framework that runs tests directly in the kernel environment:
+
+- **Test Runner**: Located in `src/lib/test_utils.rs`, provides the `Testable` trait and test execution
+- **Test Modules**: Tests are organized in `src/tests/` with submodules for different test categories
+- **Panic Handler**: Different behavior in test mode - exits QEMU with failure code
+- **QEMU Integration**: Tests run in QEMU and automatically exit with success/failure status
+
+Run tests with `./test.sh` which builds the kernel with test features and executes in QEMU.
+
 ## Entry Point and Initialization
 
 ### Simplified Entry Point

@@ -1,7 +1,18 @@
 #!/bin/bash
+#
+# test.sh - Build and run AgenticOS kernel tests
+#
+# This script builds the kernel with test features enabled and runs it in QEMU.
+# Tests execute automatically during kernel boot and QEMU exits with appropriate
+# status codes:
+#   - Exit code 33 (0x10 << 1 | 1) = All tests passed
+#   - Exit code 35 (0x11 << 1 | 1) = Test failure
+#
+# Usage: ./test.sh
 
 # Build and run tests
 echo "Building and running kernel tests..."
+# Cargo build must be ran twice to make sure image file is built
 cargo build --features test
 cargo build --features test
 
