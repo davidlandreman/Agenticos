@@ -1,3 +1,6 @@
+.cargo
+.claude
+
 # Rust build artifacts
 /target/
 Cargo.lock
