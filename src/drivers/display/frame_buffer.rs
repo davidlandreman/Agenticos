@@ -2,6 +2,7 @@ use bootloader_api::info::{FrameBuffer, PixelFormat};
 use core::fmt;
 use core::ptr;
 use crate::graphics::color::Color;
+use super::double_buffer::DoubleBufferedFrameBuffer;
 
 pub struct FrameBufferWriter {
     framebuffer: &'static mut FrameBuffer,

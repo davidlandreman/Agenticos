@@ -292,3 +292,9 @@ pub fn clear_screen() {
         buffer.clear();
     }
 }
+
+pub fn set_cursor_y(y: usize) {
+    if let Some(ref mut buffer) = *TEXT_BUFFER.lock() {
+        buffer.cursor_y = y;
+    }
+}

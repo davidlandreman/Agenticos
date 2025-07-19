@@ -1,6 +1,7 @@
 use crate::process::{Process, ProcessId, allocate_pid};
 use crate::drivers::display::display;
 use crate::graphics::color::Color;
+use crate::graphics::images::{BmpImage, Image};
 use crate::mm::memory;
 use crate::{print, println};
 
@@ -28,24 +29,40 @@ impl Process for ShellProcess {
     }
     
     fn run(&mut self) {
-        let stats = memory::get_memory_stats();
-        let buffer_type = if display::USE_DOUBLE_BUFFER { " (Double Buffered)" } else { "" };
-        
-        println!("Welcome to AgenticOS!{}", buffer_type);
-        println!("======================");
-        println!();
+        // Load and display the BMP image
+        static LAND_IMAGE_DATA: &[u8] = include_bytes!("../../assets/LAND3.BMP");
 
-        // Force an exception here - test divide by zero
-        println!("Testing interrupt handling with divide by zero...");
-        
-        // Use volatile to prevent compiler optimization
-        /* unsafe {
-            let numerator: u32 = 10;
-            let denominator = core::ptr::read_volatile(&0u32);
-            let _result = numerator / denominator; // This will trigger a divide by zero exception
-        } */
-        
+        // Try to parse and display the BMP image
+        match BmpImage::from_bytes(LAND_IMAGE_DATA) {
+            Ok(land_image) => {
+                // Use the double buffer directly to draw the image
+                display::with_double_buffer(|buffer| {
+                    // Clear the screen to black first
+                    for y in 0..720 {
+                        for x in 0..1280 {
+                            buffer.draw_pixel(x, y, Color::BLACK);
+                        }
+                    }
+                    
+                    // Draw the image at position (100, 100)
+                    buffer.draw_image(100, 100, &land_image);
+                    
+                    // Swap buffers to show the image
+                    buffer.swap_buffers();
+                });
+                
+                // Just halt after drawing the image
+                loop {
+                    x86_64::instructions::hlt();
+                }
+            }
+            Err(_e) => {
+                println!("Failed to parse BMP");
+            }
+        }
+
         // Print memory information
+        let stats = memory::get_memory_stats();
         println!("Memory Statistics:");
         println!("  Total usable memory: {} MB", stats.usable_memory / (1024 * 1024));
         println!("  Total memory: {} MB", stats.total_memory / (1024 * 1024));
@@ -68,10 +85,10 @@ impl Process for ShellProcess {
         println!("Testing scrolling functionality:");
         println!("================================");
         
-        for i in 0..300 {
+        /*for i in 0..300 {
             display::set_color(if i % 2 == 0 { Color::WHITE } else { Color::GRAY });
             println!("Line {}: This is a test of the scrolling text buffer", i + 1);
-        }
+        }*/
         
         display::set_color(Color::MAGENTA);
         println!();
@@ -105,9 +122,9 @@ impl Process for ShellProcess {
         
         // Demonstrate keyboard input
         display::set_color(Color::GREEN);
-        println!("Keyboard input is now active! Type anything:");
+        println!("AgenticOS Shell");
         display::set_color(Color::WHITE);
-        print!("> ");
+        print!(">> ");
         
         // The keyboard interrupt handler will automatically print characters as they are typed
         // In a real OS, we would have a more sophisticated input handling system

@@ -249,4 +249,23 @@ where
     }
 }
 
+// Set cursor Y position
+pub fn set_cursor_y(y: usize) {
+    if let Some(ref mut writer) = *WRITER.lock() {
+        writer.cursor_y = y;
+    }
+}
+
+// Get access to the double buffer for direct operations
+pub fn with_double_buffer<F, R>(f: F) -> Option<R>
+where 
+    F: FnOnce(&mut DoubleBufferedFrameBuffer) -> R
+{
+    if let Some(ref mut writer) = *WRITER.lock() {
+        Some(f(&mut writer.buffer))
+    } else {
+        None
+    }
+}
+
 // Macros are now exported from display.rs

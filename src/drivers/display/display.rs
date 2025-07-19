@@ -24,6 +24,28 @@ pub fn set_color(color: Color) {
     }
 }
 
+// Function to set cursor Y position
+pub fn set_cursor_y(y: usize) {
+    if USE_DOUBLE_BUFFER {
+        super::double_buffered_text::set_cursor_y(y);
+    } else {
+        super::text_buffer::set_cursor_y(y);
+    }
+}
+
+// Function to access the double buffer for graphics operations
+pub fn with_double_buffer<F, R>(f: F) -> Option<R>
+where 
+    F: FnOnce(&mut super::double_buffer::DoubleBufferedFrameBuffer) -> R
+{
+    if USE_DOUBLE_BUFFER {
+        super::double_buffered_text::with_double_buffer(f)
+    } else {
+        // For single buffer mode, graphics operations are not supported
+        None
+    }
+}
+
 // Export the macros that use the unified print function
 #[macro_export]
 macro_rules! print {

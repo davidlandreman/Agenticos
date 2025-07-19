@@ -1,4 +1,5 @@
 use super::color::Color;
+use super::images::Image;
 use crate::drivers::display::frame_buffer::FrameBufferWriter;
 use core::cmp::{max, min};
 
@@ -331,6 +332,69 @@ impl<'a> Graphics<'a> {
         }
         if cx - x >= 0 && cy - y >= 0 {
             self.draw_pixel((cx - x) as usize, (cy - y) as usize, color);
+        }
+    }
+    
+    // Image drawing methods
+    pub fn draw_image(&mut self, x: usize, y: usize, image: &dyn Image) {
+        let width = image.width();
+        let height = image.height();
+        
+        for img_y in 0..height {
+            for img_x in 0..width {
+                if let Some(color) = image.get_pixel(img_x, img_y) {
+                    let dest_x = x + img_x;
+                    let dest_y = y + img_y;
+                    
+                    if dest_x < self.frame_buffer.width() && dest_y < self.frame_buffer.height() {
+                        self.draw_pixel(dest_x, dest_y, color);
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn draw_image_scaled(&mut self, x: usize, y: usize, width: usize, height: usize, image: &dyn Image) {
+        let src_width = image.width() as f32;
+        let src_height = image.height() as f32;
+        let x_scale = src_width / width as f32;
+        let y_scale = src_height / height as f32;
+        
+        for dest_y in 0..height {
+            for dest_x in 0..width {
+                let src_x = (dest_x as f32 * x_scale) as usize;
+                let src_y = (dest_y as f32 * y_scale) as usize;
+                
+                if let Some(color) = image.get_pixel(src_x, src_y) {
+                    let final_x = x + dest_x;
+                    let final_y = y + dest_y;
+                    
+                    if final_x < self.frame_buffer.width() && final_y < self.frame_buffer.height() {
+                        self.draw_pixel(final_x, final_y, color);
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn draw_image_region(&mut self, x: usize, y: usize, 
+                            src_x: usize, src_y: usize, 
+                            width: usize, height: usize, 
+                            image: &dyn Image) {
+        for offset_y in 0..height {
+            for offset_x in 0..width {
+                let img_x = src_x + offset_x;
+                let img_y = src_y + offset_y;
+                
+                if let Some(color) = image.get_pixel(img_x, img_y) {
+                    let dest_x = x + offset_x;
+                    let dest_y = y + offset_y;
+                    
+                    if dest_x < self.frame_buffer.width() && dest_y < self.frame_buffer.height() {
+                        self.draw_pixel(dest_x, dest_y, color);
+                    }
+                }
+            }
         }
     }
 }

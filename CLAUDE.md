@@ -201,6 +201,12 @@ The framebuffer display system supports both single and double buffering modes, 
 - Double buffering: Pixel writes go to fast RAM, then bulk copy to framebuffer
 - Scrolling: Memory copy operations (`ptr::copy`) are much faster than redrawing
 
+### Image Support
+- **BMP format**: Full Windows bitmap support with palette handling (4/8/16/24/32-bit)
+- **Located in**: `src/graphics/images/`
+- **Usage**: `BmpImage::from_bytes()` with `include_bytes!()` for compile-time embedding
+- **Drawing**: Via `display::with_double_buffer()` and `buffer.draw_image()`
+
 **Current Limitations:**
 - Graphics concepts are becoming complex and somewhat murky
 - The relationship between different display modules needs clarification

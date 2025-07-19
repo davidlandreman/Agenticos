@@ -2,6 +2,7 @@ use bootloader_api::info::{FrameBuffer, PixelFormat};
 use core::fmt;
 use core::ptr;
 use crate::graphics::color::Color;
+use crate::graphics::images::Image;
 
 pub struct DoubleBufferedFrameBuffer {
     framebuffer: &'static mut FrameBuffer,
@@ -248,6 +249,66 @@ impl DoubleBufferedFrameBuffer {
                 front_buffer.as_mut_ptr(),
                 buffer_size.min(front_buffer.len())
             );
+        }
+    }
+    
+    // Image drawing methods
+    pub fn draw_image(&mut self, x: usize, y: usize, image: &dyn Image) {
+        use crate::debug_info;
+        
+        let width = image.width();
+        let height = image.height();
+        
+        debug_info!("DoubleBuffer: Drawing image {}x{} at ({}, {})", width, height, x, y);
+        
+        let mut pixels_drawn = 0;
+        let mut first_pixel_color = None;
+        
+        for img_y in 0..height {
+            for img_x in 0..width {
+                if let Some(color) = image.get_pixel(img_x, img_y) {
+                    let dest_x = x + img_x;
+                    let dest_y = y + img_y;
+                    
+                    if dest_x < self.width && dest_y < self.height {
+                        self.draw_pixel(dest_x, dest_y, color);
+                        pixels_drawn += 1;
+                        
+                        if first_pixel_color.is_none() {
+                            first_pixel_color = Some(color);
+                        }
+                    }
+                }
+            }
+        }
+        
+        debug_info!("DoubleBuffer: Drew {} pixels", pixels_drawn);
+        if let Some(color) = first_pixel_color {
+            debug_info!("DoubleBuffer: First pixel color: R={}, G={}, B={}", 
+                       color.red, color.green, color.blue);
+        }
+    }
+    
+    pub fn draw_image_scaled(&mut self, x: usize, y: usize, width: usize, height: usize, image: &dyn Image) {
+        let src_width = image.width() as f32;
+        let src_height = image.height() as f32;
+        let x_scale = src_width / width as f32;
+        let y_scale = src_height / height as f32;
+        
+        for dest_y in 0..height {
+            for dest_x in 0..width {
+                let src_x = (dest_x as f32 * x_scale) as usize;
+                let src_y = (dest_y as f32 * y_scale) as usize;
+                
+                if let Some(color) = image.get_pixel(src_x, src_y) {
+                    let final_x = x + dest_x;
+                    let final_y = y + dest_y;
+                    
+                    if final_x < self.width && final_y < self.height {
+                        self.draw_pixel(final_x, final_y, color);
+                    }
+                }
+            }
         }
     }
 }
