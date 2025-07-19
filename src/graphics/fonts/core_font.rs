@@ -92,9 +92,16 @@ impl FontRef {
     }
 }
 
-// Include IBM Plex font data
+// Binary Font Data Assets
+static ARIAL_TTF_DATA: &[u8] = include_bytes!("../../../assets/tiny.ttf");
 static IBM_PLEX_DATA: &[u8] = include_bytes!("../../../assets/ibmplex.fnt");
 static IBM_PLEX_LARGE_DATA: &[u8] = include_bytes!("../../../assets/ibmplex-large.fnt");
+
+// Create static instance of Arial font
+pub static ARIAL_FONT: spin::Lazy<Option<TrueTypeFont>> = spin::Lazy::new(|| {
+    TrueTypeFont::from_ttf_data(ARIAL_TTF_DATA, 16)
+});
+
 
 // Create static instances of IBM Plex fonts
 pub static IBM_PLEX_FONT: spin::Lazy<Option<VFNTFont>> = spin::Lazy::new(|| {
@@ -119,39 +126,22 @@ pub fn get_ibm_plex_large_font() -> Option<FontRef> {
     IBM_PLEX_LARGE_FONT.as_ref().map(|font| FontRef::new(font as &dyn Font))
 }
 
-// Include Arial TTF data
-static ARIAL_TTF_DATA: &[u8] = include_bytes!("../../../assets/arial.ttf");
-
-// Create static instance of Arial font
-pub static ARIAL_FONT: spin::Lazy<Option<TrueTypeFont>> = spin::Lazy::new(|| {
-    crate::debug_info!("ARIAL_FONT: Starting lazy initialization...");
-    crate::debug_info!("ARIAL_FONT: Arial TTF data size: {} bytes", ARIAL_TTF_DATA.len());
-    
-    let result = TrueTypeFont::from_ttf_data(ARIAL_TTF_DATA, 16); // 16 pixel size
-    
-    match &result {
-        Some(_) => crate::debug_info!("ARIAL_FONT: Successfully created TrueTypeFont"),
-        None => crate::debug_info!("ARIAL_FONT: Failed to create TrueTypeFont"),
-    }
-    
-    result
-});
-
 pub fn get_arial_font() -> Option<FontRef> {
+    crate::debug_info!("get_arial_font() called!!!");
     ARIAL_FONT.as_ref().map(|font| FontRef::new(font as &dyn Font))
 }
 
 // Get default font - try Arial with proper debugging
 pub fn get_default_font() -> FontRef {
 
-    // return get_embedded_font();
+    return get_embedded_font();
 
     // Try to load Arial font
     crate::debug_info!("About to access ARIAL_FONT lazy static...");
-    match ARIAL_FONT.as_ref() {
+    return match get_arial_font() {
         Some(font) => {
             crate::debug_info!("Arial font loaded successfully!");
-            FontRef::new(font as &dyn Font)
+            font 
         }
         None => {
             crate::debug_info!("Arial font failed to load, using embedded font");
