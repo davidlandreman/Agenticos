@@ -71,5 +71,9 @@ echo "✅ Build complete!"
 # Run in QEMU if requested
 if [ "$RUN_QEMU" = true ]; then
     echo "🚀 Launching QEMU..."
-    qemu-system-x86_64 -drive format=raw,file=target/bootloader/bios.img -serial stdio -no-reboot -no-shutdown
+    qemu-system-x86_64 -drive format=raw,file=target/bootloader/bios.img \
+        -serial stdio \
+        -no-reboot -no-shutdown \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -m 128M
 fi

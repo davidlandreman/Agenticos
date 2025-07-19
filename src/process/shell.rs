@@ -93,8 +93,18 @@ impl Process for ShellProcess {
         println!("System ready.");
         println!();
         
-        // Demonstrate keyboard input
+        // Input testing instructions
         display::set_color(Color::YELLOW);
+        println!("Input Device Testing:");
+        println!("====================");
+        display::set_color(Color::WHITE);
+        println!("- Type on keyboard to test keyboard input");
+        println!("- Move mouse to test mouse input (check debug logs)");
+        println!("- Mouse coordinates and button presses will be logged");
+        println!();
+        
+        // Demonstrate keyboard input
+        display::set_color(Color::GREEN);
         println!("Keyboard input is now active! Type anything:");
         display::set_color(Color::WHITE);
         print!("> ");

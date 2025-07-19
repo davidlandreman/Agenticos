@@ -4,6 +4,7 @@ use crate::{debug_info, debug_debug, debug_warn};
 use crate::arch::x86_64::interrupts;
 use crate::mm::memory;
 use crate::drivers::display::{display, text_buffer, double_buffered_text};
+use crate::drivers::ps2_controller;
 use crate::process::{Process, ShellProcess};
 
 pub fn init(boot_info: &'static mut BootInfo) {
@@ -18,6 +19,9 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize interrupt descriptor table
     interrupts::init_idt();
     
+    // Initialize PS/2 controller configuration for keyboard
+    ps2_controller::init();
+    
     // Initialize memory manager
     memory::init(&boot_info.memory_regions, boot_info.physical_memory_offset.into_option());
     
@@ -31,6 +35,9 @@ pub fn init(boot_info: &'static mut BootInfo) {
     
     // Initialize display
     init_display(boot_info);
+    
+    // Initialize mouse driver
+    crate::drivers::mouse::init();
     
 }
 
