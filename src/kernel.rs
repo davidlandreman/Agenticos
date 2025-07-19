@@ -25,6 +25,10 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize memory manager
     memory::init(&boot_info.memory_regions, boot_info.physical_memory_offset.into_option());
     
+    // Initialize IDE controller and detect drives
+    debug_info!("Initializing IDE controller...");
+    crate::drivers::ide::IDE_CONTROLLER.initialize();
+    
     // Print memory information
     memory::print_memory_info();
     

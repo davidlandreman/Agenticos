@@ -95,6 +95,16 @@ impl Process for ShellProcess {
         println!("Column:\t1\t2\t3\t4");
         println!("Value:\tA\tB\tC\tD");
         
+        // Test IDE disk detection
+        display::set_color(Color::MAGENTA);
+        println!();
+        println!("IDE Disk Detection:");
+        println!("==================");
+        display::set_color(Color::WHITE);
+        
+        // Test reading from IDE disk if one is present
+        self.test_ide_disk();
+        
         // Final message
         println!();
         display::set_color(Color::CYAN);
@@ -122,5 +132,54 @@ impl Process for ShellProcess {
         // The keyboard interrupt handler will automatically print characters as they are typed
         // In a real OS, we would have a more sophisticated input handling system
         // For now, keyboard input is automatically displayed via the interrupt handler
+    }
+}
+
+impl ShellProcess {
+    fn test_ide_disk(&self) {
+        use crate::drivers::ide::{IDE_CONTROLLER, IdeChannel, IdeDrive, IdeBlockDevice};
+        use crate::drivers::block::BlockDevice;
+        
+        // Check primary master disk
+        let primary_master = IdeBlockDevice::new(IdeChannel::Primary, IdeDrive::Master);
+        
+        // Check if disk is present
+        if let Some((model_bytes, sectors)) = IDE_CONTROLLER.get_disk_info(IdeChannel::Primary, IdeDrive::Master) {
+            let size_mb = (sectors * 512) / (1024 * 1024);
+            
+            // Convert model bytes to string
+            let model_len = model_bytes.iter().position(|&c| c == 0).unwrap_or(40);
+            let model = core::str::from_utf8(&model_bytes[..model_len]).unwrap_or("Unknown").trim();
+            
+            println!("Found IDE disk: {}", model);
+            println!("  Size: {} MB ({} sectors)", size_mb, sectors);
+            
+            // Try to read the first sector (boot sector)
+            let mut buffer = [0u8; 512];
+            match primary_master.read_blocks(0, 1, &mut buffer) {
+                Ok(_) => {
+                    println!("  Successfully read boot sector!");
+                    
+                    // Display first 16 bytes of boot sector in hex
+                    print!("  Boot sector (first 16 bytes): ");
+                    for i in 0..16 {
+                        print!("{:02X} ", buffer[i]);
+                    }
+                    println!();
+                    
+                    // Check for common boot sector signatures
+                    if buffer[510] == 0x55 && buffer[511] == 0xAA {
+                        println!("  Valid boot sector signature found (0x55AA)");
+                    } else {
+                        println!("  No standard boot sector signature");
+                    }
+                }
+                Err(e) => {
+                    println!("  Failed to read boot sector: {}", e);
+                }
+            }
+        } else {
+            println!("No IDE disk found on primary master");
+        }
     }
 }
