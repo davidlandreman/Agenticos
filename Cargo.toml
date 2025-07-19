@@ -9,6 +9,9 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 
+[features]
+test = []
+
 [build-dependencies]
 bootloader="0.11.10"
 bootloader_linker = "0.1.7"
@@ -20,6 +23,7 @@ volatile = "0.2.6"
 spin = "0.9"
 x86_64 = "0.14"
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
+
 
 #[package.metadata.bootimage]
 #build-command = ["build"]

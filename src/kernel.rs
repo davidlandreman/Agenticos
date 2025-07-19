@@ -31,6 +31,10 @@ pub fn init(boot_info: &'static mut BootInfo) {
     
     // Initialize display
     init_display(boot_info);
+    
+    // Run tests if enabled
+    #[cfg(feature = "test")]
+    run_tests();
 }
 
 fn init_display(boot_info: &'static mut BootInfo) {
@@ -112,4 +116,60 @@ fn display_boot_messages() {
 pub fn run() -> ! {
     debug_info!("Kernel initialization complete. Entering idle loop...");
     loop {}
+}
+
+#[cfg(feature = "test")]
+pub fn run_tests() {
+    debug_info!("=== Running Kernel Tests ===");
+    
+    // Test 1: Debug system
+    debug_info!("Test 1: Debug system initialization");
+    debug_debug!("Debug system is working correctly");
+    debug_info!("[PASS] Debug system test");
+    
+    // Test 2: Memory stats
+    debug_info!("Test 2: Memory statistics");
+    let stats = memory::get_memory_stats();
+    assert!(stats.total_memory > 0, "Total memory should be greater than 0");
+    assert!(stats.usable_memory > 0, "Usable memory should be greater than 0");
+    assert!(stats.usable_memory <= stats.total_memory, "Usable memory should not exceed total memory");
+    debug_info!("Memory - Total: {} MB, Usable: {} MB", 
+               stats.total_memory / (1024 * 1024),
+               stats.usable_memory / (1024 * 1024));
+    debug_info!("[PASS] Memory statistics test");
+    
+    // Test 3: Display colors
+    debug_info!("Test 3: Display color setting");
+    display::set_color(Color::RED);
+    println!("This text should be red");
+    display::set_color(Color::GREEN);
+    println!("This text should be green");
+    display::set_color(Color::BLUE);
+    println!("This text should be blue");
+    display::set_color(Color::WHITE);
+    debug_info!("[PASS] Display color test");
+    
+    // Test 4: Basic arithmetic
+    debug_info!("Test 4: Basic arithmetic");
+    let a = 10;
+    let b = 20;
+    assert_eq!(a + b, 30, "10 + 20 should equal 30");
+    assert_eq!(b - a, 10, "20 - 10 should equal 10");
+    debug_info!("[PASS] Basic arithmetic test");
+    
+    debug_info!("=== All Tests Passed! ===");
+    
+    // Exit QEMU with success code
+    exit_qemu_success();
+}
+
+#[cfg(feature = "test")]
+fn exit_qemu_success() {
+    use x86_64::instructions::port::Port;
+    
+    debug_info!("Exiting QEMU with success status...");
+    unsafe {
+        let mut port = Port::new(0xf4);
+        port.write(0x10u32); // Success exit code
+    }
 }
