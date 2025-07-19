@@ -1,6 +1,8 @@
 use spin::Mutex;
 use lazy_static::lazy_static;
 use crate::debug_info;
+use crate::debug_trace;
+use crate::debug_debug;
 use x86_64::instructions::port::Port;
 
 const MOUSE_DATA_PORT: u16 = 0x60;
@@ -58,17 +60,31 @@ pub fn init() {
     // Wait for controller to be ready
     wait_controller();
     
-    // Enable auxiliary device
-    send_controller_command(ENABLE_AUX_DEVICE);
+    // Skip enabling auxiliary device - already done in PS/2 controller init
+    // The mouse may already be sending data at this point
     
-    // Skip auxiliary port test - it often fails in QEMU
-    // Just try to proceed with mouse initialization
+    // Clear any pending data before reset
+    let mut cleared_count = 0;
+    while read_data_timeout().is_some() {
+        cleared_count += 1;
+    }
+    if cleared_count > 0 {
+        debug_info!("Cleared {} pending bytes from mouse", cleared_count);
+    }
     
-    // Reset mouse
-    debug_info!("Resetting mouse...");
+    // Reset mouse - this may fail if mouse is already active
+    debug_info!("Attempting to reset mouse...");
     if !send_mouse_command(MOUSE_RESET) {
-        debug_info!("Failed to send reset command");
-        return;
+        debug_info!("Mouse reset command failed - mouse may already be active");
+        // Try to just enable data reporting
+        if send_mouse_command(MOUSE_ENABLE) {
+            debug_info!("Mouse data reporting enabled (without reset)");
+            debug_info!("PS/2 mouse initialization completed (already active)");
+            return;
+        } else {
+            debug_info!("Failed to enable mouse data reporting");
+            return;
+        }
     }
         
         // Wait for reset to complete and read response
@@ -192,11 +208,26 @@ fn read_data_timeout_long() -> Option<u8> {
 pub fn handle_interrupt(data: u8) {
     let mut mouse_data = MOUSE_DATA.lock();
     
+    // If we're expecting the first byte of a packet, validate it
+    if mouse_data.packet_index == 0 {
+        // Check if this could be a valid first byte (bit 3 must be set)
+        if (data & 0x08) == 0 {
+            debug_trace!("Invalid first byte 0x{:02x}, skipping", data);
+            return;
+        }
+    }
+    
     let packet_index = mouse_data.packet_index;
     mouse_data.packet_bytes[packet_index] = data;
     mouse_data.packet_index += 1;
     
+    debug_trace!("Mouse packet byte {} of 3: 0x{:02x}", mouse_data.packet_index, data);
+    
     if mouse_data.packet_index >= 3 {
+        debug_trace!("Processing complete mouse packet: 0x{:02x} 0x{:02x} 0x{:02x}", 
+            mouse_data.packet_bytes[0], 
+            mouse_data.packet_bytes[1], 
+            mouse_data.packet_bytes[2]);
         process_packet(&mut mouse_data);
         mouse_data.packet_index = 0;
     }
@@ -206,13 +237,6 @@ fn process_packet(data: &mut MouseData) {
     let byte1 = data.packet_bytes[0];
     let byte2 = data.packet_bytes[1];
     let byte3 = data.packet_bytes[2];
-    
-    // Check if this is a valid first byte
-    if (byte1 & 0x08) == 0 {
-        // Invalid packet, reset
-        data.packet_index = 0;
-        return;
-    }
     
     // Extract button states
     let old_buttons = data.buttons;

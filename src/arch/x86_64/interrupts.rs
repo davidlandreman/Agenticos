@@ -308,7 +308,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     let scancode: u8 = unsafe { port.read() };
     
     // Debug: log keyboard interrupt
-    crate::debug_info!("Keyboard interrupt: scancode=0x{:02x}", scancode);
+    crate::debug_trace!("Keyboard interrupt: scancode=0x{:02x}", scancode);
     
     crate::drivers::keyboard::add_scancode(scancode);
     
@@ -324,7 +324,7 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
     let data: u8 = unsafe { port.read() };
     
     // Debug: log mouse interrupt
-    crate::debug_info!("Mouse interrupt: data=0x{:02x}", data);
+    crate::debug_trace!("Mouse interrupt: data=0x{:02x}", data);
     
     crate::drivers::mouse::handle_interrupt(data);
     

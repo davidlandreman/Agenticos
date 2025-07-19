@@ -10,7 +10,7 @@ use crate::process::{Process, ShellProcess};
 pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize debug subsystem
     debug::init();
-    debug::set_debug_level(DebugLevel::Trace);
+    debug::set_debug_level(DebugLevel::Debug);
     
     debug_info!("=== AgenticOS Kernel Starting ===");
     debug_info!("Kernel entry point reached successfully!");

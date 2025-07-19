@@ -3,7 +3,7 @@ use crate::debug_info;
 
 /// Initialize the PS/2 controller for keyboard and mouse support
 pub fn init() {
-    debug_info!("Initializing PS/2 controller for keyboard...");
+    debug_info!("Initializing PS/2 controller for keyboard and mouse...");
     
     unsafe {
         // Disable devices while configuring
@@ -38,6 +38,11 @@ pub fn init() {
         wait_ps2_write();
         Port::<u8>::new(0x64).write(0xAE);
         debug_info!("Keyboard enabled");
+        
+        // Enable mouse port (auxiliary device)
+        wait_ps2_write();
+        Port::<u8>::new(0x64).write(0xA8);
+        debug_info!("Mouse port enabled");
         
         // Reset keyboard
         wait_ps2_write();
