@@ -66,14 +66,17 @@ impl ScancodeQueue {
 }
 
 pub(crate) fn add_scancode(scancode: u8) {
+    // Note: This is called from interrupt context
+    // We should ONLY queue the scancode here, not process it
+    // Processing (including printing) should happen outside interrupt context
     if let Err(()) = SCANCODE_QUEUE.lock().push(scancode) {
         debug_info!("WARNING: Keyboard scancode queue full; dropping input");
-    } else {
-        process_scancode(scancode);
     }
 }
 
 fn process_scancode(scancode: u8) {
+    // Note: This is called from interrupt context, but KEYBOARD_STATE is only accessed here
+    // and in interrupt context, so we don't need without_interrupts
     let mut state = KEYBOARD_STATE.lock();
     
     // Handle special codes
@@ -235,9 +238,30 @@ fn scancode_set2_to_ascii(scancode: u8) -> Option<char> {
     Some(character)
 }
 
+/// Process any pending keyboard input and print characters
+/// This should be called from the main loop, NOT from interrupt context
+pub fn process_pending_input() {
+    loop {
+        let scancode = x86_64::instructions::interrupts::without_interrupts(|| {
+            SCANCODE_QUEUE.lock().pop()
+        });
+        
+        match scancode {
+            Some(scancode) => {
+                process_scancode(scancode);
+            }
+            None => break,
+        }
+    }
+}
+
 pub fn read_character() -> Option<char> {
     loop {
-        if let Some(scancode) = SCANCODE_QUEUE.lock().pop() {
+        let scancode = x86_64::instructions::interrupts::without_interrupts(|| {
+            SCANCODE_QUEUE.lock().pop()
+        });
+        
+        if let Some(scancode) = scancode {
             let pressed = scancode < 0x80;
             let key_code = if pressed { scancode } else { scancode - 0x80 };
             

@@ -279,6 +279,8 @@ fn process_packet(data: &mut MouseData) {
 }
 
 pub fn get_state() -> (i32, i32, u8) {
-    let data = MOUSE_DATA.lock();
-    (data.x, data.y, data.buttons)
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let data = MOUSE_DATA.lock();
+        (data.x, data.y, data.buttons)
+    })
 }

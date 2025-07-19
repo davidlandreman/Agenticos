@@ -71,8 +71,11 @@ pub fn run() -> ! {
 
     debug_info!("Entering idle loop with mouse cursor...");
     
-    // Enable mouse cursor drawing in the idle loop
+    // Main kernel loop
     loop {
+        // Process any pending keyboard input (outside of interrupt context)
+        crate::drivers::keyboard::process_pending_input();
+        
         // Draw mouse cursor if double buffering is enabled
         if display::USE_DOUBLE_BUFFER {
             double_buffered_text::with_buffer(|buffer| {
