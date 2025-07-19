@@ -18,6 +18,7 @@ mod graphics;
 mod lib;
 mod mm;
 mod process;
+mod stdlib;
 mod tests;
 
 use bootloader_api::{entry_point, BootInfo};

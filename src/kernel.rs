@@ -5,7 +5,6 @@ use crate::arch::x86_64::interrupts;
 use crate::mm::memory;
 use crate::drivers::display::{display, text_buffer, double_buffered_text};
 use crate::drivers::ps2_controller;
-use crate::process::Process;
 use crate::commands::ShellProcess;
 
 pub fn init(boot_info: &'static mut BootInfo) {
@@ -245,18 +244,21 @@ fn init_filesystems() {
 pub fn run() -> ! {
     debug_info!("Kernel initialization complete.");
 
+    // Register available commands with the process manager
+    debug_info!("Registering commands...");
+    crate::process::register_command("dir", crate::commands::dir::create_dir_process);
+    debug_info!("Commands registered successfully.");
+
     // Run shell process
     let mut shell_process = ShellProcess::new();
-    debug_info!("Running shell process (PID: {})", shell_process.get_id());
+    debug_info!("Running shell process (PID: {})", shell_process.base.get_id());
     shell_process.run();
 
-    debug_info!("Entering idle loop with mouse cursor...");
+    crate::println!("Shell Process Done: System Halted");
     
-    // Main kernel loop
-    loop {
-        // Process any pending keyboard input (outside of interrupt context)
-        crate::drivers::keyboard::process_pending_input();
-        
+    // Main kernel loop - TODO this loop should not exist and we should just call a halt here or restart shell
+    debug_info!("Entering idle loop with mouse cursor...");
+    loop {        
         // Draw mouse cursor if double buffering is enabled
         if display::USE_DOUBLE_BUFFER {
             double_buffered_text::with_buffer(|buffer| {

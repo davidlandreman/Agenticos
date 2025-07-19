@@ -370,6 +370,218 @@ shell_process.run();
 - No actual concurrent execution yet - processes run synchronously
 - Ready for extension with process states, scheduling, and context switching
 
+## Process Management and Command System
+
+### Overview
+The kernel now includes a sophisticated process management system that allows any command to execute other commands through a centralized process manager. This architecture eliminates boilerplate and provides a foundation for future multi-tasking capabilities.
+
+### Architecture
+
+#### Core Components
+- **`ProcessManager`**: Central registry and executor for all commands
+- **`RunnableProcess` trait**: Interface for processes that can be spawned
+- **`CommandFactory`**: Function type for creating process instances
+- **Command Registration**: Global registry mapping command names to factories
+
+#### Process Traits and Implementation
+```rust
+// Core trait for runnable processes
+pub trait RunnableProcess {
+    fn run(&mut self);
+    fn get_name(&self) -> &str;
+}
+
+// Existing processes automatically become runnable
+pub struct MyProcess {
+    pub base: BaseProcess,
+    // ... other fields
+}
+
+impl HasBaseProcess for MyProcess { /* ... */ }
+
+// Simple RunnableProcess implementation (minimal boilerplate)
+impl RunnableProcess for MyProcess {
+    fn run(&mut self) {
+        self.run(); // Call inherent run method
+    }
+    
+    fn get_name(&self) -> &str {
+        self.base.get_name()
+    }
+}
+```
+
+### Command Registration and Execution
+
+#### Registration Pattern
+Commands are registered during kernel initialization:
+```rust
+// In kernel.rs initialization
+crate::process::register_command("dir", crate::commands::dir::create_dir_process);
+crate::process::register_command("mycommand", crate::commands::mycommand::create_mycommand_process);
+```
+
+#### Factory Function Pattern
+Each command provides a factory function:
+```rust
+// In src/commands/mycommand/mod.rs
+pub fn create_mycommand_process(args: Vec<String>) -> Box<dyn RunnableProcess> {
+    Box::new(MyCommandProcess::new_with_args(args))
+}
+```
+
+#### Shell Integration
+The shell automatically routes unknown commands to the process manager:
+```rust
+// In shell command processing
+match trimmed {
+    "help" | "exit" | "clear" => { /* built-in commands */ }
+    _ => {
+        // Try to execute as registered command
+        match crate::process::execute_command(trimmed) {
+            Ok(()) => { /* success */ }
+            Err(e) => println!("{}", e),
+        }
+    }
+}
+```
+
+### Adding New Commands
+
+#### Step 1: Create Command Structure
+Follow the established pattern:
+```rust
+// src/commands/mycommand/mod.rs
+use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
+
+pub struct MyCommandProcess {
+    pub base: BaseProcess,
+    args: Vec<String>,
+}
+
+impl MyCommandProcess {
+    pub fn new() -> Self {
+        Self {
+            base: BaseProcess::new("mycommand"),
+            args: Vec::new(),
+        }
+    }
+    
+    pub fn new_with_args(args: Vec<String>) -> Self {
+        Self {
+            base: BaseProcess::new("mycommand"),
+            args,
+        }
+    }
+}
+```
+
+#### Step 2: Implement Required Traits
+```rust
+impl HasBaseProcess for MyCommandProcess {
+    fn base(&self) -> &BaseProcess { &self.base }
+    fn base_mut(&mut self) -> &mut BaseProcess { &mut self.base }
+}
+
+impl RunnableProcess for MyCommandProcess {
+    fn run(&mut self) {
+        self.run(); // Delegate to inherent method
+    }
+    
+    fn get_name(&self) -> &str {
+        self.base.get_name()
+    }
+}
+```
+
+#### Step 3: Implement Command Logic
+```rust
+impl MyCommandProcess {
+    pub fn run(&mut self) {
+        // Command implementation here
+        println!("MyCommand executed with {} args", self.args.len());
+        for (i, arg) in self.args.iter().enumerate() {
+            println!("  Arg {}: {}", i, arg);
+        }
+    }
+}
+```
+
+#### Step 4: Add Factory Function
+```rust
+pub fn create_mycommand_process(args: Vec<String>) -> Box<dyn RunnableProcess> {
+    Box::new(MyCommandProcess::new_with_args(args))
+}
+```
+
+#### Step 5: Register in Kernel
+```rust
+// In src/kernel.rs
+crate::process::register_command("mycommand", crate::commands::mycommand::create_mycommand_process);
+```
+
+#### Step 6: Export from Commands Module
+```rust
+// In src/commands/mod.rs
+pub mod mycommand;
+pub use mycommand::MyCommandProcess;
+```
+
+### Key Benefits
+
+#### Minimal Boilerplate
+- No need to implement full `Process` trait
+- Simple `RunnableProcess` implementation delegates to existing `run()` method
+- Factory function is straightforward
+
+#### Uniform Command Execution
+- All commands executed through the same `process::execute_command()` interface
+- Consistent argument parsing and error handling
+- Easy to extend with features like pipes, redirection, etc.
+
+#### Future-Ready Architecture
+- Foundation for process scheduling and concurrency
+- Commands can spawn other commands via process manager
+- Ready for inter-process communication features
+
+### Process Manager API
+
+#### Core Functions
+```rust
+// Register a command globally
+pub fn register_command(name: &str, factory: CommandFactory);
+
+// Execute a command with arguments
+pub fn execute_command(command_line: &str) -> ProcessResult;
+
+// Query available commands
+pub fn list_commands() -> Vec<String>;
+pub fn has_command(name: &str) -> bool;
+```
+
+#### Usage Examples
+```rust
+// Register commands
+register_command("ls", create_ls_process);
+register_command("cat", create_cat_process);
+
+// Execute commands
+execute_command("ls /home")?;
+execute_command("cat file.txt")?;
+
+// Query commands
+let available = list_commands();
+if has_command("git") {
+    execute_command("git status")?;
+}
+```
+
+### Design Philosophy
+- **Convention over Configuration**: Follow shell command patterns
+- **Minimal Abstraction**: Don't over-engineer the process system
+- **Future Compatibility**: Architecture supports threading/scheduling extensions
+- **Developer Friendly**: Easy to add new commands with minimal boilerplate
+
 ## Mouse Support
 
 ### Overview

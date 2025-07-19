@@ -333,6 +333,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     
     crate::drivers::keyboard::add_scancode(scancode);
     
+    // Wake up any processes waiting for stdin input
+    crate::stdlib::waker::wake_stdin_waiters();
+    
     unsafe {
         PICS.lock().notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
     }

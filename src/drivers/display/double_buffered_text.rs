@@ -236,6 +236,13 @@ pub fn set_color(color: Color) {
     }
 }
 
+pub fn clear_screen() {
+    let mut writer = WRITER.lock();
+    if let Some(ref mut w) = *writer {
+        w.clear();
+    }
+}
+
 // Access the underlying buffer for mouse cursor drawing
 pub fn with_buffer<F, R>(f: F) -> Option<R>
 where 

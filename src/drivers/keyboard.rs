@@ -1,6 +1,6 @@
 use spin::Mutex;
 use lazy_static::lazy_static;
-use crate::{debug_info, print};
+use crate::{debug_info, debug_trace, debug_error, debug_debug, print};
 
 const SCANCODE_QUEUE_SIZE: usize = 100;
 
@@ -70,7 +70,7 @@ pub(crate) fn add_scancode(scancode: u8) {
     // We should ONLY queue the scancode here, not process it
     // Processing (including printing) should happen outside interrupt context
     if let Err(()) = SCANCODE_QUEUE.lock().push(scancode) {
-        debug_info!("WARNING: Keyboard scancode queue full; dropping input");
+        debug_error!("WARNING: Keyboard scancode queue full; dropping input");
     }
 }
 
@@ -103,7 +103,15 @@ fn process_scancode(scancode: u8) {
     
     // Only process make codes (key press)
     if let Some(character) = scancode_set2_to_ascii(scancode) {
-        print!("{}", character);
+        debug_trace!("Keyboard: converted scancode 0x{:02X} to character '{}'", scancode, character);
+        
+        // Echo character immediately for real-time feedback
+        crate::print!("{}", character);
+        
+        // Route input to active process stdin buffer
+        crate::process::push_keyboard_input(character);
+    } else {
+        debug_debug!("Keyboard: scancode 0x{:02X} did not convert to character", scancode);
     }
     
     state.is_extended = false;
@@ -238,7 +246,7 @@ fn scancode_set2_to_ascii(scancode: u8) -> Option<char> {
     Some(character)
 }
 
-/// Process any pending keyboard input and print characters
+/// Process any pending keyboard input
 /// This should be called from the main loop, NOT from interrupt context
 pub fn process_pending_input() {
     loop {

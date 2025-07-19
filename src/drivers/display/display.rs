@@ -33,6 +33,17 @@ pub fn set_cursor_y(y: usize) {
     }
 }
 
+// Function to clear the screen
+pub fn clear_screen() {
+    if USE_DOUBLE_BUFFER {
+        // For double buffer, we need to implement this
+        // For now, just clear by filling with spaces
+        super::double_buffered_text::clear_screen();
+    } else {
+        super::text_buffer::clear_screen();
+    }
+}
+
 // Function to access the double buffer for graphics operations
 pub fn with_double_buffer<F, R>(f: F) -> Option<R>
 where 

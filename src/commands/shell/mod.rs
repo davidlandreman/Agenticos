@@ -1,35 +1,36 @@
-use crate::process::{Process, ProcessId, allocate_pid};
+use crate::process::{BaseProcess, HasBaseProcess};
 use crate::drivers::display::display;
 use crate::graphics::color::Color;
 use crate::graphics::images::{BmpImage, Image};
-use crate::mm::memory;
 use crate::{print, println};
 use alloc;
 
 pub struct ShellProcess {
-    id: ProcessId,
-    name: &'static str,
+    pub base: BaseProcess,
 }
 
 impl ShellProcess {
     pub fn new() -> Self {
         Self {
-            id: allocate_pid(),
-            name: "shell",
+            base: BaseProcess::new("shell"),
         }
     }
 }
 
-impl Process for ShellProcess {
-    fn get_id(&self) -> ProcessId {
-        self.id
+impl HasBaseProcess for ShellProcess {
+    fn base(&self) -> &BaseProcess {
+        &self.base
     }
     
-    fn get_name(&self) -> &str {
-        self.name
+    fn base_mut(&mut self) -> &mut BaseProcess {
+        &mut self.base
     }
-    
-    fn run(&mut self) {
+}
+
+impl ShellProcess {
+    pub fn run(&mut self) {
+        // Register this process's stdin buffer to receive keyboard input
+        self.base.register_stdin();
         // Load and display the BMP image from filesystem
         let image_path = "/banner.bmp";
         
@@ -103,20 +104,93 @@ impl Process for ShellProcess {
         println!("Input Device Testing:");
         println!("====================");
         display::set_color(Color::WHITE);
-        println!("- Type on keyboard to test keyboard input");
+        println!("- Type on keyboard to test keyboard input (with echo)");
+        println!("- Use 'echo off' to disable input echoing, 'echo on' to re-enable");
         println!("- Move mouse to test mouse input (check debug logs)");
         println!("- Mouse coordinates and button presses will be logged");
         println!();
         
-        // Demonstrate keyboard input
+        // Demonstrate keyboard input with stdin/stdout
         display::set_color(Color::GREEN);
         println!("AgenticOS Shell");
         display::set_color(Color::WHITE);
-        print!(">> ");
         
-        // The keyboard interrupt handler will automatically print characters as they are typed
-        // In a real OS, we would have a more sophisticated input handling system
-        // For now, keyboard input is automatically displayed via the interrupt handler
+        // Simple shell loop demonstrating stdin reading
+        loop {
+            print!(">> ");
+            
+            // Read a line from stdin
+            match self.base.stdin().read_line() {
+                Ok(line) => {
+                    // No need to manually echo - handled automatically by stdin buffer
+                    println!(); // New line after the command
+                    
+                    // Simple command processing
+                    let trimmed = line.trim();
+                    match trimmed {
+                        "help" => {
+                            println!("Available commands:");
+                            println!("Built-in commands:");
+                            println!("  help     - Show this help message");
+                            println!("  exit     - Exit the shell");
+                            println!("  clear    - Clear the screen");
+                            println!("  echo on  - Enable input echoing");
+                            println!("  echo off - Disable input echoing");
+                            println!("  echo     - Show current echo status");
+                            
+                            // Show registered commands
+                            let commands = crate::process::list_commands();
+                            if !commands.is_empty() {
+                                println!("Available programs:");
+                                for cmd in commands {
+                                    println!("  {}       - Execute {} command", cmd, cmd);
+                                }
+                            }
+                        }
+                        "exit" => {
+                            println!("Exiting shell...");
+                            break;
+                        }
+                        "clear" => {
+                            display::clear_screen();
+                        }
+                        "echo on" => {
+                            self.base.configure_stdin_echo(true);
+                            println!("Echo enabled");
+                        }
+                        "echo off" => {
+                            self.base.configure_stdin_echo(false);
+                            println!("Echo disabled");
+                        }
+                        "echo" => {
+                            let enabled = self.base.stdin().echo_enabled();
+                            println!("Echo is currently {}", if enabled { "enabled" } else { "disabled" });
+                        }
+                        "" => {
+                            // Empty command, just show prompt again
+                        }
+                        _ => {
+                            // Try to execute as a registered command through process manager
+                            match crate::process::execute_command(trimmed) {
+                                Ok(()) => {
+                                    // Command executed successfully
+                                }
+                                Err(e) => {
+                                    println!("{}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Error reading input: {:?}", e);
+                    break;
+                }
+            }
+        }
+        
+        // Clean up - unregister stdin buffer when shell exits
+        self.base.unregister_stdin();
     }
 }
 
