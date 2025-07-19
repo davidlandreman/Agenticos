@@ -407,5 +407,105 @@ The kernel includes a filesystem abstraction layer with FAT12/16/32 support:
 - `src/fs/filesystem.rs` - Filesystem trait
 - `src/fs/vfs.rs` - Virtual filesystem layer
 - `src/fs/fat/` - FAT implementation
+- `src/fs/file_handle.rs` - Arc-based file and directory handles
+- `src/fs/fs_manager.rs` - High-level filesystem API
 
-The shell automatically detects and displays filesystem information during boot.
+### Arc-based File Handle API
+
+The filesystem now provides modern Arc-based file handles that eliminate lifetime issues and unsafe transmutation:
+
+#### File Operations
+```rust
+use crate::fs::{File, FileResult};
+use crate::lib::arc::Arc;
+
+// Open a file for reading
+let file: Arc<File> = File::open_read("/TEST.TXT")?;
+
+// Read entire file as string
+let content = file.read_to_string()?;
+
+// Read into buffer
+let mut buffer = [0u8; 1024];
+let bytes_read = file.read(&mut buffer)?;
+
+// Get file information
+println!("Path: {}", file.path());
+println!("Size: {} bytes", file.size());
+println!("Position: {}", file.position());
+
+// Seek within file
+file.seek(100)?;
+
+// Share file handle safely
+let file_clone = file.clone();
+assert!(file.is_open() && file_clone.is_open());
+```
+
+#### Directory Operations
+```rust
+use crate::fs::{Directory, DirectoryEntry};
+
+// Open a directory
+let dir: Arc<Directory> = Directory::open("/")?;
+
+// Get all entries
+let entries = dir.entries();
+for entry in &entries {
+    println!("{} - {} bytes", entry.name_str(), entry.size);
+}
+
+// Iterate through entries
+let mut dir = Directory::open("/assets")?;
+while let Some(entry) = dir.read_entry() {
+    match entry.file_type {
+        FileType::File => println!("📄 {}", entry.name_str()),
+        FileType::Directory => println!("📁 {}", entry.name_str()),
+        _ => println!("❓ {}", entry.name_str()),
+    }
+}
+```
+
+#### Key Features
+- **Shared Ownership**: Arc enables multiple references to the same file handle
+- **Automatic Cleanup**: Files are automatically closed when all references are dropped
+- **Memory Safe**: No unsafe lifetime transmutation or manual memory management
+- **Thread Safe**: Arc provides atomic reference counting for future multi-threading support
+- **Error Handling**: Consistent `FileResult<T>` return types with detailed error information
+
+#### Convenience Functions
+```rust
+use crate::fs;
+
+// Quick file operations
+if fs::exists("/config.txt") {
+    let content = fs::read_file_to_string("/config.txt")?;
+    fs::write_string("/output.txt", &content)?;
+}
+
+// Create new files
+let new_file = fs::create_file("/data.bin")?;
+new_file.write(b"Binary data")?;
+
+// Process files line by line
+fs::for_each_line("/log.txt", |line| {
+    println!("Log: {}", line);
+    Ok(())
+})?;
+```
+
+### Filesystem Implementation Notes
+
+#### Directory Enumeration
+The filesystem trait includes an `enumerate_dir` method that provides efficient directory listing:
+- FAT filesystem overrides this to directly read directory entries from disk
+- Returns a `Vec<DirectoryEntry>` for easy iteration
+- Supports both root directory and subdirectory enumeration (FAT currently only supports root)
+
+#### Virtual Filesystem (VFS)
+- Manages filesystem mounts at specific paths
+- Automatically detects filesystem types (FAT12/16/32, ext2/3/4, NTFS)
+- Routes file operations to appropriate filesystem implementation
+- Currently supports single root mount point
+
+The shell automatically detects and displays filesystem information during boot, and provides filesystem exploration capabilities using the Arc-based API.

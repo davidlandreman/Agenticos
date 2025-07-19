@@ -287,14 +287,21 @@ AgenticOS provides a comprehensive filesystem abstraction layer that supports mu
    - File attributes and metadata
    - Error handling with `FilesystemError` enum
 
-2. **Partition Support** (`partition.rs`)
+2. **Arc-based File Handle API** (`file_handle.rs`)
+   - Modern file API using Arc for shared ownership
+   - Eliminates callback-based patterns
+   - Thread-safe file operations
+   - Supports cloning for shared access
+   - Automatic resource cleanup on drop
+
+3. **Partition Support** (`partition.rs`)
    - MBR partition table parsing
    - Partition type detection
    - `PartitionBlockDevice` - Virtual block device for partitions
    - Supports up to 4 primary partitions
    - Automatic partition enumeration
 
-3. **Virtual Filesystem (VFS)** (`vfs.rs`)
+4. **Virtual Filesystem (VFS)** (`vfs.rs`)
    - Mount point management
    - Path resolution to appropriate filesystem
    - Global VFS instance
@@ -303,7 +310,7 @@ AgenticOS provides a comprehensive filesystem abstraction layer that supports mu
 
 ### FAT Filesystem Implementation (`fs/fat/`)
 
-Complete FAT12/16/32 filesystem support:
+Complete FAT12/16/32 filesystem support with read-only operations:
 
 1. **Boot Sector Parsing** (`boot_sector.rs`)
    - BIOS Parameter Block (BPB) parsing
@@ -324,7 +331,7 @@ Complete FAT12/16/32 filesystem support:
 
 4. **Filesystem Operations** (`filesystem.rs`)
    - File reading
-   - Directory listing
+   - Directory listing with `enumerate_dir()` method
    - Root directory support for FAT12/16
    - Cluster chain support for FAT32
 
@@ -339,20 +346,15 @@ The system can automatically detect filesystem types:
 ### Usage Example
 
 ```rust
-// Read partitions from disk
-let partitions = read_partitions(device)?;
+// Arc-based file operations
+let file = fs::File::open_read("/test.txt")?;
+let content = file.read_to_string()?;
 
-// Create partition device
-let part_device = PartitionBlockDevice::new(device, &partition);
-
-// Detect filesystem type
-let fs_type = detect_filesystem(&part_device)?;
-
-// Mount FAT filesystem
-let fat_fs = FatFilesystem::new(&part_device)?;
-
-// List directory
-let entries = fat_fs.list_root_array(&mut buffer, max_entries)?;
+// Directory operations
+let dir = fs::Directory::open("/")?;
+for entry in dir.entries() {
+    println!("{} - {} bytes", entry.name_str(), entry.size);
+}
 ```
 
 ## Process Management (`process/`)

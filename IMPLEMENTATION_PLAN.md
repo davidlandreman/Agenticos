@@ -109,14 +109,19 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
   - Virtual Filesystem (VFS) layer for mount management
   - MBR partition table support with up to 4 primary partitions
   - Virtual block devices for individual partitions
+- **Arc-based File Handle API**:
+  - Modern file API using Arc for shared ownership
+  - Thread-safe file and directory operations
+  - Automatic resource cleanup
+  - Directory enumeration with `enumerate_dir()` method
 - **FAT Filesystem**:
   - Complete FAT12/16/32 read support
   - BIOS Parameter Block (BPB) parsing
   - FAT table operations and cluster chain following
   - Directory entry parsing (8.3 filenames)
-  - Root directory listing
+  - Root directory listing with actual filesystem entries
   - File reading capabilities
-  - Integration with shell for testing
+  - Integration with shell for filesystem exploration
 - **Future Filesystem Support**: Ready for ext2/3/4, NTFS implementations
 
 ### 🔄 Recent Architectural Improvements
@@ -239,11 +244,13 @@ agenticos/
 │   ├── fs/
 │   │   ├── mod.rs
 │   │   ├── filesystem.rs
+│   │   ├── file_handle.rs    # Arc-based file API
 │   │   ├── partition.rs
 │   │   ├── vfs.rs
 │   │   └── fat/
 │   │       ├── mod.rs
 │   │       ├── filesystem.rs
+│   │       ├── fat_filesystem.rs  # FAT wrapper
 │   │       ├── boot_sector.rs
 │   │       ├── fat_table.rs
 │   │       ├── directory.rs
