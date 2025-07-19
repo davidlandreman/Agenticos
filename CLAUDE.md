@@ -89,6 +89,36 @@ The project follows a modular architecture with clear separation of concerns:
 - `#[no_mangle]` - Preserve function names for bootloader
 - `#[panic_handler]` - Custom panic handling
 
+### no_std Environment Restrictions
+
+**CRITICAL: This is a `no_std` environment - the Rust standard library is NOT available.**
+
+#### What this means:
+- **NO `Vec<T>`** - Use static arrays `&[T]` or `&'static [T]` instead
+- **NO `String`** - Use `&str` or `&'static str` instead
+- **NO `HashMap`** - Implement custom data structures if needed
+- **NO heap allocation** - Use static allocation or stack allocation
+- **NO `std::*` imports** - Only `core::*` and `alloc::*` (when available)
+
+#### Common replacements:
+```rust
+// WRONG - uses Vec from std
+pub fn get_tests() -> Vec<&'static dyn Testable> {
+    vec![&test1, &test2]
+}
+
+// CORRECT - uses static slice
+pub fn get_tests() -> &'static [&'static dyn Testable] {
+    &[&test1, &test2]
+}
+
+// WRONG - uses String
+let message = String::from("Hello");
+
+// CORRECT - uses &str
+let message = "Hello";
+```
+
 ### Testing Approach
 - Custom test framework for `no_std` environment
 - QEMU integration for hardware testing
@@ -116,16 +146,25 @@ Tests are organized in the `src/tests/` directory by topic:
 - `basic.rs` - Basic functionality and sanity tests
 - `memory.rs` - Memory management tests
 - `display.rs` - Display and graphics tests
+- `interrupts.rs` - Interrupt handler tests
 
 To add a new test:
 1. Add the test function to the appropriate module
-2. Add it to the module's `get_tests()` function
+2. Add it to the module's `get_tests()` function (returns `&'static [&'static dyn Testable]`)
 3. Tests will automatically run when using `./test.sh`
 
 Example test:
 ```rust
 fn test_example() {
     assert_eq!(2 + 2, 4);
+}
+
+// In the test module, return tests as a static slice:
+pub fn get_tests() -> &'static [&'static dyn Testable] {
+    &[
+        &test_example,
+        // other tests...
+    ]
 }
 ```
 
