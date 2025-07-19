@@ -1,7 +1,7 @@
 
-use crate::fs::vfs::{VirtualFilesystem, get_vfs, vfs_open, vfs_read_dir, vfs_stat};
-use crate::fs::filesystem::{FileHandle as FsFileHandle, FileMode, DirectoryEntry, FilesystemError};
-use crate::fs::file_handle::{File, FileError, FileResult};
+use crate::fs::vfs::{get_vfs, vfs_open, vfs_read_dir, vfs_stat};
+use crate::fs::filesystem::{FileHandle as FsFileHandle, FileMode, DirectoryEntry};
+use crate::fs::file_handle::File;
 use crate::lib::arc::Arc;
 use crate::drivers::block::BlockDevice;
 use alloc::{string::{String, ToString}, vec::Vec};

@@ -1,6 +1,6 @@
 use spin::Mutex;
 use lazy_static::lazy_static;
-use crate::{debug_info, debug_trace, debug_error, debug_debug, print};
+use crate::{debug_info, debug_trace, debug_error, debug_debug};
 
 const SCANCODE_QUEUE_SIZE: usize = 100;
 

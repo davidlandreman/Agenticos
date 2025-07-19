@@ -230,8 +230,8 @@ impl ShellProcess {
 
 impl ShellProcess {
     fn explore_filesystem(&self) {
-        use crate::fs;
-        use alloc::{vec::Vec, string::String, format};
+        
+        
         
         println!("Exploring mounted filesystem...");
         

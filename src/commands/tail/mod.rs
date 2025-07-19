@@ -2,7 +2,7 @@ use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
 use crate::drivers::display::display;
 use crate::graphics::color::Color;
 use crate::println;
-use alloc::{vec::Vec, string::String, boxed::Box, collections::VecDeque};
+use alloc::{vec::Vec, string::String, boxed::Box};
 
 pub struct TailProcess {
     pub base: BaseProcess,

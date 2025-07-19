@@ -2,7 +2,7 @@ use crate::fs::filesystem::{
     Filesystem, FilesystemError, FilesystemStats, DirectoryEntry, DirectoryIterator,
     FileHandle, FileMode, FileType, FileAttributes
 };
-use crate::fs::fat::filesystem::{FatFilesystem as FatFs, FileHandle as FatFileHandle};
+use crate::fs::fat::filesystem::FatFilesystem as FatFs;
 use crate::fs::fat::types::FatType;
 
 /// Wrapper to implement the Filesystem trait for FAT

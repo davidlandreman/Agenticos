@@ -5,6 +5,4 @@ pub mod directory;
 pub mod filesystem;
 pub mod fat_filesystem;
 
-pub use filesystem::{FatFilesystem, FileHandle};
-pub use types::{FatType, FileAttributes, FatError};
-pub use fat_filesystem::FatFilesystemWrapper;
+pub use filesystem::FatFilesystem;

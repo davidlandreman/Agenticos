@@ -1,5 +1,4 @@
 use crate::drivers::block::BlockDevice;
-use core::fmt;
 
 /// Partition type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

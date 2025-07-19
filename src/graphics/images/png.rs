@@ -1,7 +1,7 @@
 use core::mem::size_of;
 use crate::graphics::color::Color;
 use super::image::{Image, ImageFormat, PixelFormat};
-use crate::{debug_info, debug_debug, debug_error};
+use crate::{debug_info, debug_error};
 
 #[derive(Debug)]
 pub enum PngError {

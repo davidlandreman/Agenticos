@@ -140,7 +140,7 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
-    use x86_64::VirtAddr;
+    
     
     let accessed_addr = Cr2::read();
     

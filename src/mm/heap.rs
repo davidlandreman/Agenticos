@@ -1,7 +1,6 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use spin::Mutex;
-use x86_64::VirtAddr;
 use crate::{debug_info, debug_debug};
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;

@@ -2,7 +2,6 @@ use spin::Mutex;
 use lazy_static::lazy_static;
 use crate::debug_info;
 use crate::debug_trace;
-use crate::debug_debug;
 use x86_64::instructions::port::Port;
 
 const MOUSE_DATA_PORT: u16 = 0x60;

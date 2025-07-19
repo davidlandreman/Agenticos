@@ -3,7 +3,7 @@ use crate::fs::fat::boot_sector::BootSector;
 use crate::fs::fat::fat_table::FatTable;
 use crate::fs::fat::directory::DirectoryIterator;
 use crate::fs::fat::types::{FatType, FatError, ClusterId};
-use crate::{debug_info, debug_error};
+use crate::debug_info;
 use alloc;
 
 pub struct FatFilesystem<'a> {

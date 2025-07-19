@@ -6,7 +6,7 @@ use x86_64::{
     },
     VirtAddr, PhysAddr,
 };
-use crate::{debug_info, debug_debug, debug_error};
+use crate::{debug_info, debug_error};
 use super::frame_allocator::BootInfoFrameAllocator;
 
 // Global mapper for page fault handling

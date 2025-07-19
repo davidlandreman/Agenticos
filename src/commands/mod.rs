@@ -13,15 +13,3 @@ pub mod pwd;
 pub mod ls;
 
 pub use shell::ShellProcess;
-pub use dir::DirProcess;
-pub use cat::CatProcess;
-pub use echo::EchoProcess;
-pub use head::HeadProcess;
-pub use tail::TailProcess;
-pub use wc::WcProcess;
-pub use touch::TouchProcess;
-pub use hexdump::HexdumpProcess;
-pub use time::TimeProcess;
-pub use grep::GrepProcess;
-pub use pwd::PwdProcess;
-pub use ls::LsProcess;
