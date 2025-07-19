@@ -8,6 +8,7 @@ mod panic;
 // Module structure
 mod arch;
 mod drivers;
+mod fs;
 mod graphics;
 mod lib;
 mod mm;

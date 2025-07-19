@@ -15,6 +15,7 @@ src/
 ├── panic.rs             # Panic handling
 ├── arch/                # Architecture-specific
 ├── drivers/             # Device drivers
+├── fs/                  # Filesystem layer
 ├── graphics/            # Graphics subsystem
 ├── lib/                 # Core libraries
 ├── mm/                  # Memory management
@@ -212,6 +213,107 @@ The debug system provides structured logging for kernel debugging:
 2. **Single Font Size** - No dynamic font scaling
 3. **Limited Graphics** - Basic primitives only
 4. **No Hardware Acceleration** - Pure software rendering
+
+## Block Device Layer (`drivers/block.rs`)
+
+The block device layer provides a unified interface for all block storage devices:
+
+### BlockDevice Trait
+- **read_blocks()** - Read blocks from device
+- **write_blocks()** - Write blocks to device
+- **block_size()** - Get device block size (typically 512 bytes)
+- **total_blocks()** - Get total number of blocks
+- **capacity()** - Calculate total capacity in bytes
+- **is_read_only()** - Check if device is read-only
+- **flush()** - Flush pending writes
+
+### IDE Driver Implementation
+- Full IDE/ATA PIO mode driver (`drivers/ide.rs`)
+- Supports up to 4 drives (primary/secondary × master/slave)
+- LBA28/LBA48 addressing support
+- Automatic drive detection and identification
+- Implements `BlockDevice` trait through `IdeBlockDevice` wrapper
+
+## Filesystem Layer (`fs/`)
+
+### Filesystem Abstraction
+
+AgenticOS provides a comprehensive filesystem abstraction layer that supports multiple filesystem types:
+
+1. **Filesystem Trait** (`filesystem.rs`)
+   - Common interface for all filesystem implementations
+   - Standard operations: open, read, write, mkdir, etc.
+   - Directory iteration support
+   - File attributes and metadata
+   - Error handling with `FilesystemError` enum
+
+2. **Partition Support** (`partition.rs`)
+   - MBR partition table parsing
+   - Partition type detection
+   - `PartitionBlockDevice` - Virtual block device for partitions
+   - Supports up to 4 primary partitions
+   - Automatic partition enumeration
+
+3. **Virtual Filesystem (VFS)** (`vfs.rs`)
+   - Mount point management
+   - Path resolution to appropriate filesystem
+   - Global VFS instance
+   - Auto-mount functionality
+   - Support for multiple mounted filesystems
+
+### FAT Filesystem Implementation (`fs/fat/`)
+
+Complete FAT12/16/32 filesystem support:
+
+1. **Boot Sector Parsing** (`boot_sector.rs`)
+   - BIOS Parameter Block (BPB) parsing
+   - FAT type detection based on cluster count
+   - Validation and error checking
+
+2. **FAT Table Operations** (`fat_table.rs`)
+   - Cluster chain following
+   - FAT entry reading for all FAT types
+   - Bad cluster detection
+   - End-of-chain detection
+
+3. **Directory Support** (`directory.rs`)
+   - Short filename (8.3) support
+   - Directory entry parsing
+   - File attribute handling
+   - Directory iteration
+
+4. **Filesystem Operations** (`filesystem.rs`)
+   - File reading
+   - Directory listing
+   - Root directory support for FAT12/16
+   - Cluster chain support for FAT32
+
+### Filesystem Detection
+
+The system can automatically detect filesystem types:
+- Checks for MBR partition tables
+- Reads partition boot sectors
+- Identifies FAT12/16/32 by signatures
+- Extensible for future filesystem support (ext2/3/4, NTFS)
+
+### Usage Example
+
+```rust
+// Read partitions from disk
+let partitions = read_partitions(device)?;
+
+// Create partition device
+let part_device = PartitionBlockDevice::new(device, &partition);
+
+// Detect filesystem type
+let fs_type = detect_filesystem(&part_device)?;
+
+// Mount FAT filesystem
+let fat_fs = FatFilesystem::new(&part_device)?;
+
+// List directory
+let entries = fat_fs.list_root_array(&mut buffer, max_entries)?;
+```
 
 ## Process Management (`process/`)
 

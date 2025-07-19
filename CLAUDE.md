@@ -51,6 +51,8 @@ The project follows a modular architecture with clear separation of concerns:
   - `keyboard.rs` - PS/2 keyboard driver with scancode processing
   - `mouse.rs` - PS/2 mouse driver with packet processing
   - `ps2_controller.rs` - PS/2 controller initialization for keyboard and mouse
+  - `block.rs` - Block device trait and abstractions
+  - `ide.rs` - IDE/ATA disk driver with LBA support
 
 - `src/graphics/` - Graphics subsystem
   - `color.rs` - Color definitions and utilities
@@ -63,6 +65,18 @@ The project follows a modular architecture with clear separation of concerns:
     - `vfnt.rs` - VFNT font format support
     - `truetype_font.rs` - TrueType font support
     - `font_data.rs` - Font data definitions
+
+- `src/fs/` - Filesystem layer
+  - `mod.rs` - Module exports
+  - `filesystem.rs` - Generic filesystem trait and detection
+  - `partition.rs` - MBR partition table support
+  - `vfs.rs` - Virtual filesystem layer
+  - `fat/` - FAT filesystem implementation
+    - `filesystem.rs` - FAT filesystem operations
+    - `boot_sector.rs` - BIOS Parameter Block parsing
+    - `fat_table.rs` - FAT table and cluster operations
+    - `directory.rs` - Directory entry handling
+    - `types.rs` - FAT-specific types
 
 - `src/lib/` - Core libraries and utilities
   - `debug.rs` - Debug logging system with macros
@@ -280,3 +294,22 @@ The kernel now includes full PS/2 mouse support with hardware cursor rendering:
 
 ### Usage
 The mouse is automatically initialized during kernel boot and the cursor appears on screen. Mouse movement and button clicks are tracked and logged (movement at debug level, button changes at info level).
+
+## Filesystem Support
+
+### Overview
+The kernel includes a filesystem abstraction layer with FAT12/16/32 support:
+
+- **Block devices**: Generic `BlockDevice` trait with IDE/ATA driver
+- **Partitions**: MBR partition table support  
+- **VFS layer**: Mount management and filesystem detection
+- **FAT filesystem**: Read-only FAT12/16/32 implementation with 8.3 filenames
+
+### Key Components
+- `src/drivers/block.rs` - Block device abstraction
+- `src/drivers/ide.rs` - IDE disk driver
+- `src/fs/filesystem.rs` - Filesystem trait
+- `src/fs/vfs.rs` - Virtual filesystem layer
+- `src/fs/fat/` - FAT implementation
+
+The shell automatically detects and displays filesystem information during boot.
