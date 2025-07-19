@@ -56,7 +56,8 @@ impl Font for TrueTypeFont {
     }
     
     fn char_width(&self) -> usize {
-        (self.render_size * 3 / 4) as usize
+        // Return average character width - actual widths vary per character
+        (self.render_size * 2 / 3) as usize
     }
     
     fn char_height(&self) -> usize {
@@ -142,11 +143,10 @@ pub fn get_arial_font() -> Option<FontRef> {
 
 // Get default font - try Arial with proper debugging
 pub fn get_default_font() -> FontRef {
+
     return get_embedded_font();
-
-    //return get_ibm_plex_font().unwrap();
-
-    /* Try to load Arial font
+    
+    // Try to load Arial font
     crate::debug_info!("About to access ARIAL_FONT lazy static...");
     match ARIAL_FONT.as_ref() {
         Some(font) => {
@@ -157,5 +157,5 @@ pub fn get_default_font() -> FontRef {
             crate::debug_info!("Arial font failed to load, using embedded font");
             get_embedded_font()
         }
-    } */
+    }
 }

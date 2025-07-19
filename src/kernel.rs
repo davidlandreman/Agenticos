@@ -1,10 +1,10 @@
 use bootloader_api::BootInfo;
 use crate::lib::debug::{self, DebugLevel};
-use crate::{debug_info, debug_debug, debug_warn, println};
+use crate::{debug_info, debug_debug, debug_warn};
 use crate::arch::x86_64::interrupts;
 use crate::mm::memory;
 use crate::drivers::display::{display, text_buffer, double_buffered_text};
-use crate::graphics::color::Color;
+use crate::process::{Process, ShellProcess};
 
 pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize debug subsystem
@@ -48,70 +48,21 @@ fn init_display(boot_info: &'static mut BootInfo) {
             debug_info!("Text buffer initialized successfully!");
         }
         
-        display_boot_messages();
     } else {
         debug_warn!("No framebuffer available from bootloader");
     }
 }
 
-fn display_boot_messages() {
-    let stats = memory::get_memory_stats();
-    let buffer_type = if display::USE_DOUBLE_BUFFER { " (Double Buffered)" } else { "" };
-    
-    println!("Welcome to AgenticOS!{}", buffer_type);
-    println!("======================");
-    println!();
-    
-    // Print memory information
-    println!("Memory Statistics:");
-    println!("  Total usable memory: {} MB", stats.usable_memory / (1024 * 1024));
-    println!("  Total memory: {} MB", stats.total_memory / (1024 * 1024));
-    println!();
-    
-    // Demonstrate color support
-    display::set_color(Color::CYAN);
-    println!("This text is in cyan!");
-    
-    display::set_color(Color::GREEN);
-    println!("This text is in green!");
-    
-    display::set_color(Color::YELLOW);
-    println!("This text is in yellow!");
-    
-    display::set_color(Color::WHITE);
-    println!();
-    
-    // Demonstrate scrolling
-    println!("Testing scrolling functionality:");
-    println!("================================");
-    
-    for i in 0..300 {
-        display::set_color(if i % 2 == 0 { Color::WHITE } else { Color::GRAY });
-        println!("Line {}: This is a test of the scrolling text buffer", i + 1);
-    }
-    
-    display::set_color(Color::MAGENTA);
-    println!();
-    println!("Scrolling test complete!");
-    
-    // Demonstrate tab support
-    display::set_color(Color::WHITE);
-    println!();
-    println!("Tilde Test: ~");
-    println!("Tab test:");
-    println!("Column:\t1\t2\t3\t4");
-    println!("Value:\tA\tB\tC\tD");
-    
-    // Final message
-    println!();
-    display::set_color(Color::CYAN);
-    println!("AgenticOS kernel initialized successfully!");
-    display::set_color(Color::WHITE);
-    println!("System ready.");
-}
 
 pub fn run() -> ! {
-    debug_info!("Kernel initialization complete. Entering idle loop...");
+    debug_info!("Kernel initialization complete.");
+
+    // Run shell process
+    let mut shell_process = ShellProcess::new();
+    debug_info!("Running shell process (PID: {})", shell_process.get_id());
+    shell_process.run();
+
+    debug_info!("Entering idle loop...");
     loop {}
 }
 

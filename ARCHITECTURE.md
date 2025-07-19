@@ -17,7 +17,8 @@ src/
 ├── drivers/             # Device drivers
 ├── graphics/            # Graphics subsystem
 ├── lib/                 # Core libraries
-└── mm/                  # Memory management
+├── mm/                  # Memory management
+└── process/             # Process management
 ```
 
 ### Testing Framework
@@ -47,7 +48,7 @@ The initialization sequence is now centralized in `kernel.rs`:
 2. **Interrupts** - Set up interrupt descriptor table
 3. **Memory manager** - Initialize physical memory management
 4. **Display subsystem** - Initialize framebuffer and text rendering
-5. **Boot messages** - Display system information
+5. **Shell process** - Run the shell process to show system information and provide user interface
 
 ## Architecture-Specific Code (`arch/`)
 
@@ -184,6 +185,38 @@ The debug system provides structured logging for kernel debugging:
 2. **Single Font Size** - No dynamic font scaling
 3. **Limited Graphics** - Basic primitives only
 4. **No Hardware Acceleration** - Pure software rendering
+
+## Process Management (`process/`)
+
+### Process Abstraction Layer
+
+The process management system provides the foundation for future multitasking:
+
+1. **Process Trait** (`process.rs`)
+   - Core interface defining process behavior
+   - Methods: `get_id()`, `get_name()`, `run()`
+   - Simple PID allocation starting from 1
+   - Foundation for future scheduling
+
+2. **Shell Process** (`shell.rs`)
+   - System shell implementation
+   - Runs as PID 1 during kernel initialization
+   - Displays welcome messages, memory stats, and tests
+   - Foundation for future interactive shell features
+   - Demonstrates the process abstraction in action
+
+### Current Design
+- **Synchronous execution** - No concurrent processes yet
+- **Simple PID allocation** - Sequential counter, no reuse
+- **No process states** - Processes run immediately when created
+- **No context switching** - Foundation only
+
+### Future Extensions
+- Process states (running, ready, blocked)
+- Process scheduling and context switching
+- Inter-process communication
+- Process memory isolation
+- Thread support within processes
 
 ## Panic Handling
 

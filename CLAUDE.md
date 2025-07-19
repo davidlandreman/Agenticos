@@ -66,6 +66,11 @@ The project follows a modular architecture with clear separation of concerns:
 - `src/mm/` - Memory management
   - `memory.rs` - Physical memory manager
 
+- `src/process/` - Process management and abstractions
+  - `process.rs` - Process trait and PID allocation
+  - `shell.rs` - Shell process implementation
+  - `mod.rs` - Module exports
+
 ### Configuration Files
 - `Cargo.toml` - Project manifest with OS-specific dependencies
 - `rust-toolchain.toml` - Specifies nightly Rust with required components
@@ -158,3 +163,37 @@ The framebuffer display system supports both single and double buffering modes, 
 - The relationship between different display modules needs clarification
 - Font rendering and graphics primitives could benefit from better organization
 - Future work should revisit and reorganize the graphics subsystem architecture
+
+## Process Abstraction
+
+### Overview
+The kernel now includes a basic process abstraction layer as a foundation for future threading and scheduling capabilities. This initial implementation provides:
+
+- **Process trait**: Defines the interface for all processes with `get_id()`, `get_name()`, and `run()` methods
+- **PID allocation**: Simple sequential process ID allocation starting from 1
+- **Shell process**: The kernel's boot messages and initial system interface extracted into a `ShellProcess`
+
+### Current Implementation
+- `src/process/process.rs`: Core process abstractions
+  - `Process` trait defining the process interface
+  - `ProcessId` type alias for u32
+  - `allocate_pid()` function for sequential PID allocation
+  
+- `src/process/shell.rs`: System shell process
+  - Displays welcome message, memory statistics, and system tests
+  - Demonstrates color support, scrolling, and tab handling
+  - Runs as PID 1 during kernel initialization
+  - Foundation for future interactive shell capabilities
+
+### Usage Example
+```rust
+// In kernel.rs during kernel initialization
+let mut shell_process = ShellProcess::new();
+debug_info!("Running shell process (PID: {})", shell_process.get_id());
+shell_process.run();
+```
+
+### Future Considerations
+- This is a foundation for future threading/scheduling implementation
+- No actual concurrent execution yet - processes run synchronously
+- Ready for extension with process states, scheduling, and context switching
