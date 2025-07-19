@@ -247,7 +247,18 @@ pub fn run() -> ! {
     // Register available commands with the process manager
     debug_info!("Registering commands...");
     crate::process::register_command("dir", crate::commands::dir::create_dir_process);
-    debug_info!("Commands registered successfully.");
+    crate::process::register_command("cat", crate::commands::cat::create_cat_process);
+    crate::process::register_command("echo", crate::commands::echo::create_echo_process);
+    crate::process::register_command("head", crate::commands::head::create_head_process);
+    crate::process::register_command("tail", crate::commands::tail::create_tail_process);
+    crate::process::register_command("wc", crate::commands::wc::create_wc_process);
+    crate::process::register_command("touch", crate::commands::touch::create_touch_process);
+    crate::process::register_command("hexdump", crate::commands::hexdump::create_hexdump_process);
+    crate::process::register_command("time", crate::commands::time::create_time_process);
+    crate::process::register_command("grep", crate::commands::grep::create_grep_process);
+    crate::process::register_command("pwd", crate::commands::pwd::create_pwd_process);
+    crate::process::register_command("ls", crate::commands::ls::create_ls_process);
+    debug_info!("All {} commands registered successfully.", 12);
 
     // Run shell process
     let mut shell_process = ShellProcess::new();

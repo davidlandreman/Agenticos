@@ -137,14 +137,3 @@ impl<'a> TextRenderer<'a> {
         self.draw_text(text, x, y);
     }
 }
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_measure_text() {
-        // Test would go here
-    }
-}

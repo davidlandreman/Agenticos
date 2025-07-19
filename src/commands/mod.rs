@@ -1,5 +1,27 @@
 pub mod shell;
 pub mod dir;
+pub mod cat;
+pub mod echo;
+pub mod head;
+pub mod tail;
+pub mod wc;
+pub mod touch;
+pub mod hexdump;
+pub mod time;
+pub mod grep;
+pub mod pwd;
+pub mod ls;
 
 pub use shell::ShellProcess;
 pub use dir::DirProcess;
+pub use cat::CatProcess;
+pub use echo::EchoProcess;
+pub use head::HeadProcess;
+pub use tail::TailProcess;
+pub use wc::WcProcess;
+pub use touch::TouchProcess;
+pub use hexdump::HexdumpProcess;
+pub use time::TimeProcess;
+pub use grep::GrepProcess;
+pub use pwd::PwdProcess;
+pub use ls::LsProcess;
