@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 
 // TrueType font structure for parsing TTF files
 #[derive(Debug)]
@@ -59,6 +60,52 @@ const GLYF_TAG: u32 = 0x676c7966; // 'glyf'
 const HMTX_TAG: u32 = 0x686d7478; // 'hmtx'
 
 impl TrueTypeFont {
+    pub fn from_ttf_file(file_path: &str, render_size: u16) -> Option<Self> {
+        crate::debug_info!("TTF: Entering from_ttf_file function");
+        
+        use crate::fs::File;
+        use alloc::vec;
+        
+        crate::debug_info!("TTF: Loading font from file: {}", file_path);
+        crate::debug_info!("TTF: About to call File::open_read");
+        
+        // Open file using proven File::open_read pattern
+        let file = match File::open_read(file_path) {
+            Ok(f) => {
+                crate::debug_info!("TTF: File opened successfully, size: {} bytes", f.size());
+                f
+            },
+            Err(e) => {
+                crate::debug_info!("TTF: Failed to open font file {}: {:?}", file_path, e);
+                return None;
+            }
+        };
+        
+        // Read file using proven pattern from hexdump/shell commands
+        let mut file_data = vec![0u8; file.size() as usize];
+        let bytes_read = match file.read(&mut file_data) {
+            Ok(size) => {
+                crate::debug_info!("TTF: Successfully read {} bytes from file", size);
+                size
+            },
+            Err(e) => {
+                crate::debug_info!("TTF: Failed to read font file data: {:?}", e);
+                return None;
+            }
+        };
+        
+        // Truncate if we read less than expected
+        file_data.truncate(bytes_read);
+        
+        crate::debug_info!("TTF: Successfully read {} bytes from {}", file_data.len(), file_path);
+        
+        // Convert Vec<u8> to &'static [u8] by leaking memory
+        // This is acceptable for fonts which are loaded once and used for the entire kernel lifetime
+        let static_data: &'static [u8] = Box::leak(file_data.into_boxed_slice());
+        
+        Self::from_ttf_data(static_data, render_size)
+    }
+    
     pub fn from_ttf_data(data: &'static [u8], render_size: u16) -> Option<Self> {
         crate::debug_info!("TTF: Starting to parse TrueType font, size: {} bytes, render_size: {}", data.len(), render_size);
         

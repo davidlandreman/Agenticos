@@ -1,6 +1,7 @@
 use super::embedded_font::{Embedded8x8Font, DEFAULT_8X8_FONT};
 use super::vfnt::VFNTFont;
 use super::truetype_font::TrueTypeFont;
+use alloc::boxed::Box;
 
 // Unified font trait that all font types must implement
 pub trait Font {
@@ -66,9 +67,14 @@ impl Font for TrueTypeFont {
 }
 
 // Font wrapper that can hold any font type
+#[derive(Copy, Clone)]
 pub struct FontRef {
     font: &'static dyn Font,
 }
+
+// Make FontRef thread-safe by implementing Send and Sync
+unsafe impl Send for FontRef {}
+unsafe impl Sync for FontRef {}
 
 impl FontRef {
     pub fn new(font: &'static dyn Font) -> Self {
@@ -131,21 +137,64 @@ pub fn get_arial_font() -> Option<FontRef> {
     ARIAL_FONT.as_ref().map(|font| FontRef::new(font as &dyn Font))
 }
 
-// Get default font - try Arial with proper debugging
-pub fn get_default_font() -> FontRef {
-
-    return get_embedded_font();
-
-    // Try to load Arial font
-    crate::debug_info!("About to access ARIAL_FONT lazy static...");
-    return match get_arial_font() {
+pub fn get_arial_font_from_fs() -> Option<FontRef> {
+    match TrueTypeFont::from_ttf_file("/arial.ttf", 16) {
         Some(font) => {
-            crate::debug_info!("Arial font loaded successfully!");
-            font 
+            // Create a static reference by leaking memory
+            // This is acceptable for fonts which are used throughout kernel lifetime
+            let static_font: &'static TrueTypeFont = Box::leak(Box::new(font));
+            Some(FontRef::new(static_font as &dyn Font))
+        }
+        None => None,
+    }
+}
+
+// Global font state for dynamic switching
+use spin::Mutex;
+static CURRENT_DEFAULT_FONT: Mutex<Option<FontRef>> = Mutex::new(None);
+
+// Get default font - use embedded font initially, but allow dynamic switching
+pub fn get_default_font() -> FontRef {
+    // Check if we have a custom font set
+    if let Some(font) = *CURRENT_DEFAULT_FONT.lock() {
+        return font;
+    }
+    
+    // Fall back to embedded font
+    get_embedded_font()
+}
+
+// Set a new default font dynamically
+pub fn set_default_font(font: FontRef) {
+    crate::debug_info!("Setting new default font");
+    *CURRENT_DEFAULT_FONT.lock() = Some(font);
+}
+
+// Reset to embedded font
+pub fn reset_to_embedded_font() {
+    crate::debug_info!("Resetting to embedded font");
+    *CURRENT_DEFAULT_FONT.lock() = None;
+}
+
+// Try to load and set Arial font from filesystem (can be called after boot)
+pub fn try_load_arial_font() -> bool {
+    crate::debug_info!("Attempting to load Arial font from /arial.ttf");
+    
+    // Check if filesystem is available
+    if !crate::fs::exists("/arial.ttf") {
+        crate::debug_info!("Arial font file not found or filesystem not ready");
+        return false;
+    }
+    
+    match get_arial_font_from_fs() {
+        Some(font) => {
+            crate::debug_info!("Arial font loaded successfully from filesystem!");
+            set_default_font(font);
+            true
         }
         None => {
-            crate::debug_info!("Arial font failed to load, using embedded font");
-            get_embedded_font()
+            crate::debug_info!("Arial font failed to load from filesystem");
+            false
         }
     }
 }
