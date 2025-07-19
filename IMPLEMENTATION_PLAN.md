@@ -28,6 +28,8 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - Implement newline and basic formatting
 - **Deliverable**: Kernel with "Hello, World!" output
 
+**Note**: Initial graphics implementation has evolved beyond VGA to include framebuffer support with both single and double buffering. The graphics subsystem architecture has become complex and should be revisited for reorganization.
+
 ### 2.2 Serial Port Output
 - Configure UART for debugging
 - Implement serial port driver
@@ -126,6 +128,24 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - Implement basic system calls
 - Create userspace/kernel boundary
 - **Deliverable**: User programs
+
+## Phase 7.5: Graphics Architecture Refactor (Weeks 19-20)
+
+### 7.5.1 Graphics Subsystem Reorganization
+- Refactor display modules for clarity
+- Establish clear separation between:
+  - Low-level framebuffer operations
+  - Text rendering systems
+  - Graphics primitives
+  - Font management
+- Document clear interfaces between components
+- **Deliverable**: Clean, maintainable graphics architecture
+
+### 7.5.2 Performance Optimization
+- Profile rendering performance
+- Optimize critical paths
+- Implement efficient clipping and dirty region tracking
+- **Deliverable**: High-performance graphics subsystem
 
 ## Phase 8: AgenticOS Specific Features (Weeks 21-24)
 

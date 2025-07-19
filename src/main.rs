@@ -1,10 +1,13 @@
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 mod memory;
 mod debug;
 mod color;
 mod frame_buffer;
+mod double_buffer;
+mod double_buffered_text;
 mod core_font;
 mod embedded_font;
 mod vfnt;
@@ -13,6 +16,8 @@ mod font_data;
 mod core_text;
 mod core_gfx;
 mod text_buffer;
+mod display;
+mod interrupts;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo};
@@ -31,6 +36,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     debug_info!("Kernel entry point reached successfully!");
     debug_debug!("Boot info address: {:p}", boot_info);
 
+    // Initialize interrupt descriptor table
+    interrupts::init_idt();
+    
     // Initialize memory manager
     memory::init(&boot_info.memory_regions, boot_info.physical_memory_offset.into_option());
     
@@ -50,14 +58,19 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Initialize framebuffer if available
     debug_info!("Checking for framebuffer...");
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
-        debug_info!("Framebuffer found! Initializing text buffer...");
-        
-        // Initialize the text buffer
-        text_buffer::init(framebuffer);
-        debug_info!("Text buffer initialized successfully!");
+        if display::USE_DOUBLE_BUFFER {
+            debug_info!("Framebuffer found! Initializing double buffered text...");
+            double_buffered_text::init(framebuffer);
+            debug_info!("Double buffered text initialized successfully!");
+        } else {
+            debug_info!("Framebuffer found! Initializing text buffer...");
+            text_buffer::init(framebuffer);
+            debug_info!("Text buffer initialized successfully!");
+        }
         
         // Demonstrate the print! and println! macros
-        println!("Welcome to AgenticOS!");
+        let buffer_type = if display::USE_DOUBLE_BUFFER { " (Double Buffered)" } else { "" };
+        println!("Welcome to AgenticOS!{}", buffer_type);
         println!("======================");
         println!();
         
@@ -68,44 +81,48 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         println!();
         
         // Demonstrate color support
-        text_buffer::set_color(color::Color::CYAN);
+        display::set_color(color::Color::CYAN);
         println!("This text is in cyan!");
         
-        text_buffer::set_color(color::Color::GREEN);
+        display::set_color(color::Color::GREEN);
         println!("This text is in green!");
         
-        text_buffer::set_color(color::Color::YELLOW);
+        display::set_color(color::Color::YELLOW);
         println!("This text is in yellow!");
         
-        text_buffer::set_color(color::Color::WHITE);
+        display::set_color(color::Color::WHITE);
         println!();
         
         // Demonstrate scrolling by printing many lines
         println!("Testing scrolling functionality:");
         println!("================================");
         
-        for i in 0..30 {
-            text_buffer::set_color(if i % 2 == 0 { color::Color::WHITE } else { color::Color::GRAY });
+        for i in 0..300 {
+            display::set_color(if i % 2 == 0 { color::Color::WHITE } else { color::Color::GRAY });
             println!("Line {}: This is a test of the scrolling text buffer", i + 1);
         }
         
-        text_buffer::set_color(color::Color::MAGENTA);
+        display::set_color(color::Color::MAGENTA);
         println!();
         println!("Scrolling test complete!");
         
         // Demonstrate tab support
-        text_buffer::set_color(color::Color::WHITE);
+        display::set_color(color::Color::WHITE);
         println!();
+
+        println!("Tilde Test: ~");
         println!("Tab test:");
         println!("Column:\t1\t2\t3\t4");
         println!("Value:\tA\tB\tC\tD");
         
         // Final message
         println!();
-        text_buffer::set_color(color::Color::CYAN);
+        display::set_color(color::Color::CYAN);
         println!("AgenticOS kernel initialized successfully!");
-        text_buffer::set_color(color::Color::WHITE);
+        display::set_color(color::Color::WHITE);
         println!("System ready.");
+        
+
         
     } else {
         debug_warn!("No framebuffer available from bootloader");

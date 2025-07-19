@@ -31,7 +31,12 @@ The project structure for OS development:
 - `src/main.rs` - Kernel entry point with `#![no_std]` and `#![no_main]`
 - `src/debug.rs` - Debug subsystem for structured kernel logging
 - `src/memory.rs` - Memory management implementation
-- `src/vga_buffer.rs` - VGA text mode display driver
+- `src/display.rs` - Unified display interface (routes between single/double buffering)
+- `src/text_buffer.rs` - Direct framebuffer text rendering
+- `src/double_buffer.rs` - Double buffering implementation for framebuffer
+- `src/double_buffered_text.rs` - Text rendering with double buffering
+- `src/frame_buffer.rs` - Low-level framebuffer abstraction
+- `src/vga_buffer.rs` - VGA text mode display driver (legacy)
 - `Cargo.toml` - Project manifest with OS-specific dependencies
 - `rust-toolchain.toml` - Specifies nightly Rust with required components
 - `.cargo/config.toml` - Build configuration and target settings
@@ -56,3 +61,26 @@ The project structure for OS development:
 - Implementation plan: `IMPLEMENTATION_PLAN.md`
 - Architecture documentation: `architecture.md`
 - Tutorial reference: https://os.phil-opp.com/
+
+## Graphics and Display Subsystem
+
+### Double Buffering Implementation
+The framebuffer display system supports both single and double buffering modes, controlled by the `USE_DOUBLE_BUFFER` flag in `src/display.rs`.
+
+**Key Learnings:**
+1. **Direct framebuffer access is slow** - Writing pixel-by-pixel to framebuffer memory has poor performance due to slow memory access
+2. **Double buffering improves performance** - Writing to a fast memory buffer first, then copying to framebuffer in one operation is much faster
+3. **Memory operations are efficient** - Using `ptr::copy()` for buffer swapping and scrolling is far superior to pixel-by-pixel operations
+4. **Static allocation works well** - Using an 8MB static buffer avoids heap allocation complexities in the kernel
+5. **Unified interfaces simplify code** - The `display.rs` module provides a clean abstraction over different rendering implementations
+
+**Performance Considerations:**
+- Single buffering: Each pixel write goes directly to slow framebuffer memory
+- Double buffering: Pixel writes go to fast RAM, then bulk copy to framebuffer
+- Scrolling: Memory copy operations (`ptr::copy`) are much faster than redrawing
+
+**Current Limitations:**
+- Graphics concepts are becoming complex and somewhat murky
+- The relationship between different display modules needs clarification
+- Font rendering and graphics primitives could benefit from better organization
+- Future work should revisit and reorganize the graphics subsystem architecture

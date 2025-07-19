@@ -279,16 +279,7 @@ pub fn _print(args: fmt::Arguments) {
     }
 }
 
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => ($crate::text_buffer::_print(format_args!($($arg)*)));
-}
-
-#[macro_export]
-macro_rules! println {
-    () => ($crate::print!("\n"));
-    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
-}
+// Macros are now exported from display.rs
 
 pub fn set_color(color: Color) {
     if let Some(ref mut buffer) = *TEXT_BUFFER.lock() {
