@@ -2,7 +2,7 @@ use crate::process::{Process, ProcessId, allocate_pid};
 use crate::drivers::display::display;
 use crate::graphics::color::Color;
 use crate::mm::memory;
-use crate::println;
+use crate::{print, println};
 
 pub struct ShellProcess {
     id: ProcessId,
@@ -91,5 +91,16 @@ impl Process for ShellProcess {
         println!("AgenticOS kernel initialized successfully!");
         display::set_color(Color::WHITE);
         println!("System ready.");
+        println!();
+        
+        // Demonstrate keyboard input
+        display::set_color(Color::YELLOW);
+        println!("Keyboard input is now active! Type anything:");
+        display::set_color(Color::WHITE);
+        print!("> ");
+        
+        // The keyboard interrupt handler will automatically print characters as they are typed
+        // In a real OS, we would have a more sophisticated input handling system
+        // For now, keyboard input is automatically displayed via the interrupt handler
     }
 }

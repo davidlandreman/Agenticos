@@ -63,6 +63,8 @@ pub fn run() -> ! {
     shell_process.run();
 
     debug_info!("Entering idle loop...");
-    loop {}
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 

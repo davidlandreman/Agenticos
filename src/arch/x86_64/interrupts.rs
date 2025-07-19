@@ -1,6 +1,32 @@
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use lazy_static::lazy_static;
+use pic8259::ChainedPics;
+use spin::Mutex;
 use crate::{debug_error, debug_info, println};
+
+pub const PIC_1_OFFSET: u8 = 32;
+pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
+
+pub static PICS: Mutex<ChainedPics> = Mutex::new(unsafe { 
+    ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) 
+});
+
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum InterruptIndex {
+    Timer = PIC_1_OFFSET,
+    Keyboard,
+}
+
+impl InterruptIndex {
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    fn as_usize(self) -> usize {
+        usize::from(self.as_u8())
+    }
+}
 
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
@@ -19,6 +45,10 @@ lazy_static! {
         idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
         idt.alignment_check.set_handler_fn(alignment_check_handler);
         
+        // Set up hardware interrupt handlers
+        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+        idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
+        
         idt
     };
 }
@@ -27,6 +57,14 @@ pub fn init_idt() {
     debug_info!("Initializing Interrupt Descriptor Table...");
     IDT.load();
     debug_info!("IDT loaded successfully");
+    
+    debug_info!("Initializing PIC...");
+    unsafe { PICS.lock().initialize() };
+    debug_info!("PIC initialized successfully");
+    
+    debug_info!("Enabling interrupts...");
+    x86_64::instructions::interrupts::enable();
+    debug_info!("Interrupts enabled");
 }
 
 // Exception Handlers
@@ -192,4 +230,25 @@ extern "x86-interrupt" fn alignment_check_handler(
     println!("{:#?}", stack_frame);
     
     panic!("Alignment check");
+}
+
+// Hardware Interrupt Handlers
+
+extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
+}
+
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    use x86_64::instructions::port::Port;
+    
+    let mut port = Port::new(0x60);
+    let scancode: u8 = unsafe { port.read() };
+    
+    crate::drivers::keyboard::add_scancode(scancode);
+    
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
 }
