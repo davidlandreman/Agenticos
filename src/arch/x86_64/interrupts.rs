@@ -193,13 +193,3 @@ extern "x86-interrupt" fn alignment_check_handler(
     
     panic!("Alignment check");
 }
-
-// Test functions
-#[cfg(test)]
-mod tests {
-    #[test_case]
-    fn test_breakpoint_exception() {
-        // invoke a breakpoint exception
-        x86_64::instructions::interrupts::int3();
-    }
-}

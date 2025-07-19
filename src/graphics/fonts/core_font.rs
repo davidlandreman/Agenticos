@@ -144,8 +144,8 @@ pub fn get_arial_font() -> Option<FontRef> {
 // Get default font - try Arial with proper debugging
 pub fn get_default_font() -> FontRef {
 
-    return get_embedded_font();
-    
+    // return get_embedded_font();
+
     // Try to load Arial font
     crate::debug_info!("About to access ARIAL_FONT lazy static...");
     match ARIAL_FONT.as_ref() {

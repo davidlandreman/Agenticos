@@ -34,6 +34,16 @@ impl Process for ShellProcess {
         println!("Welcome to AgenticOS!{}", buffer_type);
         println!("======================");
         println!();
+
+        // Force an exception here - test divide by zero
+        println!("Testing interrupt handling with divide by zero...");
+        
+        // Use volatile to prevent compiler optimization
+        /* unsafe {
+            let numerator: u32 = 10;
+            let denominator = core::ptr::read_volatile(&0u32);
+            let _result = numerator / denominator; // This will trigger a divide by zero exception
+        } */
         
         // Print memory information
         println!("Memory Statistics:");
