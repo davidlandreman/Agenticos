@@ -236,4 +236,17 @@ pub fn set_color(color: Color) {
     }
 }
 
+// Access the underlying buffer for mouse cursor drawing
+pub fn with_buffer<F, R>(f: F) -> Option<R>
+where 
+    F: FnOnce(&mut DoubleBufferedFrameBuffer) -> R
+{
+    let mut writer = WRITER.lock();
+    if let Some(ref mut w) = *writer {
+        Some(f(&mut w.buffer))
+    } else {
+        None
+    }
+}
+
 // Macros are now exported from display.rs

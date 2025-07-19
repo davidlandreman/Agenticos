@@ -1,6 +1,6 @@
 use super::color::Color;
 use super::core_gfx::Graphics;
-use crate::drivers::display::frame_buffer::FrameBufferWriter;
+use crate::drivers::display::double_buffer::DoubleBufferedFrameBuffer;
 
 const CURSOR_SIZE: usize = 12;
 
@@ -37,7 +37,7 @@ impl MouseCursor {
         }
     }
     
-    pub fn draw(&mut self, frame_buffer: &mut FrameBufferWriter, x: i32, y: i32) {
+    pub fn draw(&mut self, frame_buffer: &mut DoubleBufferedFrameBuffer, x: i32, y: i32) {
         // First restore the area under the previous cursor position
         if self.visible && self.last_x >= 0 && self.last_y >= 0 {
             self.restore_background(frame_buffer);
@@ -70,14 +70,14 @@ impl MouseCursor {
         self.visible = true;
     }
     
-    pub fn hide(&mut self, frame_buffer: &mut FrameBufferWriter) {
+    pub fn hide(&mut self, frame_buffer: &mut DoubleBufferedFrameBuffer) {
         if self.visible && self.last_x >= 0 && self.last_y >= 0 {
             self.restore_background(frame_buffer);
             self.visible = false;
         }
     }
     
-    fn save_background(&mut self, frame_buffer: &mut FrameBufferWriter, x: i32, y: i32) {
+    fn save_background(&mut self, frame_buffer: &mut DoubleBufferedFrameBuffer, x: i32, y: i32) {
         let (width, height) = frame_buffer.get_dimensions();
         
         for row in 0..CURSOR_SIZE {
@@ -93,7 +93,7 @@ impl MouseCursor {
         }
     }
     
-    fn restore_background(&mut self, frame_buffer: &mut FrameBufferWriter) {
+    fn restore_background(&mut self, frame_buffer: &mut DoubleBufferedFrameBuffer) {
         let (width, height) = frame_buffer.get_dimensions();
         
         for row in 0..CURSOR_SIZE {
@@ -124,4 +124,22 @@ pub fn draw_cursor_with_graphics(gfx: &mut Graphics, x: i32, y: i32) {
     // Black outline for visibility
     gfx.set_stroke_color(Color::BLACK);
     gfx.draw_rect((x - 6) as usize, (y - 6) as usize, 12, 12);
+}
+
+// Global mouse cursor instance
+use spin::Mutex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref MOUSE_CURSOR: Mutex<MouseCursor> = Mutex::new(MouseCursor::new());
+}
+
+/// Draw the mouse cursor at the current mouse position
+pub fn draw_mouse_cursor(buffer: &mut DoubleBufferedFrameBuffer) {
+    // Get current mouse position
+    let (x, y, _buttons) = crate::drivers::mouse::get_state();
+    
+    // Draw the cursor
+    let mut cursor = MOUSE_CURSOR.lock();
+    cursor.draw(buffer, x, y);
 }

@@ -81,6 +81,26 @@ The display subsystem (`src/drivers/display/`) provides multiple layers:
    - **double_buffered_text.rs** - Renders to memory buffer first
    - Both implement scrolling, color support, and font rendering
 
+### Input Device Drivers
+
+#### PS/2 Controller (`ps2_controller.rs`)
+- Initializes the PS/2 controller for both keyboard and mouse
+- Configures controller settings and enables interrupts
+- Manages the shared hardware interface for both devices
+
+#### Keyboard Driver (`keyboard.rs`)
+- Handles PS/2 keyboard scancodes via IRQ1
+- Maintains a circular buffer for scancode queuing
+- Supports scancode set 2 with proper key mapping
+- Processes both make and break codes
+
+#### Mouse Driver (`mouse.rs`)
+- Processes 3-byte PS/2 mouse packets via IRQ12
+- Validates packet integrity (bit 3 check)
+- Tracks absolute cursor position with boundary clamping
+- Monitors all three button states
+- Provides position/button state queries via `get_state()`
+
 4. **Double Buffering** (`double_buffer.rs`)
    - 8MB static buffer allocation
    - Fast memory-to-memory operations
@@ -106,6 +126,13 @@ The display subsystem (`src/drivers/display/`) provides multiple layers:
    - Multi-line text support
    - Text alignment (left, center, right)
    - Background color support
+
+4. **Mouse Cursor** (`mouse_cursor.rs`)
+   - Classic arrow cursor design (12x12 pixels)
+   - Background save/restore for clean movement
+   - Direct integration with `DoubleBufferedFrameBuffer`
+   - Global cursor instance with lazy initialization
+   - Rendered in kernel idle loop based on mouse position
 
 ### Font System (`graphics/fonts/`)
 

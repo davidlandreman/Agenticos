@@ -48,11 +48,15 @@ The project follows a modular architecture with clear separation of concerns:
     - `text_buffer.rs` - Direct framebuffer text rendering
     - `double_buffer.rs` - Double buffering implementation
     - `double_buffered_text.rs` - Text rendering with double buffering
+  - `keyboard.rs` - PS/2 keyboard driver with scancode processing
+  - `mouse.rs` - PS/2 mouse driver with packet processing
+  - `ps2_controller.rs` - PS/2 controller initialization for keyboard and mouse
 
 - `src/graphics/` - Graphics subsystem
   - `color.rs` - Color definitions and utilities
   - `core_text.rs` - Text rendering engine
   - `core_gfx.rs` - Graphics primitives (lines, circles, etc.)
+  - `mouse_cursor.rs` - Mouse cursor rendering with background save/restore
   - `fonts/` - Font rendering systems
     - `core_font.rs` - Unified font interface
     - `embedded_font.rs` - Built-in bitmap fonts
@@ -236,3 +240,37 @@ shell_process.run();
 - This is a foundation for future threading/scheduling implementation
 - No actual concurrent execution yet - processes run synchronously
 - Ready for extension with process states, scheduling, and context switching
+
+## Mouse Support
+
+### Overview
+The kernel now includes full PS/2 mouse support with hardware cursor rendering:
+
+- **PS/2 Controller**: Shared controller initialization for both keyboard and mouse devices
+- **Mouse Driver**: Handles PS/2 mouse packets, tracks position and button states
+- **Hardware Cursor**: Rendered directly to the framebuffer with the double buffer system
+- **Interrupt-driven**: Mouse events are processed via IRQ12 interrupts
+
+### Implementation Details
+
+#### PS/2 Controller (`ps2_controller.rs`)
+- Initializes the PS/2 controller for both keyboard and mouse
+- Enables interrupts for both devices (IRQ1 for keyboard, IRQ12 for mouse)
+- Configures the controller with proper settings for both devices
+
+#### Mouse Driver (`mouse.rs`)
+- Processes 3-byte PS/2 mouse packets
+- Validates packet integrity (bit 3 of first byte must be set)
+- Tracks mouse position with screen boundary clamping (0-1279, 0-719)
+- Handles all three mouse buttons (left, right, middle)
+- Provides `get_state()` function for cursor position queries
+
+#### Mouse Cursor Rendering (`mouse_cursor.rs`)
+- Classic arrow cursor design (12x12 pixels)
+- Integrates directly with `DoubleBufferedFrameBuffer`
+- Background save/restore for clean cursor movement
+- Global cursor instance managed via lazy_static
+- Drawn in the kernel idle loop when mouse position changes
+
+### Usage
+The mouse is automatically initialized during kernel boot and the cursor appears on screen. Mouse movement and button clicks are tracked and logged (movement at debug level, button changes at info level).

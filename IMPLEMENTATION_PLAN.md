@@ -33,10 +33,13 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - **TODO**: Expand test coverage, add CI/CD pipeline
 
 #### Phase 4: Interrupt Handling ✓
-- **Status**: Partially Complete
+- **Status**: Complete
 - **4.1 CPU Exception Handling**: ✓ IDT setup with basic handlers
 - **4.2 Double Fault Protection**: ✓ Handler implemented
-- **4.3 Hardware Interrupts**: ⏳ Timer and keyboard pending
+- **4.3 Hardware Interrupts**: ✓ Timer, keyboard, and mouse interrupts working
+  - PIC 8259 initialized and configured
+  - IRQ1 (keyboard) and IRQ12 (mouse) handlers implemented
+  - Timer interrupt (IRQ0) for system tick
 
 #### Phase 5: Memory Management ✓
 - **Status**: Partially Complete
@@ -53,6 +56,20 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - Process trait with `get_id()`, `get_name()`, `run()` methods
 - Simple PID allocation (sequential from 1)
 - Shell process runs as PID 1 during initialization
+
+#### Input Device Support ✓
+- **Status**: Complete
+- **PS/2 Controller**: Shared initialization for keyboard and mouse
+- **Keyboard Driver**: 
+  - Full PS/2 keyboard support with scancode set 2
+  - Circular buffer for scancode queuing
+  - Make/break code processing
+- **Mouse Driver**:
+  - Complete PS/2 mouse support with 3-byte packet processing
+  - Position tracking with screen boundary clamping
+  - Three-button support (left, right, middle)
+  - Hardware cursor rendering with double buffer integration
+  - Classic arrow cursor with background save/restore
 - Foundation ready for future scheduling/threading
 
 ### 🔄 Recent Architectural Improvements

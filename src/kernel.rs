@@ -69,8 +69,20 @@ pub fn run() -> ! {
     debug_info!("Running shell process (PID: {})", shell_process.get_id());
     shell_process.run();
 
-    debug_info!("Entering idle loop...");
+    debug_info!("Entering idle loop with mouse cursor...");
+    
+    // Enable mouse cursor drawing in the idle loop
     loop {
+        // Draw mouse cursor if double buffering is enabled
+        if display::USE_DOUBLE_BUFFER {
+            double_buffered_text::with_buffer(|buffer| {
+                // Draw the mouse cursor
+                crate::graphics::mouse_cursor::draw_mouse_cursor(buffer);
+                // Swap buffers to show the cursor
+                buffer.swap_buffers();
+            });
+        }
+        
         x86_64::instructions::hlt();
     }
 }
