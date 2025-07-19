@@ -62,38 +62,6 @@ impl Process for ShellProcess {
                 println!("Failed to parse BMP");
             }
         }
-
-        // Print memory information
-        let stats = memory::get_memory_stats();
-        println!("Memory Statistics:");
-        println!("  Total usable memory: {} MB", stats.usable_memory / (1024 * 1024));
-        println!("  Total memory: {} MB", stats.total_memory / (1024 * 1024));
-        println!();
-        
-        // Demonstrate color support
-        display::set_color(Color::CYAN);
-        println!("This text is in cyan!");
-        
-        display::set_color(Color::GREEN);
-        println!("This text is in green!");
-        
-        display::set_color(Color::YELLOW);
-        println!("This text is in yellow!");
-        
-        display::set_color(Color::WHITE);
-        println!();
-    
-        display::set_color(Color::MAGENTA);
-        println!();
-        println!("Scrolling test complete!");
-        
-        // Demonstrate tab support
-        display::set_color(Color::WHITE);
-        println!();
-        println!("Tilde Test: ~");
-        println!("Tab test:");
-        println!("Column:\t1\t2\t3\t4");
-        println!("Value:\tA\tB\tC\tD");
         
         // Test filesystem access
         display::set_color(Color::MAGENTA);
@@ -146,6 +114,7 @@ impl ShellProcess {
         let test_files = &[
             "/TEST.TXT",
             "/README.TXT",
+            "/assets/TEST.TXT",
             "/assets/test.txt",
             "/assets/agentic-banner.png",
             "/assets/LAND3.BMP",

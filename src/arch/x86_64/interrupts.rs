@@ -137,19 +137,40 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
+    use x86_64::VirtAddr;
     
+    let accessed_addr = Cr2::read();
+    
+    // Don't check for physical memory offset access here - let the mapper handle it
+    // The mapper knows the actual physical memory offset from the bootloader
+    
+    // Check if the fault is in our heap region
+    const HEAP_START: u64 = 0x_4444_4444_0000;
+    const HEAP_END: u64 = HEAP_START + (100 * 1024 * 1024); // 100 MiB
+    
+    if accessed_addr.as_u64() >= HEAP_START && accessed_addr.as_u64() < HEAP_END {
+        // This is a heap access - we should allocate and map a page
+        debug_info!("Page fault in heap region at {:?}", accessed_addr);
+        
+        // Try to handle the page fault
+        if let Some(mapper) = unsafe { crate::mm::paging::get_mapper() } {
+            if let Err(e) = mapper.handle_page_fault(accessed_addr) {
+                debug_error!("Failed to handle page fault: {:?}", e);
+                panic!("Failed to allocate memory for heap");
+            }
+            // Successfully mapped - return and retry the instruction
+            return;
+        }
+    }
+    
+    // Not a heap fault or couldn't handle it - panic
     debug_error!("EXCEPTION: PAGE FAULT");
-    debug_error!("Accessed Address: {:?}", Cr2::read());
+    debug_error!("Accessed Address: {:?}", accessed_addr);
     debug_error!("Error Code: {:?}", error_code);
+    debug_error!("Instruction Pointer: {:?}", stack_frame.instruction_pointer);
     debug_error!("{:#?}", stack_frame);
     
-    println!();
-    println!("EXCEPTION: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
-    println!("Error Code: {:?}", error_code);
-    println!("{:#?}", stack_frame);
-    
-    panic!("Page fault");
+    panic!("Unhandled page fault");
 }
 
 extern "x86-interrupt" fn double_fault_handler(

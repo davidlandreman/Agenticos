@@ -22,8 +22,20 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize PS/2 controller configuration for keyboard
     ps2_controller::init();
     
-    // Initialize memory manager
-    memory::init(&boot_info.memory_regions, boot_info.physical_memory_offset.into_option());
+    // Extract what we need from boot_info before borrowing it
+    // Use a default offset if not provided by bootloader
+    let physical_memory_offset = boot_info.physical_memory_offset.into_option()
+        .unwrap_or(0x10000000000); // Default offset for identity mapping
+    let rsdp_addr = boot_info.rsdp_addr.into_option();
+    
+    // Initialize memory and heap (this will borrow memory_regions for 'static)
+    unsafe {
+        // Create a reference that will live for the entire program
+        let memory_regions_ref: &'static _ = &*((&boot_info.memory_regions) as *const _);
+        memory::init(memory_regions_ref, Some(physical_memory_offset));
+        memory::init_heap(physical_memory_offset);
+    }
+    debug_info!("Heap initialized successfully!");
     
     // Initialize IDE controller and detect drives
     debug_info!("Initializing IDE controller...");
@@ -36,11 +48,11 @@ pub fn init(boot_info: &'static mut BootInfo) {
     memory::print_memory_info();
     
     // Print boot information
-    if let Some(rsdp_addr) = boot_info.rsdp_addr.into_option() {
+    if let Some(rsdp_addr) = rsdp_addr {
         debug_debug!("RSDP address: 0x{:016x}", rsdp_addr);
     }
     
-    // Initialize display
+    // Initialize display - this can still mutably borrow boot_info
     init_display(boot_info);
     
     // Initialize mouse driver

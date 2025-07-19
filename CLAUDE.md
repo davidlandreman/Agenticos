@@ -82,7 +82,10 @@ The project follows a modular architecture with clear separation of concerns:
   - `debug.rs` - Debug logging system with macros
 
 - `src/mm/` - Memory management
-  - `memory.rs` - Physical memory manager
+  - `memory.rs` - Physical memory manager with heap initialization
+  - `frame_allocator.rs` - Physical frame allocator using bootloader memory map
+  - `heap.rs` - Dynamic memory allocator (100 MiB heap with linked-list allocator)
+  - `paging.rs` - Virtual memory paging with demand paging support
 
 - `src/process/` - Process management and abstractions
   - `process.rs` - Process trait and PID allocation
@@ -112,30 +115,33 @@ The project follows a modular architecture with clear separation of concerns:
 **CRITICAL: This is a `no_std` environment - the Rust standard library is NOT available.**
 
 #### What this means:
-- **NO `Vec<T>`** - Use static arrays `&[T]` or `&'static [T]` instead
-- **NO `String`** - Use `&str` or `&'static str` instead
-- **NO `HashMap`** - Implement custom data structures if needed
-- **NO heap allocation** - Use static allocation or stack allocation
-- **NO `std::*` imports** - Only `core::*` and `alloc::*` (when available)
+- **NO `std::*` imports** - Only `core::*` and `alloc::*` are available
+- **LIMITED heap allocation** - Heap is now available via custom allocator (see Memory Management section)
+- **`Vec<T>` and `String` NOW AVAILABLE** - Through the `alloc` crate after heap initialization
+- **NO `HashMap` from std** - Use `alloc::collections::BTreeMap` or implement custom data structures
+- **NO file I/O, threads, or network** - These require OS support we haven't implemented
 
-#### Common replacements:
+#### Heap Allocation Support (NEW):
+With the heap allocator now implemented, dynamic allocation is available:
 ```rust
-// WRONG - uses Vec from std
-pub fn get_tests() -> Vec<&'static dyn Testable> {
-    vec![&test1, &test2]
+// NOW SUPPORTED - Vec and String from alloc crate
+use alloc::vec::Vec;
+use alloc::string::String;
+
+pub fn example() {
+    let mut v = Vec::new();
+    v.push(42);
+    
+    let s = String::from("Hello, heap!");
 }
 
-// CORRECT - uses static slice
+// Still use static slices when heap isn't needed
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[&test1, &test2]
 }
-
-// WRONG - uses String
-let message = String::from("Hello");
-
-// CORRECT - uses &str
-let message = "Hello";
 ```
+
+**Important**: The heap allocator must be initialized before using any `alloc` features. This happens automatically during kernel initialization.
 
 ### Testing Approach
 - Custom test framework for `no_std` environment
@@ -146,6 +152,65 @@ let message = "Hello";
 - Implementation plan: `IMPLEMENTATION_PLAN.md`
 - Architecture documentation: `architecture.md`
 - Tutorial reference: https://os.phil-opp.com/
+
+## Memory Management
+
+### Overview
+The kernel features a sophisticated memory management system with virtual memory, paging, and dynamic heap allocation:
+
+- **Physical Memory**: Managed by `BootInfoFrameAllocator` using bootloader-provided memory map
+- **Virtual Memory**: Page table management with 4KB pages and demand paging
+- **Heap Allocation**: 100 MiB heap using `linked_list_allocator` backend
+- **Page Fault Handling**: Automatic page allocation for heap memory access
+
+### Components
+
+#### Frame Allocator (`frame_allocator.rs`)
+- Allocates physical 4KB memory frames from usable memory regions
+- Filters bootloader memory map to only use "Usable" regions
+- Skips frame 0 for safety (null pointer protection)
+- Provides frames to the virtual memory mapper
+
+#### Heap Allocator (`heap.rs`)
+- **Location**: Virtual address `0x_4444_4444_0000`
+- **Size**: 100 MiB (configurable)
+- **Backend**: `linked_list_allocator` crate v0.10
+- **Features**:
+  - Global allocator enables `alloc` crate collections (Vec, String, etc.)
+  - Demand paging - pages mapped only when accessed
+  - Proper OOM (out-of-memory) handling
+
+#### Virtual Memory (`paging.rs`)
+- `MemoryMapper` provides unified page table access
+- `OffsetPageTable` for virtual-to-physical translations
+- Page fault integration for demand paging
+- Special handling for physical memory region access
+
+### Usage Examples
+```rust
+// After heap initialization, these work:
+use alloc::{vec, vec::Vec, string::String};
+
+let mut numbers = vec![1, 2, 3, 4, 5];
+numbers.push(6);
+
+let message = String::from("Hello from the heap!");
+
+// Large allocations are supported
+let large_buffer = vec![0u8; 1024 * 1024]; // 1 MB allocation
+```
+
+### Page Fault Handling
+When heap memory is accessed before being mapped:
+1. Page fault occurs with the unmapped address
+2. Handler allocates a new physical frame
+3. Maps the virtual page to the physical frame
+4. Execution continues transparently
+
+### Debugging
+- Page faults log detailed information via `debug_info!`
+- Memory regions displayed during boot
+- Heap test suite validates allocator functionality
 
 ## Testing Framework
 
@@ -163,6 +228,7 @@ The project includes a custom unit testing framework that runs tests directly in
 Tests are organized in the `src/tests/` directory by topic:
 - `basic.rs` - Basic functionality and sanity tests
 - `memory.rs` - Memory management tests
+- `heap.rs` - Heap allocator and dynamic memory tests
 - `display.rs` - Display and graphics tests
 - `interrupts.rs` - Interrupt handler tests
 

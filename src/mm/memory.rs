@@ -1,4 +1,5 @@
 use bootloader_api::info::{MemoryRegions, MemoryRegion, MemoryRegionKind};
+use x86_64::VirtAddr;
 use crate::{debug_info, debug_debug};
 
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +47,18 @@ impl MemoryManager {
                 let size = region.end - region.start;
                 self.stats.total_memory += size;
                 
+                // Print each region for debugging
+                let kind_str = match region.kind {
+                    MemoryRegionKind::Usable => "Usable",
+                    MemoryRegionKind::Bootloader => "Bootloader",
+                    MemoryRegionKind::UnknownBios(_) => "Unknown BIOS",
+                    MemoryRegionKind::UnknownUefi(_) => "Unknown UEFI",
+                    _ => "Unknown",
+                };
+                
+                debug_info!("Region {}: 0x{:016x} - 0x{:016x} ({} bytes, {})",
+                    self.region_count - 1, region.start, region.end, size, kind_str);
+                
                 match region.kind {
                     MemoryRegionKind::Usable => self.stats.usable_memory += size,
                     MemoryRegionKind::Bootloader => self.stats.bootloader_memory += size,
@@ -55,6 +68,7 @@ impl MemoryManager {
         }
         
         debug_info!("Memory manager initialized with {} regions", self.region_count);
+        debug_info!("Physical memory offset: {:?}", phys_mem_offset);
     }
 
     pub fn print_memory_map(&self) {
@@ -131,9 +145,38 @@ impl MemoryManager {
 // Global memory manager instance
 static mut MEMORY_MANAGER: MemoryManager = MemoryManager::new();
 
-pub fn init(memory_regions: &MemoryRegions, phys_mem_offset: Option<u64>) {
+// Static storage for memory regions to use with heap allocator
+static mut STATIC_MEMORY_REGIONS: Option<&'static MemoryRegions> = None;
+
+pub fn init(memory_regions: &'static MemoryRegions, phys_mem_offset: Option<u64>) {
     unsafe {
         MEMORY_MANAGER.init(memory_regions, phys_mem_offset);
+        STATIC_MEMORY_REGIONS = Some(memory_regions);
+    }
+}
+
+// Static storage for the mapper
+static mut STATIC_MAPPER: Option<crate::mm::paging::MemoryMapper> = None;
+
+pub fn init_heap(phys_mem_offset: u64) {
+    unsafe {
+        let memory_regions = STATIC_MEMORY_REGIONS
+            .expect("Memory regions not initialized");
+            
+        // Create mapper in static storage
+        STATIC_MAPPER = Some(crate::mm::paging::MemoryMapper::new(
+            VirtAddr::new(phys_mem_offset),
+            memory_regions
+        ));
+        
+        // Store pointer globally for page fault handling
+        if let Some(mapper) = &mut STATIC_MAPPER {
+            crate::mm::paging::MAPPER = Some(mapper as *mut _);
+            
+            // Initialize heap
+            crate::mm::heap::init_heap(mapper)
+                .expect("Failed to initialize heap");
+        }
     }
 }
 

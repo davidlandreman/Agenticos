@@ -152,19 +152,59 @@ The font system supports multiple font formats through a unified interface:
 
 ## Memory Management (`mm/`)
 
+### Overview
+
+AgenticOS features a sophisticated memory management system with physical memory management, virtual memory paging, and dynamic heap allocation. The system enables the kernel to use dynamic data structures through the `alloc` crate.
+
 ### Physical Memory Manager (`memory.rs`)
 
-The memory manager tracks physical memory regions:
+The memory manager initializes and manages the memory subsystem:
 - Parses memory map from bootloader
 - Categorizes memory (usable, reserved, bootloader)
 - Provides memory statistics
-- Foundation for future heap allocator
+- Initializes frame allocator and heap
+- Sets up virtual memory mapping
 
-Key features:
-- Static allocation (no heap required)
-- Fixed-size region tracking
-- Memory region iteration
-- Statistics gathering
+### Frame Allocator (`frame_allocator.rs`)
+
+The `BootInfoFrameAllocator` manages physical memory frames:
+- Allocates 4KB frames from usable memory regions
+- Filters bootloader memory map for safe regions
+- Skips frame 0 to catch null pointer dereferences
+- Implements `FrameAllocator<Size4KiB>` trait from x86_64 crate
+- Provides frames for virtual memory operations
+
+### Heap Allocator (`heap.rs`)
+
+Dynamic memory allocation with these characteristics:
+- **Virtual Address**: `0x_4444_4444_0000`
+- **Size**: 100 MiB (configurable via `HEAP_SIZE`)
+- **Backend**: `linked_list_allocator` crate (v0.10)
+- **Features**:
+  - Global allocator enables `Vec`, `String`, and other `alloc` types
+  - Demand paging - memory mapped only when accessed
+  - OOM handling with proper error reporting
+  - Zero-initialized pages for security
+
+### Virtual Memory (`paging.rs`)
+
+Page table management and virtual memory operations:
+- `MemoryMapper` provides centralized page table access
+- Uses `OffsetPageTable` for virtual-to-physical translations
+- Integrates with page fault handler for demand paging
+- Special handling for physical memory region access
+- Global mapper instance for interrupt handlers
+
+### Page Fault Integration
+
+The memory system integrates with the page fault handler in `arch/x86_64/interrupts.rs`:
+1. Unmapped heap access triggers page fault
+2. Handler checks if address is in heap range
+3. Allocates new physical frame
+4. Maps virtual page to physical frame
+5. Execution resumes transparently
+
+This demand paging approach reduces initial memory usage and allows the heap to grow as needed.
 
 ## Core Libraries (`lib/`)
 
@@ -359,10 +399,13 @@ The panic handler (`panic.rs`) provides:
 
 ### Planned Improvements
 
-1. **Memory Management**
-   - Heap allocator implementation
-   - Virtual memory/paging
-   - Memory protection
+1. **Memory Management** (Partially Complete)
+   - ✓ Heap allocator implementation
+   - ✓ Virtual memory/paging with demand paging
+   - ✓ Basic frame allocation
+   - TODO: Memory protection between processes
+   - TODO: Copy-on-write optimization
+   - TODO: Memory-mapped files
 
 2. **Process Management**
    - Task/thread abstraction

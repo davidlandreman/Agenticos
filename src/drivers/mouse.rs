@@ -273,7 +273,7 @@ fn process_packet(data: &mut MouseData) {
     
     // Only log if position actually changed
     if data.x != old_x || data.y != old_y {
-        debug_info!("Mouse moved: ({}, {}) -> ({}, {}), buttons={:03b}", 
+        debug_trace!("Mouse moved: ({}, {}) -> ({}, {}), buttons={:03b}", 
             old_x, old_y, data.x, data.y, data.buttons);
     }
 }

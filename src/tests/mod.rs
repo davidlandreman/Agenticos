@@ -6,6 +6,8 @@ pub mod memory;
 pub mod display;
 #[cfg(feature = "test")]
 pub mod interrupts;
+#[cfg(feature = "test")]
+pub mod heap;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -19,6 +21,7 @@ pub fn run_tests() {
     let memory_tests = memory::get_tests();
     let display_tests = display::get_tests();
     let interrupts_tests = interrupts::get_tests();
+    let heap_tests = heap::get_tests();
     
     let mut total_tests = 0;
     
@@ -50,6 +53,14 @@ pub fn run_tests() {
     debug_info!("\n[Interrupt Tests]");
     debug_info!("Running {} tests", interrupts_tests.len());
     for test in interrupts_tests {
+        test.run();
+        total_tests += 1;
+    }
+    
+    // Run heap tests
+    debug_info!("\n[Heap Tests]");
+    debug_info!("Running {} tests", heap_tests.len());
+    for test in heap_tests {
         test.run();
         total_tests += 1;
     }

@@ -42,13 +42,20 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
   - Timer interrupt (IRQ0) for system tick
 
 #### Phase 5: Memory Management ✓
-- **Status**: Partially Complete
+- **Status**: Complete
 - **5.1 Physical Memory Management**: ✓ 
   - Memory map parsing from bootloader
   - Memory region tracking and statistics
-  - Foundation for frame allocator
-- **5.2 Paging**: ⏳ Pending
-- **5.3 Heap Allocation**: ⏳ Pending
+  - Frame allocator implementation (`BootInfoFrameAllocator`)
+- **5.2 Paging**: ✓ Complete
+  - Virtual memory with `OffsetPageTable`
+  - Page fault handler with demand paging
+  - Memory mapper for address translation
+- **5.3 Heap Allocation**: ✓ Complete
+  - 100 MiB heap at virtual address `0x_4444_4444_0000`
+  - `linked_list_allocator` backend
+  - Global allocator enables `Vec`, `String`, etc.
+  - Comprehensive heap tests
 
 #### Process Foundation ✓
 - **Status**: Initial Implementation Complete
@@ -308,8 +315,8 @@ agenticos/
 
 ### ⏳ In Progress
 - [ ] PNG image format support (decompression needed)
-- [ ] Virtual memory with paging
-- [ ] Heap allocation support
+- [x] Virtual memory with paging ✓
+- [x] Heap allocation support ✓
 - [ ] Async/await infrastructure
 - [ ] Multitasking support
 - [ ] Filesystem write support
@@ -335,10 +342,12 @@ agenticos/
 - Implement image scaling and transformation
 
 ### Memory Management
-- Complete paging implementation
-- Add memory protection features
-- Implement efficient heap allocator
-- Support for NUMA architectures
+- ✓ Complete paging implementation (DONE)
+- ✓ Implement efficient heap allocator (DONE - using linked_list_allocator)
+- Add memory protection features (per-process isolation)
+- Implement copy-on-write optimization
+- Add memory-mapped file support
+- Support for NUMA architectures (future)
 
 ### Architecture
 - Consider microkernel design elements
