@@ -4,6 +4,7 @@ use crate::fs::fat::fat_table::FatTable;
 use crate::fs::fat::directory::DirectoryIterator;
 use crate::fs::fat::types::{FatType, FatError, ClusterId};
 use crate::{debug_info, debug_error};
+use alloc;
 
 pub struct FatFilesystem<'a> {
     device: &'a dyn BlockDevice,
@@ -97,11 +98,20 @@ impl<'a> FatFilesystem<'a> {
         
         let fat_table = FatTable::new(self.device, boot_sector, self.fat_type);
         
+        // Allocate a temporary buffer for reading full clusters
+        let mut cluster_buffer = alloc::vec![0u8; cluster_size];
+        
         fat_table.follow_chain(file.first_cluster, |cluster| {
             let bytes_to_read = core::cmp::min(cluster_size, file.size as usize - bytes_read);
             
             if bytes_to_read > 0 {
-                self.read_cluster(cluster, &mut buffer[bytes_read..bytes_read + cluster_size])?;
+                // Read the full cluster into our temporary buffer
+                self.read_cluster(cluster, &mut cluster_buffer)?;
+                
+                // Copy only the bytes we need into the output buffer
+                buffer[bytes_read..bytes_read + bytes_to_read]
+                    .copy_from_slice(&cluster_buffer[..bytes_to_read]);
+                    
                 bytes_read += bytes_to_read;
             }
             
@@ -113,26 +123,34 @@ impl<'a> FatFilesystem<'a> {
     
     pub fn find_file(&self, path: &str) -> Result<FileHandle, FatError> {
         // For now, only support root directory files
-        if path.starts_with('/') {
-            let filename = &path[1..];
-            
-            let mut files = [FileHandle {
-                name: [0; 13],
-                size: 0,
-                first_cluster: ClusterId(0),
-                is_directory: false,
-            }; 256];
-            let file_count = self.list_root_array(&mut files, 256)?;
-            for i in 0..file_count {
-                let file = &files[i];
-                let file_name_str = core::str::from_utf8(&file.name)
-                    .ok()
-                    .and_then(|s| s.split('\0').next())
-                    .unwrap_or("");
-                    
-                if file_name_str.eq_ignore_ascii_case(filename) {
-                    return Ok(*file);
-                }
+        // Handle both absolute paths (with /) and relative paths (without /)
+        let filename = if path.starts_with('/') {
+            &path[1..]
+        } else {
+            path
+        };
+        
+        // Don't process empty filenames or subdirectory paths
+        if filename.is_empty() || filename.contains('/') {
+            return Err(FatError::NotFound);
+        }
+        
+        let mut files = [FileHandle {
+            name: [0; 13],
+            size: 0,
+            first_cluster: ClusterId(0),
+            is_directory: false,
+        }; 256];
+        let file_count = self.list_root_array(&mut files, 256)?;
+        for i in 0..file_count {
+            let file = &files[i];
+            let file_name_str = core::str::from_utf8(&file.name)
+                .ok()
+                .and_then(|s| s.split('\0').next())
+                .unwrap_or("");
+                
+            if file_name_str.eq_ignore_ascii_case(filename) {
+                return Ok(*file);
             }
         }
         

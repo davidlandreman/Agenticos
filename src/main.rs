@@ -11,6 +11,7 @@ mod bootloader_config;
 
 // Module structure
 mod arch;
+mod commands;
 mod drivers;
 mod fs;
 mod graphics;

@@ -88,10 +88,14 @@ The project follows a modular architecture with clear separation of concerns:
   - `heap.rs` - Dynamic memory allocator (100 MiB heap with linked-list allocator)
   - `paging.rs` - Virtual memory paging with demand paging support
 
-- `src/process/` - Process management and abstractions
+- `src/process/` - Core process management primitives
   - `process.rs` - Process trait and PID allocation
-  - `shell.rs` - Shell process implementation
   - `mod.rs` - Module exports
+
+- `src/commands/` - Specific command implementations
+  - `shell/` - System shell command
+    - `mod.rs` - Shell process implementation
+  - `mod.rs` - Command exports
 
 ### Configuration Files
 - `Cargo.toml` - Project manifest with OS-specific dependencies
@@ -338,15 +342,24 @@ The kernel now includes a basic process abstraction layer as a foundation for fu
   - `ProcessId` type alias for u32
   - `allocate_pid()` function for sequential PID allocation
   
-- `src/process/shell.rs`: System shell process
+- `src/commands/shell/mod.rs`: System shell command
+  - Implements the `Process` trait as `ShellProcess`
   - Displays welcome message, memory statistics, and system tests
   - Demonstrates color support, scrolling, and tab handling
   - Runs as PID 1 during kernel initialization
   - Foundation for future interactive shell capabilities
 
+### Architecture Note
+The separation between `/process` and `/commands` provides a clean distinction:
+- `/process` contains only the fundamental primitives and traits for process management
+- `/commands` contains specific implementations of processes that users can run
+- This structure allows for easy addition of new commands while keeping the core process abstraction minimal
+
 ### Usage Example
 ```rust
 // In kernel.rs during kernel initialization
+use crate::commands::ShellProcess;
+
 let mut shell_process = ShellProcess::new();
 debug_info!("Running shell process (PID: {})", shell_process.get_id());
 shell_process.run();

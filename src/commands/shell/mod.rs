@@ -4,6 +4,7 @@ use crate::graphics::color::Color;
 use crate::graphics::images::{BmpImage, Image};
 use crate::mm::memory;
 use crate::{print, println};
+use alloc;
 
 pub struct ShellProcess {
     id: ProcessId,
@@ -29,37 +30,53 @@ impl Process for ShellProcess {
     }
     
     fn run(&mut self) {
-        // Load and display the BMP image
-        static LAND_IMAGE_DATA: &[u8] = include_bytes!("../../assets/LAND3.BMP");
-
-        // Try to parse and display the BMP image
-        match BmpImage::from_bytes(LAND_IMAGE_DATA) {
-            Ok(land_image) => {
-                // Use the double buffer directly to draw the image
-                display::with_double_buffer(|buffer| {
-                    // Clear the screen to black first
-                    for y in 0..720 {
-                        for x in 0..1280 {
-                            buffer.draw_pixel(x, y, Color::BLACK);
+        // Load and display the BMP image from filesystem
+        let image_path = "/banner.bmp";
+        
+        // Try to load and parse the BMP image using the file API
+        match crate::fs::File::open_read(image_path) {
+            Ok(file) => {
+                // Read the entire file into a vector
+                let mut image_data = alloc::vec![0u8; file.size() as usize];
+                match file.read(&mut image_data) {
+                    Ok(_) => {
+                        // Parse the BMP image from the loaded data
+                        match BmpImage::from_bytes(&image_data) {
+                            Ok(banner_image) => {
+                                // Use the double buffer directly to draw the image
+                                display::with_double_buffer(|buffer| {
+                                    // Clear the screen to black first
+                                    for y in 0..720 {
+                                        for x in 0..1280 {
+                                            buffer.draw_pixel(x, y, Color::BLACK);
+                                        }
+                                    }
+                                    
+                                    // Draw the image at position (100, 100)
+                                    buffer.draw_image(100, 100, &banner_image);
+                                    
+                                    // Swap buffers to show the image
+                                    buffer.swap_buffers();
+                                });
+                                
+                                // Calculate cursor position below the bitmap
+                                // Bitmap is at Y=100, add its height, then convert to text rows
+                                let bitmap_bottom_y = 100 + banner_image.height();
+                                let text_row = bitmap_bottom_y / 8; // 8 is the font height
+                                display::set_cursor_y(text_row + 1); // Add 1 for some spacing
+                            }
+                            Err(_e) => {
+                                println!("Failed to parse BMP from {}", image_path);
+                            }
                         }
                     }
-                    
-                    // Draw the image at position (100, 100)
-                    buffer.draw_image(100, 100, &land_image);
-                    
-                    // Swap buffers to show the image
-                    buffer.swap_buffers();
-                });
-                
-                // Calculate cursor position below the bitmap
-                // Bitmap is at Y=100, add its height, then convert to text rows
-                let bitmap_bottom_y = 100 + land_image.height();
-                let text_row = bitmap_bottom_y / 8; // 8 is the font height
-                display::set_cursor_y(text_row + 1); // Add 1 for some spacing
-                
+                    Err(e) => {
+                        println!("Failed to read image file {}: {}", image_path, e);
+                    }
+                }
             }
-            Err(_e) => {
-                println!("Failed to parse BMP");
+            Err(e) => {
+                println!("Failed to open image file {}: {}", image_path, e);
             }
         }
         

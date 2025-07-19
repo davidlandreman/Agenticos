@@ -38,20 +38,20 @@ pub enum BmpError {
     InsufficientData,
 }
 
-pub struct BmpImage {
+pub struct BmpImage<'a> {
     width: usize,
     height: usize,
     pixel_format: PixelFormat,
-    data: &'static [u8],
+    data: &'a [u8],
     bottom_up: bool,
     bytes_per_pixel: usize,
     row_stride: usize,
     bits_per_pixel: u16,
-    palette: Option<&'static [u8]>,
+    palette: Option<&'a [u8]>,
 }
 
-impl BmpImage {
-    pub fn from_bytes(data: &'static [u8]) -> Result<Self, BmpError> {
+impl<'a> BmpImage<'a> {
+    pub fn from_bytes(data: &'a [u8]) -> Result<Self, BmpError> {
         debug_info!("BMP: Parsing BMP file, data size: {} bytes", data.len());
         
         if data.len() < size_of::<BmpFileHeader>() + size_of::<BmpInfoHeader>() {
@@ -158,7 +158,7 @@ impl BmpImage {
     }
 }
 
-impl Image for BmpImage {
+impl<'a> Image for BmpImage<'a> {
     fn width(&self) -> usize {
         self.width
     }

@@ -5,7 +5,8 @@ use crate::arch::x86_64::interrupts;
 use crate::mm::memory;
 use crate::drivers::display::{display, text_buffer, double_buffered_text};
 use crate::drivers::ps2_controller;
-use crate::process::{Process, ShellProcess};
+use crate::process::Process;
+use crate::commands::ShellProcess;
 
 pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize debug subsystem

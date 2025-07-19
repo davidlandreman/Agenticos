@@ -170,10 +170,52 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
         Ok(())
     }
     
-    fn read(&self, _handle: &mut FileHandle, _buffer: &mut [u8]) -> Result<usize, FilesystemError> {
-        // This would require keeping the FAT file handle
-        // For now, return unsupported
-        Err(FilesystemError::UnsupportedOperation)
+    fn read(&self, handle: &mut FileHandle, buffer: &mut [u8]) -> Result<usize, FilesystemError> {
+        // The FAT filesystem read_file method only supports reading entire files,
+        // so we need to allocate a temporary buffer for the whole file
+        
+        // Check if we're at EOF
+        if handle.position >= handle.size {
+            return Ok(0);
+        }
+        
+        // Reconstruct the FAT file handle from the generic handle
+        // The inode contains the first cluster number
+        let fat_handle = crate::fs::fat::filesystem::FileHandle {
+            name: [0; 13], // Name doesn't matter for reading
+            size: handle.size as u32,
+            first_cluster: crate::fs::fat::types::ClusterId(handle.inode as u32),
+            is_directory: false,
+        };
+        
+        // FAT filesystems use cluster sizes from 512 bytes to 32KB
+        // Use a conservative 4KB (8 sectors) cluster size for buffer allocation
+        const ASSUMED_CLUSTER_SIZE: usize = 4096;
+        
+        // Allocate buffer for entire file, rounded up to cluster boundary
+        // This ensures read_file has enough buffer space for cluster-aligned reads
+        let buffer_size = ((handle.size as usize + ASSUMED_CLUSTER_SIZE - 1) / ASSUMED_CLUSTER_SIZE) * ASSUMED_CLUSTER_SIZE;
+        let mut file_buffer = alloc::vec![0u8; buffer_size];
+        
+        // Read the entire file
+        match self.inner.read_file(&fat_handle, &mut file_buffer) {
+            Ok(_) => {
+                // Calculate how much to copy from the current position
+                let remaining = handle.size - handle.position;
+                let to_copy = core::cmp::min(buffer.len(), remaining as usize);
+                
+                // Copy the requested portion
+                buffer[..to_copy].copy_from_slice(
+                    &file_buffer[handle.position as usize..handle.position as usize + to_copy]
+                );
+                
+                // Update position
+                handle.position += to_copy as u64;
+                
+                Ok(to_copy)
+            }
+            Err(_) => Err(FilesystemError::IoError),
+        }
     }
     
     fn write(&self, _handle: &mut FileHandle, _buffer: &[u8]) -> Result<usize, FilesystemError> {

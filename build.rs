@@ -36,7 +36,7 @@ fn main() {
                         if metadata.is_file() {
                             let file_name = entry.file_name().to_string_lossy().to_string();
                             let source_path = entry.path();
-                            let dest_path = format!("/assets/{}", file_name);
+                            let dest_path = format!("/{}", file_name);
                             
                             println!("cargo:warning=  Adding {}", dest_path);
                             builder.set_file(dest_path.clone(), source_path);
