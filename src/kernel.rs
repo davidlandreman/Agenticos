@@ -120,6 +120,8 @@ pub fn run() -> ! {
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
+    use crate::lib::test_utils::exit_qemu_success;
+    
     debug_info!("=== Running Kernel Tests ===");
     
     // Test 1: Debug system
@@ -157,19 +159,12 @@ pub fn run_tests() {
     assert_eq!(b - a, 10, "20 - 10 should equal 10");
     debug_info!("[PASS] Basic arithmetic test");
     
+    // Test 5: Test panic behavior (comment out to test passing)
+    // debug_info!("Test 5: Testing panic handler");
+    // panic!("This is a test panic!");
+    
     debug_info!("=== All Tests Passed! ===");
     
     // Exit QEMU with success code
     exit_qemu_success();
-}
-
-#[cfg(feature = "test")]
-fn exit_qemu_success() {
-    use x86_64::instructions::port::Port;
-    
-    debug_info!("Exiting QEMU with success status...");
-    unsafe {
-        let mut port = Port::new(0xf4);
-        port.write(0x10u32); // Success exit code
-    }
 }

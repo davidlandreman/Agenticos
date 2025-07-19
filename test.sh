@@ -3,6 +3,7 @@
 # Build and run tests
 echo "Building and running kernel tests..."
 cargo build --features test
+cargo build --features test
 
 # Run with QEMU configured for testing
 qemu-system-x86_64 \
