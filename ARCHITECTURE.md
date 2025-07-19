@@ -4,23 +4,65 @@ This document describes the architecture and design decisions of AgenticOS compo
 
 ## Overall Architecture
 
-AgenticOS follows a modular monolithic kernel design with clear separation between architecture-specific code, device drivers, and core kernel services. The kernel is organized into distinct modules that communicate through well-defined interfaces.
+AgenticOS is a monolithic kernel operating system targeting x86-64. While the eventual goal is to support "agentic" computing capabilities, the current implementation focuses on fundamental OS features. All code runs in kernel space (ring 0) with no user/kernel separation.
+
+**Design Philosophy:**
+- Modular organization within monolithic structure
+- Clear separation of concerns between subsystems
+- Minimal use of unsafe Rust code
+- Static memory allocation where possible to avoid heap fragmentation
+- Performance over flexibility in critical paths
+
+## Current State Summary
+
+### What Works Well
+- **Memory Management**: Robust heap with demand paging
+- **Display System**: Fast double-buffered graphics
+- **Filesystem**: Clean Arc-based API for file access
+- **Input Devices**: Full keyboard and mouse support
+- **Command System**: Easy to extend with new commands
+- **Build System**: Simple and effective
+
+### What Needs Work
+- **No Multitasking**: Everything is synchronous
+- **Graphics Architecture**: Organic growth led to complexity
+- **Global State**: Over-reliance on statics
+- **Test Coverage**: Minimal testing
+- **Error Handling**: Inconsistent approaches
+- **Documentation**: Some areas lack clarity
+
+### Not Yet Implemented
+- **Agent Runtime**: The core vision
+- **User Mode**: Everything runs privileged
+- **Networking**: No network stack
+- **Write Support**: Filesystem is read-only
+- **Advanced Features**: No threads, IPC, etc.
 
 ### Module Organization
 
 ```
 src/
-├── main.rs              # Minimal entry point
-├── kernel.rs            # Kernel initialization
+├── main.rs              # Minimal entry point (< 25 lines)
+├── kernel.rs            # Kernel initialization and main loop
 ├── panic.rs             # Panic handling
-├── arch/                # Architecture-specific
-├── drivers/             # Device drivers
-├── fs/                  # Filesystem layer
-├── graphics/            # Graphics subsystem
-├── lib/                 # Core libraries
-├── mm/                  # Memory management
-└── process/             # Process management
+├── arch/                # Architecture-specific (x86_64 only)
+├── drivers/             # Hardware device drivers
+├── fs/                  # Filesystem layer (FAT read-only)
+├── graphics/            # Graphics and font rendering
+├── lib/                 # Core utilities (Arc, debug, test)
+├── mm/                  # Memory management (heap, paging)
+├── process/             # Process abstractions (no scheduling)
+├── commands/            # Shell commands (13 implemented)
+└── tests/               # Kernel test suite
 ```
+
+### Key Architectural Decisions
+
+1. **No Standard Library**: Uses `#![no_std]` requiring custom implementations
+2. **Static Allocation**: 8MB display buffer, pre-allocated structures
+3. **Synchronous Execution**: No async/await or threading
+4. **Global State**: Heavy use of `static mut` and `lazy_static`
+5. **Trait-Based Abstractions**: BlockDevice, Filesystem, Process, Font
 
 ### Testing Framework
 
@@ -65,22 +107,28 @@ This separation allows for potential future ports to other architectures.
 
 ### Display Driver Architecture
 
-The display subsystem (`src/drivers/display/`) provides multiple layers:
+The display subsystem has evolved organically and now shows architectural complexity:
 
-1. **Unified Interface** (`display.rs`)
-   - Provides consistent API regardless of buffering mode
-   - Runtime selection between single/double buffering
-   - Exports print macros for kernel-wide use
+1. **Display Interface** (`display.rs`)
+   - Controls `USE_DOUBLE_BUFFER` flag for performance tuning
+   - Provides `println!` and `print!` macros
+   - Routes to appropriate buffer implementation
 
-2. **Framebuffer Abstraction** (`frame_buffer.rs`)
-   - Low-level pixel manipulation
-   - Direct memory access to framebuffer
-   - Format conversion for different pixel formats
+2. **Buffer Implementations**
+   - **FrameBuffer**: Direct framebuffer memory access (slow)
+   - **DoubleBuffer**: 8MB static buffer with fast bulk copy
+   - **TextBuffer**: Direct text rendering
+   - **DoubleBufferedText**: Text via double buffer
 
-3. **Text Rendering**
-   - **text_buffer.rs** - Direct rendering to framebuffer
-   - **double_buffered_text.rs** - Renders to memory buffer first
-   - Both implement scrolling, color support, and font rendering
+3. **Performance Characteristics**
+   - Single buffering: ~50-100ms per screen clear (poor)
+   - Double buffering: ~5-10ms per screen clear (good)
+   - Scrolling: Memory move instead of redraw
+
+**Architectural Issues:**
+- Multiple overlapping abstractions
+- Unclear separation between display/graphics/text
+- Tight coupling with global state
 
 ### Input Device Drivers
 
@@ -102,38 +150,48 @@ The display subsystem (`src/drivers/display/`) provides multiple layers:
 - Monitors all three button states
 - Provides position/button state queries via `get_state()`
 
-4. **Double Buffering** (`double_buffer.rs`)
-   - 8MB static buffer allocation
-   - Fast memory-to-memory operations
-   - Significant performance improvement over direct writes
 
 ## Graphics Subsystem (`graphics/`)
 
-### Core Graphics Components
+The graphics subsystem provides rendering capabilities but suffers from organic growth and unclear boundaries.
 
-1. **Color Management** (`color.rs`)
-   - RGB color representation
-   - Predefined color constants
-   - Color conversion utilities
+### Current Components
 
-2. **Graphics Primitives** (`core_gfx.rs`)
-   - Line drawing (Bresenham's algorithm)
-   - Rectangle and circle rendering
-   - Triangle and polygon support
-   - Both outline and filled variants
+1. **Graphics Primitives** (`core_gfx.rs`)
+   - Bresenham line drawing
+   - Circle rendering (outline and filled)
+   - Rectangle and polygon support
+   - Direct pixel manipulation
 
-3. **Text Rendering Engine** (`core_text.rs`)
-   - Font-agnostic text rendering
-   - Multi-line text support
-   - Text alignment (left, center, right)
+2. **Text Rendering** (`core_text.rs`)
+   - Multi-line text with alignment
+   - Font-agnostic interface
    - Background color support
+   - Works with any font implementation
 
-4. **Mouse Cursor** (`mouse_cursor.rs`)
-   - Classic arrow cursor design (12x12 pixels)
-   - Background save/restore for clean movement
-   - Direct integration with `DoubleBufferedFrameBuffer`
-   - Global cursor instance with lazy initialization
-   - Rendered in kernel idle loop based on mouse position
+3. **Mouse Cursor** (`mouse_cursor.rs`)
+   - 12x12 arrow cursor
+   - Background save/restore
+   - Tightly coupled to double buffer
+
+4. **Image Support**
+   - **BMP**: Full support including palettes
+   - **PNG**: Header parsing only (no decompression)
+
+### Architectural Problems
+
+The graphics subsystem has several issues:
+- **Unclear Layering**: Display, graphics, and text modules overlap
+- **Tight Coupling**: Components directly reference each other
+- **Mixed Abstractions**: Low-level pixel ops mixed with high-level rendering
+- **Global State**: Heavy reliance on static instances
+
+**Recommendation**: Future refactoring should establish clear layers:
+1. Framebuffer access layer
+2. Primitive drawing layer  
+3. Text/font layer
+4. Image/sprite layer
+5. Composite/widget layer
 
 ### Font System (`graphics/fonts/`)
 
@@ -195,16 +253,20 @@ Page table management and virtual memory operations:
 - Special handling for physical memory region access
 - Global mapper instance for interrupt handlers
 
-### Page Fault Integration
+### Demand Paging Implementation
 
-The memory system integrates with the page fault handler in `arch/x86_64/interrupts.rs`:
-1. Unmapped heap access triggers page fault
-2. Handler checks if address is in heap range
-3. Allocates new physical frame
-4. Maps virtual page to physical frame
-5. Execution resumes transparently
+The heap uses demand paging to allocate physical memory only when accessed:
 
-This demand paging approach reduces initial memory usage and allows the heap to grow as needed.
+1. **Initial State**: Heap virtual address space (100 MiB) is reserved but not mapped
+2. **First Access**: Triggers page fault with unmapped address
+3. **Page Fault Handler**: 
+   - Validates address is in heap range (0x_4444_4444_0000 - 0x_4444_4AAA_8FFF)
+   - Allocates a physical frame from frame allocator
+   - Maps virtual page to physical frame
+   - Returns to retry the instruction
+4. **Result**: Memory allocated on-demand, reducing initial footprint
+
+This approach means the 100 MiB heap doesn't consume physical memory until actually used.
 
 ## Core Libraries (`lib/`)
 
@@ -232,27 +294,6 @@ The debug system provides structured logging for kernel debugging:
 - Runtime level configuration
 - Formatted output with prefixes
 
-## Display Subsystem Architecture
-
-### Performance Optimizations
-
-1. **Double Buffering Benefits**
-   - Reduces framebuffer access latency
-   - Enables bulk memory operations
-   - Smoother visual updates
-   - Configurable via `USE_DOUBLE_BUFFER` flag
-
-2. **Memory Operations**
-   - Uses `ptr::copy()` for fast memory moves
-   - Optimized scrolling without redrawing
-   - Efficient buffer swapping
-
-### Current Limitations
-
-1. **Static Buffer Size** - 8MB hardcoded limit
-2. **Single Font Size** - No dynamic font scaling
-3. **Limited Graphics** - Basic primitives only
-4. **No Hardware Acceleration** - Pure software rendering
 
 ## Block Device Layer (`drivers/block.rs`)
 
@@ -276,37 +317,31 @@ The block device layer provides a unified interface for all block storage device
 
 ## Filesystem Layer (`fs/`)
 
-### Filesystem Abstraction
+### Architecture Overview
 
-AgenticOS provides a comprehensive filesystem abstraction layer that supports multiple filesystem types:
+The filesystem layer provides read-only access to FAT-formatted disks:
 
 1. **Filesystem Trait** (`filesystem.rs`)
-   - Common interface for all filesystem implementations
-   - Standard operations: open, read, write, mkdir, etc.
-   - Directory iteration support
-   - File attributes and metadata
-   - Error handling with `FilesystemError` enum
+   - Generic interface for filesystem implementations
+   - Standard operations (open, read, enumerate_dir)
+   - Currently only FAT is implemented
 
-2. **Arc-based File Handle API** (`file_handle.rs`)
-   - Modern file API using Arc for shared ownership
-   - Eliminates callback-based patterns
-   - Thread-safe file operations
-   - Supports cloning for shared access
-   - Automatic resource cleanup on drop
+2. **Arc-based File API** (`file_handle.rs`)
+   - Uses custom Arc implementation for shared ownership
+   - Eliminates lifetime issues common in OS development
+   - Clean API without callbacks or unsafe transmutation
+   - Automatic cleanup when last reference dropped
 
-3. **Partition Support** (`partition.rs`)
-   - MBR partition table parsing
-   - Partition type detection
-   - `PartitionBlockDevice` - Virtual block device for partitions
-   - Supports up to 4 primary partitions
-   - Automatic partition enumeration
+3. **VFS Layer** (`vfs.rs`)
+   - Single global mount point (no multi-mount yet)
+   - Filesystem type detection
+   - Routes operations to FAT implementation
 
-4. **Virtual Filesystem (VFS)** (`vfs.rs`)
-   - Mount point management
-   - Path resolution to appropriate filesystem
-   - Global VFS instance
-   - Auto-mount functionality
-   - Support for multiple mounted filesystems
+4. **Limitations**
+   - Read-only (no write support)
+   - 8.3 filenames only
+   - No subdirectory navigation
+   - FAT12/16/32 only
 
 ### FAT Filesystem Implementation (`fs/fat/`)
 
@@ -359,35 +394,36 @@ for entry in dir.entries() {
 
 ## Process Management (`process/`)
 
-### Process Abstraction Layer
+### Current Implementation
 
-The process management system provides the foundation for future multitasking:
+The "process management" system is currently just a command dispatcher:
 
-1. **Process Trait** (`process.rs`)
-   - Core interface defining process behavior
-   - Methods: `get_id()`, `get_name()`, `run()`
-   - Simple PID allocation starting from 1
-   - Foundation for future scheduling
+1. **Process Traits** (`process.rs`)
+   - `Process` and `BaseProcess` define interfaces
+   - Sequential PID allocation (no reuse)
+   - No actual process control blocks or state
 
-2. **Shell Process** (`shell.rs`)
-   - System shell implementation
-   - Runs as PID 1 during kernel initialization
-   - Displays welcome messages, memory stats, and tests
-   - Foundation for future interactive shell features
-   - Demonstrates the process abstraction in action
+2. **Command Manager** (`manager.rs`)
+   - Registry mapping command names to factories
+   - Synchronous command execution
+   - Simple argument parsing
 
-### Current Design
-- **Synchronous execution** - No concurrent processes yet
-- **Simple PID allocation** - Sequential counter, no reuse
-- **No process states** - Processes run immediately when created
-- **No context switching** - Foundation only
+3. **What's Missing**
+   - No CPU context saving/switching
+   - No process scheduling
+   - No memory isolation
+   - No concurrent execution
+   - No process lifecycle (create/suspend/terminate)
 
-### Future Extensions
-- Process states (running, ready, blocked)
-- Process scheduling and context switching
-- Inter-process communication
-- Process memory isolation
-- Thread support within processes
+### Design Limitations
+
+The current design is sufficient for a single-user command-line system but lacks fundamental process management features:
+- Everything runs in kernel mode
+- Commands block the entire system
+- No protection between commands
+- No resource limits or accounting
+
+This is intentional for simplicity but must be completely redesigned for true multitasking.
 
 ## Panic Handling
 
@@ -397,42 +433,64 @@ The panic handler (`panic.rs`) provides:
 - Kernel halt in infinite loop
 - Panic message display
 
-## Future Architecture Enhancements
+## Future Architecture Priorities
 
-### Planned Improvements
+### Immediate Needs (Technical Debt)
 
-1. **Memory Management** (Partially Complete)
-   - ✓ Heap allocator implementation
-   - ✓ Virtual memory/paging with demand paging
-   - ✓ Basic frame allocation
-   - TODO: Memory protection between processes
-   - TODO: Copy-on-write optimization
-   - TODO: Memory-mapped files
+1. **Graphics Refactoring**
+   - Establish clear abstraction layers
+   - Reduce coupling between modules
+   - Consistent naming and organization
 
-2. **Process Management**
-   - Task/thread abstraction
-   - Scheduler implementation
-   - Inter-process communication
+2. **Error Handling**
+   - Replace panics with proper Results
+   - Consistent error types across subsystems
+   - Better error propagation and reporting
 
-3. **File System**
-   - VFS layer
-   - Basic file system driver
-   - Device file abstraction
+3. **Test Coverage**
+   - Expand test suite significantly
+   - Integration tests for subsystems
+   - Performance benchmarks
 
-4. **Networking**
-   - Network driver framework
-   - TCP/IP stack
-   - Socket abstraction
+### Medium-term Goals
 
-5. **Agent Support**
-   - Agent execution environment
-   - Resource isolation
-   - Communication protocols
+1. **True Process Management**
+   - CPU context switching
+   - Process scheduling (round-robin to start)
+   - Basic memory isolation
+   - User/kernel mode separation
+
+2. **Filesystem Write Support**
+   - FAT write operations
+   - Long filename support
+   - Subdirectory navigation
+
+3. **Better Memory Management**
+   - Per-process memory spaces
+   - Copy-on-write pages
+   - Memory-mapped files
+
+### Long-term Vision (Agentic Features)
+
+1. **Agent Runtime**
+   - WebAssembly or similar sandboxing
+   - Resource limits and quotas
+   - Inter-agent communication
+
+2. **Networking**
+   - Basic network stack
+   - Agent-to-agent protocols
+   - Remote agent execution
+
+3. **Distributed Features**
+   - Agent migration
+   - Distributed state management
+   - Consensus protocols
 
 ### Design Principles
 
-1. **Modularity** - Clear separation of concerns
-2. **Safety** - Leverage Rust's type system
-3. **Performance** - Optimize critical paths
-4. **Simplicity** - Avoid over-engineering
-5. **Extensibility** - Easy to add new features
+1. **Incremental Progress** - Small, working improvements
+2. **Maintainability** - Clean, documented code
+3. **Performance** - Measure and optimize bottlenecks
+4. **Correctness** - Extensive testing and validation
+5. **Simplicity** - Don't over-engineer solutions

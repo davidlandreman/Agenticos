@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch, following established OS development practices while preparing for agent-based computing capabilities.
+AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch with the eventual goal of supporting agent-based computing capabilities.
+
+**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. However, the "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
 
 ## Common Commands
 
@@ -21,6 +23,7 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - `cargo build --features test` - Build kernel with test features enabled
 - Tests run automatically on kernel boot when built with test feature
 - QEMU exits with success/failure code based on test results
+- **Note**: Test coverage is limited and should be expanded
 
 ### Code Quality
 - `cargo fmt` - Format code according to Rust standards
@@ -29,12 +32,12 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 
 ## Project Structure
 
-The project follows a modular architecture with clear separation of concerns:
+The project follows a modular monolithic kernel design with clear separation of concerns. All code runs in kernel space (ring 0) with no user/kernel boundary yet.
 
 ### Core Files
 - `src/main.rs` - Minimal kernel entry point (< 25 lines)
 - `src/kernel.rs` - Kernel initialization and boot sequence
-- `src/panic.rs` - Custom panic handler
+- `src/panic.rs` - Custom panic handler for kernel panics
 
 ### Module Organization
 - `src/arch/` - Architecture-specific code
@@ -42,70 +45,106 @@ The project follows a modular architecture with clear separation of concerns:
     - `interrupts.rs` - Interrupt handling and IDT
 
 - `src/drivers/` - Hardware drivers
-  - `display/` - Display and framebuffer drivers
-    - `display.rs` - Unified display interface
+  - `display/` - Display and framebuffer drivers (uses modern framebuffer, NOT VGA)
+    - `display.rs` - Unified display interface (controls single/double buffering)
     - `frame_buffer.rs` - Low-level framebuffer abstraction
     - `text_buffer.rs` - Direct framebuffer text rendering
-    - `double_buffer.rs` - Double buffering implementation
+    - `double_buffer.rs` - 8MB static buffer for performance
     - `double_buffered_text.rs` - Text rendering with double buffering
-  - `keyboard.rs` - PS/2 keyboard driver with scancode processing
-  - `mouse.rs` - PS/2 mouse driver with packet processing
-  - `ps2_controller.rs` - PS/2 controller initialization for keyboard and mouse
-  - `block.rs` - Block device trait and abstractions
-  - `ide.rs` - IDE/ATA disk driver with LBA support
+  - `keyboard.rs` - PS/2 keyboard driver with scancode set 2 support
+  - `mouse.rs` - PS/2 mouse driver with 3-button support
+  - `ps2_controller.rs` - Shared PS/2 controller for keyboard/mouse
+  - `block.rs` - Block device trait for storage abstraction
+  - `ide.rs` - IDE/ATA PIO mode driver (supports 4 drives)
 
-- `src/graphics/` - Graphics subsystem
-  - `color.rs` - Color definitions and utilities
-  - `core_text.rs` - Text rendering engine
-  - `core_gfx.rs` - Graphics primitives (lines, circles, etc.)
-  - `mouse_cursor.rs` - Mouse cursor rendering with background save/restore
-  - `fonts/` - Font rendering systems
-    - `core_font.rs` - Unified font interface
-    - `embedded_font.rs` - Built-in bitmap fonts
-    - `vfnt.rs` - VFNT font format support
-    - `truetype_font.rs` - TrueType font support
-    - `font_data.rs` - Font data definitions
+- `src/graphics/` - Graphics subsystem (note: becoming complex, needs refactoring)
+  - `color.rs` - RGB color definitions and predefined colors
+  - `core_text.rs` - Font-agnostic text rendering
+  - `core_gfx.rs` - Graphics primitives (Bresenham lines, circles, polygons)
+  - `mouse_cursor.rs` - 12x12 hardware cursor with background save/restore
+  - `fonts/` - Multiple font format support
+    - `core_font.rs` - Unified font trait and selection
+    - `embedded_font.rs` - Built-in 8x8 bitmap fonts
+    - `vfnt.rs` - VFNT vector font format
+    - `truetype_font.rs` - TrueType font parsing and rendering
+    - `font_data.rs` - Raw font data storage
+  - `images/` - Image format support
+    - `bmp.rs` - Full Windows BMP support (4/8/16/24/32-bit)
+    - `png.rs` - PNG header parsing only (no decompression yet)
 
-- `src/fs/` - Filesystem layer
-  - `mod.rs` - Module exports
-  - `filesystem.rs` - Generic filesystem trait and detection
-  - `partition.rs` - MBR partition table support
-  - `vfs.rs` - Virtual filesystem layer
-  - `fat/` - FAT filesystem implementation
-    - `filesystem.rs` - FAT filesystem operations
+- `src/fs/` - Filesystem layer (read-only currently)
+  - `filesystem.rs` - Generic filesystem trait
+  - `partition.rs` - MBR partition table parsing
+  - `vfs.rs` - Virtual filesystem with mount management
+  - `file_handle.rs` - Arc-based file API (modern design)
+  - `fs_manager.rs` - High-level filesystem operations
+  - `fat/` - FAT12/16/32 implementation
+    - `filesystem.rs` - FAT operations (8.3 filenames only)
     - `boot_sector.rs` - BIOS Parameter Block parsing
-    - `fat_table.rs` - FAT table and cluster operations
-    - `directory.rs` - Directory entry handling
+    - `fat_table.rs` - Cluster chain following
+    - `directory.rs` - Directory entry parsing
     - `types.rs` - FAT-specific types
 
 - `src/lib/` - Core libraries and utilities
-  - `debug.rs` - Debug logging system with macros
-  - `arc.rs` - Atomic reference counting (Arc/Weak) implementation
+  - `debug.rs` - 5-level debug logging (error/warn/info/debug/trace)
+  - `arc.rs` - Custom Arc/Weak implementation for kernel use
+  - `test_utils.rs` - Testing framework for no_std environment
 
-- `src/mm/` - Memory management
-  - `memory.rs` - Physical memory manager with heap initialization
-  - `frame_allocator.rs` - Physical frame allocator using bootloader memory map
-  - `heap.rs` - Dynamic memory allocator (100 MiB heap with linked-list allocator)
-  - `paging.rs` - Virtual memory paging with demand paging support
+- `src/mm/` - Memory management (fully implemented)
+  - `memory.rs` - Memory subsystem initialization
+  - `frame_allocator.rs` - 4KB frame allocation from bootloader map
+  - `heap.rs` - 100 MiB heap at 0x_4444_4444_0000 (linked-list allocator)
+  - `paging.rs` - Virtual memory with demand paging
 
-- `src/process/` - Core process management primitives
-  - `process.rs` - Process trait and PID allocation
-  - `mod.rs` - Module exports
+- `src/process/` - Process management (basic foundation only)
+  - `process.rs` - Process/BaseProcess traits, PID allocation
+  - `manager.rs` - Command registry and execution
 
-- `src/commands/` - Specific command implementations
-  - `shell/` - System shell command
-    - `mod.rs` - Shell process implementation
-  - `mod.rs` - Command exports
+- `src/commands/` - Shell commands (13 implemented)
+  - `shell/` - Main system shell
+  - `dir.rs`, `ls.rs` - Directory listing
+  - `cat.rs`, `head.rs`, `tail.rs` - File viewing
+  - `echo.rs`, `wc.rs`, `grep.rs` - Text processing
+  - `touch.rs` - File creation
+  - `hexdump.rs` - Binary viewing
+  - `time.rs` - System time
+  - `pwd.rs` - Working directory
+
+- `src/tests/` - Test modules
+  - `basic.rs`, `memory.rs`, `heap.rs`, `arc.rs` - Core tests
+  - `display.rs`, `interrupts.rs` - Hardware tests
 
 ### Configuration Files
 - `Cargo.toml` - Project manifest with OS-specific dependencies
 - `rust-toolchain.toml` - Specifies nightly Rust with required components
 - `.cargo/config.toml` - Build configuration and target settings
+- `x86_64-agenticos.json` - Custom target specification
 
 ### Documentation
 - `IMPLEMENTATION_PLAN.md` - Phased development roadmap
 - `ARCHITECTURE.md` - Detailed architecture documentation
 - `CLAUDE.md` - This file, AI assistant guidance
+
+## Known Issues and Technical Debt
+
+### Current Limitations
+1. **No Multitasking** - Everything runs synchronously in kernel space
+2. **Read-Only Filesystem** - No write support implemented
+3. **8.3 Filenames Only** - No long filename support
+4. **Limited Test Coverage** - Many subsystems lack comprehensive tests
+5. **Global State** - Heavy use of `static mut` and `lazy_static`
+6. **No User Space** - Everything runs in ring 0 (kernel mode)
+
+### Areas Needing Refactoring
+1. **Graphics Subsystem** - Complex relationships between display modules
+2. **Error Handling** - Inconsistent use of panic! vs Result
+3. **Command System** - Could benefit from better parsing/validation
+4. **Mouse Integration** - Cursor rendering tightly coupled to display
+
+### Performance Considerations
+- Double buffering provides significant performance improvement
+- Memory operations (ptr::copy) are much faster than pixel-by-pixel
+- Static allocation avoids heap fragmentation in critical paths
 
 ## OS Development Specifics
 
@@ -300,287 +339,130 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
 
 ## Graphics and Display Subsystem
 
+### Architecture Overview
+The display system uses a **modern framebuffer** (NOT VGA text mode) provided by the bootloader. The system is organized in layers but the relationships between modules have become complex and need refactoring.
+
 ### Double Buffering Implementation
-The framebuffer display system supports both single and double buffering modes, controlled by the `USE_DOUBLE_BUFFER` flag in `src/drivers/display/display.rs`.
+Double buffering is controlled by the `USE_DOUBLE_BUFFER` flag in `src/drivers/display/display.rs`:
+- **Enabled (default)**: 8MB static buffer, fast performance
+- **Disabled**: Direct framebuffer writes, slower but simpler
 
-**Key Learnings:**
-1. **Direct framebuffer access is slow** - Writing pixel-by-pixel to framebuffer memory has poor performance due to slow memory access
-2. **Double buffering improves performance** - Writing to a fast memory buffer first, then copying to framebuffer in one operation is much faster
-3. **Memory operations are efficient** - Using `ptr::copy()` for buffer swapping and scrolling is far superior to pixel-by-pixel operations
-4. **Static allocation works well** - Using an 8MB static buffer avoids heap allocation complexities in the kernel
-5. **Unified interfaces simplify code** - The `display.rs` module provides a clean abstraction over different rendering implementations
+**Performance Insights:**
+1. **Framebuffer memory is slow** - Direct pixel writes have high latency
+2. **Bulk copies are fast** - `ptr::copy()` for buffer swapping is efficient
+3. **Scrolling optimization** - Memory move instead of redrawing saves cycles
+4. **Static allocation** - Avoids heap fragmentation for critical path
 
-**Performance Considerations:**
-- Single buffering: Each pixel write goes directly to slow framebuffer memory
-- Double buffering: Pixel writes go to fast RAM, then bulk copy to framebuffer
-- Scrolling: Memory copy operations (`ptr::copy`) are much faster than redrawing
+### Graphics Capabilities
+- **Primitives**: Lines (Bresenham), circles, rectangles, polygons
+- **Text**: Multiple fonts (bitmap, VFNT, TrueType) with alignment
+- **Images**: Full BMP support, partial PNG (headers only)
+- **Mouse**: Hardware cursor with background save/restore
+- **Colors**: RGB support with predefined palette
 
-### Image Support
-- **BMP format**: Full Windows bitmap support with palette handling (4/8/16/24/32-bit)
-- **Located in**: `src/graphics/images/`
-- **Usage**: `BmpImage::from_bytes()` with `include_bytes!()` for compile-time embedding
-- **Drawing**: Via `display::with_double_buffer()` and `buffer.draw_image()`
+### Current Architecture Issues
+The graphics subsystem has grown organically and now suffers from:
+- Unclear module boundaries (display vs graphics vs fonts)
+- Tight coupling between components
+- Mixed abstraction levels
+- Inconsistent naming conventions
 
-**Current Limitations:**
-- Graphics concepts are becoming complex and somewhat murky
-- The relationship between different display modules needs clarification
-- Font rendering and graphics primitives could benefit from better organization
-- Future work should revisit and reorganize the graphics subsystem architecture
+**Recommendation**: Next major refactor should establish clear layers:
+1. Raw framebuffer access
+2. Drawing primitives
+3. Text/font rendering
+4. Image loading/display
+5. Composite operations (windows, widgets)
 
-## Process Abstraction
+## Process Management
 
-### Overview
-The kernel now includes a basic process abstraction layer as a foundation for future threading and scheduling capabilities. This initial implementation provides:
+### Current State
+AgenticOS has a basic process abstraction but **no actual multitasking**. All "processes" run synchronously in kernel space. This is a foundation for future work, not a complete implementation.
 
-- **Process trait**: Defines the interface for all processes with `get_id()`, `get_name()`, and `run()` methods
-- **PID allocation**: Simple sequential process ID allocation starting from 1
-- **Shell process**: The kernel's boot messages and initial system interface extracted into a `ShellProcess`
+### What's Implemented
+- **Process traits**: `Process` and `BaseProcess` define the interface
+- **PID allocation**: Sequential IDs starting from 1 (no reuse)
+- **Command registry**: Maps command names to factory functions
+- **Shell integration**: Unknown commands routed to process manager
 
-### Current Implementation
-- `src/process/process.rs`: Core process abstractions
-  - `Process` trait defining the process interface
-  - `ProcessId` type alias for u32
-  - `allocate_pid()` function for sequential PID allocation
-  
-- `src/commands/shell/mod.rs`: System shell command
-  - Implements the `Process` trait as `ShellProcess`
-  - Displays welcome message, memory statistics, and system tests
-  - Demonstrates color support, scrolling, and tab handling
-  - Runs as PID 1 during kernel initialization
-  - Foundation for future interactive shell capabilities
+### What's NOT Implemented
+- **No scheduling** - Processes run to completion
+- **No context switching** - No saved CPU state
+- **No isolation** - All code shares kernel memory
+- **No concurrency** - Single execution thread
+- **No IPC** - No inter-process communication
 
-### Architecture Note
-The separation between `/process` and `/commands` provides a clean distinction:
-- `/process` contains only the fundamental primitives and traits for process management
-- `/commands` contains specific implementations of processes that users can run
-- This structure allows for easy addition of new commands while keeping the core process abstraction minimal
-
-### Usage Example
+### Command System
+The current "process" system is really just a command dispatcher:
 ```rust
-// In kernel.rs during kernel initialization
-use crate::commands::ShellProcess;
+// Commands are registered at boot
+register_command("ls", create_ls_process);
 
-let mut shell_process = ShellProcess::new();
-debug_info!("Running shell process (PID: {})", shell_process.get_id());
-shell_process.run();
+// Shell executes them synchronously
+execute_command("ls /home")?;  // Runs to completion
 ```
 
-### Future Considerations
-- This is a foundation for future threading/scheduling implementation
-- No actual concurrent execution yet - processes run synchronously
-- Ready for extension with process states, scheduling, and context switching
+This provides a clean way to add commands but is not true process management.
 
-## Process Management and Command System
+### How Commands Work
 
-### Overview
-The kernel now includes a sophisticated process management system that allows any command to execute other commands through a centralized process manager. This architecture eliminates boilerplate and provides a foundation for future multi-tasking capabilities.
+Commands are registered at boot and executed through the process manager:
 
-### Architecture
+1. **Registration**: Each command registers a factory function
+   ```rust
+   register_command("ls", create_ls_process);
+   ```
 
-#### Core Components
-- **`ProcessManager`**: Central registry and executor for all commands
-- **`RunnableProcess` trait**: Interface for processes that can be spawned
-- **`CommandFactory`**: Function type for creating process instances
-- **Command Registration**: Global registry mapping command names to factories
+2. **Execution**: Shell routes commands to process manager
+   ```rust
+   execute_command("ls /home")?;
+   ```
 
-#### Process Traits and Implementation
-```rust
-// Core trait for runnable processes
-pub trait RunnableProcess {
-    fn run(&mut self);
-    fn get_name(&self) -> &str;
-}
-
-// Existing processes automatically become runnable
-pub struct MyProcess {
-    pub base: BaseProcess,
-    // ... other fields
-}
-
-impl HasBaseProcess for MyProcess { /* ... */ }
-
-// Simple RunnableProcess implementation (minimal boilerplate)
-impl RunnableProcess for MyProcess {
-    fn run(&mut self) {
-        self.run(); // Call inherent run method
-    }
-    
-    fn get_name(&self) -> &str {
-        self.base.get_name()
-    }
-}
-```
-
-### Command Registration and Execution
-
-#### Registration Pattern
-Commands are registered during kernel initialization:
-```rust
-// In kernel.rs initialization
-crate::process::register_command("dir", crate::commands::dir::create_dir_process);
-crate::process::register_command("mycommand", crate::commands::mycommand::create_mycommand_process);
-```
-
-#### Factory Function Pattern
-Each command provides a factory function:
-```rust
-// In src/commands/mycommand/mod.rs
-pub fn create_mycommand_process(args: Vec<String>) -> Box<dyn RunnableProcess> {
-    Box::new(MyCommandProcess::new_with_args(args))
-}
-```
-
-#### Shell Integration
-The shell automatically routes unknown commands to the process manager:
-```rust
-// In shell command processing
-match trimmed {
-    "help" | "exit" | "clear" => { /* built-in commands */ }
-    _ => {
-        // Try to execute as registered command
-        match crate::process::execute_command(trimmed) {
-            Ok(()) => { /* success */ }
-            Err(e) => println!("{}", e),
-        }
-    }
-}
-```
+3. **Implementation**: Commands implement `RunnableProcess`
+   ```rust
+   pub trait RunnableProcess {
+       fn run(&mut self);
+       fn get_name(&self) -> &str;
+   }
 
 ### Adding New Commands
 
-#### Step 1: Create Command Structure
-Follow the established pattern:
-```rust
-// src/commands/mycommand/mod.rs
-use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
+To add a new command, follow this pattern:
 
-pub struct MyCommandProcess {
-    pub base: BaseProcess,
-    args: Vec<String>,
-}
+1. **Create command file**: `src/commands/mycommand/mod.rs`
+   ```rust
+   use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
+   
+   pub struct MyCommandProcess {
+       pub base: BaseProcess,
+       args: Vec<String>,
+   }
+   
+   // Factory function for registration
+   pub fn create_mycommand_process(args: Vec<String>) -> Box<dyn RunnableProcess> {
+       Box::new(MyCommandProcess::new_with_args(args))
+   }
+   ```
 
-impl MyCommandProcess {
-    pub fn new() -> Self {
-        Self {
-            base: BaseProcess::new("mycommand"),
-            args: Vec::new(),
-        }
-    }
-    
-    pub fn new_with_args(args: Vec<String>) -> Self {
-        Self {
-            base: BaseProcess::new("mycommand"),
-            args,
-        }
-    }
-}
-```
+2. **Implement traits**: Minimal boilerplate required
+   ```rust
+   impl RunnableProcess for MyCommandProcess {
+       fn run(&mut self) { /* your code here */ }
+       fn get_name(&self) -> &str { self.base.get_name() }
+   }
+   ```
 
-#### Step 2: Implement Required Traits
-```rust
-impl HasBaseProcess for MyCommandProcess {
-    fn base(&self) -> &BaseProcess { &self.base }
-    fn base_mut(&mut self) -> &mut BaseProcess { &mut self.base }
-}
+3. **Register in kernel.rs**:
+   ```rust
+   register_command("mycommand", create_mycommand_process);
+   ```
 
-impl RunnableProcess for MyCommandProcess {
-    fn run(&mut self) {
-        self.run(); // Delegate to inherent method
-    }
-    
-    fn get_name(&self) -> &str {
-        self.base.get_name()
-    }
-}
-```
+4. **Export from commands/mod.rs**:
+   ```rust
+   pub mod mycommand;
+   ```
 
-#### Step 3: Implement Command Logic
-```rust
-impl MyCommandProcess {
-    pub fn run(&mut self) {
-        // Command implementation here
-        println!("MyCommand executed with {} args", self.args.len());
-        for (i, arg) in self.args.iter().enumerate() {
-            println!("  Arg {}: {}", i, arg);
-        }
-    }
-}
-```
-
-#### Step 4: Add Factory Function
-```rust
-pub fn create_mycommand_process(args: Vec<String>) -> Box<dyn RunnableProcess> {
-    Box::new(MyCommandProcess::new_with_args(args))
-}
-```
-
-#### Step 5: Register in Kernel
-```rust
-// In src/kernel.rs
-crate::process::register_command("mycommand", crate::commands::mycommand::create_mycommand_process);
-```
-
-#### Step 6: Export from Commands Module
-```rust
-// In src/commands/mod.rs
-pub mod mycommand;
-pub use mycommand::MyCommandProcess;
-```
-
-### Key Benefits
-
-#### Minimal Boilerplate
-- No need to implement full `Process` trait
-- Simple `RunnableProcess` implementation delegates to existing `run()` method
-- Factory function is straightforward
-
-#### Uniform Command Execution
-- All commands executed through the same `process::execute_command()` interface
-- Consistent argument parsing and error handling
-- Easy to extend with features like pipes, redirection, etc.
-
-#### Future-Ready Architecture
-- Foundation for process scheduling and concurrency
-- Commands can spawn other commands via process manager
-- Ready for inter-process communication features
-
-### Process Manager API
-
-#### Core Functions
-```rust
-// Register a command globally
-pub fn register_command(name: &str, factory: CommandFactory);
-
-// Execute a command with arguments
-pub fn execute_command(command_line: &str) -> ProcessResult;
-
-// Query available commands
-pub fn list_commands() -> Vec<String>;
-pub fn has_command(name: &str) -> bool;
-```
-
-#### Usage Examples
-```rust
-// Register commands
-register_command("ls", create_ls_process);
-register_command("cat", create_cat_process);
-
-// Execute commands
-execute_command("ls /home")?;
-execute_command("cat file.txt")?;
-
-// Query commands
-let available = list_commands();
-if has_command("git") {
-    execute_command("git status")?;
-}
-```
-
-### Design Philosophy
-- **Convention over Configuration**: Follow shell command patterns
-- **Minimal Abstraction**: Don't over-engineer the process system
-- **Future Compatibility**: Architecture supports threading/scheduling extensions
-- **Developer Friendly**: Easy to add new commands with minimal boilerplate
+That's it! The command is now available in the shell.
 
 ## Mouse Support
 
@@ -635,102 +517,31 @@ The kernel includes a filesystem abstraction layer with FAT12/16/32 support:
 - `src/fs/file_handle.rs` - Arc-based file and directory handles
 - `src/fs/fs_manager.rs` - High-level filesystem API
 
-### Arc-based File Handle API
+### Arc-based File API
 
-The filesystem now provides modern Arc-based file handles that eliminate lifetime issues and unsafe transmutation:
+The filesystem uses Arc (atomic reference counting) for safe file handle sharing:
 
-#### File Operations
 ```rust
-use crate::fs::{File, FileResult};
+use crate::fs::File;
 use crate::lib::arc::Arc;
 
-// Open a file for reading
+// Open and read files
 let file: Arc<File> = File::open_read("/TEST.TXT")?;
-
-// Read entire file as string
 let content = file.read_to_string()?;
 
-// Read into buffer
-let mut buffer = [0u8; 1024];
-let bytes_read = file.read(&mut buffer)?;
-
-// Get file information
-println!("Path: {}", file.path());
-println!("Size: {} bytes", file.size());
-println!("Position: {}", file.position());
-
-// Seek within file
-file.seek(100)?;
-
-// Share file handle safely
-let file_clone = file.clone();
-assert!(file.is_open() && file_clone.is_open());
+// Clone handles safely
+let file2 = file.clone();  // Both share same file
 ```
 
-#### Directory Operations
-```rust
-use crate::fs::{Directory, DirectoryEntry};
+**Key Benefits:**
+- No lifetime issues or unsafe code
+- Automatic cleanup when last reference dropped
+- Ready for future multi-threading
+- Clean API without callbacks
 
-// Open a directory
-let dir: Arc<Directory> = Directory::open("/")?;
+**Limitations:**
+- Read-only (no write support)
+- 8.3 filenames only
+- FAT filesystem only
+- No subdirectory support yet
 
-// Get all entries
-let entries = dir.entries();
-for entry in &entries {
-    println!("{} - {} bytes", entry.name_str(), entry.size);
-}
-
-// Iterate through entries
-let mut dir = Directory::open("/assets")?;
-while let Some(entry) = dir.read_entry() {
-    match entry.file_type {
-        FileType::File => println!("📄 {}", entry.name_str()),
-        FileType::Directory => println!("📁 {}", entry.name_str()),
-        _ => println!("❓ {}", entry.name_str()),
-    }
-}
-```
-
-#### Key Features
-- **Shared Ownership**: Arc enables multiple references to the same file handle
-- **Automatic Cleanup**: Files are automatically closed when all references are dropped
-- **Memory Safe**: No unsafe lifetime transmutation or manual memory management
-- **Thread Safe**: Arc provides atomic reference counting for future multi-threading support
-- **Error Handling**: Consistent `FileResult<T>` return types with detailed error information
-
-#### Convenience Functions
-```rust
-use crate::fs;
-
-// Quick file operations
-if fs::exists("/config.txt") {
-    let content = fs::read_file_to_string("/config.txt")?;
-    fs::write_string("/output.txt", &content)?;
-}
-
-// Create new files
-let new_file = fs::create_file("/data.bin")?;
-new_file.write(b"Binary data")?;
-
-// Process files line by line
-fs::for_each_line("/log.txt", |line| {
-    println!("Log: {}", line);
-    Ok(())
-})?;
-```
-
-### Filesystem Implementation Notes
-
-#### Directory Enumeration
-The filesystem trait includes an `enumerate_dir` method that provides efficient directory listing:
-- FAT filesystem overrides this to directly read directory entries from disk
-- Returns a `Vec<DirectoryEntry>` for easy iteration
-- Supports both root directory and subdirectory enumeration (FAT currently only supports root)
-
-#### Virtual Filesystem (VFS)
-- Manages filesystem mounts at specific paths
-- Automatically detects filesystem types (FAT12/16/32, ext2/3/4, NTFS)
-- Routes file operations to appropriate filesystem implementation
-- Currently supports single root mount point
-
-The shell automatically detects and displays filesystem information during boot, and provides filesystem exploration capabilities using the Arc-based API.
