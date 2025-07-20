@@ -7,7 +7,7 @@ use crate::drivers::mouse;
 use super::{
     Window, WindowId, Screen, ScreenId, ScreenMode, GraphicsDevice,
     Event, EventResult, KeyboardEvent, MouseEvent, MouseEventType,
-    Point, Rect,
+    Point, Rect, keyboard::{scancode_to_keycode, is_break_code, KeyboardState},
 };
 
 /// The Window Manager coordinates all windows across all screens
@@ -17,7 +17,7 @@ pub struct WindowManager {
     /// Currently active screen
     active_screen: ScreenId,
     /// Registry of all windows
-    window_registry: BTreeMap<WindowId, Box<dyn Window>>,
+    pub window_registry: BTreeMap<WindowId, Box<dyn Window>>,
     /// Focus stack - top element has focus
     focus_stack: Vec<WindowId>,
     /// Z-order of windows (back to front)
@@ -32,6 +32,10 @@ pub struct WindowManager {
     cursor_saved_pixels: Vec<(usize, usize, crate::graphics::color::Color)>,
     /// Dirty region that needs updating
     dirty_region: Option<Rect>,
+    /// Keyboard state tracker
+    keyboard_state: KeyboardState,
+    /// Whether we're expecting a break code after 0xF0
+    expecting_break_code: bool,
 }
 
 impl WindowManager {
@@ -47,6 +51,9 @@ impl WindowManager {
             last_mouse_pos: (0, 0),
             needs_redraw: true,
             cursor_saved_pixels: Vec::new(),
+            dirty_region: None,
+            keyboard_state: KeyboardState::default(),
+            expecting_break_code: false,
         };
         
         // Create default text screen
@@ -175,11 +182,69 @@ impl WindowManager {
     
     // Event routing
     
+    /// Process keyboard interrupt data
+    pub fn handle_keyboard_scancode(&mut self, scancode: u8) {
+        crate::debug_trace!("WindowManager::handle_keyboard_scancode: 0x{:02x}", scancode);
+        
+        // Special handling for 0xF0 prefix (scancode set 2 break code prefix)
+        if scancode == 0xF0 {
+            crate::debug_info!("Got 0xF0 prefix, next scancode will be a break code");
+            self.expecting_break_code = true;
+            return;
+        }
+        
+        // Check if this is a break code (key release)
+        let is_break = self.expecting_break_code;
+        self.expecting_break_code = false;
+        
+        if is_break {
+            crate::debug_info!("Processing break code (key release) for scancode 0x{:02x}", scancode);
+            // Handle modifier key releases
+            match scancode {
+                0x12 | 0x59 => self.keyboard_state.modifiers.shift = false,  // Shift release
+                0x14 => self.keyboard_state.modifiers.ctrl = false,          // Ctrl release
+                0x11 => self.keyboard_state.modifiers.alt = false,           // Alt release
+                _ => {}
+            }
+            // Don't process break codes further for now
+            return;
+        }
+        
+        // Update modifier state for make codes
+        crate::debug_trace!("Updating keyboard modifiers...");
+        self.keyboard_state.update_modifiers(scancode);
+        crate::debug_trace!("Modifiers updated");
+        
+        // Convert scancode to KeyCode
+        crate::debug_trace!("Converting scancode to keycode...");
+        if let Some(key_code) = scancode_to_keycode(scancode) {
+            crate::debug_trace!("Converted to KeyCode: {:?}", key_code);
+            
+            let event = KeyboardEvent {
+                key_code,
+                pressed: true,  // We're only handling make codes
+                modifiers: self.keyboard_state.modifiers,
+            };
+            
+            crate::debug_trace!("Routing keyboard event: pressed={}", event.pressed);
+            self.route_keyboard_event(event);
+            crate::debug_trace!("route_keyboard_event returned");
+        } else {
+            crate::debug_trace!("No KeyCode mapping for scancode 0x{:02x}", scancode);
+        }
+        crate::debug_trace!("handle_keyboard_scancode complete");
+    }
+    
     /// Route a keyboard event to the appropriate window
     pub fn route_keyboard_event(&mut self, event: KeyboardEvent) {
+        crate::debug_trace!("route_keyboard_event called");
+        
         // Send to focused window
         if let Some(focused) = self.focused_window() {
+            crate::debug_trace!("Routing to focused window: {:?}", focused);
             self.route_event_to_window(focused, Event::Keyboard(event));
+        } else {
+            crate::debug_trace!("No focused window to route keyboard event to");
         }
     }
     
@@ -209,9 +274,15 @@ impl WindowManager {
     
     /// Route an event to a specific window
     fn route_event_to_window(&mut self, window_id: WindowId, event: Event) {
+        crate::debug_trace!("route_event_to_window: window={:?}, event={:?}", window_id, event);
+        
         let result = if let Some(window) = self.window_registry.get_mut(&window_id) {
-            window.handle_event(event.clone())
+            crate::debug_trace!("Calling handle_event on window");
+            let result = window.handle_event(event.clone());
+            crate::debug_trace!("handle_event returned: {:?}", result);
+            result
         } else {
+            crate::debug_trace!("Window not found in registry!");
             EventResult::Ignored
         };
         
@@ -219,6 +290,7 @@ impl WindowManager {
         if result == EventResult::Propagate {
             if let Some(window) = self.window_registry.get(&window_id) {
                 if let Some(parent_id) = window.parent() {
+                    crate::debug_trace!("Propagating to parent: {:?}", parent_id);
                     self.route_event_to_window(parent_id, event);
                 }
             }
@@ -240,6 +312,10 @@ impl WindowManager {
         // Check if any windows need repaint
         let windows_need_repaint = self.window_registry.values().any(|w| w.needs_repaint());
         
+        if windows_need_repaint {
+            crate::debug_info!("Windows need repaint detected!");
+        }
+        
         // Only render if something changed
         if !self.needs_redraw && !mouse_moved && !windows_need_repaint {
             return; // Nothing to update
@@ -254,16 +330,24 @@ impl WindowManager {
             return;
         }
         
-        debug_trace!("Full frame render: windows_need_repaint={}", windows_need_repaint);
+        crate::debug_trace!("Full frame render: windows_need_repaint={}, mouse_moved={}, needs_redraw={}", 
+            windows_need_repaint, mouse_moved, self.needs_redraw);
         
         // Clear the device
+        crate::debug_trace!("Clearing graphics device...");
         self.graphics_device.clear(crate::graphics::color::Color::BLACK);
+        crate::debug_trace!("Graphics device cleared");
         
         // Render the active screen's windows
         if let Some(screen) = self.get_active_screen() {
             if let Some(root_id) = screen.root_window {
+                crate::debug_trace!("Rendering window tree starting from root: {:?}", root_id);
                 self.render_window_tree(root_id);
+            } else {
+                crate::debug_warn!("No root window set for active screen!");
             }
+        } else {
+            crate::debug_warn!("No active screen!");
         }
         
         // Draw a simple mouse cursor (arrow shape)
@@ -354,6 +438,7 @@ impl WindowManager {
     
     /// Recursively render a window and its children
     fn render_window_tree(&mut self, window_id: WindowId) {
+        crate::debug_trace!("render_window_tree: {:?}", window_id);
         // We need to temporarily take the window out to avoid borrowing issues
         if let Some(mut window) = self.window_registry.remove(&window_id) {
             // Get window properties before painting
@@ -361,11 +446,14 @@ impl WindowManager {
             let visible = window.visible();
             let children = window.children().to_vec();
             
+            crate::debug_trace!("Window {:?}: bounds={:?}, visible={}", window_id, bounds, visible);
+            
             if visible {
                 // Set clipping to window bounds
                 self.graphics_device.set_clip_rect(Some(bounds));
                 
                 // Paint the window
+                crate::debug_trace!("Calling paint on window {:?}", window_id);
                 window.paint(&mut *self.graphics_device);
                 
                 // Put the window back

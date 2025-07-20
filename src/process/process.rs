@@ -5,7 +5,7 @@ use spin::Mutex;
 pub type ProcessId = u32;
 
 /// Trait for runnable processes that can be spawned by the process manager
-pub trait RunnableProcess {
+pub trait RunnableProcess: Send {
     fn run(&mut self);
     fn get_name(&self) -> &str;
 }
@@ -154,7 +154,7 @@ impl RunnableProcess for BaseProcess {
 // Blanket implementation for anything that implements HasBaseProcess + Process
 impl<T> RunnableProcess for T 
 where 
-    T: HasBaseProcess + Process,
+    T: HasBaseProcess + Process + Send,
 {
     fn run(&mut self) {
         Process::run(self);

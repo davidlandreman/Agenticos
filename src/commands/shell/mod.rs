@@ -5,6 +5,8 @@ use crate::graphics::images::{BmpImage, Image};
 use crate::{print, println};
 use alloc;
 
+pub mod async_shell;
+
 pub struct ShellProcess {
     pub base: BaseProcess,
 }

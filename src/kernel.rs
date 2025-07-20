@@ -5,7 +5,7 @@ use crate::arch::x86_64::interrupts;
 use crate::mm::memory;
 use crate::drivers::display::{display, text_buffer, double_buffered_text};
 use crate::drivers::ps2_controller;
-use crate::commands::ShellProcess;
+// ShellProcess is no longer used - we use async_shell instead
 use crate::window;
 use alloc::boxed::Box;
 
@@ -279,28 +279,45 @@ pub fn run() -> ! {
     // Start the shell in a simple way - we'll run it but render frames between inputs
     debug_info!("Starting shell with window system...");
     
+    // The default desktop already created a terminal window
+    // Get its ID from the terminal module
+    let terminal_id = window::terminal::get_terminal_window()
+        .expect("Terminal window should be set by create_default_desktop");
+    debug_info!("Using terminal window with ID: {:?}", terminal_id);
+    
+    // Force an initial render to display the terminal
+    window::render_frame();
+    
     // Print a welcome message
     crate::println!("\nWelcome to AgenticOS!");
     crate::println!("Window system active. Type 'help' for commands.\n");
     
-    // Create and run shell
-    let mut shell_process = ShellProcess::new();
-    debug_info!("Running shell process (PID: {})", shell_process.base.get_id());
+    // Set up the terminal input callback to route to async shell
+    window::terminal::set_terminal_input_callback(|line| {
+        crate::commands::shell::async_shell::handle_shell_input(line);
+    });
     
-    // We need to modify the shell to work with the window system
-    // For now, let's just start the idle loop and the shell won't work properly
-    // This needs a proper integration between the shell and window system
+    // Initialize the async shell
+    crate::commands::shell::async_shell::init_async_shell(terminal_id);
+    debug_info!("Async shell initialized");
     
     // Main kernel loop
     debug_info!("Entering idle loop with window rendering...");
+    let mut frame_count = 0u64;
     loop {
+        // Update async shell state
+        crate::commands::shell::async_shell::update_async_shell();
+        
         // Window manager handles all rendering including mouse cursor
         window::render_frame();
         
-        // The shell needs to be integrated properly with async input
-        // For now, this is just rendering
+        frame_count += 1;
+        if frame_count % 10000 == 0 {
+            crate::debug_trace!("Frame {}", frame_count);
+        }
         
-        // Use hlt to save CPU, but wake on interrupts (including mouse)
+        // Use hlt to save CPU, but wake on interrupts
+        // The keyboard interrupt will wake us up to process input
         x86_64::instructions::hlt();
     }
 }

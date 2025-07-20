@@ -4,7 +4,7 @@ use crate::graphics::color::Color;
 use core::fmt;
 
 // Configuration: Set to true to enable double buffering
-pub const USE_DOUBLE_BUFFER: bool = false;
+pub const USE_DOUBLE_BUFFER: bool = true;
 
 // Unified print function that routes to the appropriate implementation
 pub fn _print(args: fmt::Arguments) {

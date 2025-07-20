@@ -48,6 +48,25 @@ pub struct TextWindow {
 }
 
 impl TextWindow {
+    /// Process any pending console output
+    pub fn process_console_output(&mut self) {
+        let (lines, pending) = crate::window::console::take_output();
+        if !lines.is_empty() || !pending.is_empty() {
+            crate::debug_info!("TextWindow: Processing {} lines and pending: '{}'", lines.len(), pending);
+            for (i, line) in lines.iter().enumerate() {
+                crate::debug_info!("  Line {}: '{}'", i, line);
+                self.write_str(&line);
+                self.newline();
+            }
+            if !pending.is_empty() {
+                crate::debug_info!("  Pending: '{}'", pending);
+                self.write_str(&pending);
+            }
+            // Mark that we need repaint since we added text
+            self.base.invalidate();
+        }
+    }
+    
     /// Create a new text window
     pub fn new(bounds: Rect) -> Self {
         let font = get_default_font();
@@ -80,6 +99,8 @@ impl TextWindow {
     
     /// Write a character at the cursor position
     pub fn write_char(&mut self, ch: char) {
+        crate::debug_trace!("TextWindow::write_char called with '{}'", ch);
+        
         if ch == '\n' {
             self.newline();
             return;
@@ -91,6 +112,7 @@ impl TextWindow {
         }
         
         if self.cursor_x < self.cols && self.cursor_y < self.rows {
+            crate::debug_trace!("Writing '{}' at ({}, {})", ch, self.cursor_x, self.cursor_y);
             self.buffer[self.cursor_y][self.cursor_x] = CharCell {
                 ch,
                 fg_color: self.current_fg,
@@ -103,6 +125,10 @@ impl TextWindow {
             }
             
             self.base.invalidate();
+            crate::debug_trace!("Window invalidated after write_char");
+        } else {
+            crate::debug_warn!("Cursor out of bounds: ({}, {}) max: ({}, {})", 
+                self.cursor_x, self.cursor_y, self.cols, self.rows);
         }
     }
     
@@ -114,7 +140,7 @@ impl TextWindow {
     }
     
     /// Move to a new line
-    fn newline(&mut self) {
+    pub fn newline(&mut self) {
         self.cursor_x = 0;
         self.cursor_y += 1;
         
@@ -154,6 +180,35 @@ impl TextWindow {
         self.current_fg = fg;
         self.current_bg = bg;
     }
+    
+    /// Get current cursor position
+    pub fn cursor_position(&self) -> (usize, usize) {
+        (self.cursor_x, self.cursor_y)
+    }
+    
+    /// Set cursor position
+    pub fn set_cursor_position(&mut self, x: usize, y: usize) {
+        if x < self.cols && y < self.rows {
+            self.cursor_x = x;
+            self.cursor_y = y;
+            self.base.invalidate();
+        }
+    }
+    
+    /// Handle backspace
+    pub fn backspace(&mut self) {
+        if self.cursor_x > 0 {
+            self.cursor_x -= 1;
+            self.buffer[self.cursor_y][self.cursor_x] = CharCell::default();
+            self.base.invalidate();
+        } else if self.cursor_y > 0 {
+            // Move to end of previous line
+            self.cursor_y -= 1;
+            self.cursor_x = self.cols - 1;
+            self.buffer[self.cursor_y][self.cursor_x] = CharCell::default();
+            self.base.invalidate();
+        }
+    }
 }
 
 impl Window for TextWindow {
@@ -182,31 +237,28 @@ impl Window for TextWindow {
             return;
         }
         
-        // Check for console output and add it to the window
-        let (lines, pending) = crate::window::console::take_output();
-        if !lines.is_empty() || !pending.is_empty() {
-            for line in lines {
-                self.write_str(&line);
-                self.newline();
-            }
-            if !pending.is_empty() {
-                self.write_str(&pending);
-            }
-            // Mark that we need repaint since we added text
-            self.base.invalidate();
-        }
+        crate::debug_trace!("TextWindow::paint - bounds: {:?}", self.bounds());
+        crate::debug_trace!("TextWindow buffer size: {}x{}, cursor at ({}, {})", 
+            self.cols, self.rows, self.cursor_x, self.cursor_y);
+        
+        // REMOVED: Console output processing - this should be done elsewhere,
+        // not on every paint! This was causing the prompt to be reprinted
+        // every time the window was painted.
         
         let bounds = self.bounds();
         let font = get_default_font();
         
-        // Clear background
+        // Clear background with a dark grey instead of black to see if it's rendering
         device.fill_rect(
             bounds.x as usize,
             bounds.y as usize,
             bounds.width as usize,
             bounds.height as usize,
-            Color::BLACK,
+            Color::new(32, 32, 32),
         );
+        
+        // Count non-space characters for debugging
+        let mut char_count = 0;
         
         // Render each character
         for (row, line) in self.buffer.iter().enumerate() {
@@ -227,10 +279,17 @@ impl Window for TextWindow {
                 
                 // Draw character
                 if cell.ch != ' ' {
+                    char_count += 1;
+                    if row < 15 {  // Log more chars for debugging
+                        crate::debug_trace!("Drawing '{}' at screen ({}, {}) buffer ({}, {})", 
+                            cell.ch, x, y, col, row);
+                    }
                     device.draw_text(x, y, &cell.ch.to_string(), font.as_font(), cell.fg_color);
                 }
             }
         }
+        
+        crate::debug_info!("TextWindow: Drew {} non-space characters", char_count);
         
         // Draw cursor if focused
         if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
@@ -248,6 +307,7 @@ impl Window for TextWindow {
         }
         
         self.base.clear_needs_repaint();
+        crate::debug_trace!("TextWindow paint complete, needs_repaint cleared");
     }
     
     fn needs_repaint(&self) -> bool {

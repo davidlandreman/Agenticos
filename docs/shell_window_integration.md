@@ -14,7 +14,6 @@ The shell (`ShellProcess`) runs a blocking loop that:
 
 This blocks the kernel's idle loop, preventing `window::render_frame()` from being called, which means:
 - No window updates
-- No mouse cursor movement
 - No visual feedback
 
 ## Goal Architecture
@@ -37,6 +36,34 @@ This blocks the kernel's idle loop, preventing `window::render_frame()` from bei
          ↑                    ↑
     Keyboard IRQ         Render Loop
 ```
+
+### Standard I/O Flow
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Application   │     │     Process     │     │    Terminal     │
+│                 │     │   I/O Context   │     │     Window      │
+├─────────────────┤     ├─────────────────┤     ├─────────────────┤
+│                 │     │                 │     │                 │
+│ println!("Hi")  │────>│ stdout.write()  │────>│ text_buffer.add │
+│                 │     │                 │     │                 │
+│ stdin.read_line│<────│ stdin.read()    │<────│ input_buffer    │
+│                 │     │                 │     │                 │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+### I/O Context Lifecycle
+
+1. **Window System Active** (loads early in boot):
+   - stdin: Reads from terminal window's input buffer
+   - stdout/stderr: Write to terminal window's text buffer
+   - print! macros automatically route through terminal
+   - No need for direct framebuffer fallback since window system is always available
+
+2. **Future: Multiple Terminals**:
+   - Each terminal has its own I/O context
+   - Processes inherit I/O context from parent
+   - Can redirect to files or pipes
 
 ## Implementation Steps
 
@@ -83,15 +110,10 @@ pub fn scancode_to_keycode(scancode: u8) -> Option<KeyCode> {
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let scancode = unsafe { Port::new(0x60).read() };
     
-    // Route to window manager if available
-    if window::is_initialized() {
-        window::with_window_manager(|wm| {
-            wm.handle_keyboard_scancode(scancode);
-        });
-    } else {
-        // Fall back to current queue-based system
-        add_scancode(scancode);
-    }
+    // Always route to window manager (loads early in boot)
+    window::with_window_manager(|wm| {
+        wm.handle_keyboard_scancode(scancode);
+    });
     
     unsafe {
         PICS.lock().notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
@@ -275,43 +297,212 @@ pub fn run() -> ! {
 }
 ```
 
-### Phase 4: Process Output Redirection
+### Phase 4: Standard I/O Integration
 
-#### 4.1 Create Process Output Interface
+#### 4.1 Design Philosophy
+The window system needs to provide stdin/stdout/stderr abstractions that:
+- Work with existing print macros (`println!`, `print!`)
+- Support process I/O redirection
+- Allow multiple terminals to have independent I/O streams
+- Maintain compatibility with early boot (before window system)
+
+#### 4.2 Standard Output Architecture
 ```rust
 // In process/io.rs
-pub trait ProcessIO {
-    fn write(&mut self, data: &str);
-    fn writeln(&mut self, data: &str) {
-        self.write(data);
-        self.write("\n");
-    }
+pub trait Write {
+    fn write_str(&mut self, s: &str) -> Result<(), Error>;
 }
 
-pub struct TerminalIO {
-    terminal: Arc<Mutex<TerminalWindow>>,
+pub struct Stdout {
+    target: StdoutTarget,
 }
 
-impl ProcessIO for TerminalIO {
-    fn write(&mut self, data: &str) {
-        self.terminal.lock().write(data);
+enum StdoutTarget {
+    /// Window system active - terminal window
+    Terminal(WindowId),
+    /// Redirected to file (future)
+    File(FileHandle),
+    /// Piped to another process (future)
+    Pipe(PipeHandle),
+}
+
+impl Write for Stdout {
+    fn write_str(&mut self, s: &str) -> Result<(), Error> {
+        match &self.target {
+            StdoutTarget::Terminal(window_id) => {
+                // Route through window system
+                window::write_to_terminal(*window_id, s);
+            }
+            // Future: File and Pipe implementations
+        }
+        Ok(())
     }
 }
 ```
 
-#### 4.2 Update Commands to Use ProcessIO
+#### 4.3 Standard Input Architecture
 ```rust
-// Example: updating ls command
+pub struct Stdin {
+    source: StdinSource,
+}
+
+enum StdinSource {
+    /// Window system active - terminal window input
+    Terminal(WindowId),
+    /// Redirected from file (future)
+    File(FileHandle),
+    /// Piped from another process (future)
+    Pipe(PipeHandle),
+}
+
+impl Stdin {
+    /// Read a line (blocking in current implementation)
+    pub fn read_line(&mut self) -> Result<String, Error> {
+        match &self.source {
+            StdinSource::Terminal(window_id) => {
+                // Get input from terminal window
+                window::read_line_from_terminal(*window_id)
+            }
+            // Future: File and Pipe implementations
+        }
+    }
+    
+    /// Future: Non-blocking read
+    pub fn try_read_line(&mut self) -> Result<Option<String>, Error> {
+        // Non-blocking implementation for event-driven shell
+    }
+}
+```
+
+#### 4.4 Process I/O Context
+```rust
+// In process/mod.rs
+pub struct IoContext {
+    pub stdin: Stdin,
+    pub stdout: Stdout,
+    pub stderr: Stderr,
+}
+
+impl IoContext {
+    /// Create I/O context for a terminal window
+    pub fn terminal(window_id: WindowId) -> Self {
+        IoContext {
+            stdin: Stdin { source: StdinSource::Terminal(window_id) },
+            stdout: Stdout { target: StdoutTarget::Terminal(window_id) },
+            stderr: Stderr { target: StderrTarget::Terminal(window_id) },
+        }
+    }
+}
+```
+
+#### 4.5 Update Print Macros
+```rust
+// In lib/io.rs or similar
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        // Always use window system since it loads early
+        if let Some(io) = $crate::process::current_io_context() {
+            use core::fmt::Write;
+            let _ = write!(io.stdout, $($arg)*);
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! println {
+    () => ($crate::print!("\n"));
+    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
+}
+```
+
+#### 4.6 Terminal Window I/O Integration
+```rust
+// In window/windows/terminal.rs
+impl TerminalWindow {
+    /// Read a line from the terminal (blocks until Enter)
+    pub fn read_line(&mut self) -> String {
+        // Set up a future/promise for the result
+        let (sender, receiver) = channel();
+        
+        self.input_callback = Some(Box::new(move |line| {
+            sender.send(line);
+        }));
+        
+        // This is still blocking, but happens in terminal context
+        receiver.recv()
+    }
+    
+    /// Try to read a line (non-blocking)
+    pub fn try_read_line(&mut self) -> Option<String> {
+        self.pending_input.take()
+    }
+    
+    /// Write to terminal output
+    pub fn write(&mut self, text: &str) {
+        self.text_window.write_str(text);
+        // Trigger repaint
+        self.base.invalidate();
+    }
+}
+```
+
+#### 4.7 Shell Integration with I/O Context
+```rust
+// In commands/shell/mod.rs
+impl ShellProcess {
+    pub fn new_with_io(io: IoContext) -> Self {
+        ShellProcess {
+            base: BaseProcess::new("shell"),
+            io_context: io,
+            // ... other fields
+        }
+    }
+    
+    pub fn run(&mut self) {
+        loop {
+            // Use stdout for prompt
+            write!(self.io_context.stdout, "AgenticOS> ").unwrap();
+            
+            // Use stdin for input
+            match self.io_context.stdin.read_line() {
+                Ok(line) => {
+                    self.execute_command(line);
+                }
+                Err(e) => {
+                    writeln!(self.io_context.stderr, "Error reading input: {}", e).unwrap();
+                }
+            }
+        }
+    }
+}
+```
+
+#### 4.8 Command I/O Redirection
+```rust
+// Update RunnableProcess trait
+pub trait RunnableProcess: Process + HasBaseProcess {
+    fn run(&mut self, io: &mut IoContext);
+    
+    // Backwards compatibility wrapper
+    fn run_legacy(&mut self) {
+        // Since window system is always available, use default terminal
+        let mut io = IoContext::terminal(WindowId::default());
+        self.run(&mut io);
+    }
+}
+
+// Example: ls command with I/O context
 impl RunnableProcess for LsProcess {
-    fn run(&mut self, io: &mut dyn ProcessIO) {
+    fn run(&mut self, io: &mut IoContext) {
         match list_directory(&self.path) {
             Ok(entries) => {
                 for entry in entries {
-                    io.writeln(&format!("{}", entry.name));
+                    writeln!(io.stdout, "{}", entry.name).unwrap();
                 }
             }
             Err(e) => {
-                io.writeln(&format!("Error: {}", e));
+                writeln!(io.stderr, "ls: {}: {}", self.path, e).unwrap();
             }
         }
     }
@@ -398,12 +589,65 @@ impl RunnableProcess for LsProcess {
    - Advanced editing (Ctrl+A, Ctrl+E, etc.)
    - Scrollback buffer
 
+## Benefits of the I/O Context Model
+
+### 1. Unified Interface
+- All processes use the same stdin/stdout/stderr abstractions
+- Print macros work identically in early boot and window system
+- Easy transition from direct framebuffer to window-based output
+
+### 2. Flexibility
+- Can redirect output to files: `ls > files.txt`
+- Can pipe between processes: `ls | grep foo`
+- Can have multiple terminals with independent I/O
+
+### 3. Backwards Compatibility
+- Existing commands continue to work with legacy `run()` method
+- All I/O is routed through the window system
+- No need for direct framebuffer fallback
+
+### 4. Future Extensibility
+- Easy to add network streams (telnet/ssh)
+- Can implement pseudo-terminals (pty)
+- Ready for user-space processes with proper I/O isolation
+
+## Example: Complete I/O Flow
+
+```rust
+// 1. User types "ls" and presses Enter in terminal window
+TerminalWindow::handle_event(KeyCode::Enter)
+  → input_callback("ls")
+  → AsyncShell receives "ls"
+
+// 2. Shell creates ls process with terminal I/O
+let io = IoContext::terminal(terminal_window_id);
+let mut ls = LsProcess::new_with_io(io);
+
+// 3. ls writes output
+writeln!(io.stdout, "file1.txt")
+  → Stdout::write_str("file1.txt\n")
+  → window::write_to_terminal(window_id, "file1.txt\n")
+  → TerminalWindow::write("file1.txt\n")
+  → TextWindow renders text
+
+// 4. Window manager renders frame
+window::render_frame()
+  → WindowManager::render()
+  → TerminalWindow::paint()
+  → User sees "file1.txt" on screen
+```
+
 ## Conclusion
 
 Integrating the shell with the window system requires:
 1. Routing keyboard input through the window manager
 2. Implementing a proper terminal window with input buffering
 3. Making the shell non-blocking and event-driven
-4. Updating commands to output through the terminal
+4. Creating a proper I/O context system for stdin/stdout/stderr
+5. Updating commands to use the I/O context
 
-This will create a responsive system where the mouse continues to work while typing and commands execute within the window system framework.
+This will create a responsive system where:
+- The mouse continues to work while typing
+- Commands execute within the window system framework
+- Output is properly routed to the correct terminal
+- Future features like pipes and redirection are possible

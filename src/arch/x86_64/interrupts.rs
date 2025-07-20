@@ -334,14 +334,30 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // Debug: log keyboard interrupt
     crate::debug_trace!("Keyboard interrupt: scancode=0x{:02x}", scancode);
     
-    crate::drivers::keyboard::add_scancode(scancode);
+    // Try to route to window manager, but don't block if it's busy
+    // This prevents deadlock if the window manager is rendering
+    crate::debug_trace!("Routing to window manager...");
+    
+    if let Some(()) = crate::window::try_with_window_manager(|wm| {
+        crate::debug_trace!("Got window manager lock, handling scancode");
+        wm.handle_keyboard_scancode(scancode);
+        crate::debug_trace!("Window manager routing complete");
+    }) {
+        // Successfully handled
+    } else {
+        crate::debug_warn!("Window manager is busy, dropping keyboard event 0x{:02x}", scancode);
+        // TODO: Implement a proper event queue to avoid dropping events
+    }
     
     // Wake up any processes waiting for stdin input
+    crate::debug_trace!("Waking stdin waiters...");
     crate::stdlib::waker::wake_stdin_waiters();
+    crate::debug_trace!("Stdin waiters woken");
     
     unsafe {
         PICS.lock().notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
     }
+    crate::debug_trace!("Keyboard interrupt complete");
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
