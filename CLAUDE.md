@@ -151,7 +151,7 @@ The project follows a modular monolithic kernel design with clear separation of 
 4. **Limited Test Coverage** - Many subsystems lack comprehensive tests
 5. **Global State** - Heavy use of `static mut` and `lazy_static`
 6. **No User Space** - Everything runs in ring 0 (kernel mode)
-7. **Shell Not Interactive in Window System** - Shell needs async input integration
+7. **Async Shell Performance** - Keyboard events can be dropped when window manager is busy rendering
 
 ### Areas Needing Refactoring
 1. **Graphics Subsystem** - Complex relationships between display modules
@@ -165,6 +165,8 @@ The project follows a modular monolithic kernel design with clear separation of 
 - Memory operations (ptr::copy) are much faster than pixel-by-pixel
 - Static allocation avoids heap fragmentation in critical paths
 - Window system uses smart rendering - only updates when mouse moves or content changes
+- **Text rendering optimization**: TextWindow uses incremental updates (dirty cell tracking) to avoid redrawing all characters on each keypress
+- **Window manager optimization**: Only clears screen on full redraw (`needs_redraw`), not on every paint
 
 ## OS Development Specifics
 

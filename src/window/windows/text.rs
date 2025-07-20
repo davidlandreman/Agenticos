@@ -45,6 +45,10 @@ pub struct TextWindow {
     /// Character dimensions
     char_width: usize,
     char_height: usize,
+    /// Track which cells have been modified since last paint
+    dirty_cells: Vec<(usize, usize)>,
+    /// Whether to do incremental updates or full repaint
+    incremental_updates: bool,
 }
 
 impl TextWindow {
@@ -94,6 +98,8 @@ impl TextWindow {
             current_bg: Color::BLACK,
             char_width,
             char_height,
+            dirty_cells: Vec::new(),
+            incremental_updates: true,
         }
     }
     
@@ -118,6 +124,18 @@ impl TextWindow {
                 fg_color: self.current_fg,
                 bg_color: self.current_bg,
             };
+            
+            // Track this cell as dirty for incremental updates
+            if self.incremental_updates {
+                self.dirty_cells.push((self.cursor_x, self.cursor_y));
+                // Only invalidate if we have a reasonable number of dirty cells
+                // Otherwise do a full repaint
+                if self.dirty_cells.len() > 100 {
+                    self.incremental_updates = false;
+                    self.dirty_cells.clear();
+                }
+            }
+            
             self.cursor_x += 1;
             
             if self.cursor_x >= self.cols {
@@ -156,6 +174,9 @@ impl TextWindow {
         // Remove first line and add empty line at bottom
         self.buffer.remove(0);
         self.buffer.push(vec![CharCell::default(); self.cols]);
+        // Scrolling requires full repaint
+        self.incremental_updates = false;
+        self.dirty_cells.clear();
         self.base.invalidate();
     }
     
@@ -164,6 +185,9 @@ impl TextWindow {
         self.buffer = vec![vec![CharCell::default(); self.cols]; self.rows];
         self.cursor_x = 0;
         self.cursor_y = 0;
+        // Clearing requires full repaint
+        self.incremental_updates = false;
+        self.dirty_cells.clear();
         self.base.invalidate();
     }
     
@@ -200,12 +224,20 @@ impl TextWindow {
         if self.cursor_x > 0 {
             self.cursor_x -= 1;
             self.buffer[self.cursor_y][self.cursor_x] = CharCell::default();
+            // Track as dirty cell
+            if self.incremental_updates {
+                self.dirty_cells.push((self.cursor_x, self.cursor_y));
+            }
             self.base.invalidate();
         } else if self.cursor_y > 0 {
             // Move to end of previous line
             self.cursor_y -= 1;
             self.cursor_x = self.cols - 1;
             self.buffer[self.cursor_y][self.cursor_x] = CharCell::default();
+            // Track as dirty cell
+            if self.incremental_updates {
+                self.dirty_cells.push((self.cursor_x, self.cursor_y));
+            }
             self.base.invalidate();
         }
     }
@@ -248,62 +280,115 @@ impl Window for TextWindow {
         let bounds = self.bounds();
         let font = get_default_font();
         
-        // Clear background with a dark grey instead of black to see if it's rendering
-        device.fill_rect(
-            bounds.x as usize,
-            bounds.y as usize,
-            bounds.width as usize,
-            bounds.height as usize,
-            Color::new(32, 32, 32),
-        );
+        // Check if we can do incremental update
+        crate::debug_trace!("TextWindow paint: incremental_updates={}, dirty_cells={}", 
+            self.incremental_updates, self.dirty_cells.len());
         
-        // Count non-space characters for debugging
-        let mut char_count = 0;
-        
-        // Render each character
-        for (row, line) in self.buffer.iter().enumerate() {
-            for (col, cell) in line.iter().enumerate() {
+        if self.incremental_updates && !self.dirty_cells.is_empty() {
+            crate::debug_info!("TextWindow: Incremental update for {} dirty cells", self.dirty_cells.len());
+            
+            // Only update the dirty cells
+            for &(col, row) in &self.dirty_cells {
                 let x = bounds.x as usize + col * self.char_width;
                 let y = bounds.y as usize + row * self.char_height;
+                let cell = &self.buffer[row][col];
                 
-                // Draw background if not black
-                if cell.bg_color != Color::BLACK {
-                    device.fill_rect(
-                        x,
-                        y,
-                        self.char_width,
-                        self.char_height,
-                        cell.bg_color,
-                    );
-                }
+                // Clear the cell area first
+                device.fill_rect(
+                    x,
+                    y,
+                    self.char_width,
+                    self.char_height,
+                    cell.bg_color,
+                );
                 
-                // Draw character
+                // Draw character if not space
                 if cell.ch != ' ' {
-                    char_count += 1;
-                    if row < 15 {  // Log more chars for debugging
-                        crate::debug_trace!("Drawing '{}' at screen ({}, {}) buffer ({}, {})", 
-                            cell.ch, x, y, col, row);
-                    }
                     device.draw_text(x, y, &cell.ch.to_string(), font.as_font(), cell.fg_color);
                 }
             }
-        }
-        
-        crate::debug_info!("TextWindow: Drew {} non-space characters", char_count);
-        
-        // Draw cursor if focused
-        if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
-            let cursor_x = bounds.x as usize + self.cursor_x * self.char_width;
-            let cursor_y = bounds.y as usize + self.cursor_y * self.char_height;
             
-            // Draw cursor as a filled rectangle
+            // Clear the dirty cells list
+            self.dirty_cells.clear();
+            
+            // Draw cursor if focused (always redraw cursor)
+            if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
+                let cursor_x = bounds.x as usize + self.cursor_x * self.char_width;
+                let cursor_y = bounds.y as usize + self.cursor_y * self.char_height;
+                
+                // Draw cursor as a filled rectangle
+                device.fill_rect(
+                    cursor_x,
+                    cursor_y + self.char_height - 2,
+                    self.char_width,
+                    2,
+                    Color::WHITE,
+                );
+            }
+        } else {
+            // Full repaint
+            crate::debug_info!("TextWindow: Full repaint");
+            
+            // Clear background with a dark grey instead of black to see if it's rendering
             device.fill_rect(
-                cursor_x,
-                cursor_y + self.char_height - 2,
-                self.char_width,
-                2,
-                Color::WHITE,
+                bounds.x as usize,
+                bounds.y as usize,
+                bounds.width as usize,
+                bounds.height as usize,
+                Color::new(32, 32, 32),
             );
+            
+            // Count non-space characters for debugging
+            let mut char_count = 0;
+            
+            // Render each character
+            for (row, line) in self.buffer.iter().enumerate() {
+                for (col, cell) in line.iter().enumerate() {
+                    let x = bounds.x as usize + col * self.char_width;
+                    let y = bounds.y as usize + row * self.char_height;
+                    
+                    // Draw background if not black
+                    if cell.bg_color != Color::BLACK {
+                        device.fill_rect(
+                            x,
+                            y,
+                            self.char_width,
+                            self.char_height,
+                            cell.bg_color,
+                        );
+                    }
+                    
+                    // Draw character
+                    if cell.ch != ' ' {
+                        char_count += 1;
+                        if row < 15 {  // Log more chars for debugging
+                            crate::debug_trace!("Drawing '{}' at screen ({}, {}) buffer ({}, {})", 
+                                cell.ch, x, y, col, row);
+                        }
+                        device.draw_text(x, y, &cell.ch.to_string(), font.as_font(), cell.fg_color);
+                    }
+                }
+            }
+            
+            crate::debug_info!("TextWindow: Drew {} non-space characters", char_count);
+            
+            // Draw cursor if focused
+            if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
+                let cursor_x = bounds.x as usize + self.cursor_x * self.char_width;
+                let cursor_y = bounds.y as usize + self.cursor_y * self.char_height;
+                
+                // Draw cursor as a filled rectangle
+                device.fill_rect(
+                    cursor_x,
+                    cursor_y + self.char_height - 2,
+                    self.char_width,
+                    2,
+                    Color::WHITE,
+                );
+            }
+            
+            // Re-enable incremental updates after full repaint
+            self.incremental_updates = true;
         }
         
         self.base.clear_needs_repaint();

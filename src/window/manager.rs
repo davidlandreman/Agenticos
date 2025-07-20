@@ -333,10 +333,13 @@ impl WindowManager {
         crate::debug_trace!("Full frame render: windows_need_repaint={}, mouse_moved={}, needs_redraw={}", 
             windows_need_repaint, mouse_moved, self.needs_redraw);
         
-        // Clear the device
-        crate::debug_trace!("Clearing graphics device...");
-        self.graphics_device.clear(crate::graphics::color::Color::BLACK);
-        crate::debug_trace!("Graphics device cleared");
+        // Only clear the device if we need a full redraw
+        // Individual windows will handle their own clearing/painting
+        if self.needs_redraw {
+            crate::debug_trace!("Clearing graphics device...");
+            self.graphics_device.clear(crate::graphics::color::Color::BLACK);
+            crate::debug_trace!("Graphics device cleared");
+        }
         
         // Render the active screen's windows
         if let Some(screen) = self.get_active_screen() {
