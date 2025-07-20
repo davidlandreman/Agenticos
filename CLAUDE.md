@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch with the eventual goal of supporting agent-based computing capabilities.
 
-**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. However, the "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
+**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. A new window system has been implemented that provides hierarchical window management, event routing, and mouse support. However, the "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
 
 ## Common Commands
 
@@ -52,7 +52,7 @@ The project follows a modular monolithic kernel design with clear separation of 
     - `double_buffer.rs` - 8MB static buffer for performance
     - `double_buffered_text.rs` - Text rendering with double buffering
   - `keyboard.rs` - PS/2 keyboard driver with scancode set 2 support
-  - `mouse.rs` - PS/2 mouse driver with 3-button support
+  - `mouse.rs` - PS/2 mouse driver with 3-button support (returns position as (i32, i32, u8))
   - `ps2_controller.rs` - Shared PS/2 controller for keyboard/mouse
   - `block.rs` - Block device trait for storage abstraction
   - `ide.rs` - IDE/ATA PIO mode driver (supports 4 drives)
@@ -100,6 +100,23 @@ The project follows a modular monolithic kernel design with clear separation of 
   - `process.rs` - Process/BaseProcess traits, PID allocation
   - `manager.rs` - Command registry and execution
 
+- `src/window/` - Window system implementation
+  - `mod.rs` - Window system initialization and global functions
+  - `types.rs` - Core types (WindowId, ScreenId, Rect, Point, ColorDepth)
+  - `event.rs` - Event system (keyboard, mouse, window events)
+  - `graphics.rs` - GraphicsDevice trait for rendering abstraction
+  - `manager.rs` - WindowManager for coordinating windows and screens
+  - `screen.rs` - Screen abstraction for virtual displays
+  - `console.rs` - Console output buffer for print macro integration
+  - `terminal.rs` - Terminal window support (placeholder)
+  - `adapters/` - GraphicsDevice implementations
+    - `direct_framebuffer.rs` - Direct framebuffer writes (fast, used for mouse)
+    - `double_buffered.rs` - Double buffered rendering (smooth but slower)
+  - `windows/` - Window implementations
+    - `base.rs` - Base window functionality
+    - `container.rs` - Container window that can hold children
+    - `text.rs` - Text grid window for terminal output
+
 - `src/commands/` - Shell commands (13 implemented)
   - `shell/` - Main system shell
   - `dir.rs`, `ls.rs` - Directory listing
@@ -134,6 +151,7 @@ The project follows a modular monolithic kernel design with clear separation of 
 4. **Limited Test Coverage** - Many subsystems lack comprehensive tests
 5. **Global State** - Heavy use of `static mut` and `lazy_static`
 6. **No User Space** - Everything runs in ring 0 (kernel mode)
+7. **Shell Not Interactive in Window System** - Shell needs async input integration
 
 ### Areas Needing Refactoring
 1. **Graphics Subsystem** - Complex relationships between display modules
@@ -142,9 +160,11 @@ The project follows a modular monolithic kernel design with clear separation of 
 4. **Mouse Integration** - Cursor rendering tightly coupled to display
 
 ### Performance Considerations
-- Double buffering provides significant performance improvement
+- Direct framebuffer writes are faster for mouse cursor than double buffering
+- Double buffering's 3.5MB copies on every frame are expensive for simple updates
 - Memory operations (ptr::copy) are much faster than pixel-by-pixel
 - Static allocation avoids heap fragmentation in critical paths
+- Window system uses smart rendering - only updates when mouse moves or content changes
 
 ## OS Development Specifics
 

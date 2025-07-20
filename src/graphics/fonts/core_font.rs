@@ -81,6 +81,10 @@ impl FontRef {
         Self { font }
     }
     
+    pub fn as_font(&self) -> &dyn Font {
+        self.font
+    }
+    
     pub fn get_char_bitmap(&self, ch: char) -> Option<&[u8]> {
         self.font.get_char_bitmap(ch)
     }

@@ -20,6 +20,7 @@ mod mm;
 mod process;
 mod stdlib;
 mod tests;
+mod window;
 
 use bootloader_api::{entry_point, BootInfo};
 use bootloader_config::BOOTLOADER_CONFIG;

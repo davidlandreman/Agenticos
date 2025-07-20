@@ -1,7 +1,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use spin::Mutex;
-use crate::{debug_info, debug_debug};
+use crate::{debug_info, debug_debug, debug_trace};
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 pub const HEAP_SIZE: usize = 100 * 1024 * 1024; // 100 MiB
@@ -37,11 +37,11 @@ unsafe impl GlobalAlloc for LockedHeap {
                 match heap.allocate_first_fit(layout) {
                     Ok(non_null) => {
                         let ptr = non_null.as_ptr();
-                        debug_debug!("Allocated {} bytes at {:p}", layout.size(), ptr);
+                        debug_trace!("Allocated {} bytes at {:p}", layout.size(), ptr);
                         ptr
                     }
                     Err(_) => {
-                        debug_info!("Allocation failed for {} bytes", layout.size());
+                        debug_trace!("Allocation failed for {} bytes", layout.size());
                         ptr::null_mut()
                     }
                 }
@@ -54,7 +54,7 @@ unsafe impl GlobalAlloc for LockedHeap {
         let mut heap = self.0.lock();
         
         if let Some(heap) = heap.as_mut() {
-            debug_debug!("Deallocating {} bytes at {:p}", layout.size(), ptr);
+            debug_trace!("Deallocating {} bytes at {:p}", layout.size(), ptr);
             heap.deallocate(ptr::NonNull::new_unchecked(ptr), layout);
         }
     }

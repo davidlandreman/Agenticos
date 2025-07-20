@@ -252,6 +252,33 @@ impl DoubleBufferedFrameBuffer {
         }
     }
     
+    /// Swap only a specific rectangular region
+    pub fn swap_region(&mut self, x: usize, y: usize, width: usize, height: usize) {
+        let front_buffer = self.framebuffer.buffer_mut();
+        
+        // Clamp the region to screen bounds
+        let x = x.min(self.width);
+        let y = y.min(self.height);
+        let width = width.min(self.width - x);
+        let height = height.min(self.height - y);
+        
+        // Copy only the specified region row by row
+        unsafe {
+            for row in 0..height {
+                let y_offset = (y + row) * self.stride * self.bytes_per_pixel;
+                let x_offset = x * self.bytes_per_pixel;
+                let offset = y_offset + x_offset;
+                let row_size = width * self.bytes_per_pixel;
+                
+                ptr::copy_nonoverlapping(
+                    self.back_buffer.as_ptr().add(offset),
+                    front_buffer.as_mut_ptr().add(offset),
+                    row_size.min(front_buffer.len() - offset)
+                );
+            }
+        }
+    }
+    
     // Image drawing methods
     pub fn draw_image(&mut self, x: usize, y: usize, image: &dyn Image) {
         use crate::debug_info;

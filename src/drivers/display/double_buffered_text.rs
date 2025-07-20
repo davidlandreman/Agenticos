@@ -13,6 +13,15 @@ const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB static buffer
 // Static buffer for double buffering
 static mut BACK_BUFFER: [u8; MAX_BUFFER_SIZE] = [0; MAX_BUFFER_SIZE];
 
+/// Get access to the static back buffer
+/// 
+/// # Safety
+/// This function is unsafe because it returns a mutable reference to a static buffer.
+/// The caller must ensure no other code is accessing this buffer.
+pub unsafe fn get_static_back_buffer() -> &'static mut [u8] {
+    &mut BACK_BUFFER
+}
+
 pub struct DoubleBufferedText {
     buffer: DoubleBufferedFrameBuffer,
     width: usize,

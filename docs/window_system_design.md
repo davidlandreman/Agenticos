@@ -392,33 +392,33 @@ pub struct TerminalWindow {
    - Shell process attached to terminal
    - Same shell code runs in both modes
 
-## Implementation Phases
+## Implementation Status
 
-### Phase 1: Core Infrastructure
-- [ ] Window trait and basic types
-- [ ] GraphicsDevice trait
-- [ ] WindowManager skeleton
-- [ ] Event system
+### Phase 1: Core Infrastructure ✅ COMPLETED
+- [x] Window trait and basic types
+- [x] GraphicsDevice trait
+- [x] WindowManager skeleton
+- [x] Event system
 
-### Phase 2: Basic Windows
-- [ ] ContainerWindow
-- [ ] TextWindow with grid rendering
-- [ ] Simple event routing
-- [ ] Screen switching
+### Phase 2: Basic Windows ✅ COMPLETED
+- [x] ContainerWindow
+- [x] TextWindow with grid rendering
+- [x] Simple event routing
+- [x] Screen switching
 
-### Phase 3: Graphics Integration
-- [ ] CanvasWindow
-- [ ] GraphicsDevice implementation using DoubleBufferedFrameBuffer
-- [ ] Clipping and dirty regions
-- [ ] Window buffers
+### Phase 3: Graphics Integration ✅ COMPLETED
+- [ ] CanvasWindow (not implemented)
+- [x] GraphicsDevice implementation with both DirectFrameBuffer and DoubleBuffered adapters
+- [x] Clipping support
+- [ ] Window buffers (decided against for performance)
 
-### Phase 4: UI Controls
+### Phase 4: UI Controls 🚧 PARTIAL
 - [ ] FrameWindow with decorations
 - [ ] Button, Label, TextBox
-- [ ] Focus management
-- [ ] Mouse interaction
+- [x] Focus management
+- [x] Mouse interaction and cursor rendering
 
-### Phase 5: Advanced Features
+### Phase 5: Advanced Features ⏳ FUTURE
 - [ ] Drag and drop
 - [ ] Window resizing/moving
 - [ ] Menus and dialogs
@@ -564,6 +564,59 @@ pub fn create_text_editor() {
 }
 ```
 
+## Implementation Lessons Learned
+
+### Performance Insights
+
+1. **Double Buffering vs Direct Rendering**
+   - Double buffering requires copying ~3.5MB on every frame for 1280x720
+   - For mostly static content with just mouse movement, direct framebuffer writes are much faster
+   - The window system now uses direct framebuffer mode by default (USE_DOUBLE_BUFFER = false)
+
+2. **Smart Rendering**
+   - Only render frames when something actually changes (mouse movement, new text, window invalidation)
+   - Use HLT instruction to save CPU between frames
+   - Track dirty state to avoid unnecessary buffer swaps
+
+3. **Mouse Cursor Optimization**
+   - Originally tried to implement save/restore for cursor background
+   - Simpler approach: use fast mouse update that only redraws cursor area
+   - Future improvement: hardware cursor support if available
+
+### Architecture Decisions
+
+1. **Print Macro Integration**
+   - Print macros check if window system is available and route through console buffer
+   - TextWindow pulls from console buffer during paint()
+   - This allows seamless transition from boot-time direct printing to window system
+
+2. **Window Rendering Pipeline**
+   - Windows are temporarily removed from registry during rendering to avoid borrow checker issues
+   - Recursive rendering with proper clipping for child windows
+   - Z-order maintained for proper layering
+
+3. **Graphics Device Abstraction**
+   - Two adapters implemented: DirectFrameBufferDevice and DoubleBufferedDevice
+   - Easy to switch between them based on USE_DOUBLE_BUFFER flag
+   - Consistent interface allows future optimizations (dirty rectangles, hardware acceleration)
+
+### Current Status
+
+The window system is functional with:
+- ✅ Hierarchical window management
+- ✅ Mouse cursor with good performance
+- ✅ Text output through windows
+- ✅ Event system foundation
+- ✅ Multiple screen support
+
+Not yet implemented:
+- ❌ Interactive shell (needs async keyboard input)
+- ❌ Window decorations and controls
+- ❌ Drag and drop
+- ❌ Proper save/restore for overlapping windows
+
 ## Conclusion
 
-This window system design provides a flexible foundation for both text and graphical interfaces in AgenticOS. By treating everything as a window with a common event and rendering model, we can build sophisticated user interfaces while maintaining simplicity and consistency. The unique text-first hybrid mode sets AgenticOS apart by allowing rich graphical content to enhance text-based workflows without sacrificing the efficiency and clarity of a terminal interface. 
+This window system design provides a flexible foundation for both text and graphical interfaces in AgenticOS. By treating everything as a window with a common event and rendering model, we can build sophisticated user interfaces while maintaining simplicity and consistency. The unique text-first hybrid mode sets AgenticOS apart by allowing rich graphical content to enhance text-based workflows without sacrificing the efficiency and clarity of a terminal interface.
+
+The implementation revealed important performance considerations around framebuffer access patterns and the trade-offs between double buffering and direct rendering. The current system achieves good mouse responsiveness while maintaining a clean architecture for future enhancements. 

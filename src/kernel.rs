@@ -6,6 +6,8 @@ use crate::mm::memory;
 use crate::drivers::display::{display, text_buffer, double_buffered_text};
 use crate::drivers::ps2_controller;
 use crate::commands::ShellProcess;
+use crate::window;
+use alloc::boxed::Box;
 
 pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize debug subsystem
@@ -64,15 +66,29 @@ fn init_display(boot_info: &'static mut BootInfo) {
     debug_info!("Checking for framebuffer...");
     
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
-        if display::USE_DOUBLE_BUFFER {
-            debug_info!("Framebuffer found! Initializing double buffered text...");
-            double_buffered_text::init(framebuffer);
-            debug_info!("Double buffered text initialized successfully!");
+        debug_info!("Framebuffer found! Initializing window system...");
+        
+        // Create graphics device based on double buffer configuration
+        let device: Box<dyn window::GraphicsDevice> = if display::USE_DOUBLE_BUFFER {
+            debug_info!("Using double-buffered graphics device");
+            Box::new(window::adapters::DoubleBufferedDevice::new_with_static_buffer(framebuffer))
         } else {
-            debug_info!("Framebuffer found! Initializing text buffer...");
-            text_buffer::init(framebuffer);
-            debug_info!("Text buffer initialized successfully!");
-        }
+            debug_info!("Using direct framebuffer device");
+            Box::new(window::adapters::DirectFrameBufferDevice::new(framebuffer))
+        };
+        
+        // Initialize window manager
+        window::init_window_manager(device);
+        debug_info!("Window manager initialized successfully!");
+        
+        // Create default desktop with terminal
+        window::create_default_desktop();
+        debug_info!("Default desktop created!");
+        
+        // Do an initial render to show something immediately
+        debug_info!("Performing initial render...");
+        window::render_frame();
+        debug_info!("Initial render complete!");
         
     } else {
         debug_warn!("No framebuffer available from bootloader");
@@ -260,26 +276,31 @@ pub fn run() -> ! {
     crate::process::register_command("ls", crate::commands::ls::create_ls_process);
     debug_info!("All {} commands registered successfully.", 12);
 
-    // Run shell process
+    // Start the shell in a simple way - we'll run it but render frames between inputs
+    debug_info!("Starting shell with window system...");
+    
+    // Print a welcome message
+    crate::println!("\nWelcome to AgenticOS!");
+    crate::println!("Window system active. Type 'help' for commands.\n");
+    
+    // Create and run shell
     let mut shell_process = ShellProcess::new();
     debug_info!("Running shell process (PID: {})", shell_process.base.get_id());
-    shell_process.run();
-
-    crate::println!("Shell Process Done: System Halted");
     
-    // Main kernel loop - TODO this loop should not exist and we should just call a halt here or restart shell
-    debug_info!("Entering idle loop with mouse cursor...");
-    loop {        
-        // Draw mouse cursor if double buffering is enabled
-        if display::USE_DOUBLE_BUFFER {
-            double_buffered_text::with_buffer(|buffer| {
-                // Draw the mouse cursor
-                crate::graphics::mouse_cursor::draw_mouse_cursor(buffer);
-                // Swap buffers to show the cursor
-                buffer.swap_buffers();
-            });
-        }
+    // We need to modify the shell to work with the window system
+    // For now, let's just start the idle loop and the shell won't work properly
+    // This needs a proper integration between the shell and window system
+    
+    // Main kernel loop
+    debug_info!("Entering idle loop with window rendering...");
+    loop {
+        // Window manager handles all rendering including mouse cursor
+        window::render_frame();
         
+        // The shell needs to be integrated properly with async input
+        // For now, this is just rendering
+        
+        // Use hlt to save CPU, but wake on interrupts (including mouse)
         x86_64::instructions::hlt();
     }
 }

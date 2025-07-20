@@ -4,11 +4,17 @@ use crate::graphics::color::Color;
 use core::fmt;
 
 // Configuration: Set to true to enable double buffering
-pub const USE_DOUBLE_BUFFER: bool = true;
+pub const USE_DOUBLE_BUFFER: bool = false;
 
 // Unified print function that routes to the appropriate implementation
 pub fn _print(args: fmt::Arguments) {
-    if USE_DOUBLE_BUFFER {
+    // Check if window system is available
+    if crate::window::terminal::get_terminal_window().is_some() {
+        // Write to window console
+        use core::fmt::Write;
+        let mut writer = crate::window::console::ConsoleWriter;
+        let _ = writer.write_fmt(args);
+    } else if USE_DOUBLE_BUFFER {
         super::double_buffered_text::_print(args);
     } else {
         super::text_buffer::_print(args);
