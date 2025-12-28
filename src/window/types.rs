@@ -2,6 +2,11 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+/// Minimum window width for resizing
+pub const MIN_WINDOW_WIDTH: u32 = 100;
+/// Minimum window height for resizing
+pub const MIN_WINDOW_HEIGHT: u32 = 50;
+
 /// Unique identifier for a window
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WindowId(pub usize);
@@ -125,6 +130,78 @@ impl Rect {
     #[inline]
     pub fn bottom(&self) -> i32 {
         self.y + self.height as i32
+    }
+
+    /// Calculate new bounds when resizing by dragging an edge.
+    /// Enforces minimum size constraints.
+    pub fn resize_edge(
+        &self,
+        edge: ResizeEdge,
+        delta_x: i32,
+        delta_y: i32,
+        min_width: u32,
+        min_height: u32,
+    ) -> Rect {
+        let (mut x, mut y, mut w, mut h) = (self.x, self.y, self.width, self.height);
+
+        match edge {
+            ResizeEdge::Top => {
+                // Top edge: moving up increases height, moving down decreases
+                let new_height = (h as i32 - delta_y).max(min_height as i32) as u32;
+                let actual_delta = h as i32 - new_height as i32;
+                y += actual_delta;
+                h = new_height;
+            }
+            ResizeEdge::Bottom => {
+                // Bottom edge: moving down increases height
+                h = (h as i32 + delta_y).max(min_height as i32) as u32;
+            }
+            ResizeEdge::Left => {
+                // Left edge: moving left increases width, moving right decreases
+                let new_width = (w as i32 - delta_x).max(min_width as i32) as u32;
+                let actual_delta = w as i32 - new_width as i32;
+                x += actual_delta;
+                w = new_width;
+            }
+            ResizeEdge::Right => {
+                // Right edge: moving right increases width
+                w = (w as i32 + delta_x).max(min_width as i32) as u32;
+            }
+            ResizeEdge::TopLeft => {
+                // Corner: combine top and left behaviors
+                let new_width = (w as i32 - delta_x).max(min_width as i32) as u32;
+                let new_height = (h as i32 - delta_y).max(min_height as i32) as u32;
+                let actual_dx = w as i32 - new_width as i32;
+                let actual_dy = h as i32 - new_height as i32;
+                x += actual_dx;
+                y += actual_dy;
+                w = new_width;
+                h = new_height;
+            }
+            ResizeEdge::TopRight => {
+                // Corner: combine top and right behaviors
+                let new_height = (h as i32 - delta_y).max(min_height as i32) as u32;
+                let actual_dy = h as i32 - new_height as i32;
+                y += actual_dy;
+                h = new_height;
+                w = (w as i32 + delta_x).max(min_width as i32) as u32;
+            }
+            ResizeEdge::BottomLeft => {
+                // Corner: combine bottom and left behaviors
+                let new_width = (w as i32 - delta_x).max(min_width as i32) as u32;
+                let actual_dx = w as i32 - new_width as i32;
+                x += actual_dx;
+                w = new_width;
+                h = (h as i32 + delta_y).max(min_height as i32) as u32;
+            }
+            ResizeEdge::BottomRight => {
+                // Corner: combine bottom and right behaviors
+                w = (w as i32 + delta_x).max(min_width as i32) as u32;
+                h = (h as i32 + delta_y).max(min_height as i32) as u32;
+            }
+        }
+
+        Rect::new(x, y, w, h)
     }
 }
 

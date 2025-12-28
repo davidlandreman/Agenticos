@@ -11,7 +11,7 @@ use super::{
     Event, EventResult, KeyboardEvent, MouseEvent, MouseEventType,
     Point, Rect, keyboard::{scancode_to_keycode, is_break_code, KeyboardState},
 };
-use super::types::{InteractionState, HitTestResult};
+use super::types::{InteractionState, HitTestResult, ResizeEdge, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT};
 use super::console::take_pending_invalidations;
 
 /// The Window Manager coordinates all windows across all screens
@@ -506,18 +506,18 @@ impl WindowManager {
                     // Move the window
                     if let Some(win) = self.window_registry.get_mut(&window) {
                         let old_bounds = win.bounds();
-                        // Mark old position as dirty
-                        self.compositor.dirty.mark_dirty(old_bounds);
 
-                        // Update bounds
-                        win.set_bounds(Rect::new(new_x, new_y, old_bounds.width, old_bounds.height));
-                        win.invalidate();
+                        // Only update if position actually changed
+                        if new_x != old_bounds.x || new_y != old_bounds.y {
+                            // Update bounds
+                            win.set_bounds(Rect::new(new_x, new_y, old_bounds.width, old_bounds.height));
+                            win.invalidate();
 
-                        // Mark new position as dirty
-                        let new_bounds = win.bounds();
-                        self.compositor.dirty.mark_dirty(new_bounds);
+                            // Force full repaint to properly redraw exposed areas
+                            self.compositor.dirty.mark_full_repaint();
 
-                        crate::debug_trace!("Dragging window {:?} to ({}, {})", window, new_x, new_y);
+                            crate::debug_trace!("Dragging window {:?} to ({}, {})", window, new_x, new_y);
+                        }
                     }
                 } else {
                     // Button released - end drag
@@ -525,16 +525,50 @@ impl WindowManager {
                     self.interaction_state = InteractionState::Idle;
                 }
             }
-            InteractionState::Resizing { .. } => {
-                // TODO: Implement resizing
-                if !left_button_pressed {
+            InteractionState::Resizing { window, edge, start_mouse, start_bounds } => {
+                if left_button_pressed {
+                    // Calculate delta from start position
+                    let delta_x = mouse_x - start_mouse.x;
+                    let delta_y = mouse_y - start_mouse.y;
+
+                    // Calculate new bounds using the helper method
+                    let new_bounds = start_bounds.resize_edge(
+                        edge,
+                        delta_x,
+                        delta_y,
+                        MIN_WINDOW_WIDTH,
+                        MIN_WINDOW_HEIGHT,
+                    );
+
+                    // Update the window bounds if changed
+                    if let Some(win) = self.window_registry.get_mut(&window) {
+                        let old_bounds = win.bounds();
+
+                        // Only update if bounds actually changed
+                        if old_bounds != new_bounds {
+                            // Update window bounds
+                            win.set_bounds(new_bounds);
+                            win.invalidate();
+
+                            // Force full repaint to properly redraw exposed areas
+                            self.compositor.dirty.mark_full_repaint();
+
+                            crate::debug_trace!("Resizing window {:?} to {:?}", window, new_bounds);
+                        }
+                    }
+
+                    // Update child windows after resize
+                    self.update_children_for_resized_window(window);
+                } else {
+                    // Button released - end resize
+                    crate::debug_info!("Window resize ended");
                     self.interaction_state = InteractionState::Idle;
                 }
             }
         }
     }
 
-    /// Check if the mouse is on a title bar and start dragging if so.
+    /// Check if the mouse is on a title bar or border and start the appropriate interaction.
     fn start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
         // Find the topmost window under the mouse
         // Walk z-order from front to back
@@ -548,23 +582,56 @@ impl WindowManager {
                 let local_y = mouse_y - bounds.y;
 
                 if bounds.contains_point(Point::new(mouse_x, mouse_y)) {
-                    // Check if this is a FrameWindow by trying to get its type
-                    // We'll use a simple heuristic based on window properties
-                    // For a proper solution, we'd need trait downcasting
+                    // Hit test for frame-like windows
+                    // Constants: 2px border, 24px title bar (so title bar area is y 2..26)
+                    let border = 2;
+                    let title_height = 24;
 
-                    // Simple hit test for frame-like windows
-                    // Assume title bar is top 24 pixels after 2px border
-                    if local_y >= 2 && local_y < 26 {
+                    // Check border regions first (corners before edges)
+                    let at_left = local_x < border;
+                    let at_right = local_x >= bounds.width as i32 - border;
+                    let at_top = local_y < border;
+                    let at_bottom = local_y >= bounds.height as i32 - border;
+
+                    if at_top && at_left {
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::Border(ResizeEdge::TopLeft);
+                        break;
+                    } else if at_top && at_right {
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::Border(ResizeEdge::TopRight);
+                        break;
+                    } else if at_bottom && at_left {
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::Border(ResizeEdge::BottomLeft);
+                        break;
+                    } else if at_bottom && at_right {
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::Border(ResizeEdge::BottomRight);
+                        break;
+                    } else if at_top {
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::Border(ResizeEdge::Top);
+                        break;
+                    } else if at_bottom {
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::Border(ResizeEdge::Bottom);
+                        break;
+                    } else if at_left {
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::Border(ResizeEdge::Left);
+                        break;
+                    } else if at_right {
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::Border(ResizeEdge::Right);
+                        break;
+                    } else if local_y >= border && local_y < border + title_height {
+                        // Title bar (inside border, top 24 pixels)
                         target_window = Some(window_id);
                         target_hit = HitTestResult::TitleBar;
                         break;
-                    } else if local_y < 2 || local_x < 2 ||
-                              local_x >= bounds.width as i32 - 2 ||
-                              local_y >= bounds.height as i32 - 2 {
-                        // On a border - could be resize, but for now just break
-                        break;
                     } else {
-                        // Client area - don't start drag, but stop searching
+                        // Client area - don't start drag/resize, but stop searching
                         break;
                     }
                 }
@@ -572,18 +639,30 @@ impl WindowManager {
         }
 
         if let Some(window_id) = target_window {
-            if target_hit == HitTestResult::TitleBar {
-                if let Some(window) = self.window_registry.get(&window_id) {
-                    let bounds = window.bounds();
-                    crate::debug_info!("Starting window drag for {:?} at ({}, {})", window_id, bounds.x, bounds.y);
-                    self.interaction_state = InteractionState::Dragging {
-                        window: window_id,
-                        start_mouse: Point::new(mouse_x, mouse_y),
-                        start_window: Point::new(bounds.x, bounds.y),
-                    };
+            if let Some(window) = self.window_registry.get(&window_id) {
+                let bounds = window.bounds();
 
-                    // Bring window to front
-                    self.bring_to_front(window_id);
+                match target_hit {
+                    HitTestResult::TitleBar => {
+                        crate::debug_info!("Starting window drag for {:?} at ({}, {})", window_id, bounds.x, bounds.y);
+                        self.interaction_state = InteractionState::Dragging {
+                            window: window_id,
+                            start_mouse: Point::new(mouse_x, mouse_y),
+                            start_window: Point::new(bounds.x, bounds.y),
+                        };
+                        self.bring_to_front(window_id);
+                    }
+                    HitTestResult::Border(edge) => {
+                        crate::debug_info!("Starting window resize for {:?} edge {:?}", window_id, edge);
+                        self.interaction_state = InteractionState::Resizing {
+                            window: window_id,
+                            edge,
+                            start_mouse: Point::new(mouse_x, mouse_y),
+                            start_bounds: bounds,
+                        };
+                        self.bring_to_front(window_id);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -598,5 +677,46 @@ impl WindowManager {
 
         // Mark entire screen as needing repaint for proper layering
         self.compositor.dirty.mark_full_repaint();
+    }
+
+    /// Update child windows after a parent has been resized.
+    fn update_children_for_resized_window(&mut self, parent_id: WindowId) {
+        // Get the parent's children and calculate new content area
+        let (children, content_area) = {
+            if let Some(window) = self.window_registry.get(&parent_id) {
+                let children = window.children().to_vec();
+                let bounds = window.bounds();
+
+                // Calculate content area - for FrameWindow this excludes borders/title
+                // Constants: 2px border on all sides, 24px title bar
+                let border = 2u32;
+                let title_height = 24u32;
+
+                // Content area is relative to the parent window
+                let content_area = Rect::new(
+                    border as i32,
+                    (border + title_height) as i32,
+                    bounds.width.saturating_sub(border * 2),
+                    bounds.height.saturating_sub(border * 2 + title_height),
+                );
+                (children, Some(content_area))
+            } else {
+                (Vec::new(), None)
+            }
+        };
+
+        // Update each child's bounds to fill the content area
+        if let Some(content_area) = content_area {
+            for child_id in children {
+                if let Some(child) = self.window_registry.get_mut(&child_id) {
+                    let child_bounds = child.bounds();
+                    // Only update if bounds differ
+                    if child_bounds != content_area {
+                        child.set_bounds(content_area);
+                        child.invalidate();
+                    }
+                }
+            }
+        }
     }
 }

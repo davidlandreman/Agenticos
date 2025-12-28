@@ -11,12 +11,15 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 ## Common Commands
 
 ### Build and Run
-- `./build.sh` - Build kernel, create disk images, and run in QEMU (recommended)
+- `./build.sh` - Build kernel in release mode, create disk images, and run in QEMU (recommended)
 - `./build.sh -c` - Clean build (removes all artifacts first)
+- `./build.sh -d` - Build in debug mode (larger kernel, slower boot, more symbols)
 - `./build.sh -n` - Build only, don't run QEMU
 - `./build.sh -h` - Show help and usage
 - `cargo build` - Build the kernel only (won't create disk images)
 - `cargo build --release` - Build optimized release version
+
+**QEMU Configuration**: The build script runs QEMU with 128M RAM, serial output, VirtIO tablet for seamless mouse, and isa-debug-exit for test integration.
 
 ### Testing
 - `./test.sh` - Run kernel tests in QEMU with automatic exit
@@ -51,17 +54,31 @@ The project follows a modular monolithic kernel design with clear separation of 
     - `text_buffer.rs` - Direct framebuffer text rendering
     - `double_buffer.rs` - 8MB static buffer for performance
     - `double_buffered_text.rs` - Text rendering with double buffering
+  - `virtio/` - VirtIO device drivers
+    - `mod.rs` - VirtIO module initialization
+    - `common.rs` - VirtIO device abstraction and Virtqueue implementation
+    - `input.rs` - VirtIO tablet device for absolute mouse positioning (seamless in QEMU)
+  - `pci.rs` - PCI bus enumeration, configuration space access, BAR reading
   - `keyboard.rs` - PS/2 keyboard driver with scancode set 2 support
-  - `mouse.rs` - PS/2 mouse driver with 3-button support (returns position as (i32, i32, u8))
+  - `mouse.rs` - PS/2 mouse driver with 3-button support (fallback when VirtIO unavailable)
   - `ps2_controller.rs` - Shared PS/2 controller for keyboard/mouse
   - `block.rs` - Block device trait for storage abstraction
   - `ide.rs` - IDE/ATA PIO mode driver (supports 4 drives)
 
-- `src/graphics/` - Graphics subsystem (note: becoming complex, needs refactoring)
+- `src/input/` - Input processing pipeline (lock-free architecture)
+  - `mod.rs` - Central `InputProcessor` for event conversion and routing
+  - `queue.rs` - Lock-free SPSC (Single-Producer Single-Consumer) ring buffer (256 entries)
+  - `keyboard_driver.rs` - PS/2 scancode set 2 to KeyCode conversion with state machine
+  - `mouse_driver.rs` - PS/2 mouse packet state machine
+
+- `src/graphics/` - Graphics subsystem
   - `color.rs` - RGB color definitions and predefined colors
   - `core_text.rs` - Font-agnostic text rendering
   - `core_gfx.rs` - Graphics primitives (Bresenham lines, circles, polygons)
   - `mouse_cursor.rs` - 12x12 hardware cursor with background save/restore
+  - `compositor.rs` - Dirty rectangle tracking and cursor overlay management
+  - `framebuffer.rs` - Region save/restore abstraction (`SavedRegion`, `RegionCapableBuffer` trait)
+  - `render.rs` - `RenderTarget` abstraction for efficient row-based drawing
   - `fonts/` - Multiple font format support
     - `core_font.rs` - Unified font trait and selection
     - `embedded_font.rs` - Built-in 8x8 bitmap fonts
@@ -90,6 +107,10 @@ The project follows a modular monolithic kernel design with clear separation of 
   - `arc.rs` - Custom Arc/Weak implementation for kernel use
   - `test_utils.rs` - Testing framework for no_std environment
 
+- `src/stdlib/` - Standard library extensions for no_std
+  - `io.rs` - Read/Write traits, `StdinBuffer` for buffered input
+  - `waker.rs` - Async waker support for future use
+
 - `src/mm/` - Memory management (fully implemented)
   - `memory.rs` - Memory subsystem initialization
   - `frame_allocator.rs` - 4KB frame allocation from bootloader map
@@ -109,6 +130,8 @@ The project follows a modular monolithic kernel design with clear separation of 
   - `screen.rs` - Screen abstraction for virtual displays
   - `console.rs` - Console output buffer for print macro integration
   - `terminal.rs` - Terminal window support
+  - `cursor.rs` - CursorRenderer with background save/restore for clean movement
+  - `keyboard.rs` - PS/2 scancode set 2 to KeyCode conversion for window events
   - `adapters/` - GraphicsDevice implementations
     - `direct_framebuffer.rs` - Direct framebuffer writes (fast, used for mouse)
     - `double_buffered.rs` - Double buffered rendering (smooth but slower)
@@ -144,6 +167,8 @@ The project follows a modular monolithic kernel design with clear separation of 
 - `IMPLEMENTATION_PLAN.md` - Phased development roadmap
 - `ARCHITECTURE.md` - Detailed architecture documentation
 - `CLAUDE.md` - This file, AI assistant guidance
+- `docs/window_system_design.md` - Window system architecture and implementation status
+- `docs/shell_window_integration.md` - Shell/terminal window integration design
 
 ## Known Issues and Technical Debt
 
@@ -531,39 +556,106 @@ The system boots into a GUI desktop with:
 - Child windows are positioned relative to their parent's coordinate system
 - Window bounds are temporarily adjusted during rendering for proper positioning
 
+### Implementation Status
+Based on the phased development approach:
+- **Phase 1 (Core Infrastructure)**: Complete - Window trait, types, event system
+- **Phase 2 (Basic Windows)**: Complete - ContainerWindow, TextWindow, event routing
+- **Phase 3 (Graphics Integration)**: Complete - GraphicsDevice adapters, clipping
+- **Phase 4 (UI Controls)**: Partial - FrameWindow done, focus management working, mouse interaction complete
+- **Phase 5 (Advanced Features)**: Future - Drag/drop, window resizing, menus
+
+See `docs/window_system_design.md` for detailed architecture documentation.
+
 ## Mouse Support
 
 ### Overview
-The kernel now includes full PS/2 mouse support with hardware cursor rendering:
+The kernel supports multiple mouse input methods with automatic fallback:
 
-- **PS/2 Controller**: Shared controller initialization for both keyboard and mouse devices
-- **Mouse Driver**: Handles PS/2 mouse packets, tracks position and button states
-- **Hardware Cursor**: Rendered directly to the framebuffer with the double buffer system
-- **Interrupt-driven**: Mouse events are processed via IRQ12 interrupts
+- **VirtIO Tablet (Primary)**: Seamless absolute positioning in QEMU - no cursor grabbing
+- **PS/2 Mouse (Fallback)**: Traditional relative positioning when VirtIO unavailable
+- **Hardware Cursor**: Rendered via window system with background save/restore
+- **Interrupt-driven**: Events processed via IRQ12 (PS/2) or VirtIO interrupts
+
+### Input Method Selection
+During initialization, the kernel:
+1. Scans PCI bus for VirtIO tablet device
+2. If found, initializes VirtIO tablet with screen dimensions for coordinate scaling
+3. If not found, falls back to PS/2 mouse via IRQ12
 
 ### Implementation Details
+
+#### VirtIO Tablet (`drivers/virtio/input.rs`)
+- Provides absolute positioning (seamless mouse in QEMU)
+- Scales tablet coordinates to screen resolution via `init_with_screen()`
+- Uses PCI bus enumeration to detect device
+- Requires `-device virtio-tablet-pci` QEMU flag
 
 #### PS/2 Controller (`ps2_controller.rs`)
 - Initializes the PS/2 controller for both keyboard and mouse
 - Enables interrupts for both devices (IRQ1 for keyboard, IRQ12 for mouse)
 - Configures the controller with proper settings for both devices
 
-#### Mouse Driver (`mouse.rs`)
-- Processes 3-byte PS/2 mouse packets
+#### PS/2 Mouse Driver (`mouse.rs`)
+- Processes 3-byte PS/2 mouse packets (fallback mode)
 - Validates packet integrity (bit 3 of first byte must be set)
-- Tracks mouse position with screen boundary clamping (0-1279, 0-719)
+- Tracks mouse position with screen boundary clamping
 - Handles all three mouse buttons (left, right, middle)
 - Provides `get_state()` function for cursor position queries
 
-#### Mouse Cursor Rendering (`mouse_cursor.rs`)
+#### Mouse Cursor Rendering (`window/cursor.rs`, `graphics/mouse_cursor.rs`)
 - Classic arrow cursor design (12x12 pixels)
-- Integrates directly with `DoubleBufferedFrameBuffer`
+- Window system's CursorRenderer handles drawing
 - Background save/restore for clean cursor movement
-- Global cursor instance managed via lazy_static
-- Drawn in the kernel idle loop when mouse position changes
+- Drawn during render loop when mouse position changes
 
 ### Usage
-The mouse is automatically initialized during kernel boot and the cursor appears on screen. Mouse movement and button clicks are tracked and logged (movement at debug level, button changes at info level).
+The mouse is automatically initialized during kernel boot. VirtIO tablet provides seamless mouse experience in QEMU (cursor moves freely between host and guest). PS/2 mode requires QEMU to grab the mouse.
+
+## Input Processing Pipeline
+
+### Overview
+AgenticOS uses a sophisticated three-layer input processing architecture designed for interrupt safety and clean event routing:
+
+1. **Hardware Layer**: Interrupt handlers push raw events to lock-free queue
+2. **Processing Layer**: `InputProcessor` converts raw scancodes to typed events
+3. **Event Layer**: Typed events routed to window system
+
+### Lock-Free Event Queue (`src/input/queue.rs`)
+- SPSC (Single-Producer Single-Consumer) ring buffer design
+- 256-entry capacity (power of 2 for efficient modulo)
+- Atomic operations with Release/Acquire ordering
+- **Critical**: Prevents interrupt handler blocking (try_lock was causing issues)
+
+```rust
+// Interrupt handler (producer) - never blocks
+pub fn push(&self, event: RawInputEvent) -> bool {
+    // Uses atomic compare_exchange, returns false if full
+}
+
+// Main loop (consumer) - processes events
+pub fn pop(&self) -> Option<RawInputEvent> {
+    // Uses atomic load/store with proper ordering
+}
+```
+
+### Keyboard Processing (`src/input/keyboard_driver.rs`)
+- State machine for PS/2 scancode set 2
+- Handles extended scancodes (0xE0 prefix)
+- Tracks modifier state (Shift, Ctrl, Alt)
+- Converts to `KeyCode` enum for window system
+
+### Mouse Processing (`src/input/mouse_driver.rs`)
+- State machine for 3-byte PS/2 packets
+- Validates packet integrity before processing
+- Produces `MouseEvent` with position delta and button state
+
+### Integration with Window System
+The `InputProcessor` is called from the kernel's idle loop:
+```rust
+// In kernel main loop
+input::process_pending_events();  // Drains queue, routes to windows
+window::render_frame();           // Renders any changes
+```
 
 ## Filesystem Support
 

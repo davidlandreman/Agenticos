@@ -287,12 +287,41 @@ impl Window for TextWindow {
         let font = crate::graphics::fonts::core_font::get_default_font();
         self.char_width = font.char_width();
         self.char_height = font.char_height();
-        self.cols = bounds.width as usize / self.char_width;
-        self.rows = bounds.height as usize / self.char_height;
-        // Reallocate buffer if dimensions changed
-        if self.rows != self.buffer.len() || (self.rows > 0 && self.cols != self.buffer[0].len()) {
-            self.buffer = vec![vec![CharCell::default(); self.cols]; self.rows];
+        let new_cols = bounds.width as usize / self.char_width;
+        let new_rows = bounds.height as usize / self.char_height;
+
+        // Only reallocate if dimensions actually changed
+        let old_rows = self.buffer.len();
+        let old_cols = if old_rows > 0 { self.buffer[0].len() } else { 0 };
+
+        if new_rows != old_rows || new_cols != old_cols {
+            // Create new buffer and preserve existing content
+            let mut new_buffer = vec![vec![CharCell::default(); new_cols]; new_rows];
+
+            // Copy existing content (as much as fits)
+            let copy_rows = old_rows.min(new_rows);
+            let copy_cols = old_cols.min(new_cols);
+            for row in 0..copy_rows {
+                for col in 0..copy_cols {
+                    new_buffer[row][col] = self.buffer[row][col];
+                }
+            }
+
+            self.buffer = new_buffer;
+            self.cols = new_cols;
+            self.rows = new_rows;
+
+            // Adjust cursor if now out of bounds
+            if self.cursor_x >= self.cols {
+                self.cursor_x = self.cols.saturating_sub(1);
+            }
+            if self.cursor_y >= self.rows {
+                self.cursor_y = self.rows.saturating_sub(1);
+            }
+
+            // Clear dirty cells and force full repaint
             self.dirty_cells.clear();
+            self.incremental_updates = false;
         }
     }
 
