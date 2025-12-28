@@ -49,6 +49,12 @@ impl Window for DesktopWindow {
             return;
         }
 
+        // Only paint if we actually need to repaint
+        // This prevents overwriting child windows during partial updates
+        if !self.base.needs_repaint() {
+            return;
+        }
+
         // Fill the entire desktop with the background color
         let bounds = self.base.bounds();
         device.fill_rect(

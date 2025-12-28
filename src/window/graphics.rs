@@ -24,6 +24,9 @@ pub trait GraphicsDevice: Send {
     
     /// Draw a single pixel
     fn draw_pixel(&mut self, x: usize, y: usize, color: Color);
+
+    /// Read a pixel at the given position
+    fn read_pixel(&self, x: usize, y: usize) -> Color;
     
     /// Draw a line between two points
     fn draw_line(&mut self, x1: usize, y1: usize, x2: usize, y2: usize, color: Color);

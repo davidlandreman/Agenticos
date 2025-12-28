@@ -90,5 +90,6 @@ if [ "$RUN_QEMU" = true ]; then
         -serial stdio \
         -no-reboot -no-shutdown \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -device virtio-tablet-pci \
         -m 128M
 fi

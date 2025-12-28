@@ -353,6 +353,9 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
     let mut port = Port::new(0x60);
     let data: u8 = unsafe { port.read() };
 
+    // Update the mouse driver state so get_state() returns current position
+    crate::drivers::mouse::handle_interrupt(data);
+
     // Enqueue to lock-free queue - never blocks
     if !INPUT_QUEUE.push(RawInputEvent::MousePacketByte(data)) {
         // Queue full - this should be rare with 256 entry buffer

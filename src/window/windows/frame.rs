@@ -209,6 +209,11 @@ impl Window for FrameWindow {
             return;
         }
 
+        // Only paint if we actually need to repaint
+        if !self.base.needs_repaint() {
+            return;
+        }
+
         // Draw frame decorations
         self.draw_borders(device);
         self.draw_title_bar(device);

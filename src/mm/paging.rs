@@ -16,6 +16,17 @@ pub unsafe fn get_mapper() -> Option<&'static mut MemoryMapper> {
     MAPPER.map(|ptr| &mut *ptr)
 }
 
+/// Translate a virtual address to a physical address
+/// Returns None if the address is not mapped
+pub fn translate_virt_to_phys(virt_addr: u64) -> Option<u64> {
+    unsafe {
+        get_mapper().and_then(|mapper| {
+            mapper.translate_addr(VirtAddr::new(virt_addr))
+                .map(|phys| phys.as_u64())
+        })
+    }
+}
+
 pub struct MemoryMapper {
     mapper: OffsetPageTable<'static>,
     frame_allocator: BootInfoFrameAllocator,

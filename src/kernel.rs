@@ -55,19 +55,29 @@ pub fn init(boot_info: &'static mut BootInfo) {
     }
     
     // Initialize display - this can still mutably borrow boot_info
-    init_display(boot_info);
-    
-    // Initialize mouse driver
-    crate::drivers::mouse::init();
+    let screen_dims = init_display(boot_info);
+
+    // Initialize mouse driver with screen dimensions
+    // VirtIO tablet will be tried first (seamless mouse in QEMU)
+    // Falls back to PS/2 mouse if not available
+    if let Some((width, height)) = screen_dims {
+        crate::drivers::mouse::init_with_screen(width, height);
+    } else {
+        crate::drivers::mouse::init();
+    }
     
 }
 
-fn init_display(boot_info: &'static mut BootInfo) {
+fn init_display(boot_info: &'static mut BootInfo) -> Option<(u32, u32)> {
     debug_info!("Checking for framebuffer...");
-    
+
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
         debug_info!("Framebuffer found! Initializing window system...");
-        
+
+        let width = framebuffer.info().width as u32;
+        let height = framebuffer.info().height as u32;
+        debug_info!("Screen dimensions: {}x{}", width, height);
+
         // Create graphics device based on double buffer configuration
         let device: Box<dyn window::GraphicsDevice> = if display::USE_DOUBLE_BUFFER {
             debug_info!("Using double-buffered graphics device");
@@ -76,22 +86,24 @@ fn init_display(boot_info: &'static mut BootInfo) {
             debug_info!("Using direct framebuffer device");
             Box::new(window::adapters::DirectFrameBufferDevice::new(framebuffer))
         };
-        
+
         // Initialize window manager
         window::init_window_manager(device);
         debug_info!("Window manager initialized successfully!");
-        
+
         // Create default desktop with terminal
         window::create_default_desktop();
         debug_info!("Default desktop created!");
-        
+
         // Do an initial render to show something immediately
         debug_info!("Performing initial render...");
         window::render_frame();
         debug_info!("Initial render complete!");
-        
+
+        Some((width, height))
     } else {
         debug_warn!("No framebuffer available from bootloader");
+        None
     }
 }
 
@@ -309,7 +321,23 @@ pub fn run() -> ! {
     // Main kernel loop
     debug_info!("Entering idle loop with window rendering...");
     let mut frame_count = 0u64;
+    let using_virtio = crate::drivers::mouse::is_virtio_tablet();
+    if using_virtio {
+        debug_info!("VirtIO tablet active - mouse will not grab QEMU window");
+    }
+
     loop {
+        // Poll VirtIO tablet for events (if using VirtIO)
+        // This must be done in the main loop since VirtIO tablet uses polling
+        if using_virtio {
+            crate::drivers::mouse::poll();
+
+            // Check for VirtIO tablet state changes and generate mouse events
+            if let Some(event) = input_processor.check_virtio_tablet() {
+                window::process_event(event);
+            }
+        }
+
         // Process all pending input events from the lock-free queue
         // This converts raw scancodes/mouse bytes to typed events
         for event in input_processor.process_pending(&crate::input::INPUT_QUEUE) {

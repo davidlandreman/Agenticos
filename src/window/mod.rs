@@ -23,6 +23,7 @@ pub mod windows;
 pub mod terminal;
 pub mod console;
 pub mod keyboard;
+pub mod cursor;
 
 pub use types::*;
 pub use event::*;

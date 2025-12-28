@@ -2,6 +2,7 @@ use spin::Mutex;
 use lazy_static::lazy_static;
 use crate::debug_info;
 use crate::debug_trace;
+use crate::drivers::virtio;
 use x86_64::instructions::port::Port;
 
 const MOUSE_DATA_PORT: u16 = 0x60;
@@ -27,6 +28,7 @@ const MOUSE_ID: u8 = 0x00;
 
 lazy_static! {
     static ref MOUSE_DATA: Mutex<MouseData> = Mutex::new(MouseData::new());
+    static ref USE_VIRTIO_TABLET: Mutex<bool> = Mutex::new(false);
 }
 
 #[derive(Debug)]
@@ -50,12 +52,33 @@ impl MouseData {
     }
 }
 
+/// Initialize mouse with screen dimensions for VirtIO tablet scaling
+pub fn init_with_screen(screen_width: u32, screen_height: u32) {
+    debug_info!("Initializing mouse subsystem...");
+
+    // Try VirtIO tablet first (provides seamless mouse in QEMU)
+    if virtio::input::init(screen_width, screen_height) {
+        debug_info!("Using VirtIO tablet for mouse input (seamless mode)");
+        *USE_VIRTIO_TABLET.lock() = true;
+        return;
+    }
+
+    debug_info!("VirtIO tablet not available, falling back to PS/2 mouse");
+    init_ps2();
+}
+
 pub fn init() {
-    debug_info!("Starting simplified PS/2 mouse initialization...");
-    
+    // Default to 1280x720 for legacy init
+    init_with_screen(1280, 720);
+}
+
+/// Initialize PS/2 mouse only
+fn init_ps2() {
+    debug_info!("Starting PS/2 mouse initialization...");
+
     // Skip PS/2 controller configuration here - it's already done in kernel init
     // This prevents conflicts with keyboard initialization
-    
+
     // Wait for controller to be ready
     wait_controller();
     
@@ -278,8 +301,28 @@ fn process_packet(data: &mut MouseData) {
 }
 
 pub fn get_state() -> (i32, i32, u8) {
+    // Check if using VirtIO tablet
+    if *USE_VIRTIO_TABLET.lock() {
+        if let Some(state) = virtio::input::get_state() {
+            return state;
+        }
+    }
+
+    // Fall back to PS/2 mouse data
     x86_64::instructions::interrupts::without_interrupts(|| {
         let data = MOUSE_DATA.lock();
         (data.x, data.y, data.buttons)
     })
+}
+
+/// Check if using VirtIO tablet (seamless mode)
+pub fn is_virtio_tablet() -> bool {
+    *USE_VIRTIO_TABLET.lock()
+}
+
+/// Poll VirtIO tablet for events (call from main loop)
+pub fn poll() {
+    if *USE_VIRTIO_TABLET.lock() {
+        virtio::input::poll();
+    }
 }

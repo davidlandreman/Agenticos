@@ -346,62 +346,66 @@ impl Window for TextWindow {
             self.incremental_updates, self.dirty_cells.len(), self.base.needs_repaint());
 
         // Determine paint mode
-        if self.incremental_updates {
-            if self.dirty_cells.is_empty() && !self.base.needs_repaint() {
+        // IMPORTANT: If needs_repaint() is true, we MUST do a full repaint
+        // (e.g., after screen was cleared). Only do incremental if we just
+        // have dirty cells but no full repaint is needed.
+        if self.incremental_updates && !self.base.needs_repaint() {
+            if self.dirty_cells.is_empty() {
                 // Nothing to paint - skip entirely
                 crate::debug_trace!("TextWindow: No dirty cells and no repaint needed, skipping");
                 return;
             }
 
-            if !self.dirty_cells.is_empty() {
-                crate::debug_info!("TextWindow: Incremental update for {} dirty cells", self.dirty_cells.len());
+            // Incremental update - only when no full repaint is needed
+            crate::debug_info!("TextWindow: Incremental update for {} dirty cells", self.dirty_cells.len());
 
-                // Only update the dirty cells
-                for &(col, row) in &self.dirty_cells {
-                    let x = bounds.x as usize + col * self.char_width;
-                    let y = bounds.y as usize + row * self.char_height;
-                    let cell = &self.buffer[row][col];
+            // Only update the dirty cells
+            for &(col, row) in &self.dirty_cells {
+                let x = bounds.x as usize + col * self.char_width;
+                let y = bounds.y as usize + row * self.char_height;
+                let cell = &self.buffer[row][col];
 
-                    // Clear the cell area first
-                    device.fill_rect(
-                        x,
-                        y,
-                        self.char_width,
-                        self.char_height,
-                        cell.bg_color,
-                    );
+                // Clear the cell area first
+                device.fill_rect(
+                    x,
+                    y,
+                    self.char_width,
+                    self.char_height,
+                    cell.bg_color,
+                );
 
-                    // Draw character if not space
-                    if cell.ch != ' ' {
-                        device.draw_text(x, y, &cell.ch.to_string(), font.as_font(), cell.fg_color);
-                    }
+                // Draw character if not space
+                if cell.ch != ' ' {
+                    device.draw_text(x, y, &cell.ch.to_string(), font.as_font(), cell.fg_color);
                 }
-
-                // Clear the dirty cells list
-                self.dirty_cells.clear();
-
-                // Draw cursor if focused (always redraw cursor)
-                if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
-                    let cursor_x = bounds.x as usize + self.cursor_x * self.char_width;
-                    let cursor_y = bounds.y as usize + self.cursor_y * self.char_height;
-
-                    // Draw cursor as a filled rectangle
-                    device.fill_rect(
-                        cursor_x,
-                        cursor_y + self.char_height - 2,
-                        self.char_width,
-                        2,
-                        Color::WHITE,
-                    );
-                }
-
-                self.base.clear_needs_repaint();
-                return;
             }
+
+            // Clear the dirty cells list
+            self.dirty_cells.clear();
+
+            // Draw cursor if focused (always redraw cursor)
+            if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
+                let cursor_x = bounds.x as usize + self.cursor_x * self.char_width;
+                let cursor_y = bounds.y as usize + self.cursor_y * self.char_height;
+
+                // Draw cursor as a filled rectangle
+                device.fill_rect(
+                    cursor_x,
+                    cursor_y + self.char_height - 2,
+                    self.char_width,
+                    2,
+                    Color::WHITE,
+                );
+            }
+
+            return;
         }
 
         // Full repaint (either not incremental, or needs_repaint was true)
         crate::debug_info!("TextWindow: Full repaint");
+
+        // Clear dirty cells since we're doing a full repaint
+        self.dirty_cells.clear();
 
         // Clear background with a dark grey instead of black to see if it's rendering
         device.fill_rect(

@@ -90,11 +90,19 @@ impl GraphicsDevice for DoubleBufferedDevice {
         if self.is_clipped(x, y) {
             return;
         }
-        
+
         let mut buffer = self.buffer.lock();
         buffer.draw_pixel(x, y, color);
         drop(buffer); // Release lock before setting dirty
         self.dirty = true;
+    }
+
+    fn read_pixel(&self, x: usize, y: usize) -> Color {
+        if self.is_clipped(x, y) || x >= self.width || y >= self.height {
+            return Color::BLACK;
+        }
+        let buffer = self.buffer.lock();
+        buffer.get_pixel(x, y)
     }
     
     fn draw_line(&mut self, x1: usize, y1: usize, x2: usize, y2: usize, color: Color) {

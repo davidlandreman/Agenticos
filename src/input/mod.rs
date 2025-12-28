@@ -53,7 +53,8 @@ pub use keyboard_driver::{keycode_to_char, KeyboardDriver};
 pub use mouse_driver::MouseDriver;
 pub use queue::{InputQueue, RawInputEvent, QUEUE_SIZE};
 
-use crate::window::event::{Event, KeyModifiers};
+use crate::window::event::{Event, KeyModifiers, MouseButtons, MouseEvent, MouseEventType};
+use crate::window::types::Point;
 
 /// Global input event queue.
 ///
@@ -67,9 +68,15 @@ pub static INPUT_QUEUE: InputQueue = InputQueue::new();
 ///
 /// The `InputProcessor` maintains state machines for keyboard and mouse input,
 /// handling multi-byte sequences and generating appropriate events.
+///
+/// Also supports VirtIO tablet for seamless mouse integration in QEMU.
 pub struct InputProcessor {
     keyboard: KeyboardDriver,
     mouse: MouseDriver,
+    /// Last known VirtIO tablet state (position, buttons)
+    virtio_last_state: Option<(i32, i32, u8)>,
+    /// Whether VirtIO tablet is active
+    using_virtio: bool,
 }
 
 impl InputProcessor {
@@ -77,9 +84,12 @@ impl InputProcessor {
     ///
     /// Screen dimensions are used for mouse position clamping.
     pub fn new(screen_width: i32, screen_height: i32) -> Self {
+        let using_virtio = crate::drivers::mouse::is_virtio_tablet();
         Self {
             keyboard: KeyboardDriver::new(),
             mouse: MouseDriver::new(screen_width, screen_height),
+            virtio_last_state: None,
+            using_virtio,
         }
     }
 
@@ -118,9 +128,83 @@ impl InputProcessor {
                 .process_scancode(scancode)
                 .map(Event::Keyboard),
             RawInputEvent::MousePacketByte(byte) => {
+                // Skip PS/2 mouse events if using VirtIO tablet
+                if self.using_virtio {
+                    return None;
+                }
                 self.mouse.process_byte(byte).map(Event::Mouse)
             }
         }
+    }
+
+    /// Check VirtIO tablet for state changes and generate mouse event if needed.
+    ///
+    /// This should be called from the main loop when using VirtIO tablet.
+    /// Returns a MouseEvent if the tablet state changed.
+    pub fn check_virtio_tablet(&mut self) -> Option<Event> {
+        if !self.using_virtio {
+            return None;
+        }
+
+        // Get current VirtIO tablet state
+        let (x, y, buttons) = crate::drivers::mouse::get_state();
+
+        // Check if state changed
+        let changed = match self.virtio_last_state {
+            Some((lx, ly, lb)) => x != lx || y != ly || buttons != lb,
+            None => true, // First time - consider it changed
+        };
+
+        if !changed {
+            return None;
+        }
+
+        // Determine event type
+        let old_buttons = self.virtio_last_state.map(|(_, _, b)| b).unwrap_or(0);
+        let old_pos = self.virtio_last_state.map(|(x, y, _)| (x, y));
+
+        // Update last state
+        self.virtio_last_state = Some((x, y, buttons));
+
+        // Decode button states
+        let mouse_buttons = MouseButtons {
+            left: (buttons & 0x01) != 0,
+            right: (buttons & 0x02) != 0,
+            middle: (buttons & 0x04) != 0,
+        };
+
+        let old_mouse_buttons = MouseButtons {
+            left: (old_buttons & 0x01) != 0,
+            right: (old_buttons & 0x02) != 0,
+            middle: (old_buttons & 0x04) != 0,
+        };
+
+        // Determine event type based on what changed
+        let button_pressed = (mouse_buttons.left && !old_mouse_buttons.left)
+            || (mouse_buttons.right && !old_mouse_buttons.right)
+            || (mouse_buttons.middle && !old_mouse_buttons.middle);
+
+        let button_released = (!mouse_buttons.left && old_mouse_buttons.left)
+            || (!mouse_buttons.right && old_mouse_buttons.right)
+            || (!mouse_buttons.middle && old_mouse_buttons.middle);
+
+        let event_type = if button_pressed {
+            MouseEventType::ButtonDown
+        } else if button_released {
+            MouseEventType::ButtonUp
+        } else if old_pos.map(|(ox, oy)| x != ox || y != oy).unwrap_or(true) {
+            MouseEventType::Move
+        } else {
+            return None;
+        };
+
+        let pos = Point::new(x, y);
+        Some(Event::Mouse(MouseEvent {
+            event_type,
+            position: pos,
+            global_position: pos,
+            buttons: mouse_buttons,
+        }))
     }
 
     /// Get current mouse position.

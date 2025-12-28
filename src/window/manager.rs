@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 use crate::drivers::mouse;
 use crate::graphics::compositor::Compositor;
+use super::cursor::CursorRenderer;
 use super::{
     Window, WindowId, Screen, ScreenId, ScreenMode, GraphicsDevice,
     Event, EventResult, KeyboardEvent, MouseEvent, MouseEventType,
@@ -37,6 +38,8 @@ pub struct WindowManager {
     interaction_state: InteractionState,
     /// Last known mouse button state for detecting clicks
     last_mouse_buttons: u8,
+    /// Cursor renderer for save/restore and drawing
+    cursor: CursorRenderer,
 }
 
 impl WindowManager {
@@ -57,6 +60,7 @@ impl WindowManager {
             expecting_break_code: false,
             interaction_state: InteractionState::Idle,
             last_mouse_buttons: 0,
+            cursor: CursorRenderer::new(),
         };
 
         // Create default text screen
@@ -371,12 +375,23 @@ impl WindowManager {
         // Begin frame
         self.compositor.begin_frame();
 
+        // Restore old cursor background before any rendering
+        // This erases the cursor from its old position
+        self.cursor.restore_background(&mut *self.graphics_device);
+
         // Determine if we need full repaint or can do partial
         let full_repaint = self.compositor.dirty.needs_full_repaint();
 
         if full_repaint {
             crate::debug_trace!("Full frame render required");
             self.graphics_device.clear(crate::graphics::color::Color::BLACK);
+
+            // When doing a full repaint, all windows must repaint
+            // Otherwise windows that don't think they need repainting will skip
+            // and leave holes where the screen was cleared
+            for window in self.window_registry.values_mut() {
+                window.invalidate();
+            }
         }
 
         // Render the active screen's windows
@@ -386,8 +401,9 @@ impl WindowManager {
             }
         }
 
-        // Draw mouse cursor
-        self.draw_mouse_cursor(mouse_x, mouse_y);
+        // Save background at new cursor position, then draw cursor
+        self.cursor.save_background(mouse_x, mouse_y, &*self.graphics_device);
+        self.cursor.draw(mouse_x, mouse_y, &mut *self.graphics_device);
 
         // End frame and clear dirty tracking
         self.compositor.end_frame();
@@ -408,56 +424,7 @@ impl WindowManager {
     pub fn force_full_repaint(&mut self) {
         self.compositor.dirty.mark_full_repaint();
     }
-    
-    /// Draw the mouse cursor
-    fn draw_mouse_cursor(&mut self, x: usize, y: usize) {
-        use crate::graphics::color::Color;
-        
-        // Simple arrow cursor design
-        let cursor_color = Color::WHITE;
-        let outline_color = Color::BLACK;
-        
-        // Draw cursor with black outline for visibility
-        let cursor_pixels = [
-            (0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8), (0, 9), (0, 10),
-            (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8), (1, 9),
-            (2, 2), (2, 3), (2, 4), (2, 5), (2, 6), (2, 7), (2, 8),
-            (3, 3), (3, 4), (3, 5), (3, 6), (3, 7),
-            (4, 4), (4, 5), (4, 6),
-            (5, 5),
-        ];
-        
-        // Draw black outline first
-        for &(dx, dy) in &cursor_pixels {
-            let px = x + dx;
-            let py = y + dy;
-            
-            // Draw outline pixels
-            if px > 0 {
-                self.graphics_device.draw_pixel(px - 1, py, outline_color);
-            }
-            if px < self.graphics_device.width() - 1 {
-                self.graphics_device.draw_pixel(px + 1, py, outline_color);
-            }
-            if py > 0 {
-                self.graphics_device.draw_pixel(px, py - 1, outline_color);
-            }
-            if py < self.graphics_device.height() - 1 {
-                self.graphics_device.draw_pixel(px, py + 1, outline_color);
-            }
-        }
-        
-        // Draw white cursor on top
-        for &(dx, dy) in &cursor_pixels {
-            let px = x + dx;
-            let py = y + dy;
-            
-            if px < self.graphics_device.width() && py < self.graphics_device.height() {
-                self.graphics_device.draw_pixel(px, py, cursor_color);
-            }
-        }
-    }
-    
+
     /// Recursively render a window and its children
     fn render_window_tree(&mut self, window_id: WindowId) {
         self.render_window_tree_with_offset(window_id, 0, 0);
