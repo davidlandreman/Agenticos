@@ -4,6 +4,7 @@
 CLEAN=false
 RUN_QEMU=true
 HELP=false
+DEBUG=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -14,6 +15,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -n|--no-qemu)
             RUN_QEMU=false
+            shift
+            ;;
+        -d|--debug)
+            DEBUG=true
             shift
             ;;
         -h|--help)
@@ -36,10 +41,11 @@ if [ "$HELP" = true ]; then
     echo ""
     echo "Options:"
     echo "  -c, --clean     Clean build artifacts before building"
+    echo "  -d, --debug     Build in debug mode (larger kernel, slower boot)"
     echo "  -n, --no-qemu   Build only, don't run QEMU"
     echo "  -h, --help      Show this help message"
     echo ""
-    echo "Default: Build kernel, create images, and run in QEMU"
+    echo "Default: Build in release mode, create images, and run in QEMU"
     exit 0
 fi
 
@@ -50,9 +56,18 @@ if [ "$CLEAN" = true ]; then
     rm -rf target/bootloader
 fi
 
+# Determine build flags
+BUILD_FLAGS="--release"
+if [ "$DEBUG" = true ]; then
+    BUILD_FLAGS=""
+    echo "🐛 Building in DEBUG mode"
+else
+    echo "📦 Building in RELEASE mode"
+fi
+
 # First build pass - compile the kernel
 echo "🔨 Building kernel (pass 1/2)..."
-cargo build
+cargo build $BUILD_FLAGS
 if [ $? -ne 0 ]; then
     echo "❌ Build failed!"
     exit 1
@@ -60,7 +75,7 @@ fi
 
 # Second build pass - create disk images
 echo "💾 Creating disk images (pass 2/2)..."
-cargo build
+cargo build $BUILD_FLAGS
 if [ $? -ne 0 ]; then
     echo "❌ Image creation failed!"
     exit 1

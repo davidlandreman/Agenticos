@@ -278,44 +278,64 @@ pub fn run() -> ! {
 
     // Start the shell in a simple way - we'll run it but render frames between inputs
     debug_info!("Starting shell with window system...");
-    
+
     // The default desktop already created a terminal window
     // Get its ID from the terminal module
     let terminal_id = window::terminal::get_terminal_window()
         .expect("Terminal window should be set by create_default_desktop");
     debug_info!("Using terminal window with ID: {:?}", terminal_id);
-    
+
     // Force an initial render to display the terminal
     window::render_frame();
-    
+
     // Print a welcome message
     crate::println!("\nWelcome to AgenticOS!");
     crate::println!("Window system active. Type 'help' for commands.\n");
-    
+
     // Set up the terminal input callback to route to async shell
     window::terminal::set_terminal_input_callback(|line| {
         crate::commands::shell::async_shell::handle_shell_input(line);
     });
-    
+
     // Initialize the async shell
     crate::commands::shell::async_shell::init_async_shell(terminal_id);
     debug_info!("Async shell initialized");
-    
+
+    // Create input processor for event handling
+    // This processes raw scancodes/mouse bytes into typed events
+    let mut input_processor = crate::input::InputProcessor::new(1280, 720);
+    debug_info!("Input processor initialized");
+
     // Main kernel loop
     debug_info!("Entering idle loop with window rendering...");
     let mut frame_count = 0u64;
     loop {
+        // Process all pending input events from the lock-free queue
+        // This converts raw scancodes/mouse bytes to typed events
+        for event in input_processor.process_pending(&crate::input::INPUT_QUEUE) {
+            window::process_event(event);
+        }
+
         // Update async shell state
         crate::commands::shell::async_shell::update_async_shell();
-        
+
+        // Process any pending terminal output
+        window::process_terminal_output();
+
         // Window manager handles all rendering including mouse cursor
         window::render_frame();
-        
+
         frame_count += 1;
         if frame_count % 10000 == 0 {
             crate::debug_trace!("Frame {}", frame_count);
+            // Log dropped event count for diagnostics
+            let dropped = crate::input::dropped_event_count();
+            if dropped > 0 {
+                debug_warn!("Dropped {} input events (queue overflow)", dropped);
+                crate::input::reset_dropped_count();
+            }
         }
-        
+
         // Use hlt to save CPU, but wake on interrupts
         // The keyboard interrupt will wake us up to process input
         x86_64::instructions::hlt();

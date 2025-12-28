@@ -108,6 +108,11 @@ impl TerminalWindow {
         self.text_window.write_str(&self.input_buffer);
     }
     
+    /// Process any pending console output
+    pub fn process_output(&mut self) {
+        self.text_window.process_console_output();
+    }
+    
     /// Handle a backspace key press
     fn handle_backspace(&mut self) {
         if !self.input_buffer.is_empty() {
@@ -179,6 +184,18 @@ impl Window for TerminalWindow {
         self.text_window.visible()
     }
     
+    fn set_bounds(&mut self, bounds: Rect) {
+        self.text_window.set_bounds(bounds);
+    }
+
+    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
+        self.text_window.set_bounds_no_invalidate(bounds);
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.text_window.set_visible(visible);
+    }
+    
     fn parent(&self) -> Option<WindowId> {
         self.text_window.parent()
     }
@@ -187,12 +204,26 @@ impl Window for TerminalWindow {
         self.text_window.children()
     }
     
+    fn set_parent(&mut self, parent: Option<WindowId>) {
+        self.text_window.set_parent(parent);
+    }
+    
+    fn add_child(&mut self, child: WindowId) {
+        self.text_window.add_child(child);
+    }
+    
+    fn remove_child(&mut self, child: WindowId) {
+        self.text_window.remove_child(child);
+    }
+    
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         crate::debug_trace!("TerminalWindow::paint called");
         
-        // Process any pending console output BEFORE painting
-        // This ensures output is added to the buffer before we render
-        self.text_window.process_console_output();
+        // Process any pending console output, but only if we're already marked for repaint
+        // This prevents the infinite loop of process -> invalidate -> paint -> process
+        if self.text_window.needs_repaint() {
+            self.text_window.process_console_output();
+        }
         
         // Paint the text window
         self.text_window.paint(device);

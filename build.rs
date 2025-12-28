@@ -1,22 +1,26 @@
 use std::path::PathBuf;
 
 fn main() {
+    // Detect build profile (debug or release)
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+
     // Tell cargo to re-run this script if the kernel binary changes
-    println!("cargo:rerun-if-changed=target/x86_64-unknown-none/debug/agenticos");
+    println!("cargo:rerun-if-changed=target/x86_64-unknown-none/{}/agenticos", profile);
     // Also re-run if assets directory changes
     println!("cargo:rerun-if-changed=assets");
-    
+
     // Use relative paths in the target directory
     let target_dir = PathBuf::from("/Users/david/Projects/agenticos/target");
     let out_dir = target_dir.join("./bootloader");
-    
+
     // Create output directory if it doesn't exist
     std::fs::create_dir_all(&out_dir).ok();
-    
-    // Path to the kernel binary
-    let kernel = target_dir.join("x86_64-unknown-none/debug/agenticos");
+
+    // Path to the kernel binary (debug or release based on profile)
+    let kernel = target_dir.join(format!("x86_64-unknown-none/{}/agenticos", profile));
     
     // Check if we're in the second pass (kernel exists)
+    println!("cargo:warning=Build profile: {}", profile);
     println!("cargo:warning=Checking for Kernel Code: {}", kernel.display());
     if kernel.exists() {
         println!("cargo:warning=Creating bootloader images...");

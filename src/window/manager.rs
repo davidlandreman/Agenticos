@@ -4,11 +4,14 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 use crate::drivers::mouse;
+use crate::graphics::compositor::Compositor;
 use super::{
     Window, WindowId, Screen, ScreenId, ScreenMode, GraphicsDevice,
     Event, EventResult, KeyboardEvent, MouseEvent, MouseEventType,
     Point, Rect, keyboard::{scancode_to_keycode, is_break_code, KeyboardState},
 };
+use super::types::{InteractionState, HitTestResult};
+use super::console::take_pending_invalidations;
 
 /// The Window Manager coordinates all windows across all screens
 pub struct WindowManager {
@@ -24,23 +27,24 @@ pub struct WindowManager {
     z_order: Vec<WindowId>,
     /// Graphics device for rendering
     pub graphics_device: Box<dyn GraphicsDevice>,
-    /// Last known mouse position
-    last_mouse_pos: (usize, usize),
-    /// Whether we need to redraw the screen
-    needs_redraw: bool,
-    /// Saved pixels under the mouse cursor
-    cursor_saved_pixels: Vec<(usize, usize, crate::graphics::color::Color)>,
-    /// Dirty region that needs updating
-    dirty_region: Option<Rect>,
+    /// Compositor for dirty tracking and cursor overlay
+    compositor: Compositor,
     /// Keyboard state tracker
     keyboard_state: KeyboardState,
     /// Whether we're expecting a break code after 0xF0
     expecting_break_code: bool,
+    /// Current window interaction state (dragging, resizing)
+    interaction_state: InteractionState,
+    /// Last known mouse button state for detecting clicks
+    last_mouse_buttons: u8,
 }
 
 impl WindowManager {
     /// Create a new window manager with the given graphics device
     pub fn new(graphics_device: Box<dyn GraphicsDevice>) -> Self {
+        let width = graphics_device.width() as u32;
+        let height = graphics_device.height() as u32;
+
         let mut wm = WindowManager {
             screens: Vec::new(),
             active_screen: ScreenId(0), // Will be set when first screen is created
@@ -48,18 +52,17 @@ impl WindowManager {
             focus_stack: Vec::new(),
             z_order: Vec::new(),
             graphics_device,
-            last_mouse_pos: (0, 0),
-            needs_redraw: true,
-            cursor_saved_pixels: Vec::new(),
-            dirty_region: None,
+            compositor: Compositor::new(width, height),
             keyboard_state: KeyboardState::default(),
             expecting_break_code: false,
+            interaction_state: InteractionState::Idle,
+            last_mouse_buttons: 0,
         };
-        
+
         // Create default text screen
         let default_screen = wm.create_screen(ScreenMode::Text);
         wm.active_screen = default_screen;
-        
+
         wm
     }
     
@@ -99,19 +102,32 @@ impl WindowManager {
         // Generate a new window ID
         let window_id = WindowId::new();
         
-        // Add to z-order (new windows go on top)
-        self.z_order.push(window_id);
-        
-        // If there's a parent, we'll need to update parent-child relationships
-        // when set_window_impl is called
+        // Store parent information for later use when set_window_impl is called
+        // We'll establish the relationship in set_window_impl_with_parent
         
         window_id
     }
     
     /// Set the implementation for a window
-    pub fn set_window_impl(&mut self, id: WindowId, window: Box<dyn Window>) {
+    pub fn set_window_impl(&mut self, id: WindowId, mut window: Box<dyn Window>) {
+        // Check if this window should have a parent based on how it was created
+        // For now, we'll rely on the window having its parent set before calling this
+        let parent_id = window.parent();
+        
+        // Add to registry
         self.window_registry.insert(id, window);
-        self.z_order.push(id);
+        
+        // Only add to z-order if not already present
+        if !self.z_order.contains(&id) {
+            self.z_order.push(id);
+        }
+        
+        // If the window has a parent, update the parent's children list
+        if let Some(parent_id) = parent_id {
+            // We need to add this window to its parent's children
+            // However, the current Window trait doesn't have add_child method
+            // This is a design limitation we need to work around
+        }
     }
     
     /// Destroy a window and all its children
@@ -238,13 +254,31 @@ impl WindowManager {
     /// Route a keyboard event to the appropriate window
     pub fn route_keyboard_event(&mut self, event: KeyboardEvent) {
         crate::debug_trace!("route_keyboard_event called");
-        
+
         // Send to focused window
         if let Some(focused) = self.focused_window() {
             crate::debug_trace!("Routing to focused window: {:?}", focused);
             self.route_event_to_window(focused, Event::Keyboard(event));
         } else {
             crate::debug_trace!("No focused window to route keyboard event to");
+        }
+    }
+
+    /// Process typed events from the new input system.
+    ///
+    /// This method handles events that have already been processed by the
+    /// InputProcessor (scancode->KeyCode conversion, modifier tracking, etc.)
+    pub fn process_event(&mut self, event: Event) {
+        match event {
+            Event::Keyboard(kb_event) => {
+                self.route_keyboard_event(kb_event);
+            }
+            Event::Mouse(mouse_event) => {
+                self.route_mouse_event(mouse_event);
+            }
+            _ => {
+                // Other events handled as before
+            }
         }
     }
     
@@ -298,96 +332,81 @@ impl WindowManager {
     }
     
     // Rendering
-    
+
     /// Render the current state to the graphics device
     pub fn render(&mut self) {
-        use crate::debug_trace;
-        
+        // Process any pending invalidations from deferred queue
+        let pending = take_pending_invalidations();
+        for window_id in pending {
+            if let Some(window) = self.window_registry.get_mut(&window_id) {
+                window.invalidate();
+            }
+        }
+
         // Check if mouse moved
-        let (mouse_x, mouse_y, _buttons) = mouse::get_state();
+        let (mouse_x, mouse_y, buttons) = mouse::get_state();
         let mouse_x = mouse_x.max(0) as usize;
         let mouse_y = mouse_y.max(0) as usize;
-        let mouse_moved = (mouse_x, mouse_y) != self.last_mouse_pos;
-        
-        // Check if any windows need repaint
-        let windows_need_repaint = self.window_registry.values().any(|w| w.needs_repaint());
-        
-        if windows_need_repaint {
-            crate::debug_info!("Windows need repaint detected!");
+
+        // Handle window dragging
+        self.handle_dragging(mouse_x as i32, mouse_y as i32, buttons);
+
+        // Update cursor position in compositor (this marks dirty regions)
+        let mouse_moved = self.compositor.update_cursor(mouse_x, mouse_y);
+
+        // Check if any windows need repaint and mark their regions dirty
+        for (window_id, window) in &self.window_registry {
+            if window.needs_repaint() {
+                let bounds = window.bounds();
+                self.compositor.dirty.mark_dirty(bounds);
+                crate::debug_trace!("Window {:?} needs repaint, marking dirty: {:?}", window_id, bounds);
+            }
         }
-        
-        // Only render if something changed
-        if !self.needs_redraw && !mouse_moved && !windows_need_repaint {
-            return; // Nothing to update
+
+        // Early exit if nothing needs rendering
+        if !self.compositor.needs_render() && !mouse_moved {
+            return; // Nothing to update - this is the key optimization!
         }
-        
-        // If ONLY the mouse moved, do a fast cursor update
-        if mouse_moved && !windows_need_repaint && !self.needs_redraw {
-            debug_trace!("Fast mouse update");
-            self.update_mouse_cursor_fast(mouse_x, mouse_y);
-            self.last_mouse_pos = (mouse_x, mouse_y);
-            self.graphics_device.flush();
-            return;
-        }
-        
-        crate::debug_trace!("Full frame render: windows_need_repaint={}, mouse_moved={}, needs_redraw={}", 
-            windows_need_repaint, mouse_moved, self.needs_redraw);
-        
-        // Only clear the device if we need a full redraw
-        // Individual windows will handle their own clearing/painting
-        if self.needs_redraw {
-            crate::debug_trace!("Clearing graphics device...");
+
+        // Begin frame
+        self.compositor.begin_frame();
+
+        // Determine if we need full repaint or can do partial
+        let full_repaint = self.compositor.dirty.needs_full_repaint();
+
+        if full_repaint {
+            crate::debug_trace!("Full frame render required");
             self.graphics_device.clear(crate::graphics::color::Color::BLACK);
-            crate::debug_trace!("Graphics device cleared");
         }
-        
+
         // Render the active screen's windows
         if let Some(screen) = self.get_active_screen() {
             if let Some(root_id) = screen.root_window {
-                crate::debug_trace!("Rendering window tree starting from root: {:?}", root_id);
                 self.render_window_tree(root_id);
-            } else {
-                crate::debug_warn!("No root window set for active screen!");
             }
-        } else {
-            crate::debug_warn!("No active screen!");
         }
-        
-        // Draw a simple mouse cursor (arrow shape)
+
+        // Draw mouse cursor
         self.draw_mouse_cursor(mouse_x, mouse_y);
-        
-        self.last_mouse_pos = (mouse_x, mouse_y);
-        self.needs_redraw = false;
-        
-        // Flush to physical framebuffer - this is the expensive operation!
+
+        // End frame and clear dirty tracking
+        self.compositor.end_frame();
+
+        // Flush to physical framebuffer
         self.graphics_device.flush();
     }
-    
-    /// Fast update for mouse cursor - only redraw cursor area
-    fn update_mouse_cursor_fast(&mut self, new_x: usize, new_y: usize) {
-        use crate::graphics::color::Color;
-        
-        // Erase old cursor by redrawing that area
-        let (old_x, old_y) = self.last_mouse_pos;
-        
-        // Calculate the bounding box of the old cursor (with some padding)
-        let cursor_size = 12;
-        let old_left = old_x.saturating_sub(1);
-        let old_top = old_y.saturating_sub(1);
-        let old_right = (old_x + cursor_size + 1).min(self.graphics_device.width());
-        let old_bottom = (old_y + cursor_size + 1).min(self.graphics_device.height());
-        
-        // Redraw just the old cursor area by re-rendering windows in that region
-        // For now, just fill with black (this is why mouse leaves trails)
-        // TODO: Properly save/restore background
-        for y in old_top..old_bottom {
-            for x in old_left..old_right {
-                self.graphics_device.draw_pixel(x, y, Color::BLACK);
-            }
+
+    /// Mark a window as needing repaint (for external callers).
+    pub fn invalidate_window(&mut self, window_id: WindowId) {
+        if let Some(window) = self.window_registry.get(&window_id) {
+            let bounds = window.bounds();
+            self.compositor.dirty.mark_dirty(bounds);
         }
-        
-        // Draw new cursor
-        self.draw_mouse_cursor(new_x, new_y);
+    }
+
+    /// Force a full repaint on the next frame.
+    pub fn force_full_repaint(&mut self) {
+        self.compositor.dirty.mark_full_repaint();
     }
     
     /// Draw the mouse cursor
@@ -441,30 +460,48 @@ impl WindowManager {
     
     /// Recursively render a window and its children
     fn render_window_tree(&mut self, window_id: WindowId) {
-        crate::debug_trace!("render_window_tree: {:?}", window_id);
+        self.render_window_tree_with_offset(window_id, 0, 0);
+    }
+    
+    /// Recursively render a window and its children with parent offset
+    fn render_window_tree_with_offset(&mut self, window_id: WindowId, parent_x: i32, parent_y: i32) {
+        crate::debug_trace!("render_window_tree: {:?}, offset=({}, {})", window_id, parent_x, parent_y);
         // We need to temporarily take the window out to avoid borrowing issues
         if let Some(mut window) = self.window_registry.remove(&window_id) {
             // Get window properties before painting
-            let bounds = window.bounds();
+            let mut bounds = window.bounds();
             let visible = window.visible();
             let children = window.children().to_vec();
             
-            crate::debug_trace!("Window {:?}: bounds={:?}, visible={}", window_id, bounds, visible);
+            // Adjust bounds by parent offset
+            bounds.x += parent_x;
+            bounds.y += parent_y;
+            
+            crate::debug_trace!("Window {:?}: absolute_bounds={:?}, visible={}", window_id, bounds, visible);
             
             if visible {
+                // Save the original bounds
+                let original_bounds = window.bounds();
+
+                // Temporarily set absolute bounds for rendering (without invalidation!)
+                window.set_bounds_no_invalidate(bounds);
+
                 // Set clipping to window bounds
                 self.graphics_device.set_clip_rect(Some(bounds));
-                
+
                 // Paint the window
                 crate::debug_trace!("Calling paint on window {:?}", window_id);
                 window.paint(&mut *self.graphics_device);
+
+                // Restore original bounds (without invalidation!)
+                window.set_bounds_no_invalidate(original_bounds);
                 
                 // Put the window back
                 self.window_registry.insert(window_id, window);
                 
-                // Recursively render children
+                // Recursively render children with updated offset
                 for child_id in children {
-                    self.render_window_tree(child_id);
+                    self.render_window_tree_with_offset(child_id, bounds.x, bounds.y);
                 }
                 
                 // Clear clipping
@@ -474,5 +511,125 @@ impl WindowManager {
                 self.window_registry.insert(window_id, window);
             }
         }
+    }
+
+    // Window Interaction (Dragging/Resizing)
+
+    /// Handle window dragging based on current mouse state.
+    fn handle_dragging(&mut self, mouse_x: i32, mouse_y: i32, buttons: u8) {
+        let left_button_pressed = (buttons & 0x01) != 0;
+        let left_button_was_pressed = (self.last_mouse_buttons & 0x01) != 0;
+        self.last_mouse_buttons = buttons;
+
+        match self.interaction_state {
+            InteractionState::Idle => {
+                // Check if we just pressed the left button
+                if left_button_pressed && !left_button_was_pressed {
+                    self.start_drag_if_on_title_bar(mouse_x, mouse_y);
+                }
+            }
+            InteractionState::Dragging { window, start_mouse, start_window } => {
+                if left_button_pressed {
+                    // Continue dragging - move the window
+                    let delta_x = mouse_x - start_mouse.x;
+                    let delta_y = mouse_y - start_mouse.y;
+                    let new_x = start_window.x + delta_x;
+                    let new_y = start_window.y + delta_y;
+
+                    // Move the window
+                    if let Some(win) = self.window_registry.get_mut(&window) {
+                        let old_bounds = win.bounds();
+                        // Mark old position as dirty
+                        self.compositor.dirty.mark_dirty(old_bounds);
+
+                        // Update bounds
+                        win.set_bounds(Rect::new(new_x, new_y, old_bounds.width, old_bounds.height));
+                        win.invalidate();
+
+                        // Mark new position as dirty
+                        let new_bounds = win.bounds();
+                        self.compositor.dirty.mark_dirty(new_bounds);
+
+                        crate::debug_trace!("Dragging window {:?} to ({}, {})", window, new_x, new_y);
+                    }
+                } else {
+                    // Button released - end drag
+                    crate::debug_info!("Window drag ended");
+                    self.interaction_state = InteractionState::Idle;
+                }
+            }
+            InteractionState::Resizing { .. } => {
+                // TODO: Implement resizing
+                if !left_button_pressed {
+                    self.interaction_state = InteractionState::Idle;
+                }
+            }
+        }
+    }
+
+    /// Check if the mouse is on a title bar and start dragging if so.
+    fn start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
+        // Find the topmost window under the mouse
+        // Walk z-order from front to back
+        let mut target_window = None;
+        let mut target_hit = HitTestResult::None;
+
+        for &window_id in self.z_order.iter().rev() {
+            if let Some(window) = self.window_registry.get(&window_id) {
+                let bounds = window.bounds();
+                let local_x = mouse_x - bounds.x;
+                let local_y = mouse_y - bounds.y;
+
+                if bounds.contains_point(Point::new(mouse_x, mouse_y)) {
+                    // Check if this is a FrameWindow by trying to get its type
+                    // We'll use a simple heuristic based on window properties
+                    // For a proper solution, we'd need trait downcasting
+
+                    // Simple hit test for frame-like windows
+                    // Assume title bar is top 24 pixels after 2px border
+                    if local_y >= 2 && local_y < 26 {
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::TitleBar;
+                        break;
+                    } else if local_y < 2 || local_x < 2 ||
+                              local_x >= bounds.width as i32 - 2 ||
+                              local_y >= bounds.height as i32 - 2 {
+                        // On a border - could be resize, but for now just break
+                        break;
+                    } else {
+                        // Client area - don't start drag, but stop searching
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(window_id) = target_window {
+            if target_hit == HitTestResult::TitleBar {
+                if let Some(window) = self.window_registry.get(&window_id) {
+                    let bounds = window.bounds();
+                    crate::debug_info!("Starting window drag for {:?} at ({}, {})", window_id, bounds.x, bounds.y);
+                    self.interaction_state = InteractionState::Dragging {
+                        window: window_id,
+                        start_mouse: Point::new(mouse_x, mouse_y),
+                        start_window: Point::new(bounds.x, bounds.y),
+                    };
+
+                    // Bring window to front
+                    self.bring_to_front(window_id);
+                }
+            }
+        }
+    }
+
+    /// Bring a window to the front of the z-order.
+    pub fn bring_to_front(&mut self, window_id: WindowId) {
+        // Remove from current position
+        self.z_order.retain(|&id| id != window_id);
+        // Add to front
+        self.z_order.push(window_id);
+
+        // Mark entire screen as needing repaint for proper layering
+        self.compositor.dirty.mark_full_repaint();
     }
 }

@@ -15,6 +15,7 @@ mod commands;
 mod drivers;
 mod fs;
 mod graphics;
+mod input;
 mod lib;
 mod mm;
 mod process;

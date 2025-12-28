@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch with the eventual goal of supporting agent-based computing capabilities.
 
-**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. A new window system has been implemented that provides hierarchical window management, event routing, and mouse support. However, the "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
+**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. A window system has been implemented that provides hierarchical window management, event routing, and mouse support. The OS now boots into a GUI desktop with a blue background and a windowed terminal application. However, the "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
 
 ## Common Commands
 
@@ -105,17 +105,20 @@ The project follows a modular monolithic kernel design with clear separation of 
   - `types.rs` - Core types (WindowId, ScreenId, Rect, Point, ColorDepth)
   - `event.rs` - Event system (keyboard, mouse, window events)
   - `graphics.rs` - GraphicsDevice trait for rendering abstraction
-  - `manager.rs` - WindowManager for coordinating windows and screens
+  - `manager.rs` - WindowManager for coordinating windows and screens with parent-child coordinate transformations
   - `screen.rs` - Screen abstraction for virtual displays
   - `console.rs` - Console output buffer for print macro integration
-  - `terminal.rs` - Terminal window support (placeholder)
+  - `terminal.rs` - Terminal window support
   - `adapters/` - GraphicsDevice implementations
     - `direct_framebuffer.rs` - Direct framebuffer writes (fast, used for mouse)
     - `double_buffered.rs` - Double buffered rendering (smooth but slower)
   - `windows/` - Window implementations
-    - `base.rs` - Base window functionality
+    - `base.rs` - Base window functionality with parent-child tracking
     - `container.rs` - Container window that can hold children
     - `text.rs` - Text grid window for terminal output
+    - `terminal.rs` - Terminal window with input handling
+    - `frame.rs` - Frame window with title bar and borders
+    - `desktop.rs` - Desktop background window
 
 - `src/commands/` - Shell commands (13 implemented)
   - `shell/` - Main system shell
@@ -151,7 +154,7 @@ The project follows a modular monolithic kernel design with clear separation of 
 4. **Limited Test Coverage** - Many subsystems lack comprehensive tests
 5. **Global State** - Heavy use of `static mut` and `lazy_static`
 6. **No User Space** - Everything runs in ring 0 (kernel mode)
-7. **Async Shell Performance** - Keyboard events can be dropped when window manager is busy rendering
+7. **Constant Window Repainting** - TextWindow constantly repaints even when no changes occur, causing performance issues
 
 ### Areas Needing Refactoring
 1. **Graphics Subsystem** - Complex relationships between display modules
@@ -167,6 +170,8 @@ The project follows a modular monolithic kernel design with clear separation of 
 - Window system uses smart rendering - only updates when mouse moves or content changes
 - **Text rendering optimization**: TextWindow uses incremental updates (dirty cell tracking) to avoid redrawing all characters on each keypress
 - **Window manager optimization**: Only clears screen on full redraw (`needs_redraw`), not on every paint
+- **GUI Desktop**: Default boot mode is now GUI with windowed terminal, providing modern desktop experience
+- **Coordinate Transformation**: Parent-child window relationships properly handle coordinate offsets during rendering
 
 ## OS Development Specifics
 
@@ -485,6 +490,46 @@ To add a new command, follow this pattern:
    ```
 
 That's it! The command is now available in the shell.
+
+## Window System
+
+### Overview
+The window system provides a modern GUI framework with hierarchical window management:
+
+- **Window Hierarchy**: Parent-child relationships with proper event propagation and coordinate transformations
+- **Multiple Screens**: Support for virtual screens (though only one physical display)
+- **Event System**: Keyboard and mouse events routed through window tree
+- **Double Buffering**: Smooth rendering with configurable buffering modes
+- **Mouse Support**: Hardware cursor with click and drag capabilities
+- **GUI Desktop**: Boots directly into graphical mode with blue desktop background
+
+### Window Types
+- **DesktopWindow**: Blue background for the desktop (0, 50, 100 RGB)
+- **FrameWindow**: Windows with title bars and borders (uses WindowBase for parent tracking)
+  - Active windows have blue borders/title bar
+  - Inactive windows have grey borders/title bar
+  - Title bar height: 24 pixels, border width: 2 pixels
+- **TextWindow**: Grid-based text rendering for terminals
+  - Uses 8x8 bitmap font by default
+  - Tracks dirty cells for incremental updates
+  - Dark grey background (32, 32, 32 RGB)
+- **TerminalWindow**: Interactive terminal with command input
+  - Wraps TextWindow with input handling
+  - Manages command history and cursor
+- **ContainerWindow**: Generic container for child windows
+
+### Default Desktop Layout
+The system boots into a GUI desktop with:
+- Blue desktop background covering the entire screen
+- Terminal window in a frame at position (100, 50)
+- Terminal frame size: 800x600 pixels (or smaller if screen is small)
+- Terminal displays "AgenticOS Terminal" in the title bar
+
+### Implementation Details
+- All windows now use `WindowBase` for consistent parent-child tracking
+- The `render_window_tree_with_offset` method handles coordinate transformations
+- Child windows are positioned relative to their parent's coordinate system
+- Window bounds are temporarily adjusted during rendering for proper positioning
 
 ## Mouse Support
 

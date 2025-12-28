@@ -44,14 +44,35 @@ pub trait Window: Send {
     /// Get the bounds of this window relative to its parent
     fn bounds(&self) -> Rect;
     
+    /// Set the bounds of this window
+    fn set_bounds(&mut self, bounds: Rect);
+
+    /// Set bounds without triggering invalidation (for render-time transforms)
+    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
+        // Default implementation - subclasses should override
+        self.set_bounds(bounds);
+    }
+    
     /// Check if this window is visible
     fn visible(&self) -> bool;
+    
+    /// Set the visibility of this window
+    fn set_visible(&mut self, visible: bool);
     
     /// Get the parent window ID, if any
     fn parent(&self) -> Option<WindowId>;
     
     /// Get child window IDs
     fn children(&self) -> &[WindowId];
+    
+    /// Set the parent of this window
+    fn set_parent(&mut self, parent: Option<WindowId>);
+    
+    /// Add a child window
+    fn add_child(&mut self, child: WindowId);
+    
+    /// Remove a child window
+    fn remove_child(&mut self, child: WindowId);
     
     /// Paint this window to the graphics device
     fn paint(&mut self, device: &mut dyn GraphicsDevice);
@@ -125,25 +146,66 @@ pub fn create_default_desktop() {
         let width = wm.graphics_device.width() as u32;
         let height = wm.graphics_device.height() as u32;
         
-        // Create a full-screen terminal window
-        let window_id = wm.create_window(None);
-        let terminal_window = Box::new(windows::TerminalWindow::new(Rect::new(0, 0, width, height)));
+        // Create desktop background window
+        let desktop_id = wm.create_window(None);
+        let desktop_window = Box::new(windows::DesktopWindow::new(desktop_id, Rect::new(0, 0, width, height)));
+        wm.set_window_impl(desktop_id, desktop_window);
         
-        wm.set_window_impl(window_id, terminal_window);
-        
-        // Set this as the root window for the screen
+        // Set desktop as the root window for the screen
         if let Some(screen) = wm.get_active_screen_mut() {
-            screen.set_root_window(window_id);
+            screen.set_root_window(desktop_id);
         }
         
-        // Focus the window
-        wm.focus_window(window_id);
+        // Create frame window for terminal
+        let frame_id = wm.create_window(Some(desktop_id));
+        let mut frame_window = Box::new(windows::FrameWindow::new(frame_id, "AgenticOS Terminal"));
+        
+        // Set the parent of the frame window
+        frame_window.set_parent(Some(desktop_id));
+        
+        // Position and size the frame window (not fullscreen)
+        let frame_x = 100;
+        let frame_y = 50;
+        let frame_width = 800.min(width - 200);
+        let frame_height = 600.min(height - 100);
+        frame_window.set_bounds(Rect::new(frame_x as i32, frame_y as i32, frame_width, frame_height));
+        
+        // Create terminal window inside the frame
+        let terminal_id = wm.create_window(Some(frame_id));
+        let content_area = frame_window.content_area();
+        // Terminal window is positioned at the content area offset within the frame
+        let terminal_bounds = Rect::new(content_area.x, content_area.y, content_area.width, content_area.height);
+        let mut terminal_window = Box::new(windows::TerminalWindow::new(terminal_bounds));
+        
+        // Set the parent of the terminal window
+        terminal_window.set_parent(Some(frame_id));
+        
+        // Set the terminal as the frame's content
+        frame_window.set_content_window(terminal_id);
+        
+        // Add windows to registry - the frame window already has the terminal as a child
+        wm.set_window_impl(frame_id, frame_window);
+        wm.set_window_impl(terminal_id, terminal_window);
+        
+        // Add frame window to desktop's children
+        if let Some(desktop) = wm.window_registry.get_mut(&desktop_id) {
+            desktop.add_child(frame_id);
+        }
+        
+        // Focus the terminal window
+        wm.focus_window(terminal_id);
         
         // Set this as the global terminal window
-        terminal::set_terminal_window(window_id);
+        terminal::set_terminal_window(terminal_id);
         
-        // Force window invalidation to trigger repaint
-        if let Some(window) = wm.window_registry.get_mut(&window_id) {
+        // Force all windows to repaint
+        if let Some(window) = wm.window_registry.get_mut(&desktop_id) {
+            window.invalidate();
+        }
+        if let Some(window) = wm.window_registry.get_mut(&frame_id) {
+            window.invalidate();
+        }
+        if let Some(window) = wm.window_registry.get_mut(&terminal_id) {
             window.invalidate();
         }
     });
@@ -195,7 +257,39 @@ pub fn write_to_window(window_id: WindowId, text: &str) {
     });
 }
 
+/// Process any pending terminal output.
+///
+/// This checks for console output and invalidates the terminal window if needed.
+/// The actual text writing happens during paint, with suppress_invalidation set
+/// to prevent re-invalidation loops.
+pub fn process_terminal_output() {
+    // Only process if there's actually output to process
+    if !crate::window::console::has_output() {
+        return;
+    }
+
+    // Get the global terminal window ID and invalidate it
+    if let Some(terminal_id) = terminal::get_terminal_window() {
+        with_window_manager(|wm| {
+            if let Some(window) = wm.window_registry.get_mut(&terminal_id) {
+                // Just invalidate - the terminal will process console output during paint
+                // with suppress_invalidation set, preventing the re-invalidation loop
+                window.invalidate();
+            }
+        });
+    }
+}
+
 /// Render a single frame
 pub fn render_frame() {
     with_window_manager(|wm| wm.render());
+}
+
+/// Process a typed event from the new input system.
+///
+/// This is the preferred way to handle input events - they have already
+/// been processed by InputProcessor (scancode->KeyCode conversion,
+/// modifier tracking, etc.) and are ready for routing to windows.
+pub fn process_event(event: Event) {
+    with_window_manager(|wm| wm.process_event(event));
 }

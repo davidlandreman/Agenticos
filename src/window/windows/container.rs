@@ -41,12 +41,36 @@ impl Window for ContainerWindow {
         self.base.visible()
     }
     
+    fn set_bounds(&mut self, bounds: Rect) {
+        self.base.set_bounds(bounds);
+    }
+
+    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
+        self.base.set_bounds_no_invalidate(bounds);
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.base.set_visible(visible);
+    }
+    
     fn parent(&self) -> Option<WindowId> {
         self.base.parent()
     }
     
     fn children(&self) -> &[WindowId] {
         self.base.children()
+    }
+    
+    fn set_parent(&mut self, parent: Option<WindowId>) {
+        self.base.set_parent(parent);
+    }
+    
+    fn add_child(&mut self, child: WindowId) {
+        self.base.add_child(child);
+    }
+    
+    fn remove_child(&mut self, child: WindowId) {
+        self.base.remove_child(child);
     }
     
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {

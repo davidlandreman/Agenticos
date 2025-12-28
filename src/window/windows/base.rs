@@ -62,8 +62,17 @@ impl WindowBase {
     
     /// Update the window bounds
     pub fn set_bounds(&mut self, bounds: Rect) {
+        // Only invalidate if bounds actually changed
+        if self.bounds != bounds {
+            self.bounds = bounds;
+            self.needs_repaint = true;
+        }
+    }
+
+    /// Set bounds without triggering invalidation.
+    /// Used for temporary coordinate transforms during rendering.
+    pub fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        self.needs_repaint = true;
     }
     
     /// Set visibility
