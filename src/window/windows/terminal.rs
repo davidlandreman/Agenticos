@@ -33,23 +33,23 @@ pub struct TerminalWindow {
 }
 
 impl TerminalWindow {
-    /// Create a new terminal window
-    pub fn new(bounds: Rect) -> Self {
-        let mut text_window = TextWindow::new(bounds);
-        
+    /// Create a new terminal window with a specific ID
+    pub fn new_with_id(id: crate::window::WindowId, bounds: Rect) -> Self {
+        let mut text_window = TextWindow::new_with_id(id, bounds);
+
         // Write initial text to show the terminal is ready
         text_window.write_str("AgenticOS Terminal Ready\n");
         text_window.write_str("Initializing...\n\n");
-        
+
         // Log cursor position and buffer state
         let (col, row) = text_window.cursor_position();
         crate::debug_info!("Initial text written, cursor at ({}, {})", col, row);
-        
+
         // Force invalidation to ensure initial paint
         text_window.invalidate();
-        
-        crate::debug_info!("TerminalWindow created with bounds: {:?}", bounds);
-        
+
+        crate::debug_info!("TerminalWindow created with id={:?}, bounds: {:?}", id, bounds);
+
         TerminalWindow {
             text_window,
             input_buffer: String::new(),
@@ -59,6 +59,11 @@ impl TerminalWindow {
             input_start_col: 0,
             input_start_row: 0,
         }
+    }
+
+    /// Create a new terminal window (generates its own ID)
+    pub fn new(bounds: Rect) -> Self {
+        Self::new_with_id(crate::window::WindowId::new(), bounds)
     }
     
     /// Set callback for when Enter is pressed
@@ -112,6 +117,27 @@ impl TerminalWindow {
     pub fn process_output(&mut self) {
         self.text_window.process_console_output();
     }
+
+    /// Process per-terminal output buffer
+    fn process_terminal_output(&mut self) {
+        let terminal_id = self.text_window.id();
+        let outputs = crate::window::terminal::take_terminal_output(terminal_id);
+
+        for output in outputs {
+            for ch in output.chars() {
+                if ch == '\n' {
+                    self.text_window.newline();
+                } else {
+                    self.text_window.write_char(ch);
+                }
+            }
+        }
+
+        // Update input start position after output
+        let (col, row) = self.text_window.cursor_position();
+        self.input_start_col = col;
+        self.input_start_row = row;
+    }
     
     /// Handle a backspace key press
     fn handle_backspace(&mut self) {
@@ -126,21 +152,22 @@ impl TerminalWindow {
         let input = mem::take(&mut self.input_buffer);
         crate::debug_info!("Terminal: Enter pressed, input='{}' (len={})", input, input.len());
         self.text_window.newline();
-        
+
         // Add to history if not empty
         if !input.is_empty() {
             self.history.push(input.clone());
             self.history_index = self.history.len();
         }
-        
+
         // Call callback if set
         if let Some(ref mut callback) = self.input_callback {
             callback(input.clone());
         }
-        
-        // Also call the global terminal input handler
-        crate::window::terminal::handle_terminal_input(input);
-        
+
+        // Route input to this terminal's shell
+        let terminal_id = self.text_window.id();
+        crate::window::terminal::route_terminal_input(terminal_id, input);
+
         // Update input start position for next input
         let (col, row) = self.text_window.cursor_position();
         self.input_start_col = col;
@@ -218,20 +245,22 @@ impl Window for TerminalWindow {
     
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         crate::debug_trace!("TerminalWindow::paint called");
-        
-        // Process any pending console output, but only if we're already marked for repaint
-        // This prevents the infinite loop of process -> invalidate -> paint -> process
+
+        // Process any pending per-terminal output first
+        self.process_terminal_output();
+
+        // Process any pending console output (for backwards compatibility)
         if self.text_window.needs_repaint() {
             self.text_window.process_console_output();
         }
-        
+
         // Paint the text window
         self.text_window.paint(device);
-        
+
         // After painting, sync our input position with the text window's cursor
         // This is important because the TextWindow may have processed console output
         let (col, row) = self.text_window.cursor_position();
-        
+
         // Only update input position if we're not in the middle of typing
         // (cursor should be after the prompt and any input)
         if self.input_buffer.is_empty() {

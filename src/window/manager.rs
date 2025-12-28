@@ -160,17 +160,25 @@ impl WindowManager {
     pub fn focus_window(&mut self, id: WindowId) {
         // Remove from focus stack if already present
         self.focus_stack.retain(|&wid| wid != id);
-        
+
         // Add to top of focus stack
         if let Some(window) = self.window_registry.get(&id) {
             if window.can_focus() {
-                // Remove focus from current window
+                // Remove focus from current window AND its parent frame
                 if let Some(&current_focus) = self.focus_stack.last() {
                     if let Some(current_window) = self.window_registry.get_mut(&current_focus) {
                         current_window.set_focus(false);
                     }
+                    // Also unfocus the parent frame if it exists
+                    if let Some(current_window) = self.window_registry.get(&current_focus) {
+                        if let Some(parent_id) = current_window.parent() {
+                            if let Some(parent) = self.window_registry.get_mut(&parent_id) {
+                                parent.set_focus(false);
+                            }
+                        }
+                    }
                 }
-                
+
                 // Set focus on new window
                 self.focus_stack.push(id);
                 if let Some(window) = self.window_registry.get_mut(&id) {
@@ -571,12 +579,27 @@ impl WindowManager {
     /// Check if the mouse is on a title bar or border and start the appropriate interaction.
     fn start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
         // Find the topmost window under the mouse
-        // Walk z-order from front to back
+        // Only check top-level windows (direct children of desktop, which have a parent)
+        // Skip child windows like terminals inside frames - their bounds are parent-relative
         let mut target_window = None;
         let mut target_hit = HitTestResult::None;
 
         for &window_id in self.z_order.iter().rev() {
             if let Some(window) = self.window_registry.get(&window_id) {
+                // Skip windows that are children of other windows (not top-level)
+                // Top-level windows have a parent (the desktop), but their children
+                // (like terminals inside frames) should be skipped
+                if let Some(parent_id) = window.parent() {
+                    // Check if parent is a frame (has its own parent = desktop)
+                    if let Some(parent) = self.window_registry.get(&parent_id) {
+                        if parent.parent().is_some() {
+                            // This window's parent has a parent, so this is a grandchild
+                            // (e.g., terminal inside frame inside desktop) - skip it
+                            continue;
+                        }
+                    }
+                }
+
                 let bounds = window.bounds();
                 let local_x = mouse_x - bounds.x;
                 let local_y = mouse_y - bounds.y;
@@ -631,7 +654,9 @@ impl WindowManager {
                         target_hit = HitTestResult::TitleBar;
                         break;
                     } else {
-                        // Client area - don't start drag/resize, but stop searching
+                        // Client area - focus the window but don't start drag/resize
+                        target_window = Some(window_id);
+                        target_hit = HitTestResult::Client;
                         break;
                     }
                 }
@@ -651,6 +676,7 @@ impl WindowManager {
                             start_window: Point::new(bounds.x, bounds.y),
                         };
                         self.bring_to_front(window_id);
+                        self.focus_frame_and_content(window_id);
                     }
                     HitTestResult::Border(edge) => {
                         crate::debug_info!("Starting window resize for {:?} edge {:?}", window_id, edge);
@@ -661,6 +687,13 @@ impl WindowManager {
                             start_bounds: bounds,
                         };
                         self.bring_to_front(window_id);
+                        self.focus_frame_and_content(window_id);
+                    }
+                    HitTestResult::Client => {
+                        // Clicked in client area - focus the window
+                        crate::debug_info!("Clicked client area of {:?}", window_id);
+                        self.bring_to_front(window_id);
+                        self.focus_frame_and_content(window_id);
                     }
                     _ => {}
                 }
@@ -668,15 +701,88 @@ impl WindowManager {
         }
     }
 
+    /// Focus a frame window and its content (terminal) window
+    fn focus_frame_and_content(&mut self, frame_id: WindowId) {
+        // First, unfocus the currently focused window and its parent frame
+        if let Some(&current_focus) = self.focus_stack.last() {
+            // Unfocus the current window
+            if let Some(window) = self.window_registry.get_mut(&current_focus) {
+                window.set_focus(false);
+            }
+            // Also unfocus its parent frame if it has one
+            if let Some(window) = self.window_registry.get(&current_focus) {
+                if let Some(parent_id) = window.parent() {
+                    if let Some(parent) = self.window_registry.get_mut(&parent_id) {
+                        parent.set_focus(false);
+                    }
+                }
+            }
+        }
+
+        // Focus the frame window (for blue title bar)
+        if let Some(frame) = self.window_registry.get_mut(&frame_id) {
+            frame.set_focus(true);
+        }
+
+        // Find and focus the content window (terminal) for keyboard input
+        let content_id = {
+            if let Some(frame) = self.window_registry.get(&frame_id) {
+                // Get the first child which should be the terminal
+                frame.children().first().copied()
+            } else {
+                None
+            }
+        };
+
+        if let Some(content_id) = content_id {
+            // Update focus stack
+            self.focus_stack.retain(|&id| id != content_id);
+            self.focus_stack.push(content_id);
+
+            if let Some(content) = self.window_registry.get_mut(&content_id) {
+                content.set_focus(true);
+            }
+            crate::debug_info!("Focused frame {:?} and content {:?}", frame_id, content_id);
+        } else {
+            // No content, just focus the frame itself
+            self.focus_stack.retain(|&id| id != frame_id);
+            self.focus_stack.push(frame_id);
+            crate::debug_info!("Focused frame {:?} (no content)", frame_id);
+        }
+    }
+
     /// Bring a window to the front of the z-order.
+    /// Also brings all children to front (after the parent).
     pub fn bring_to_front(&mut self, window_id: WindowId) {
+        // First collect all children recursively
+        let children = self.collect_children_recursive(window_id);
+
         // Remove from current position
         self.z_order.retain(|&id| id != window_id);
         // Add to front
         self.z_order.push(window_id);
 
+        // Also move all children to front (after parent)
+        for child_id in children {
+            self.z_order.retain(|&id| id != child_id);
+            self.z_order.push(child_id);
+        }
+
         // Mark entire screen as needing repaint for proper layering
         self.compositor.dirty.mark_full_repaint();
+    }
+
+    /// Recursively collect all children of a window
+    fn collect_children_recursive(&self, window_id: WindowId) -> Vec<WindowId> {
+        let mut result = Vec::new();
+        if let Some(window) = self.window_registry.get(&window_id) {
+            for &child_id in window.children() {
+                result.push(child_id);
+                // Recursively get children of children
+                result.extend(self.collect_children_recursive(child_id));
+            }
+        }
+        result
     }
 
     /// Update child windows after a parent has been resized.

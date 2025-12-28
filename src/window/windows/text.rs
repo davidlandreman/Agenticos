@@ -81,22 +81,22 @@ impl TextWindow {
         }
     }
     
-    /// Create a new text window
-    pub fn new(bounds: Rect) -> Self {
+    /// Create a new text window with a specific ID
+    pub fn new_with_id(id: crate::window::WindowId, bounds: Rect) -> Self {
         let font = get_default_font();
         let char_width = font.char_width();
         let char_height = font.char_height();
-        
+
         // Calculate grid dimensions
         let cols = (bounds.width as usize) / char_width;
         let rows = (bounds.height as usize) / char_height;
-        
+
         // Initialize buffer
         let buffer = vec![vec![CharCell::default(); cols]; rows];
-        
-        let mut base = WindowBase::new(bounds);
+
+        let mut base = WindowBase::new_with_id(id, bounds);
         base.set_can_focus(true); // Text windows can receive focus
-        
+
         TextWindow {
             base,
             buffer,
@@ -112,6 +112,11 @@ impl TextWindow {
             incremental_updates: true,
             suppress_invalidation: false,
         }
+    }
+
+    /// Create a new text window (generates its own ID)
+    pub fn new(bounds: Rect) -> Self {
+        Self::new_with_id(crate::window::WindowId::new(), bounds)
     }
     
     /// Write a character at the cursor position

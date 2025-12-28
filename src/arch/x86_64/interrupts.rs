@@ -2,6 +2,7 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::{debug_error, debug_info, println};
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -312,15 +313,45 @@ extern "x86-interrupt" fn alignment_check_handler(
 
 // Hardware Interrupt Handlers
 
-static mut TIMER_TICKS: u64 = 0;
+/// Timer tick counter (atomic for safe access)
+pub static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Flag indicating that a context switch should occur
+/// This is set by the timer interrupt when a process's time slice expires
+pub static PREEMPTION_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Get the current timer tick count
+pub fn get_timer_ticks() -> u64 {
+    TIMER_TICKS.load(Ordering::Relaxed)
+}
+
+/// Check and clear the preemption pending flag
+/// Returns true if preemption was pending
+pub fn check_and_clear_preemption() -> bool {
+    PREEMPTION_PENDING.swap(false, Ordering::SeqCst)
+}
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    unsafe {
-        TIMER_TICKS += 1;
-        // Only log every 100 ticks to avoid spam
-        if TIMER_TICKS % 100 == 0 {
-            crate::debug_debug!("Timer tick: {}", TIMER_TICKS);
+    let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+
+    // Only log every 100 ticks to avoid spam
+    if ticks % 100 == 0 {
+        crate::debug_debug!("Timer tick: {}", ticks);
+    }
+
+    // Check if scheduler is initialized and if preemption is needed
+    if crate::process::scheduler::SCHEDULER.try_lock().map_or(false, |mut sched| {
+        if sched.is_initialized() {
+            sched.timer_tick()
+        } else {
+            false
         }
+    }) {
+        // Set preemption flag - the kernel main loop will handle the context switch
+        PREEMPTION_PENDING.store(true, Ordering::SeqCst);
+    }
+
+    unsafe {
         PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
 }

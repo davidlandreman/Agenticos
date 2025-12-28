@@ -5,7 +5,6 @@ use crate::arch::x86_64::interrupts;
 use crate::mm::memory;
 use crate::drivers::display::{display, text_buffer, double_buffered_text};
 use crate::drivers::ps2_controller;
-// ShellProcess is no longer used - we use async_shell instead
 use crate::window;
 use alloc::boxed::Box;
 
@@ -38,7 +37,11 @@ pub fn init(boot_info: &'static mut BootInfo) {
         memory::init_heap(physical_memory_offset);
     }
     debug_info!("Heap initialized successfully!");
-    
+
+    // Initialize the process scheduler
+    crate::process::init_scheduler();
+    debug_info!("Process scheduler initialized!");
+
     // Initialize IDE controller and detect drives
     debug_info!("Initializing IDE controller...");
     crate::drivers::ide::IDE_CONTROLLER.initialize();
@@ -297,21 +300,13 @@ pub fn run() -> ! {
         .expect("Terminal window should be set by create_default_desktop");
     debug_info!("Using terminal window with ID: {:?}", terminal_id);
 
+    // Register a shell for the initial terminal
+    let initial_pid = crate::process::allocate_pid();
+    crate::commands::shell::shell_process::register_shell(terminal_id, initial_pid);
+    debug_info!("Initial shell registered with PID {:?}", initial_pid);
+
     // Force an initial render to display the terminal
     window::render_frame();
-
-    // Print a welcome message
-    crate::println!("\nWelcome to AgenticOS!");
-    crate::println!("Window system active. Type 'help' for commands.\n");
-
-    // Set up the terminal input callback to route to async shell
-    window::terminal::set_terminal_input_callback(|line| {
-        crate::commands::shell::async_shell::handle_shell_input(line);
-    });
-
-    // Initialize the async shell
-    crate::commands::shell::async_shell::init_async_shell(terminal_id);
-    debug_info!("Async shell initialized");
 
     // Create input processor for event handling
     // This processes raw scancodes/mouse bytes into typed events
@@ -327,6 +322,13 @@ pub fn run() -> ! {
     }
 
     loop {
+        // Check for preemption (timer-based context switch)
+        // NOTE: Process spawning/scheduling infrastructure exists but isn't fully
+        // integrated yet. Commands run synchronously for now.
+        if interrupts::check_and_clear_preemption() {
+            crate::process::handle_preemption();
+        }
+
         // Poll VirtIO tablet for events (if using VirtIO)
         // This must be done in the main loop since VirtIO tablet uses polling
         if using_virtio {
@@ -344,8 +346,13 @@ pub fn run() -> ! {
             window::process_event(event);
         }
 
-        // Update async shell state
-        crate::commands::shell::async_shell::update_async_shell();
+        // Poll all shell instances (cooperative multitasking)
+        let exited_terminals = crate::commands::shell::shell_process::poll_all_shells();
+
+        // Handle any terminals whose shells exited
+        for terminal_id in exited_terminals {
+            crate::window::terminal_factory::close_terminal(terminal_id);
+        }
 
         // Process any pending terminal output
         window::process_terminal_output();

@@ -24,10 +24,10 @@ pub struct WindowBase {
 }
 
 impl WindowBase {
-    /// Create a new window base
-    pub fn new(bounds: Rect) -> Self {
+    /// Create a new window base with a specific ID
+    pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
         WindowBase {
-            id: WindowId::new(),
+            id,
             bounds,
             visible: true,
             parent: None,
@@ -36,6 +36,11 @@ impl WindowBase {
             can_focus: false,
             has_focus: false,
         }
+    }
+
+    /// Create a new window base (generates its own ID - for standalone use)
+    pub fn new(bounds: Rect) -> Self {
+        Self::new_with_id(WindowId::new(), bounds)
     }
     
     /// Set the parent window

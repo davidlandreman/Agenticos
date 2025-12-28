@@ -6,6 +6,7 @@ use crate::{print, println};
 use alloc;
 
 pub mod async_shell;
+pub mod shell_process;
 
 pub struct ShellProcess {
     pub base: BaseProcess,
@@ -207,7 +208,8 @@ impl ShellProcess {
                         }
                         _ => {
                             // Try to execute as a registered command through process manager
-                            match crate::process::execute_command(trimmed) {
+                            // Use synchronous execution since this is the old blocking shell
+                            match crate::process::execute_command_sync(trimmed) {
                                 Ok(()) => {
                                     // Command executed successfully
                                 }

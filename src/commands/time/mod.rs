@@ -68,7 +68,8 @@ impl TimeProcess {
         println!("Executing: {} {}", command_name, command_args.join(" "));
         display::set_color(Color::WHITE);
         
-        match crate::process::execute_command(&format!("{} {}", command_name, command_args.join(" "))) {
+        // Use synchronous execution so we can measure elapsed time
+        match crate::process::execute_command_sync(&format!("{} {}", command_name, command_args.join(" "))) {
             Ok(()) => {
                 let end_time = self.get_timestamp();
                 let elapsed = end_time - start_time;

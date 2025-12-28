@@ -24,6 +24,7 @@ pub mod terminal;
 pub mod console;
 pub mod keyboard;
 pub mod cursor;
+pub mod terminal_factory;
 
 pub use types::*;
 pub use event::*;
@@ -176,7 +177,8 @@ pub fn create_default_desktop() {
         let content_area = frame_window.content_area();
         // Terminal window is positioned at the content area offset within the frame
         let terminal_bounds = Rect::new(content_area.x, content_area.y, content_area.width, content_area.height);
-        let mut terminal_window = Box::new(windows::TerminalWindow::new(terminal_bounds));
+        // Use new_with_id to ensure the terminal uses the ID from WindowManager
+        let mut terminal_window = Box::new(windows::TerminalWindow::new_with_id(terminal_id, terminal_bounds));
         
         // Set the parent of the terminal window
         terminal_window.set_parent(Some(frame_id));
@@ -193,9 +195,12 @@ pub fn create_default_desktop() {
             desktop.add_child(frame_id);
         }
         
-        // Focus the terminal window
+        // Focus both the frame (for blue title bar) and terminal (for keyboard input)
+        if let Some(frame) = wm.window_registry.get_mut(&frame_id) {
+            frame.set_focus(true);
+        }
         wm.focus_window(terminal_id);
-        
+
         // Set this as the global terminal window
         terminal::set_terminal_window(terminal_id);
         

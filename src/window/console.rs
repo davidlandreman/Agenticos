@@ -50,11 +50,19 @@ impl ConsoleBuffer {
 }
 
 /// Write a string to the console buffer
+/// If a current output terminal is set, routes to that terminal's buffer instead
 pub fn write_str(s: &str) {
-    // First, update the buffer
+    // Check if we have a current output terminal set (by the shell)
+    if let Some(terminal_id) = crate::window::terminal::get_current_output_terminal() {
+        // Route to the specific terminal's buffer
+        crate::window::terminal::write_to_terminal_id(terminal_id, s);
+        return;
+    }
+
+    // Fall back to global console buffer (for early boot output, etc.)
     {
         let mut buffer = CONSOLE_BUFFER.lock();
-        
+
         for ch in s.chars() {
             if ch == '\n' {
                 // Complete the current line
@@ -65,7 +73,7 @@ pub fn write_str(s: &str) {
             }
         }
     } // Release the lock before calling window manager
-    
+
     // Don't try to invalidate the window here - it causes a deadlock when called
     // from within window event handling. The window will be invalidated by the
     // terminal window when it processes the console output during paint.

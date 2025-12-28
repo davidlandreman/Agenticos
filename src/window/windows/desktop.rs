@@ -10,9 +10,9 @@ pub struct DesktopWindow {
 }
 
 impl DesktopWindow {
-    pub fn new(_id: WindowId, bounds: Rect) -> Self {
+    pub fn new(id: WindowId, bounds: Rect) -> Self {
         Self {
-            base: WindowBase::new(bounds),
+            base: WindowBase::new_with_id(id, bounds),
             background_color: Color::new(0, 50, 100), // Nice blue desktop color
         }
     }

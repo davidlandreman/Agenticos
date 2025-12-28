@@ -17,9 +17,9 @@ pub struct FrameWindow {
 }
 
 impl FrameWindow {
-    pub fn new(_id: WindowId, title: &str) -> Self {
+    pub fn new(id: WindowId, title: &str) -> Self {
         Self {
-            base: WindowBase::new(Rect::new(0, 0, 800, 600)),
+            base: WindowBase::new_with_id(id, Rect::new(0, 0, 800, 600)),
             title: title.to_string(),
             title_bar_height: 24,
             border_width: 2,

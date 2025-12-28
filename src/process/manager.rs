@@ -3,6 +3,7 @@ use lazy_static::lazy_static;
 use crate::lib::arc::Arc;
 use crate::stdlib::io::StdinBuffer;
 use crate::process::process::RunnableProcess;
+use crate::window::WindowId;
 use alloc::{vec::Vec, string::String, boxed::Box, collections::BTreeMap, format};
 
 lazy_static! {
@@ -53,23 +54,46 @@ impl ProcessManager {
     }
     
     /// Execute a command by name with arguments
-    pub fn execute_command(&self, command_line: &str) -> ProcessResult {
+    ///
+    /// Currently runs commands synchronously. The terminal_id is used to route
+    /// output to the correct terminal.
+    ///
+    /// NOTE: Process spawning infrastructure exists (spawn_process, scheduler)
+    /// but context switching back to kernel loop isn't fully integrated yet.
+    /// Commands run synchronously for now until that's resolved.
+    pub fn execute_command(&self, command_line: &str, terminal_id: Option<WindowId>) -> ProcessResult {
         let parts: Vec<&str> = command_line.trim().split_whitespace().collect();
         if parts.is_empty() {
             return Ok(()); // Empty command, do nothing
         }
-        
+
         let command_name = parts[0];
         let args: Vec<String> = parts[1..].iter().map(|s| String::from(*s)).collect();
-        
+
         if let Some(factory) = self.command_registry.get(command_name) {
             crate::debug_info!("Executing command: {} with {} args", command_name, args.len());
+
+            // Set up output routing to the correct terminal
+            if let Some(tid) = terminal_id {
+                crate::window::terminal::set_current_output_terminal(tid);
+            }
+
+            // Run the command synchronously
             let mut process = factory(args);
             process.run();
+
+            // Clear output routing
+            crate::window::terminal::clear_current_output_terminal();
+
             Ok(())
         } else {
             Err(format!("Unknown command: {}", command_name))
         }
+    }
+
+    /// Execute a command synchronously (blocking) - same as execute_command for now
+    pub fn execute_command_sync(&self, command_line: &str) -> ProcessResult {
+        self.execute_command(command_line, None)
     }
     
     /// Get list of registered commands
@@ -100,9 +124,16 @@ pub fn register_command(name: &str, factory: CommandFactory) {
     PROCESS_MANAGER.lock().register_command(name, factory);
 }
 
-/// Execute a command globally
-pub fn execute_command(command_line: &str) -> ProcessResult {
-    PROCESS_MANAGER.lock().execute_command(command_line)
+/// Execute a command globally (spawns as a process)
+///
+/// Commands are spawned as separate processes and run by the scheduler.
+pub fn execute_command(command_line: &str, terminal_id: Option<WindowId>) -> ProcessResult {
+    PROCESS_MANAGER.lock().execute_command(command_line, terminal_id)
+}
+
+/// Execute a command synchronously (blocking)
+pub fn execute_command_sync(command_line: &str) -> ProcessResult {
+    PROCESS_MANAGER.lock().execute_command_sync(command_line)
 }
 
 /// Get list of all registered commands
