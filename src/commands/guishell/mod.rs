@@ -57,9 +57,11 @@ impl GUIShellState {
 
 /// Queue a deferred action to be processed in the next poll
 pub fn queue_action(action: PendingAction) {
-    if let Some(mut state) = GUISHELL_STATE.try_lock() {
-        state.pending_action = Some(action);
-    }
+    // Use lock() instead of try_lock() to ensure the action is always queued
+    // try_lock() was silently dropping actions when the lock was briefly held
+    let mut state = GUISHELL_STATE.lock();
+    crate::debug_info!("GUIShell: Queuing action {:?}", core::mem::discriminant(&action));
+    state.pending_action = Some(action);
 }
 
 /// Global GUIShell state
@@ -290,6 +292,24 @@ fn spawn_calc() {
 
 /// Poll the GUIShell - updates taskbar buttons and handles events
 pub fn poll() {
+    // First, sync menu state with window manager
+    // The window manager may have closed the menu via click-outside detection
+    // without notifying us, so we need to check if our menu_id is still valid
+    {
+        let mut state = GUISHELL_STATE.lock();
+        if let Some(menu_id) = state.menu_id {
+            // Check if the menu window still exists
+            let menu_exists = window::with_window_manager(|wm| {
+                wm.window_registry.contains_key(&menu_id)
+            }).unwrap_or(false);
+
+            if !menu_exists {
+                crate::debug_info!("GUIShell: Menu {:?} was destroyed externally, clearing state", menu_id);
+                state.menu_id = None;
+            }
+        }
+    }
+
     // Take any pending action
     let pending_action = {
         let mut state = GUISHELL_STATE.lock();
@@ -332,6 +352,7 @@ pub fn poll() {
 /// Toggle the Start menu (show if hidden, hide if shown)
 fn toggle_start_menu() {
     let menu_open = GUISHELL_STATE.lock().menu_id.is_some();
+    crate::debug_info!("GUIShell: toggle_start_menu called, menu_open={}", menu_open);
     if menu_open {
         close_start_menu();
     } else {
