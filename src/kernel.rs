@@ -295,11 +295,12 @@ pub fn run() -> ! {
     crate::process::register_command("tasks", crate::commands::tasks::create_tasks_process);
     debug_info!("All {} commands registered successfully.", 16);
 
-    // Start the GUIShell (taskbar + start menu)
-    debug_info!("Starting GUIShell...");
-
     // Force an initial render to display the desktop
     window::render_frame();
+
+    // Start the GUIShell background process (handles taskbar + start menu)
+    debug_info!("Spawning GUIShell background process...");
+    crate::commands::guishell::spawn_guishell_process();
 
     // Create input processor for event handling
     // This processes raw scancodes/mouse bytes into typed events
@@ -315,52 +316,49 @@ pub fn run() -> ! {
     }
 
     loop {
-        // Check for preemption (timer-based context switch)
+        // === PREEMPTION HANDLING ===
+        // Check if timer requested a context switch
         if interrupts::check_and_clear_preemption() {
             crate::process::handle_preemption();
         }
 
-        // Run any scheduled processes (spawned via spawn_process)
-        // This saves kernel context and switches to the process.
-        // When the process terminates, it switches back here.
+        // === PROCESS SCHEDULING ===
+        // Run any ready processes (GUIShell, spawned commands, etc.)
+        // Processes that call sleep_ticks/sleep_until_event return here
         crate::process::try_run_scheduled_processes();
 
-        // Poll VirtIO tablet for events (if using VirtIO)
-        // This must be done in the main loop since VirtIO tablet uses polling
+        // === INPUT PROCESSING ===
+        // VirtIO tablet (seamless mouse in QEMU) requires polling
         if using_virtio {
             crate::drivers::mouse::poll();
-
-            // Check for VirtIO tablet state changes and generate mouse events
             if let Some(event) = input_processor.check_virtio_tablet() {
-                window::process_event(event);
+                window::process_event(event);  // Signals processes on input
             }
         }
 
-        // Process all pending input events from the lock-free queue
-        // This converts raw scancodes/mouse bytes to typed events
+        // Process keyboard/mouse events from interrupt-driven queue
+        // Each event signals relevant sleeping processes
         for event in input_processor.process_pending(&crate::input::INPUT_QUEUE) {
             window::process_event(event);
         }
 
-        // Poll GUIShell (updates taskbar buttons, handles menu state)
-        crate::commands::guishell::poll();
-
-        // Poll all shell instances (cooperative multitasking)
+        // === SHELL PROCESSING ===
+        // Poll shells that have pending work (cooperative multitasking)
+        // Only processes shells with has_pending_work() == true
         let exited_terminals = crate::commands::shell::shell_process::poll_all_shells();
-
-        // Handle any terminals whose shells exited
         for terminal_id in exited_terminals {
             crate::window::terminal_factory::close_terminal(terminal_id);
         }
 
-        // Process any pending terminal output
+        // === RENDERING ===
+        // Process pending terminal output (early exit if none)
         window::process_terminal_output();
-
-        // Window manager handles all rendering including mouse cursor
+        // Render frame (early exit if compositor has no dirty regions)
         window::render_frame();
 
-        // Use hlt to save CPU, but wake on interrupts
-        // The keyboard interrupt will wake us up to process input
+        // === IDLE ===
+        // Halt CPU until next interrupt (keyboard, mouse, timer)
+        // Timer fires at 100Hz, waking processes from sleep_queue
         x86_64::instructions::hlt();
     }
 }

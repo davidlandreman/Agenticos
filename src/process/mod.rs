@@ -10,7 +10,7 @@ pub use manager::{
     set_active_stdin, clear_active_stdin, push_keyboard_input,
     register_command, execute_command, execute_command_sync, list_commands
 };
-pub use pcb::{ProcessControlBlock, ProcessState, BlockReason};
+pub use pcb::{ProcessControlBlock, ProcessState, BlockReason, WakeEvents, SignalFlags};
 pub use context::CpuContext;
 pub use scheduler::{SCHEDULER, ProcessInfo};
 
@@ -387,4 +387,216 @@ pub fn terminate_process(pid: ProcessId) {
 /// * `elapsed_ticks` - Number of timer ticks since last update
 pub fn update_cpu_percentages(elapsed_ticks: u64) {
     scheduler::SCHEDULER.lock().update_cpu_percentages(elapsed_ticks);
+}
+
+// =============================================================================
+// Sleep API
+// =============================================================================
+
+/// Sleep the current process for N timer ticks
+///
+/// The process will be blocked and woken after the specified number of ticks.
+/// 1 tick = ~10ms at 100 Hz timer frequency.
+///
+/// # Arguments
+/// * `ticks` - Number of timer ticks to sleep (minimum 1)
+pub fn sleep_ticks(ticks: u64) {
+    use crate::arch::x86_64::context_switch::switch_context;
+    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
+    use core::sync::atomic::Ordering;
+
+    let ticks = ticks.max(1);
+
+    let result: Option<(*mut CpuContext, SwitchTarget)> = {
+        let mut sched = scheduler::SCHEDULER.lock();
+        let current_pid = match sched.current() {
+            Some(pid) => pid,
+            None => return, // No current process
+        };
+
+        // Mark as sleeping
+        sched.sleep_current(ticks);
+
+        // Get context pointer for current process
+        let old_ctx = match sched.get_context_mut(current_pid) {
+            Some(ctx) => ctx as *mut CpuContext,
+            None => return,
+        };
+
+        // Check if there are any real processes to run (not counting idle)
+        let switch_target = if sched.ready_count() > 0 {
+            // Get the next process
+            if let Some(next_pid) = sched.schedule() {
+                if let Some(ctx) = sched.get_context(next_pid) {
+                    SwitchTarget::Process(*ctx)
+                } else {
+                    SwitchTarget::Kernel
+                }
+            } else {
+                SwitchTarget::Kernel
+            }
+        } else {
+            // No ready processes - return to kernel context
+            SwitchTarget::Kernel
+        };
+
+        Some((old_ctx, switch_target))
+    };
+
+    let Some((old_ctx_ptr, switch_target)) = result else {
+        return;
+    };
+
+    // Perform the context switch
+    match switch_target {
+        SwitchTarget::Process(new_ctx) => {
+            // Switch to another process
+            unsafe {
+                switch_context(old_ctx_ptr, &new_ctx);
+            }
+        }
+        SwitchTarget::Kernel => {
+            // Return to kernel context - save our state and switch to kernel
+            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
+            let kernel_ctx = unsafe { KERNEL_CONTEXT };
+            unsafe {
+                switch_context(old_ctx_ptr, &kernel_ctx);
+            }
+            IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Target for context switch
+enum SwitchTarget {
+    Process(CpuContext),
+    Kernel,
+}
+
+/// Sleep the current process for approximately N milliseconds
+///
+/// Since the timer runs at 100 Hz (10ms per tick), the actual sleep time
+/// will be rounded up to the nearest 10ms.
+///
+/// # Arguments
+/// * `ms` - Milliseconds to sleep
+pub fn sleep_ms(ms: u64) {
+    // 100 Hz timer = 10ms per tick
+    // Round up to nearest tick
+    let ticks = (ms + 9) / 10;
+    sleep_ticks(ticks.max(1));
+}
+
+/// Sleep the current process until signaled by specific events
+///
+/// The process will be blocked until any of the specified events occur.
+/// When woken, use `check_signals()` to see which event triggered the wake.
+///
+/// # Arguments
+/// * `events` - Bitmask of events that can wake this process
+pub fn sleep_until_event(events: WakeEvents) {
+    use crate::arch::x86_64::context_switch::switch_context;
+    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
+    use core::sync::atomic::Ordering;
+
+    let result: Option<(*mut CpuContext, SwitchTarget)> = {
+        let mut sched = scheduler::SCHEDULER.lock();
+        let current_pid = match sched.current() {
+            Some(pid) => pid,
+            None => return,
+        };
+
+        // Mark as waiting for signal
+        sched.sleep_until_signaled(events);
+
+        // Get context pointer for current process
+        let old_ctx = match sched.get_context_mut(current_pid) {
+            Some(ctx) => ctx as *mut CpuContext,
+            None => return,
+        };
+
+        // Check if there are any real processes to run (not counting idle)
+        let switch_target = if sched.ready_count() > 0 {
+            if let Some(next_pid) = sched.schedule() {
+                if let Some(ctx) = sched.get_context(next_pid) {
+                    SwitchTarget::Process(*ctx)
+                } else {
+                    SwitchTarget::Kernel
+                }
+            } else {
+                SwitchTarget::Kernel
+            }
+        } else {
+            SwitchTarget::Kernel
+        };
+
+        Some((old_ctx, switch_target))
+    };
+
+    let Some((old_ctx_ptr, switch_target)) = result else {
+        return;
+    };
+
+    match switch_target {
+        SwitchTarget::Process(new_ctx) => {
+            unsafe {
+                switch_context(old_ctx_ptr, &new_ctx);
+            }
+        }
+        SwitchTarget::Kernel => {
+            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
+            let kernel_ctx = unsafe { KERNEL_CONTEXT };
+            unsafe {
+                switch_context(old_ctx_ptr, &kernel_ctx);
+            }
+            IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Signal a specific process to wake up
+///
+/// If the process is waiting for the given event type, it will be woken
+/// and moved to the ready queue.
+///
+/// # Arguments
+/// * `pid` - The process to signal
+/// * `signal` - The event type to signal
+pub fn signal_process(pid: ProcessId, signal: WakeEvents) {
+    scheduler::SCHEDULER.lock().signal_process(pid, signal);
+}
+
+/// Signal all processes waiting for a specific event type
+///
+/// All processes in the signal waiters list will be woken if they're
+/// waiting for this event type.
+///
+/// # Arguments
+/// * `signal` - The event type to broadcast
+pub fn broadcast_signal(signal: WakeEvents) {
+    scheduler::SCHEDULER.lock().broadcast_signal(signal);
+}
+
+/// Check and clear pending signals for the current process
+///
+/// Call this after waking from `sleep_until_event()` to see which
+/// event triggered the wake.
+///
+/// # Returns
+/// The pending signal flags, which are then cleared
+pub fn check_signals() -> SignalFlags {
+    let mut sched = scheduler::SCHEDULER.lock();
+    if let Some(pid) = sched.current() {
+        if let Some(pcb) = sched.get_process_mut(pid) {
+            let signals = pcb.pending_signals;
+            pcb.pending_signals.clear_all();
+            return signals;
+        }
+    }
+    SignalFlags::NONE
+}
+
+/// Get the number of sleeping processes
+pub fn sleeping_count() -> usize {
+    scheduler::SCHEDULER.lock().sleeping_count()
 }

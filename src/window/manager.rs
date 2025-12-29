@@ -311,9 +311,19 @@ impl WindowManager {
     pub fn process_event(&mut self, event: Event) {
         match event {
             Event::Keyboard(kb_event) => {
+                // Signal any process waiting for input on the focused window
+                if let Some(focused) = self.focused_window() {
+                    if let Some(pid) = crate::process::get_process_for_terminal(focused) {
+                        crate::process::signal_process(pid, crate::process::WakeEvents::INPUT);
+                    }
+                }
                 self.route_keyboard_event(kb_event);
             }
             Event::Mouse(mouse_event) => {
+                // Signal GUIShell for window events (clicks might need processing)
+                if matches!(mouse_event.event_type, crate::window::event::MouseEventType::ButtonDown) {
+                    crate::commands::guishell::signal_guishell();
+                }
                 self.route_mouse_event(mouse_event);
             }
             _ => {
@@ -375,7 +385,6 @@ impl WindowManager {
             // Get global bounds for this window (accounts for parent hierarchy)
             if let Some(global_bounds) = self.get_global_bounds(window_id) {
                 if global_bounds.contains_point(global_pos) {
-                    crate::debug_info!("route_mouse_event: hit window {:?} at bounds {:?}", window_id, global_bounds);
                     // Create local event with position relative to this window's global position
                     let mut local_event = event;
                     local_event.position = Point::new(

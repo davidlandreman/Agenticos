@@ -6,11 +6,102 @@
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::boxed::Box;
+use core::ops::BitOr;
 use spin::Mutex;
 use crate::lib::arc::Arc;
 use crate::window::WindowId;
 use super::process::ProcessId;
 use super::context::CpuContext;
+
+/// Events that can wake a sleeping process
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WakeEvents(u32);
+
+impl WakeEvents {
+    /// No events
+    pub const NONE: Self = Self(0);
+    /// Timer expired (for timed sleeps)
+    pub const TIMER: Self = Self(1 << 0);
+    /// Input available (keyboard/stdin)
+    pub const INPUT: Self = Self(1 << 1);
+    /// Window event occurred (mouse click, focus change, etc.)
+    pub const WINDOW_EVENT: Self = Self(1 << 2);
+    /// Child process exited
+    pub const CHILD_EXIT: Self = Self(1 << 3);
+    /// Explicit signal from another process
+    pub const SIGNAL: Self = Self(1 << 4);
+
+    /// Check if this contains the specified event type
+    #[inline]
+    pub fn contains(&self, other: Self) -> bool {
+        (self.0 & other.0) != 0
+    }
+
+    /// Add an event type
+    #[inline]
+    pub fn set(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+
+    /// Check if any events are set
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// Get raw value
+    #[inline]
+    pub fn bits(&self) -> u32 {
+        self.0
+    }
+}
+
+impl BitOr for WakeEvents {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// Signal flags for tracking which events woke a process
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SignalFlags(u32);
+
+impl SignalFlags {
+    /// No signals pending
+    pub const NONE: Self = Self(0);
+
+    /// Check if any signals are pending
+    #[inline]
+    pub fn has_any(&self) -> bool {
+        self.0 != 0
+    }
+
+    /// Set a signal flag
+    #[inline]
+    pub fn set(&mut self, flag: u32) {
+        self.0 |= flag;
+    }
+
+    /// Clear a specific flag
+    #[inline]
+    pub fn clear(&mut self, flag: u32) {
+        self.0 &= !flag;
+    }
+
+    /// Clear all flags
+    #[inline]
+    pub fn clear_all(&mut self) {
+        self.0 = 0;
+    }
+
+    /// Get raw value
+    #[inline]
+    pub fn bits(&self) -> u32 {
+        self.0
+    }
+}
 
 /// Process execution state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +123,10 @@ pub enum BlockReason {
     WaitingForInput,
     /// Waiting for a child process
     WaitingForChild(ProcessId),
-    /// Sleeping for a duration
-    Sleeping,
+    /// Sleeping until a specific timer tick
+    SleepingUntilTick(u64),
+    /// Waiting for a signal/event to occur
+    WaitingForSignal,
 }
 
 /// Process Control Block - complete state for a process
@@ -79,6 +172,15 @@ pub struct ProcessControlBlock {
 
     /// Entry point function for new processes
     pub entry_fn: Option<Box<dyn FnOnce() + Send>>,
+
+    /// Timer tick at which this process should wake (for timed sleeps)
+    pub wake_at_tick: Option<u64>,
+
+    /// Events that can wake this process when sleeping
+    pub wake_events: WakeEvents,
+
+    /// Signals that have been delivered to this process
+    pub pending_signals: SignalFlags,
 }
 
 impl ProcessControlBlock {
@@ -99,6 +201,9 @@ impl ProcessControlBlock {
             cpu_percentage: 0,
             block_reason: None,
             entry_fn: None,
+            wake_at_tick: None,
+            wake_events: WakeEvents::NONE,
+            pending_signals: SignalFlags::NONE,
         }
     }
 

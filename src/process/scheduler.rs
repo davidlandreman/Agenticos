@@ -8,7 +8,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use super::pcb::{ProcessControlBlock, ProcessState, BlockReason};
+use super::pcb::{ProcessControlBlock, ProcessState, BlockReason, WakeEvents, SignalFlags};
 use super::process::ProcessId;
 use super::context::CpuContext;
 use super::stack::{allocate_stack, free_stack};
@@ -50,6 +50,10 @@ pub struct Scheduler {
     idle_pid: Option<ProcessId>,
     /// Whether scheduler is initialized
     initialized: bool,
+    /// Processes sleeping until a specific tick, ordered by wake time
+    sleep_queue: BTreeMap<u64, Vec<ProcessId>>,
+    /// Processes waiting for signal events (not time-based)
+    signal_waiters: Vec<ProcessId>,
 }
 
 impl Scheduler {
@@ -61,6 +65,8 @@ impl Scheduler {
             current: None,
             idle_pid: None,
             initialized: false,
+            sleep_queue: BTreeMap::new(),
+            signal_waiters: Vec::new(),
         }
     }
 
@@ -360,5 +366,149 @@ impl Scheduler {
             };
             pcb.runtime_last_sample = pcb.total_runtime;
         }
+    }
+
+    // =========================================================================
+    // Sleep/Wake API
+    // =========================================================================
+
+    /// Put the current process to sleep for N timer ticks
+    ///
+    /// The process will be woken when the specified number of ticks have elapsed.
+    /// Does nothing if there is no current process.
+    ///
+    /// # Arguments
+    /// * `ticks` - Number of timer ticks to sleep (1 tick = ~10ms at 100 Hz)
+    pub fn sleep_current(&mut self, ticks: u64) {
+        let current_tick = crate::arch::x86_64::interrupts::get_timer_ticks();
+        let wake_tick = current_tick.saturating_add(ticks);
+
+        if let Some(pid) = self.current.take() {
+            if let Some(pcb) = self.processes.get_mut(&pid) {
+                pcb.state = ProcessState::Blocked;
+                pcb.block_reason = Some(BlockReason::SleepingUntilTick(wake_tick));
+                pcb.wake_at_tick = Some(wake_tick);
+                pcb.wake_events = WakeEvents::TIMER;
+
+                crate::debug_trace!("Scheduler: Process {:?} sleeping until tick {}", pid, wake_tick);
+            }
+
+            // Add to sleep queue
+            self.sleep_queue
+                .entry(wake_tick)
+                .or_insert_with(Vec::new)
+                .push(pid);
+        }
+    }
+
+    /// Put the current process to sleep until signaled by specific events
+    ///
+    /// The process will be woken when any of the specified events occur.
+    /// Does nothing if there is no current process.
+    ///
+    /// # Arguments
+    /// * `wake_events` - Events that can wake this process
+    pub fn sleep_until_signaled(&mut self, wake_events: WakeEvents) {
+        if let Some(pid) = self.current.take() {
+            if let Some(pcb) = self.processes.get_mut(&pid) {
+                pcb.state = ProcessState::Blocked;
+                pcb.block_reason = Some(BlockReason::WaitingForSignal);
+                pcb.wake_events = wake_events;
+                pcb.wake_at_tick = None;
+
+                crate::debug_trace!("Scheduler: Process {:?} waiting for events {:?}", pid, wake_events);
+            }
+
+            self.signal_waiters.push(pid);
+        }
+    }
+
+    /// Check the sleep queue and wake any processes whose time has come
+    ///
+    /// This should be called from the timer interrupt handler.
+    ///
+    /// # Arguments
+    /// * `current_tick` - The current timer tick count
+    pub fn check_sleep_queue(&mut self, current_tick: u64) {
+        // Collect expired entries (wake_tick <= current_tick)
+        let expired_ticks: Vec<u64> = self.sleep_queue
+            .range(..=current_tick)
+            .map(|(tick, _)| *tick)
+            .collect();
+
+        // Wake all processes in expired entries
+        for tick in expired_ticks {
+            if let Some(pids) = self.sleep_queue.remove(&tick) {
+                for pid in pids {
+                    self.wake_from_sleep(pid, WakeEvents::TIMER);
+                }
+            }
+        }
+    }
+
+    /// Wake a sleeping process with a specific event
+    ///
+    /// # Arguments
+    /// * `pid` - The process to wake
+    /// * `event` - The event that triggered the wake
+    fn wake_from_sleep(&mut self, pid: ProcessId, event: WakeEvents) {
+        if let Some(pcb) = self.processes.get_mut(&pid) {
+            if pcb.state == ProcessState::Blocked {
+                // Check if this event can wake the process
+                let can_wake = pcb.wake_events.contains(event)
+                    || matches!(pcb.block_reason, Some(BlockReason::SleepingUntilTick(_)));
+
+                if can_wake {
+                    pcb.state = ProcessState::Ready;
+                    pcb.block_reason = None;
+                    pcb.wake_at_tick = None;
+                    pcb.pending_signals.set(event.bits());
+                    self.ready_queue.push_back(pid);
+
+                    crate::debug_trace!("Scheduler: Woke process {:?} with event {:?}", pid, event);
+                }
+            }
+        }
+    }
+
+    /// Signal a specific process to wake up
+    ///
+    /// If the process is waiting for the given signal type, it will be woken.
+    ///
+    /// # Arguments
+    /// * `pid` - The process to signal
+    /// * `signal` - The event type to signal
+    pub fn signal_process(&mut self, pid: ProcessId, signal: WakeEvents) {
+        // Remove from signal_waiters if present
+        self.signal_waiters.retain(|&p| p != pid);
+
+        // Also remove from sleep_queue if it's there
+        for pids in self.sleep_queue.values_mut() {
+            pids.retain(|&p| p != pid);
+        }
+        // Clean up empty entries
+        self.sleep_queue.retain(|_, pids| !pids.is_empty());
+
+        self.wake_from_sleep(pid, signal);
+    }
+
+    /// Signal all processes waiting for a specific event type
+    ///
+    /// All processes in the signal_waiters list that are waiting for this
+    /// event type will be woken.
+    ///
+    /// # Arguments
+    /// * `signal` - The event type to broadcast
+    pub fn broadcast_signal(&mut self, signal: WakeEvents) {
+        let waiters: Vec<ProcessId> = self.signal_waiters.drain(..).collect();
+        for pid in waiters {
+            self.wake_from_sleep(pid, signal);
+        }
+    }
+
+    /// Get the number of sleeping processes (timed + signal waiters)
+    pub fn sleeping_count(&self) -> usize {
+        let timed: usize = self.sleep_queue.values().map(|v| v.len()).sum();
+        timed + self.signal_waiters.len()
     }
 }

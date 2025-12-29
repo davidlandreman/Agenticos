@@ -231,23 +231,24 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     // Increment tick counter
     let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
-    // Log every 100 ticks
-    if ticks % 100 == 0 {
-        crate::debug_debug!("Timer tick: {}", ticks);
-    }
-
     // Check if we're running a spawned process
     let in_process = crate::process::is_in_spawned_process();
 
-    // Check if scheduler wants preemption
-    let should_preempt = if in_process {
-        crate::process::scheduler::SCHEDULER.try_lock().map_or(false, |mut sched| {
-            if sched.is_initialized() {
+    // Try to acquire scheduler lock for sleep queue check and preemption
+    let should_preempt = if let Some(mut sched) = crate::process::scheduler::SCHEDULER.try_lock() {
+        if sched.is_initialized() {
+            // Check sleep queue and wake any processes whose time has come
+            sched.check_sleep_queue(ticks);
+
+            // Only check for preemption if we're in a spawned process
+            if in_process {
                 sched.timer_tick()
             } else {
                 false
             }
-        })
+        } else {
+            false
+        }
     } else {
         false
     };

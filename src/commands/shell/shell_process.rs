@@ -164,8 +164,19 @@ pub fn unregister_shell(terminal_id: WindowId) {
 
 /// Send input to a shell
 pub fn send_input(terminal_id: WindowId, line: String) {
-    if let Some(shell) = SHELL_REGISTRY.lock().get_mut(&terminal_id) {
-        shell.push_input(line);
+    let pid_opt = {
+        let mut registry = SHELL_REGISTRY.lock();
+        if let Some(shell) = registry.get_mut(&terminal_id) {
+            shell.push_input(line);
+            Some(shell.pid)
+        } else {
+            None
+        }
+    };
+
+    // Signal the shell's process to wake up if it's sleeping
+    if let Some(pid) = pid_opt {
+        crate::process::signal_process(pid, crate::process::WakeEvents::INPUT);
     }
 }
 

@@ -2,15 +2,18 @@
 //!
 //! This module manages the desktop environment with a taskbar at the bottom
 //! of the screen, a Start button that opens a menu, and buttons for open windows.
+//!
+//! The GUIShell runs as a background process that sleeps until events occur,
+//! reducing CPU usage when the system is idle.
 
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use crate::process::{WakeEvents, ProcessId};
 use crate::window::{self, WindowId, Rect, Window};
-use crate::window::windows::{DesktopWindow, TaskbarWindow, Button, MenuWindow, FrameWindow};
-use crate::window::windows::taskbar::{TASKBAR_HEIGHT, START_BUTTON_WIDTH, BUTTON_GAP, BUTTON_HEIGHT, BUTTON_Y_OFFSET, MAX_WINDOW_BUTTON_WIDTH};
+use crate::window::windows::{DesktopWindow, TaskbarWindow, Button, MenuWindow};
+use crate::window::windows::taskbar::{START_BUTTON_WIDTH, BUTTON_GAP, BUTTON_HEIGHT, BUTTON_Y_OFFSET, MAX_WINDOW_BUTTON_WIDTH};
 use crate::window::windows::menu::MENU_ITEM_HEIGHT;
 
 /// GUIShell state
@@ -29,6 +32,8 @@ pub struct GUIShellState {
     pub initialized: bool,
     /// Deferred action to perform in next poll
     pub pending_action: Option<PendingAction>,
+    /// Process ID of the GUIShell background process
+    pub process_id: Option<ProcessId>,
 }
 
 /// Actions that need to be deferred to avoid deadlocks
@@ -52,6 +57,7 @@ impl GUIShellState {
             window_buttons: Vec::new(),
             initialized: false,
             pending_action: None,
+            process_id: None,
         }
     }
 }
@@ -63,6 +69,11 @@ pub fn queue_action(action: PendingAction) {
     let mut state = GUISHELL_STATE.lock();
     crate::debug_info!("GUIShell: Queuing action {:?}", core::mem::discriminant(&action));
     state.pending_action = Some(action);
+
+    // Signal the GUIShell process to wake up and handle the action
+    if let Some(pid) = state.process_id {
+        crate::process::signal_process(pid, WakeEvents::WINDOW_EVENT);
+    }
 }
 
 /// Global GUIShell state
@@ -591,4 +602,119 @@ pub fn get_taskbar_id() -> Option<WindowId> {
 /// Check if GUIShell is initialized
 pub fn is_initialized() -> bool {
     GUISHELL_STATE.lock().initialized
+}
+
+// =============================================================================
+// Process-Based GUIShell
+// =============================================================================
+
+/// Ticks between periodic taskbar syncs (10 = 100ms at 100Hz timer)
+const TASKBAR_SYNC_INTERVAL: u64 = 10;
+
+/// Spawn the GUIShell as a background process
+///
+/// This creates a process that sleeps until events occur, reducing CPU usage
+/// when the system is idle. The process handles:
+/// - Pending actions (menu clicks, spawning applications)
+/// - Taskbar button synchronization (periodically)
+pub fn spawn_guishell_process() {
+    use alloc::string::String;
+
+    let pid = crate::process::spawn_process(
+        String::from("guishell"),
+        None, // No terminal - GUIShell doesn't need one
+        guishell_process_main,
+    );
+
+    // Store the process ID so we can signal it
+    GUISHELL_STATE.lock().process_id = Some(pid);
+
+    crate::debug_info!("GUIShell: Spawned background process with PID {:?}", pid);
+}
+
+/// Main entry point for the GUIShell process
+fn guishell_process_main() {
+    crate::debug_info!("GUIShell process: Starting main loop");
+
+    loop {
+        // Check if initialized - if not, wait
+        if !GUISHELL_STATE.lock().initialized {
+            // Wait a bit and check again
+            crate::process::sleep_ms(100);
+            continue;
+        }
+
+        // Process any pending actions
+        process_pending_actions();
+
+        // Sync taskbar buttons
+        sync_taskbar_buttons();
+
+        // Sleep until:
+        // - A window event occurs (button click, etc.)
+        // - Timer tick for periodic sync
+        // We use sleep_ticks instead of sleep_until_event for periodic updates
+        crate::process::sleep_ticks(TASKBAR_SYNC_INTERVAL);
+    }
+}
+
+/// Process pending actions (called from the GUIShell process)
+fn process_pending_actions() {
+    // First, sync menu state with window manager
+    {
+        let mut state = GUISHELL_STATE.lock();
+        if let Some(menu_id) = state.menu_id {
+            let menu_exists = window::with_window_manager(|wm| {
+                wm.window_registry.contains_key(&menu_id)
+            }).unwrap_or(false);
+
+            if !menu_exists {
+                crate::debug_info!("GUIShell: Menu {:?} was destroyed externally, clearing state", menu_id);
+                state.menu_id = None;
+            }
+        }
+    }
+
+    // Take any pending action
+    let pending_action = {
+        let mut state = GUISHELL_STATE.lock();
+        state.pending_action.take()
+    };
+
+    // Process pending action (outside the lock to avoid deadlocks)
+    if let Some(action) = pending_action {
+        match action {
+            PendingAction::ToggleStartMenu => {
+                toggle_start_menu();
+            }
+            PendingAction::SpawnTerminal => {
+                close_start_menu();
+                spawn_terminal();
+            }
+            PendingAction::SpawnPainting => {
+                close_start_menu();
+                spawn_painting();
+            }
+            PendingAction::SpawnCalc => {
+                close_start_menu();
+                spawn_calc();
+            }
+            PendingAction::SpawnNotepad => {
+                close_start_menu();
+                spawn_notepad();
+            }
+            PendingAction::FocusWindow(frame_id) => {
+                focus_window(frame_id);
+            }
+        }
+    }
+}
+
+/// Signal the GUIShell process to wake up
+///
+/// Call this when window events occur that might need GUIShell attention.
+pub fn signal_guishell() {
+    if let Some(pid) = GUISHELL_STATE.lock().process_id {
+        crate::process::signal_process(pid, WakeEvents::WINDOW_EVENT);
+    }
 }
