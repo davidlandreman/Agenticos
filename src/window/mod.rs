@@ -96,6 +96,12 @@ pub trait Window: Send {
     
     /// Set the focus state of this window
     fn set_focus(&mut self, focused: bool);
+
+    /// Get the window title if this is a frame window
+    /// Returns None for non-frame windows
+    fn window_title(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Global window manager instance

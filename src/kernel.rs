@@ -94,9 +94,9 @@ fn init_display(boot_info: &'static mut BootInfo) -> Option<(u32, u32)> {
         window::init_window_manager(device);
         debug_info!("Window manager initialized successfully!");
 
-        // Create default desktop with terminal
-        window::create_default_desktop();
-        debug_info!("Default desktop created!");
+        // Initialize GUIShell desktop (taskbar + start menu)
+        crate::commands::guishell::init_guishell();
+        debug_info!("GUIShell desktop initialized!");
 
         // Do an initial render to show something immediately
         debug_info!("Performing initial render...");
@@ -293,21 +293,10 @@ pub fn run() -> ! {
     crate::process::register_command("calc", crate::commands::calc::create_calc_process);
     debug_info!("All {} commands registered successfully.", 14);
 
-    // Start the shell in a simple way - we'll run it but render frames between inputs
-    debug_info!("Starting shell with window system...");
+    // Start the GUIShell (taskbar + start menu)
+    debug_info!("Starting GUIShell...");
 
-    // The default desktop already created a terminal window
-    // Get its ID from the terminal module
-    let terminal_id = window::terminal::get_terminal_window()
-        .expect("Terminal window should be set by create_default_desktop");
-    debug_info!("Using terminal window with ID: {:?}", terminal_id);
-
-    // Register a shell for the initial terminal
-    let initial_pid = crate::process::allocate_pid();
-    crate::commands::shell::shell_process::register_shell(terminal_id, initial_pid);
-    debug_info!("Initial shell registered with PID {:?}", initial_pid);
-
-    // Force an initial render to display the terminal
+    // Force an initial render to display the desktop
     window::render_frame();
 
     // Create input processor for event handling
@@ -350,6 +339,9 @@ pub fn run() -> ! {
         for event in input_processor.process_pending(&crate::input::INPUT_QUEUE) {
             window::process_event(event);
         }
+
+        // Poll GUIShell (updates taskbar buttons, handles menu state)
+        crate::commands::guishell::poll();
 
         // Poll all shell instances (cooperative multitasking)
         let exited_terminals = crate::commands::shell::shell_process::poll_all_shells();

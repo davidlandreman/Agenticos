@@ -38,6 +38,11 @@ impl FrameWindow {
         self.base.invalidate();
     }
 
+    /// Get the window title
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
     pub fn content_area(&self) -> Rect {
         // Return area relative to parent (0,0 based)
         Rect::new(
@@ -319,5 +324,9 @@ impl Window for FrameWindow {
     fn set_focus(&mut self, focused: bool) {
         self.active = focused;
         self.base.invalidate();
+    }
+
+    fn window_title(&self) -> Option<&str> {
+        Some(&self.title)
     }
 }

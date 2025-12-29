@@ -40,6 +40,10 @@ pub struct WindowManager {
     last_mouse_buttons: u8,
     /// Cursor renderer for save/restore and drawing
     cursor: CursorRenderer,
+    /// Currently active popup menu (if any)
+    active_menu: Option<WindowId>,
+    /// Taskbar window ID (if any)
+    taskbar_id: Option<WindowId>,
 }
 
 impl WindowManager {
@@ -61,6 +65,8 @@ impl WindowManager {
             interaction_state: InteractionState::Idle,
             last_mouse_buttons: 0,
             cursor: CursorRenderer::new(),
+            active_menu: None,
+            taskbar_id: None,
         };
 
         // Create default text screen
@@ -298,6 +304,21 @@ impl WindowManager {
     pub fn route_mouse_event(&mut self, event: MouseEvent) {
         // Find window under cursor
         let global_pos = event.global_position;
+
+        // If there's an active menu, check if click is outside it
+        if let Some(menu_id) = self.active_menu {
+            if let Some(menu_bounds) = self.get_global_bounds(menu_id) {
+                // Check if this is a button down event
+                if matches!(event.event_type, MouseEventType::ButtonDown) {
+                    if !menu_bounds.contains_point(global_pos) {
+                        // Click outside menu - close it and don't route the click
+                        // (user's intent was to close the menu, not click what's underneath)
+                        self.close_active_menu();
+                        return;
+                    }
+                }
+            }
+        }
 
         // Walk z-order from front to back (topmost windows first)
         for &window_id in self.z_order.iter().rev() {
@@ -886,5 +907,67 @@ impl WindowManager {
                 }
             }
         }
+    }
+
+    // Menu Management
+
+    /// Set the active popup menu
+    pub fn set_active_menu(&mut self, menu_id: Option<WindowId>) {
+        self.active_menu = menu_id;
+    }
+
+    /// Get the active popup menu
+    pub fn get_active_menu(&self) -> Option<WindowId> {
+        self.active_menu
+    }
+
+    /// Close the active menu if one is open
+    pub fn close_active_menu(&mut self) {
+        if let Some(menu_id) = self.active_menu.take() {
+            self.destroy_window(menu_id);
+            self.compositor.dirty.mark_full_repaint();
+        }
+    }
+
+    // Taskbar Management
+
+    /// Set the taskbar window ID
+    pub fn set_taskbar_id(&mut self, taskbar_id: Option<WindowId>) {
+        self.taskbar_id = taskbar_id;
+    }
+
+    /// Get the taskbar window ID
+    pub fn get_taskbar_id(&self) -> Option<WindowId> {
+        self.taskbar_id
+    }
+
+    /// Get all frame windows with their titles
+    /// Returns a list of (frame_id, title) pairs
+    /// Only returns windows that have a title (i.e., FrameWindows)
+    pub fn get_frame_windows(&self) -> Vec<(WindowId, alloc::string::String)> {
+        use alloc::string::String;
+
+        let mut result = Vec::new();
+
+        for (&window_id, window) in &self.window_registry {
+            // Only include windows that have a title (FrameWindows)
+            if let Some(title) = window.window_title() {
+                // Skip the taskbar
+                if Some(window_id) == self.taskbar_id {
+                    continue;
+                }
+                result.push((window_id, String::from(title)));
+            }
+        }
+
+        result
+    }
+
+    /// Get the screen dimensions
+    pub fn screen_dimensions(&self) -> (u32, u32) {
+        (
+            self.graphics_device.width() as u32,
+            self.graphics_device.height() as u32,
+        )
     }
 }

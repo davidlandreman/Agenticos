@@ -11,6 +11,8 @@ pub mod button;
 pub mod text_input;
 pub mod list;
 pub mod multi_column_list;
+pub mod menu;
+pub mod taskbar;
 
 pub use base::WindowBase;
 pub use container::ContainerWindow;
@@ -23,3 +25,5 @@ pub use button::Button;
 pub use text_input::TextInput;
 pub use list::List;
 pub use multi_column_list::{MultiColumnList, Column};
+pub use menu::{MenuWindow, MenuItem, MENU_ITEM_HEIGHT};
+pub use taskbar::{TaskbarWindow, TaskbarButton, TASKBAR_HEIGHT};
