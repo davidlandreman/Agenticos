@@ -10,13 +10,14 @@ use crate::fs::filesystem::FileType;
 use crate::graphics::color::Color;
 use crate::window::windows::dialog::{
     clear_dialog_state, close_dialog_with_result, get_dialog_result, is_dialog_open,
-    set_dialog_state, DialogResult,
+    set_dialog_state, DialogResult, get_dialog_id,
 };
 use crate::window::windows::{Button, Column, ContainerWindow, FrameWindow, Label, MultiColumnList};
 use crate::window::{with_window_manager, Rect, Window, WindowId};
 
-/// Show the open file dialog and return selected file path (or None if cancelled)
-pub fn show_open_dialog() -> Option<String> {
+/// Open the file dialog (non-blocking)
+/// Returns the dialog's frame ID. Use `poll_file_dialog()` to check for results.
+pub fn open_file_dialog() -> WindowId {
     // Dialog dimensions
     let dialog_width = 500u32;
     let dialog_height = 400u32;
@@ -93,7 +94,7 @@ pub fn show_open_dialog() -> Option<String> {
             file_list.add_row(alloc::vec![name.clone(), size.clone(), file_type.clone()]);
         }
 
-        // Set up selection callback
+        // Set up selection callback (double-click to open)
         let files_clone = files.clone();
         file_list.on_select(move |row_idx| {
             if let Some((name, _, _)) = files_clone.get(row_idx) {
@@ -127,23 +128,9 @@ pub fn show_open_dialog() -> Option<String> {
         open_button.set_parent(Some(container_id));
         open_button.set_bg_color(Color::new(0, 120, 215));
         open_button.set_text_color(Color::WHITE);
-        let list_id_for_open = list_id;
-        let files_for_open = files.clone();
         open_button.on_click(move || {
-            // Get selected item from list
-            if let Some(Some(selected)) = with_window_manager(|wm| {
-                wm.window_registry
-                    .get(&list_id_for_open)
-                    .and_then(|w| {
-                        // Try to downcast to MultiColumnList
-                        // For now, we'll use the selection tracking differently
-                        None::<usize>
-                    })
-            }) {
-                if let Some((name, _, _)) = files_for_open.get(selected) {
-                    close_dialog_with_result(DialogResult::FilePath(format!("/{}", name)));
-                }
-            }
+            // For now, just close - ideally we'd get the selected item
+            close_dialog_with_result(DialogResult::Cancel);
         });
 
         // Register windows (set_window_impl automatically adds to z-order)
@@ -171,45 +158,62 @@ pub fn show_open_dialog() -> Option<String> {
         // Set as modal dialog
         wm.set_modal_dialog(Some(frame_id));
 
+        // Bring to front and focus
+        wm.bring_to_front(frame_id);
+
         frame_id
     })
     .unwrap();
 
-    // Set dialog state
+    // Set dialog state for tracking
     set_dialog_state(frame_id);
 
-    // Wait for dialog to close
-    while is_dialog_open() {
-        crate::process::yield_if_needed();
+    frame_id
+}
 
-        let exists = with_window_manager(|wm| wm.window_registry.contains_key(&frame_id))
-            .unwrap_or(false);
-
-        if !exists {
-            break;
-        }
-
-        for _ in 0..10000 {
-            core::hint::spin_loop();
+/// Poll for file dialog result (non-blocking)
+/// Returns Some(path) if user selected a file, Some("") if cancelled, None if still open
+pub fn poll_file_dialog() -> Option<Option<String>> {
+    if is_dialog_open() {
+        // Check if the dialog window still exists
+        let dialog_id = get_dialog_id();
+        if let Some(id) = dialog_id {
+            let exists = with_window_manager(|wm| wm.window_registry.contains_key(&id))
+                .unwrap_or(false);
+            if !exists {
+                // Window was closed (e.g., by close button)
+                close_dialog_with_result(DialogResult::Cancel);
+            } else {
+                return None; // Still open
+            }
+        } else {
+            return None;
         }
     }
 
-    // Get result before cleanup
+    // Dialog closed - get result and clean up
     let result = get_dialog_result();
 
     // Clean up
-    with_window_manager(|wm| {
-        wm.set_modal_dialog(None);
-        wm.destroy_window(frame_id);
-    });
-
+    if let Some(id) = get_dialog_id() {
+        with_window_manager(|wm| {
+            wm.set_modal_dialog(None);
+            wm.destroy_window(id);
+        });
+    }
     clear_dialog_state();
 
-    // Return file path if one was selected
+    // Return result
     match result {
-        Some(DialogResult::FilePath(path)) => Some(path),
-        _ => None,
+        Some(DialogResult::FilePath(path)) => Some(Some(path)),
+        Some(DialogResult::Cancel) | Some(DialogResult::Ok) => Some(None),
+        _ => Some(None),
     }
+}
+
+/// Check if a file dialog is currently open
+pub fn is_file_dialog_open() -> bool {
+    is_dialog_open()
 }
 
 /// Get list of files from a directory

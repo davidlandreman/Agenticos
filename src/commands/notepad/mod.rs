@@ -12,7 +12,8 @@ use spin::Mutex;
 
 use crate::fs::File;
 use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
-use crate::window::dialogs::{show_error, show_info, show_open_dialog, show_save_dialog};
+use crate::window::dialogs::{show_error, show_info, show_save_dialog};
+use crate::window::dialogs::{open_file_dialog, poll_file_dialog, is_file_dialog_open};
 use crate::window::windows::{
     ContainerWindow, FrameWindow, MenuBar, MenuItemDef, TextEditor, MENU_BAR_HEIGHT,
 };
@@ -37,6 +38,14 @@ mod menu_ids {
     pub const HELP_ABOUT: usize = 300;
 }
 
+/// Pending dialog type
+#[derive(Clone, Copy, PartialEq)]
+enum PendingDialog {
+    None,
+    OpenFile,
+    SaveFile,
+}
+
 /// State for a single notepad instance
 struct NotepadState {
     /// Current file path (None if untitled)
@@ -51,6 +60,8 @@ struct NotepadState {
     running: bool,
     /// Pending action to process
     pending_action: Option<usize>,
+    /// Pending dialog (non-blocking)
+    pending_dialog: PendingDialog,
 }
 
 /// Global map of notepad states
@@ -242,6 +253,7 @@ impl RunnableProcess for NotepadProcess {
                     editor_id,
                     running: true,
                     pending_action: None,
+                    pending_dialog: PendingDialog::None,
                 },
             );
         }
@@ -265,9 +277,46 @@ impl RunnableProcess for NotepadProcess {
                 break;
             }
 
-            // Process pending action
-            if let Some(action) = take_pending_action(notepad_id) {
-                handle_menu_action(notepad_id, action);
+            // Check for pending dialog results
+            let pending_dialog = {
+                let states = NOTEPAD_STATES.lock();
+                states.get(&notepad_id).map(|s| s.pending_dialog).unwrap_or(PendingDialog::None)
+            };
+
+            if pending_dialog != PendingDialog::None {
+                // Poll for dialog result
+                if let Some(result) = poll_file_dialog() {
+                    // Dialog closed - process result
+                    match pending_dialog {
+                        PendingDialog::OpenFile => {
+                            if let Some(path) = result {
+                                load_file(notepad_id, editor_id, &path);
+                            }
+                        }
+                        PendingDialog::SaveFile => {
+                            // Save handled elsewhere
+                        }
+                        PendingDialog::None => {}
+                    }
+
+                    // Clear pending dialog
+                    let mut states = NOTEPAD_STATES.lock();
+                    if let Some(state) = states.get_mut(&notepad_id) {
+                        state.pending_dialog = PendingDialog::None;
+                    }
+                }
+            }
+
+            // Process pending action (only if no dialog is open)
+            if pending_dialog == PendingDialog::None {
+                if let Some(action) = take_pending_action(notepad_id) {
+                    handle_menu_action(notepad_id, action);
+                }
+            }
+
+            // Small delay (matches calc app)
+            for _ in 0..50000 {
+                core::hint::spin_loop();
             }
 
             // Allow preemption
@@ -279,11 +328,6 @@ impl RunnableProcess for NotepadProcess {
 
             if !exists {
                 break;
-            }
-
-            // Small delay
-            for _ in 0..10000 {
-                core::hint::spin_loop();
             }
         }
 
@@ -347,15 +391,13 @@ fn handle_new(notepad_id: usize) {
 
 /// Handle File > Open
 fn handle_open(notepad_id: usize) {
-    if let Some(path) = show_open_dialog() {
-        let editor_id = {
-            let states = NOTEPAD_STATES.lock();
-            states.get(&notepad_id).map(|s| s.editor_id)
-        };
+    // Open the dialog (non-blocking)
+    open_file_dialog();
 
-        if let Some(editor_id) = editor_id {
-            load_file(notepad_id, editor_id, &path);
-        }
+    // Mark that we're waiting for the dialog result
+    let mut states = NOTEPAD_STATES.lock();
+    if let Some(state) = states.get_mut(&notepad_id) {
+        state.pending_dialog = PendingDialog::OpenFile;
     }
 }
 
