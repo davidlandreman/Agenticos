@@ -359,17 +359,6 @@ pub fn run() -> ! {
         // Window manager handles all rendering including mouse cursor
         window::render_frame();
 
-        frame_count += 1;
-        if frame_count % 10000 == 0 {
-            crate::debug_trace!("Frame {}", frame_count);
-            // Log dropped event count for diagnostics
-            let dropped = crate::input::dropped_event_count();
-            if dropped > 0 {
-                debug_warn!("Dropped {} input events (queue overflow)", dropped);
-                crate::input::reset_dropped_count();
-            }
-        }
-
         // Use hlt to save CPU, but wake on interrupts
         // The keyboard interrupt will wake us up to process input
         x86_64::instructions::hlt();
