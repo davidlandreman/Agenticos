@@ -12,6 +12,8 @@ pub struct FrameWindow {
     title: String,
     title_bar_height: usize,
     border_width: usize,
+    close_button_size: usize,
+    close_button_padding: usize,
     active: bool,
     content_window_id: Option<WindowId>,
 }
@@ -23,6 +25,8 @@ impl FrameWindow {
             title: title.to_string(),
             title_bar_height: 24,
             border_width: 2,
+            close_button_size: 16,
+            close_button_padding: 4,
             active: false,
             content_window_id: None,
         }
@@ -57,14 +61,14 @@ impl FrameWindow {
             bounds.x as usize + self.border_width,
             bounds.y as usize + self.border_width,
             (bounds.width - 2 * self.border_width as u32) as usize,
-            self.title_bar_height - self.border_width,
+            self.title_bar_height,
             title_bar_color,
         );
 
-        // Draw title text (centered)
+        // Draw title text (left-aligned with padding)
         let text_y = bounds.y as usize + self.border_width + (self.title_bar_height - 8) / 2;
         let text_x = bounds.x as usize + self.border_width + 8;
-        
+
         let font = crate::graphics::fonts::core_font::get_default_font();
         device.draw_text(
             text_x,
@@ -73,6 +77,37 @@ impl FrameWindow {
             font.as_font(),
             Color::WHITE,
         );
+
+        // Draw close button
+        self.draw_close_button(device);
+    }
+
+    fn draw_close_button(&self, device: &mut dyn GraphicsDevice) {
+        let bounds = self.base.bounds();
+
+        // Calculate close button position (right side of titlebar, vertically centered)
+        let btn_x = bounds.x as usize + bounds.width as usize
+            - self.border_width - self.close_button_padding - self.close_button_size;
+        let btn_y = bounds.y as usize + self.border_width
+            + (self.title_bar_height - self.close_button_size) / 2;
+
+        // Draw close button background (dark red)
+        let btn_color = Color::new(192, 0, 0);
+        device.fill_rect(btn_x, btn_y, self.close_button_size, self.close_button_size, btn_color);
+
+        // Draw X symbol (white lines)
+        let padding = 4; // Padding inside the button for the X
+        let x1 = btn_x + padding;
+        let y1 = btn_y + padding;
+        let x2 = btn_x + self.close_button_size - padding - 1;
+        let y2 = btn_y + self.close_button_size - padding - 1;
+
+        // Draw the X using two diagonal lines
+        device.draw_line(x1, y1, x2, y2, Color::WHITE);
+        device.draw_line(x2, y1, x1, y2, Color::WHITE);
+        // Draw second lines offset by 1 pixel to make it thicker
+        device.draw_line(x1 + 1, y1, x2 + 1, y2, Color::WHITE);
+        device.draw_line(x2 - 1, y1, x1 - 1, y2, Color::WHITE);
     }
 
     /// Perform a hit test at the given local coordinates.
@@ -93,6 +128,18 @@ impl FrameWindow {
 
         // Check title bar area (excluding borders)
         if y >= border && y < border + title_height && x >= border && x < bounds.width as i32 - border {
+            // Check if click is in close button area
+            let close_btn_size = self.close_button_size as i32;
+            let close_btn_padding = self.close_button_padding as i32;
+            let close_btn_x = bounds.width as i32 - border - close_btn_padding - close_btn_size;
+            let close_btn_y = border + (title_height - close_btn_size) / 2;
+
+            if x >= close_btn_x && x < close_btn_x + close_btn_size
+                && y >= close_btn_y && y < close_btn_y + close_btn_size
+            {
+                return HitTestResult::CloseButton;
+            }
+
             return HitTestResult::TitleBar;
         }
 

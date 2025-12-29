@@ -12,5 +12,6 @@ pub mod grep;
 pub mod pwd;
 pub mod ls;
 pub mod painting;
+pub mod calc;
 
 // ShellProcess is no longer exported - we use async_shell instead

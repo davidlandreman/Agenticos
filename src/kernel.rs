@@ -290,7 +290,8 @@ pub fn run() -> ! {
     crate::process::register_command("pwd", crate::commands::pwd::create_pwd_process);
     crate::process::register_command("ls", crate::commands::ls::create_ls_process);
     crate::process::register_command("painting", crate::commands::painting::create_painting_process);
-    debug_info!("All {} commands registered successfully.", 13);
+    crate::process::register_command("calc", crate::commands::calc::create_calc_process);
+    debug_info!("All {} commands registered successfully.", 14);
 
     // Start the shell in a simple way - we'll run it but render frames between inputs
     debug_info!("Starting shell with window system...");

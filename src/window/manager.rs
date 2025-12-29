@@ -298,19 +298,19 @@ impl WindowManager {
     pub fn route_mouse_event(&mut self, event: MouseEvent) {
         // Find window under cursor
         let global_pos = event.global_position;
-        
-        // Walk z-order from front to back
+
+        // Walk z-order from front to back (topmost windows first)
         for &window_id in self.z_order.iter().rev() {
-            if let Some(window) = self.window_registry.get(&window_id) {
-                let bounds = window.bounds();
-                if bounds.contains_point(global_pos) {
-                    // Create local event
+            // Get global bounds for this window (accounts for parent hierarchy)
+            if let Some(global_bounds) = self.get_global_bounds(window_id) {
+                if global_bounds.contains_point(global_pos) {
+                    // Create local event with position relative to this window's global position
                     let mut local_event = event;
                     local_event.position = Point::new(
-                        global_pos.x - bounds.x,
-                        global_pos.y - bounds.y,
+                        global_pos.x - global_bounds.x,
+                        global_pos.y - global_bounds.y,
                     );
-                    
+
                     self.route_event_to_window(window_id, Event::Mouse(local_event));
                     break;
                 }
@@ -440,6 +440,17 @@ impl WindowManager {
     
     /// Recursively render a window and its children with parent offset
     fn render_window_tree_with_offset(&mut self, window_id: WindowId, parent_x: i32, parent_y: i32) {
+        self.render_window_tree_with_offset_propagate(window_id, parent_x, parent_y, false);
+    }
+
+    /// Internal helper for rendering with invalidation propagation
+    fn render_window_tree_with_offset_propagate(
+        &mut self,
+        window_id: WindowId,
+        parent_x: i32,
+        parent_y: i32,
+        parent_was_repainted: bool,
+    ) {
         crate::debug_trace!("render_window_tree: {:?}, offset=({}, {})", window_id, parent_x, parent_y);
         // We need to temporarily take the window out to avoid borrowing issues
         if let Some(mut window) = self.window_registry.remove(&window_id) {
@@ -447,13 +458,22 @@ impl WindowManager {
             let mut bounds = window.bounds();
             let visible = window.visible();
             let children = window.children().to_vec();
-            
+
+            // If parent was repainted, this window must also repaint
+            // (because the parent's background covered us)
+            if parent_was_repainted && !window.needs_repaint() {
+                window.invalidate();
+            }
+
+            // Check if this window will repaint (for propagating to children)
+            let will_repaint = window.needs_repaint();
+
             // Adjust bounds by parent offset
             bounds.x += parent_x;
             bounds.y += parent_y;
-            
+
             crate::debug_trace!("Window {:?}: absolute_bounds={:?}, visible={}", window_id, bounds, visible);
-            
+
             if visible {
                 // Save the original bounds
                 let original_bounds = window.bounds();
@@ -470,15 +490,16 @@ impl WindowManager {
 
                 // Restore original bounds (without invalidation!)
                 window.set_bounds_no_invalidate(original_bounds);
-                
+
                 // Put the window back
                 self.window_registry.insert(window_id, window);
-                
+
                 // Recursively render children with updated offset
+                // Propagate repaint flag to children if this window was repainted
                 for child_id in children {
-                    self.render_window_tree_with_offset(child_id, bounds.x, bounds.y);
+                    self.render_window_tree_with_offset_propagate(child_id, bounds.x, bounds.y, will_repaint);
                 }
-                
+
                 // Clear clipping
                 self.graphics_device.set_clip_rect(None);
             } else {
@@ -650,6 +671,20 @@ impl WindowManager {
                         break;
                     } else if local_y >= border && local_y < border + title_height {
                         // Title bar (inside border, top 24 pixels)
+                        // Check for close button first (16x16 button, 4px from right edge)
+                        let close_btn_size = 16;
+                        let close_btn_padding = 4;
+                        let close_btn_x = bounds.width as i32 - border - close_btn_padding - close_btn_size;
+                        let close_btn_y = border + (title_height - close_btn_size) / 2;
+
+                        if local_x >= close_btn_x && local_x < close_btn_x + close_btn_size
+                            && local_y >= close_btn_y && local_y < close_btn_y + close_btn_size
+                        {
+                            target_window = Some(window_id);
+                            target_hit = HitTestResult::CloseButton;
+                            break;
+                        }
+
                         target_window = Some(window_id);
                         target_hit = HitTestResult::TitleBar;
                         break;
@@ -694,6 +729,12 @@ impl WindowManager {
                         crate::debug_info!("Clicked client area of {:?}", window_id);
                         self.bring_to_front(window_id);
                         self.focus_frame_and_content(window_id);
+                    }
+                    HitTestResult::CloseButton => {
+                        // Close button clicked - destroy the window
+                        crate::debug_info!("Close button clicked for {:?}", window_id);
+                        self.destroy_window(window_id);
+                        self.compositor.dirty.mark_full_repaint();
                     }
                     _ => {}
                 }
@@ -783,6 +824,27 @@ impl WindowManager {
             }
         }
         result
+    }
+
+    /// Calculate the global bounds of a window by traversing the parent chain
+    fn get_global_bounds(&self, window_id: WindowId) -> Option<Rect> {
+        let window = self.window_registry.get(&window_id)?;
+        let mut bounds = window.bounds();
+
+        // Traverse parent chain and accumulate offsets
+        let mut current_parent = window.parent();
+        while let Some(parent_id) = current_parent {
+            if let Some(parent_window) = self.window_registry.get(&parent_id) {
+                let parent_bounds = parent_window.bounds();
+                bounds.x += parent_bounds.x;
+                bounds.y += parent_bounds.y;
+                current_parent = parent_window.parent();
+            } else {
+                break;
+            }
+        }
+
+        Some(bounds)
     }
 
     /// Update child windows after a parent has been resized.

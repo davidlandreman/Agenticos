@@ -85,7 +85,10 @@ impl Window for ContainerWindow {
         if !self.visible() {
             return;
         }
-        
+        if !self.base.needs_repaint() {
+            return;
+        }
+
         // Fill background
         let bounds = self.bounds();
         device.fill_rect(
@@ -95,7 +98,7 @@ impl Window for ContainerWindow {
             bounds.height as usize,
             self.background_color,
         );
-        
+
         // Clear repaint flag
         self.base.clear_needs_repaint();
     }
