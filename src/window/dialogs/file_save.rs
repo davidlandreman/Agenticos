@@ -1,10 +1,12 @@
 //! Save file dialog for saving files
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::fs::Directory;
+use crate::fs::filesystem::FileType;
 use crate::graphics::color::Color;
 use crate::window::windows::dialog::{
     clear_dialog_state, close_dialog_with_result, get_dialog_result, is_dialog_open,
@@ -73,8 +75,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
         let path_label_id = wm.create_window(Some(container_id));
         let path_label_bounds =
             Rect::new(content_area.x + 10, content_area.y + 10, content_area.width - 20, 20);
-        let mut path_label = Label::new_with_id(path_label_id, path_label_bounds);
-        path_label.set_text("Save in: /");
+        let mut path_label = Label::new_with_id(path_label_id, path_label_bounds, "Save in: /");
         path_label.set_parent(Some(container_id));
 
         // File list
@@ -85,11 +86,13 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
             content_area.width - 20,
             content_area.height - 150,
         );
-        let mut file_list = MultiColumnList::new_with_id(list_id, list_bounds);
+        let columns = alloc::vec![
+            Column::new("Name", 250),
+            Column::new("Size", 80),
+            Column::new("Type", 100),
+        ];
+        let mut file_list = MultiColumnList::new_with_id(list_id, list_bounds, columns);
         file_list.set_parent(Some(container_id));
-        file_list.add_column(Column::new("Name", 250));
-        file_list.add_column(Column::new("Size", 80));
-        file_list.add_column(Column::new("Type", 100));
 
         // Populate list with files
         for (name, size, file_type) in &files {
@@ -104,8 +107,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
             80,
             20,
         );
-        let mut fn_label = Label::new_with_id(fn_label_id, fn_label_bounds);
-        fn_label.set_text("File name:");
+        let mut fn_label = Label::new_with_id(fn_label_id, fn_label_bounds, "File name:");
         fn_label.set_parent(Some(container_id));
 
         // Filename input
@@ -128,8 +130,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
             80,
             30,
         );
-        let mut cancel_button = Button::new_with_id(cancel_button_id, cancel_bounds);
-        cancel_button.set_label("Cancel");
+        let mut cancel_button = Button::new_with_id(cancel_button_id, cancel_bounds, "Cancel");
         cancel_button.set_parent(Some(container_id));
         cancel_button.on_click(|| {
             close_dialog_with_result(DialogResult::Cancel);
@@ -143,10 +144,9 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
             80,
             30,
         );
-        let mut save_button = Button::new_with_id(save_button_id, save_bounds);
-        save_button.set_label("Save");
+        let mut save_button = Button::new_with_id(save_button_id, save_bounds, "Save");
         save_button.set_parent(Some(container_id));
-        save_button.set_background_color(Color::new(0, 120, 215));
+        save_button.set_bg_color(Color::new(0, 120, 215));
         save_button.set_text_color(Color::WHITE);
         let input_id_for_save = filename_input_id;
         save_button.on_click(move || {
@@ -155,7 +155,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
             close_dialog_with_result(DialogResult::Custom(1)); // 1 = save attempted
         });
 
-        // Register windows
+        // Register windows (set_window_impl automatically adds to z-order)
         wm.set_window_impl(frame_id, Box::new(frame));
         wm.set_window_impl(container_id, Box::new(container));
         wm.set_window_impl(path_label_id, Box::new(path_label));
@@ -164,16 +164,6 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
         wm.set_window_impl(filename_input_id, Box::new(filename_input));
         wm.set_window_impl(cancel_button_id, Box::new(cancel_button));
         wm.set_window_impl(save_button_id, Box::new(save_button));
-
-        // Add to z-order
-        wm.z_order.push(frame_id);
-        wm.z_order.push(container_id);
-        wm.z_order.push(path_label_id);
-        wm.z_order.push(list_id);
-        wm.z_order.push(fn_label_id);
-        wm.z_order.push(filename_input_id);
-        wm.z_order.push(cancel_button_id);
-        wm.z_order.push(save_button_id);
 
         // Add children
         if let Some(desktop) = wm.window_registry.get_mut(&desktop_id) {
@@ -248,13 +238,14 @@ fn get_file_list(path: &str) -> Vec<(String, String, String)> {
 
     if let Ok(dir) = Directory::open(path) {
         for entry in dir.entries() {
-            let name = entry.name_str();
-            let size = if entry.is_directory() {
+            let name = String::from(entry.name_str());
+            let is_dir = entry.file_type == FileType::Directory;
+            let size = if is_dir {
                 String::from("<DIR>")
             } else {
                 format_size(entry.size as u64)
             };
-            let file_type = if entry.is_directory() {
+            let file_type = if is_dir {
                 String::from("Folder")
             } else {
                 get_file_type(&name)

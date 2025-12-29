@@ -103,6 +103,24 @@ pub trait Window: Send {
     fn window_title(&self) -> Option<&str> {
         None
     }
+
+    /// Poll for pending popup (used by MenuBar)
+    /// Returns None for non-menu-bar windows
+    fn poll_pending_popup(&mut self) -> Option<windows::PendingPopup> {
+        None
+    }
+
+    /// Poll for pending popup selection (used by MenuBarPopup)
+    /// Returns (menu_bar_id, item_index) if a selection was made
+    fn poll_pending_popup_selection(&mut self) -> Option<(WindowId, usize)> {
+        None
+    }
+
+    /// Handle popup selection (used by MenuBar)
+    fn handle_popup_selection(&mut self, _item_index: usize) {}
+
+    /// Close popup menu (used by MenuBar)
+    fn close_popup_menu(&mut self) {}
 }
 
 /// Global window manager instance

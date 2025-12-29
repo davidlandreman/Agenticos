@@ -4,6 +4,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -89,10 +90,10 @@ impl NotepadProcess {
 }
 
 impl HasBaseProcess for NotepadProcess {
-    fn base_process(&self) -> &BaseProcess {
+    fn base(&self) -> &BaseProcess {
         &self.base
     }
-    fn base_process_mut(&mut self) -> &mut BaseProcess {
+    fn base_mut(&mut self) -> &mut BaseProcess {
         &mut self.base
     }
 }
@@ -201,15 +202,10 @@ impl RunnableProcess for NotepadProcess {
             let mut editor = TextEditor::new_with_id(editor_id, editor_bounds);
             editor.set_parent(Some(frame_id));
 
-            // Register windows
+            // Register windows (set_window_impl automatically adds to z-order)
             wm.set_window_impl(frame_id, Box::new(frame));
             wm.set_window_impl(menu_bar_id, Box::new(menu_bar));
             wm.set_window_impl(editor_id, Box::new(editor));
-
-            // Add to z-order
-            wm.z_order.push(frame_id);
-            wm.z_order.push(menu_bar_id);
-            wm.z_order.push(editor_id);
 
             // Add children
             if let Some(desktop) = wm.window_registry.get_mut(&desktop_id) {

@@ -13,6 +13,7 @@ use super::{
 };
 use super::types::{InteractionState, HitTestResult, ResizeEdge, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT};
 use super::console::take_pending_invalidations;
+use super::windows::MenuBarPopup;
 
 /// The Window Manager coordinates all windows across all screens
 pub struct WindowManager {
@@ -46,6 +47,8 @@ pub struct WindowManager {
     taskbar_id: Option<WindowId>,
     /// Currently active modal dialog (if any)
     modal_dialog: Option<WindowId>,
+    /// Active menu bar popup: (menu_bar_id, popup_window_id)
+    menu_bar_popup: Option<(WindowId, WindowId)>,
 }
 
 impl WindowManager {
@@ -70,6 +73,7 @@ impl WindowManager {
             active_menu: None,
             taskbar_id: None,
             modal_dialog: None,
+            menu_bar_popup: None,
         };
 
         // Create default text screen
@@ -326,13 +330,17 @@ impl WindowManager {
         // If there's an active menu, check if click is outside it
         if let Some(menu_id) = self.active_menu {
             if let Some(menu_bounds) = self.get_global_bounds(menu_id) {
+                crate::debug_trace!("Active menu {:?} bounds: {:?}, mouse: {:?}", menu_id, menu_bounds, global_pos);
                 // Check if this is a button down event
                 if matches!(event.event_type, MouseEventType::ButtonDown) {
                     if !menu_bounds.contains_point(global_pos) {
                         // Click outside menu - close it and don't route the click
                         // (user's intent was to close the menu, not click what's underneath)
+                        crate::debug_info!("Click outside menu - closing");
                         self.close_active_menu();
                         return;
+                    } else {
+                        crate::debug_info!("Click INSIDE menu {:?} at {:?}", menu_id, global_pos);
                     }
                 }
             }
@@ -367,6 +375,7 @@ impl WindowManager {
             // Get global bounds for this window (accounts for parent hierarchy)
             if let Some(global_bounds) = self.get_global_bounds(window_id) {
                 if global_bounds.contains_point(global_pos) {
+                    crate::debug_info!("route_mouse_event: hit window {:?} at bounds {:?}", window_id, global_bounds);
                     // Create local event with position relative to this window's global position
                     let mut local_event = event;
                     local_event.position = Point::new(
@@ -380,7 +389,7 @@ impl WindowManager {
             }
         }
     }
-    
+
     /// Route an event to a specific window
     fn route_event_to_window(&mut self, window_id: WindowId, event: Event) {
         crate::debug_trace!("route_event_to_window: window={:?}, event={:?}", window_id, event);
@@ -405,7 +414,112 @@ impl WindowManager {
             }
         }
     }
-    
+
+    /// Process menu bar popup requests
+    fn process_menu_bar_popups(&mut self) {
+        // Collect window IDs first to avoid borrow issues
+        let window_ids: Vec<WindowId> = self.window_registry.keys().cloned().collect();
+
+        for window_id in window_ids {
+            // Poll for pending popup using the trait method
+            let pending_popup = {
+                if let Some(window) = self.window_registry.get_mut(&window_id) {
+                    window.poll_pending_popup()
+                } else {
+                    None
+                }
+            };
+
+            if let Some(popup) = pending_popup {
+                // Close any existing popup
+                if let Some((old_menu_bar_id, old_popup_id)) = self.menu_bar_popup.take() {
+                    // Notify the old menu bar that its popup is closing
+                    if old_menu_bar_id != window_id {
+                        if let Some(old_menu_bar) = self.window_registry.get_mut(&old_menu_bar_id) {
+                            old_menu_bar.close_popup_menu();
+                        }
+                    }
+                    self.destroy_window(old_popup_id);
+                }
+
+                // Get desktop ID for parenting
+                let desktop_id = self.get_active_screen()
+                    .and_then(|s| s.root_window)
+                    .unwrap_or(WindowId::new());
+
+                // Create the popup window
+                let popup_id = self.create_window(Some(desktop_id));
+                let popup_bounds = Rect::new(popup.x, popup.y, popup.width, popup.height);
+                let mut popup_window = MenuBarPopup::new_with_id(
+                    popup_id,
+                    popup_bounds,
+                    window_id,
+                    popup.items,
+                );
+                // Set the parent so get_global_bounds works correctly
+                popup_window.set_parent(Some(desktop_id));
+
+                crate::debug_info!("Creating popup at bounds {:?}", popup_bounds);
+                self.set_window_impl(popup_id, Box::new(popup_window));
+
+                // Add popup to desktop's children
+                if let Some(desktop) = self.window_registry.get_mut(&desktop_id) {
+                    desktop.add_child(popup_id);
+                }
+
+                // Bring popup to front
+                self.bring_to_front(popup_id);
+
+                // Store the popup reference
+                self.menu_bar_popup = Some((window_id, popup_id));
+
+                // Set as active menu for click-outside detection
+                self.active_menu = Some(popup_id);
+
+                // Force full repaint so popup is drawn
+                self.compositor.dirty.mark_full_repaint();
+
+                crate::debug_info!("Created menu bar popup {:?} for menu bar {:?}", popup_id, window_id);
+            }
+        }
+
+        // Process popup selections
+        self.process_popup_selections();
+    }
+
+    /// Process pending popup selections
+    fn process_popup_selections(&mut self) {
+        // Collect window IDs first to avoid borrow issues
+        let window_ids: Vec<WindowId> = self.window_registry.keys().cloned().collect();
+
+        for window_id in window_ids {
+            // Poll for pending selection using the trait method
+            let selection = {
+                if let Some(window) = self.window_registry.get_mut(&window_id) {
+                    window.poll_pending_popup_selection()
+                } else {
+                    None
+                }
+            };
+
+            if let Some((menu_bar_id, item_index)) = selection {
+                crate::debug_info!("Processing popup selection: menu_bar={:?}, item={}", menu_bar_id, item_index);
+
+                // Notify the menu bar of the selection
+                if let Some(menu_bar) = self.window_registry.get_mut(&menu_bar_id) {
+                    menu_bar.handle_popup_selection(item_index);
+                }
+
+                // Close the popup
+                if let Some((_, popup_id)) = self.menu_bar_popup.take() {
+                    self.active_menu = None;
+                    self.destroy_window(popup_id);
+                    self.compositor.dirty.mark_full_repaint();
+                }
+            }
+        }
+    }
+
     // Rendering
 
     /// Render the current state to the graphics device
@@ -417,6 +531,9 @@ impl WindowManager {
                 window.invalidate();
             }
         }
+
+        // Process menu bar popup requests
+        self.process_menu_bar_popups();
 
         // Check if mouse moved
         let (mouse_x, mouse_y, buttons) = mouse::get_state();
@@ -662,6 +779,12 @@ impl WindowManager {
 
     /// Check if the mouse is on a title bar or border and start the appropriate interaction.
     fn start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
+        // If there's an active menu, don't process drag - let the click go to the menu
+        if self.active_menu.is_some() {
+            crate::debug_info!("start_drag_if_on_title_bar: active_menu present, skipping drag check");
+            return;
+        }
+
         // Find the topmost window under the mouse
         // Only check top-level windows (direct children of desktop, which have a parent)
         // Skip child windows like terminals inside frames - their bounds are parent-relative
@@ -966,6 +1089,14 @@ impl WindowManager {
     /// Close the active menu if one is open
     pub fn close_active_menu(&mut self) {
         if let Some(menu_id) = self.active_menu.take() {
+            // If this is a menu bar popup, notify the menu bar
+            if let Some((menu_bar_id, popup_id)) = self.menu_bar_popup.take() {
+                if popup_id == menu_id {
+                    if let Some(menu_bar) = self.window_registry.get_mut(&menu_bar_id) {
+                        menu_bar.close_popup_menu();
+                    }
+                }
+            }
             self.destroy_window(menu_id);
             self.compositor.dirty.mark_full_repaint();
         }

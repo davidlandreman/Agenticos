@@ -80,8 +80,7 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
             content_area.width - 40,
             60,
         );
-        let mut label = Label::new_with_id(label_id, label_bounds);
-        label.set_text(message);
+        let mut label = Label::new_with_id(label_id, label_bounds, message);
         label.set_parent(Some(container_id));
 
         // Create OK button
@@ -91,8 +90,7 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
         let button_x = content_area.x + (content_area.width as i32 - button_width) / 2;
         let button_y = content_area.y + content_area.height as i32 - button_height - 15;
         let button_bounds = Rect::new(button_x, button_y, button_width as u32, button_height as u32);
-        let mut ok_button = Button::new_with_id(ok_button_id, button_bounds);
-        ok_button.set_label("OK");
+        let mut ok_button = Button::new_with_id(ok_button_id, button_bounds, "OK");
         ok_button.set_parent(Some(container_id));
 
         // Set up button callback
@@ -100,17 +98,11 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
             close_dialog_with_result(DialogResult::Ok);
         });
 
-        // Register windows
+        // Register windows (set_window_impl automatically adds to z-order)
         wm.set_window_impl(frame_id, Box::new(frame));
         wm.set_window_impl(container_id, Box::new(container));
         wm.set_window_impl(label_id, Box::new(label));
         wm.set_window_impl(ok_button_id, Box::new(ok_button));
-
-        // Add to z-order
-        wm.z_order.push(frame_id);
-        wm.z_order.push(container_id);
-        wm.z_order.push(label_id);
-        wm.z_order.push(ok_button_id);
 
         // Add children
         if let Some(desktop) = wm.window_registry.get_mut(&desktop_id) {
