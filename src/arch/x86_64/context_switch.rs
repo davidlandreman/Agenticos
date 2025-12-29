@@ -116,6 +116,131 @@ pub unsafe extern "C" fn switch_to_context(new_ctx: *const CpuContext) {
     );
 }
 
+/// Context switch that saves callee-saved regs but restores ALL regs.
+///
+/// Used when switching from kernel to a preempted process:
+/// - Kernel only needs callee-saved registers saved (it's a normal function call)
+/// - Process needs ALL registers restored (it was interrupted mid-execution)
+///
+/// # Safety
+///
+/// Same safety requirements as `switch_context`.
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_context_full_restore(
+    old_ctx: *mut CpuContext,
+    new_ctx: *const CpuContext,
+) {
+    // The CpuContext layout (offsets in bytes):
+    // 0:  rbx, 8: rbp, 16: r12, 24: r13, 32: r14, 40: r15
+    // 48: rsp, 56: rip, 64: rflags
+    // 72: rax, 80: rcx, 88: rdx, 96: rsi, 104: rdi
+    // 112: r8, 120: r9, 128: r10, 136: r11
+
+    naked_asm!(
+        // ===== SAVE callee-saved registers to old context (rdi = old_ctx) =====
+        "mov [rdi + 0], rbx",
+        "mov [rdi + 8], rbp",
+        "mov [rdi + 16], r12",
+        "mov [rdi + 24], r13",
+        "mov [rdi + 32], r14",
+        "mov [rdi + 40], r15",
+
+        // Save stack pointer (adjust for the return address on stack)
+        "lea rax, [rsp + 8]",
+        "mov [rdi + 48], rax",
+
+        // Save return address as RIP
+        "mov rax, [rsp]",
+        "mov [rdi + 56], rax",
+
+        // Save flags
+        "pushfq",
+        "pop rax",
+        "mov [rdi + 64], rax",
+
+        // ===== RESTORE ALL registers from new context (rsi = new_ctx) =====
+        // Set up iretq frame on CURRENT stack
+        "push 0x10",             // SS (kernel data segment)
+        "push qword ptr [rsi + 48]",  // RSP
+        "push qword ptr [rsi + 64]",  // RFLAGS
+        "push 0x08",             // CS (kernel code segment)
+        "push qword ptr [rsi + 56]",  // RIP
+
+        // Restore all registers from context
+        "mov rbx, [rsi + 0]",
+        "mov rbp, [rsi + 8]",
+        "mov r12, [rsi + 16]",
+        "mov r13, [rsi + 24]",
+        "mov r14, [rsi + 32]",
+        "mov r15, [rsi + 40]",
+
+        "mov rax, [rsi + 72]",
+        "mov rcx, [rsi + 80]",
+        "mov rdx, [rsi + 88]",
+        "mov rdi, [rsi + 104]",  // Restore rdi before rsi
+        "mov r8, [rsi + 112]",
+        "mov r9, [rsi + 120]",
+        "mov r10, [rsi + 128]",
+        "mov r11, [rsi + 136]",
+        "mov rsi, [rsi + 96]",   // Restore rsi last
+
+        // Return via iretq
+        "iretq",
+    );
+}
+
+/// Switch to a process context restoring ALL registers (via iretq).
+///
+/// Used when resuming a process that was preempted by a timer interrupt.
+/// Sets up an iretq frame on the CURRENT stack, restores registers, then
+/// uses iretq to atomically load RIP, RSP, and RFLAGS.
+///
+/// # Safety
+///
+/// Same safety requirements as `switch_context`.
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_to_full_context_iretq(new_ctx: *const CpuContext) {
+    naked_asm!(
+        // rdi = new_ctx pointer
+        // CpuContext layout:
+        // 0:  rbx, 8: rbp, 16: r12, 24: r13, 32: r14, 40: r15
+        // 48: rsp, 56: rip, 64: rflags
+        // 72: rax, 80: rcx, 88: rdx, 96: rsi, 104: rdi
+        // 112: r8, 120: r9, 128: r10, 136: r11
+
+        // Set up iretq frame on CURRENT stack (don't corrupt target stack)
+        // iretq frame: RIP, CS, RFLAGS, RSP, SS (from low to high address)
+        "push 0x10",             // SS (kernel data segment)
+        "push qword ptr [rdi + 48]",  // RSP
+        "push qword ptr [rdi + 64]",  // RFLAGS
+        "push 0x08",             // CS (kernel code segment)
+        "push qword ptr [rdi + 56]",  // RIP
+
+        // Now restore all registers from context
+        // (rdi still points to context)
+        "mov rbx, [rdi + 0]",
+        "mov rbp, [rdi + 8]",
+        "mov r12, [rdi + 16]",
+        "mov r13, [rdi + 24]",
+        "mov r14, [rdi + 32]",
+        "mov r15, [rdi + 40]",
+
+        "mov rax, [rdi + 72]",
+        "mov rcx, [rdi + 80]",
+        "mov rdx, [rdi + 88]",
+        "mov rsi, [rdi + 96]",
+        // rdi loaded last
+        "mov r8, [rdi + 112]",
+        "mov r9, [rdi + 120]",
+        "mov r10, [rdi + 128]",
+        "mov r11, [rdi + 136]",
+        "mov rdi, [rdi + 104]",  // Load rdi last
+
+        // Return via iretq - atomically sets RIP, CS, RFLAGS, RSP, SS
+        "iretq",
+    );
+}
+
 /// Wrapper function for entry point of new processes
 ///
 /// This function is called when a new process starts. It retrieves

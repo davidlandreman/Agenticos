@@ -5,6 +5,13 @@ use spin::Mutex;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::{debug_error, debug_info, println};
 
+/// PIT (Programmable Interval Timer) base frequency in Hz
+const PIT_BASE_FREQUENCY: u32 = 1_193_182;
+
+/// Desired timer frequency in Hz (100 Hz = 10ms ticks)
+/// This provides good balance between responsiveness and interrupt overhead
+pub const TIMER_FREQUENCY_HZ: u32 = 100;
+
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
@@ -63,23 +70,53 @@ lazy_static! {
     };
 }
 
+/// Configure the PIT (Programmable Interval Timer) to fire at the specified frequency
+///
+/// The PIT has a base frequency of 1,193,182 Hz. We set a divisor to get our
+/// desired frequency: divisor = base_freq / desired_freq
+fn configure_pit() {
+    use x86_64::instructions::port::Port;
+
+    let divisor = (PIT_BASE_FREQUENCY / TIMER_FREQUENCY_HZ) as u16;
+    debug_info!("Configuring PIT: {} Hz (divisor {})", TIMER_FREQUENCY_HZ, divisor);
+
+    unsafe {
+        // PIT command port (0x43): Select channel 0, access mode lobyte/hibyte,
+        // mode 3 (square wave generator), binary mode
+        // Bits: 00 11 011 0 = 0x36
+        let mut command_port: Port<u8> = Port::new(0x43);
+        command_port.write(0x36);
+
+        // Write divisor to channel 0 data port (0x40)
+        // Low byte first, then high byte
+        let mut data_port: Port<u8> = Port::new(0x40);
+        data_port.write((divisor & 0xFF) as u8);
+        data_port.write((divisor >> 8) as u8);
+    }
+
+    debug_info!("PIT configured for {} Hz timer interrupts", TIMER_FREQUENCY_HZ);
+}
+
 pub fn init_idt() {
     debug_info!("Initializing Interrupt Descriptor Table...");
-    
+
     // Verify IDT entries are set up
     debug_info!("IDT entries configured:");
     debug_info!("  Timer interrupt vector: {}", InterruptIndex::Timer.as_u8());
     debug_info!("  Keyboard interrupt vector: {}", InterruptIndex::Keyboard.as_u8());
     debug_info!("  Mouse interrupt vector: {}", InterruptIndex::Mouse.as_u8());
-    
+
     IDT.load();
     debug_info!("IDT loaded successfully");
-    
+
     debug_info!("Initializing PIC...");
-    unsafe { 
+    unsafe {
         PICS.lock().initialize();
     }
     debug_info!("PIC initialized successfully");
+
+    // Configure timer frequency BEFORE enabling interrupts
+    configure_pit();
     
     // Configure PIC masks
     debug_info!("Configuring PIC interrupt masks...");

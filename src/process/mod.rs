@@ -293,7 +293,7 @@ pub fn handle_preemption() {
 /// - Kernel runs its loop (input, render) then calls this again
 /// - Kernel switches to the next ready process
 pub fn try_run_scheduled_processes() {
-    use crate::arch::x86_64::context_switch::switch_context;
+    use crate::arch::x86_64::context_switch::switch_context_full_restore;
     use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
     use core::sync::atomic::Ordering;
 
@@ -339,14 +339,14 @@ pub fn try_run_scheduled_processes() {
             IN_SPAWNED_PROCESS.store(true, Ordering::Release);
 
             // Save kernel context to global for timer handler to use
-            // The switch_context will save our current state here
+            // The switch_context_full_restore will save our current state here
             let kernel_ctx_ptr = unsafe { &mut KERNEL_CONTEXT as *mut CpuContext };
 
-            // Switch to the process
-            // When the timer preempts the process, it will switch back to
-            // the kernel context (which continues right after this call)
+            // Switch to the process using full context restore
+            // This saves kernel's callee-saved regs and restores ALL process regs
+            // When the timer preempts, it switches back to kernel context
             unsafe {
-                switch_context(kernel_ctx_ptr, next_ctx);
+                switch_context_full_restore(kernel_ctx_ptr, next_ctx);
             }
 
             // We get here when:

@@ -12,8 +12,10 @@ use super::process::ProcessId;
 use super::context::CpuContext;
 use super::stack::{allocate_stack, free_stack};
 
-/// Default time slice in timer ticks (50ms at 100Hz = 5 ticks)
-pub const DEFAULT_TIME_SLICE: u64 = 5;
+/// Default time slice in timer ticks
+/// With 100 Hz timer (10ms per tick), 2 ticks = 20ms per time slice
+/// This provides smooth multitasking where processes appear to run simultaneously
+pub const DEFAULT_TIME_SLICE: u64 = 2;
 
 /// Global scheduler instance
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());

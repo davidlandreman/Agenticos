@@ -153,10 +153,9 @@ pub unsafe extern "C" fn timer_interrupt_handler_preemptive() {
 
         "iretq",
 
-        // ========== Switch to KERNEL via jump ==========
-        // This path is used when returning to the kernel context
-        // We use a simple register restore + jump (like switch_to_context)
-        // because the kernel wasn't interrupted - it voluntarily switched
+        // ========== Switch to KERNEL via iretq ==========
+        // Use iretq to atomically switch to kernel context
+        // This is safe because iretq atomically sets RSP and enables interrupts
         "4:",
         // Clear the kernel flag
         "lea rax, [rip + {to_kernel}]",
@@ -166,6 +165,16 @@ pub unsafe extern "C" fn timer_interrupt_handler_preemptive() {
         "lea rax, [rip + {next_ctx}]",
         "mov rdi, [rax]",
 
+        // Set up iretq frame on CURRENT stack (safe, we're on interrupt stack)
+        "push 0x10",                      // SS
+        "push qword ptr [rdi + 48]",      // RSP
+        // Load flags and ensure IF is set
+        "mov rax, [rdi + 64]",
+        "or rax, 0x200",                  // Set IF
+        "push rax",                       // RFLAGS
+        "push 0x08",                      // CS
+        "push qword ptr [rdi + 56]",      // RIP
+
         // Restore callee-saved registers from context
         "mov rbx, [rdi + 0]",
         "mov rbp, [rdi + 8]",
@@ -174,16 +183,8 @@ pub unsafe extern "C" fn timer_interrupt_handler_preemptive() {
         "mov r14, [rdi + 32]",
         "mov r15, [rdi + 40]",
 
-        // Load flags
-        "mov rax, [rdi + 64]",
-        "push rax",
-        "popfq",
-
-        // Load stack pointer
-        "mov rsp, [rdi + 48]",
-
-        // Jump to RIP
-        "jmp [rdi + 56]",
+        // iretq atomically restores RIP, CS, RFLAGS, RSP, SS
+        "iretq",
 
         timer_handler_inner = sym timer_handler_inner,
         do_switch = sym DO_CONTEXT_SWITCH,
@@ -283,11 +284,10 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
                 // Move current to ready queue
                 sched.yield_current();
 
-                // Return to kernel context instead of switching to next process
-                // The kernel will run its main loop (input, render) then switch to next process
+                // Return to kernel context
                 unsafe {
                     NEXT_CONTEXT_PTR = &KERNEL_CONTEXT as *const CpuContext;
-                    SWITCH_TO_KERNEL = true;  // Use jump instead of iretq
+                    SWITCH_TO_KERNEL = true;
                     DO_CONTEXT_SWITCH = true;
                 }
                 crate::debug_trace!("Preempting back to kernel, RIP={:#x}", unsafe { KERNEL_CONTEXT.rip });

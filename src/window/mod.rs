@@ -108,12 +108,28 @@ pub fn init_window_manager(device: Box<dyn GraphicsDevice>) {
 }
 
 /// Execute a function with the window manager
+///
+/// IMPORTANT: Disables interrupts while holding the lock to prevent
+/// deadlocks with preemptive multitasking.
 pub fn with_window_manager<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut WindowManager) -> R,
 {
-    let mut wm_lock = WINDOW_MANAGER.lock();
-    wm_lock.as_mut().map(f)
+    // Disable interrupts to prevent preemption while holding the lock
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
+
+    let result = {
+        let mut wm_lock = WINDOW_MANAGER.lock();
+        wm_lock.as_mut().map(f)
+    };
+
+    // Re-enable interrupts if they were enabled before
+    if was_enabled {
+        x86_64::instructions::interrupts::enable();
+    }
+
+    result
 }
 
 /// Try to execute a function with the window manager without blocking
