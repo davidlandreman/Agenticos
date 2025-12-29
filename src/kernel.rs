@@ -292,7 +292,8 @@ pub fn run() -> ! {
     crate::process::register_command("painting", crate::commands::painting::create_painting_process);
     crate::process::register_command("calc", crate::commands::calc::create_calc_process);
     crate::process::register_command("notepad", crate::commands::notepad::create_notepad_process);
-    debug_info!("All {} commands registered successfully.", 15);
+    crate::process::register_command("tasks", crate::commands::tasks::create_tasks_process);
+    debug_info!("All {} commands registered successfully.", 16);
 
     // Start the GUIShell (taskbar + start menu)
     debug_info!("Starting GUIShell...");

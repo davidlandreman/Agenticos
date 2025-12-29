@@ -5,12 +5,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
-use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice};
+use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice, Point};
 use crate::window::event::MouseEventType;
 use super::base::WindowBase;
 
 /// Callback type for selection change events
 pub type MultiColumnSelectionCallback = Box<dyn FnMut(usize) + Send>;
+
+/// Callback type for right-click events (row_index, global_position)
+pub type RightClickCallback = Box<dyn FnMut(usize, Point) + Send>;
 
 /// Column definition for the multi-column list
 #[derive(Debug, Clone)]
@@ -49,6 +52,8 @@ pub struct MultiColumnList {
     row_height: usize,
     /// Selection change callback
     on_select: Option<MultiColumnSelectionCallback>,
+    /// Right-click callback (row_index, global_position)
+    on_right_click: Option<RightClickCallback>,
     /// Background color
     bg_color: Color,
     /// Text color
@@ -75,6 +80,7 @@ impl MultiColumnList {
             header_height: 20,
             row_height: 16,
             on_select: None,
+            on_right_click: None,
             bg_color: Color::WHITE,
             text_color: Color::BLACK,
             header_bg_color: Color::LIGHT_GRAY,
@@ -148,6 +154,17 @@ impl MultiColumnList {
         F: FnMut(usize) + Send + 'static,
     {
         self.on_select = Some(Box::new(callback));
+    }
+
+    /// Set the right-click callback
+    ///
+    /// The callback receives the row index and the global mouse position,
+    /// which can be used to position a context menu.
+    pub fn on_right_click<F>(&mut self, callback: F)
+    where
+        F: FnMut(usize, Point) + Send + 'static,
+    {
+        self.on_right_click = Some(Box::new(callback));
     }
 
     /// Calculate how many rows can be displayed
@@ -389,6 +406,20 @@ impl Window for MultiColumnList {
                                 if let Some(ref mut callback) = self.on_select {
                                     callback(index);
                                 }
+                            }
+                        }
+                        EventResult::Handled
+                    }
+                    MouseEventType::ButtonDown if mouse_event.buttons.right => {
+                        if let Some(index) = self.y_to_row_index(mouse_event.position.y) {
+                            // Select the row on right-click too
+                            if self.selected_index != Some(index) {
+                                self.selected_index = Some(index);
+                                self.base.invalidate();
+                            }
+                            // Trigger right-click callback with global position for menu placement
+                            if let Some(ref mut callback) = self.on_right_click {
+                                callback(index, mouse_event.global_position);
                             }
                         }
                         EventResult::Handled

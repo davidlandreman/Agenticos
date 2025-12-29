@@ -68,6 +68,12 @@ pub struct ProcessControlBlock {
     /// Total CPU time consumed (in timer ticks)
     pub total_runtime: u64,
 
+    /// Runtime at last CPU % sample (for delta calculation)
+    pub runtime_last_sample: u64,
+
+    /// Cached CPU percentage (0-100)
+    pub cpu_percentage: u8,
+
     /// Why the process is blocked (if state == Blocked)
     pub block_reason: Option<BlockReason>,
 
@@ -89,6 +95,8 @@ impl ProcessControlBlock {
             stdin_buffer: Arc::new(Mutex::new(VecDeque::new())),
             time_slice_remaining: 0,
             total_runtime: 0,
+            runtime_last_sample: 0,
+            cpu_percentage: 0,
             block_reason: None,
             entry_fn: None,
         }

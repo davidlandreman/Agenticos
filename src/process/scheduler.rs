@@ -5,6 +5,7 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 use super::pcb::{ProcessControlBlock, ProcessState, BlockReason};
@@ -16,6 +17,23 @@ use super::stack::{allocate_stack, free_stack};
 /// With 100 Hz timer (10ms per tick), 2 ticks = 20ms per time slice
 /// This provides smooth multitasking where processes appear to run simultaneously
 pub const DEFAULT_TIME_SLICE: u64 = 2;
+
+/// Lightweight process info for display purposes (e.g., task manager)
+#[derive(Debug, Clone)]
+pub struct ProcessInfo {
+    /// Process ID
+    pub pid: ProcessId,
+    /// Human-readable process name
+    pub name: String,
+    /// Current execution state
+    pub state: ProcessState,
+    /// Total CPU time consumed (in timer ticks)
+    pub total_runtime: u64,
+    /// Stack size in bytes
+    pub stack_size: usize,
+    /// Cached CPU percentage (0-100)
+    pub cpu_percentage: u8,
+}
 
 /// Global scheduler instance
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
@@ -307,5 +325,40 @@ impl Scheduler {
             }
         }
         None
+    }
+
+    /// Get a snapshot of all processes for display purposes
+    ///
+    /// Returns lightweight ProcessInfo structs suitable for a task manager UI.
+    pub fn get_process_list(&self) -> Vec<ProcessInfo> {
+        self.processes.values()
+            .map(|pcb| ProcessInfo {
+                pid: pcb.pid,
+                name: pcb.name.clone(),
+                state: pcb.state,
+                total_runtime: pcb.total_runtime,
+                stack_size: pcb.stack_size,
+                cpu_percentage: pcb.cpu_percentage,
+            })
+            .collect()
+    }
+
+    /// Update CPU percentages for all processes
+    ///
+    /// Call this periodically (every ~50 ticks / 500ms) to calculate CPU usage.
+    /// The percentage represents CPU time used in the elapsed window.
+    ///
+    /// # Arguments
+    /// * `elapsed_ticks` - Number of timer ticks since last update
+    pub fn update_cpu_percentages(&mut self, elapsed_ticks: u64) {
+        for pcb in self.processes.values_mut() {
+            let delta = pcb.total_runtime.saturating_sub(pcb.runtime_last_sample);
+            pcb.cpu_percentage = if elapsed_ticks > 0 {
+                ((delta * 100) / elapsed_ticks).min(100) as u8
+            } else {
+                0
+            };
+            pcb.runtime_last_sample = pcb.total_runtime;
+        }
     }
 }

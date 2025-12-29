@@ -12,7 +12,7 @@ pub use manager::{
 };
 pub use pcb::{ProcessControlBlock, ProcessState, BlockReason};
 pub use context::CpuContext;
-pub use scheduler::SCHEDULER;
+pub use scheduler::{SCHEDULER, ProcessInfo};
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -361,4 +361,30 @@ pub fn try_run_scheduled_processes() {
 /// Check if there's a process for the given terminal
 pub fn get_process_for_terminal(terminal_id: WindowId) -> Option<ProcessId> {
     scheduler::SCHEDULER.lock().find_by_terminal(terminal_id)
+}
+
+/// Get a snapshot of all running processes for display purposes
+///
+/// Returns lightweight ProcessInfo structs suitable for a task manager UI.
+pub fn get_process_list() -> alloc::vec::Vec<ProcessInfo> {
+    scheduler::SCHEDULER.lock().get_process_list()
+}
+
+/// Terminate a specific process by PID
+///
+/// This immediately marks the process as terminated and removes it
+/// from the scheduler.
+pub fn terminate_process(pid: ProcessId) {
+    scheduler::SCHEDULER.lock().terminate(pid);
+}
+
+/// Update CPU percentages for all processes
+///
+/// Call this periodically (every ~50 ticks / 500ms) to calculate CPU usage.
+/// The percentage represents CPU time used in the elapsed window.
+///
+/// # Arguments
+/// * `elapsed_ticks` - Number of timer ticks since last update
+pub fn update_cpu_percentages(elapsed_ticks: u64) {
+    scheduler::SCHEDULER.lock().update_cpu_percentages(elapsed_ticks);
 }
