@@ -20,6 +20,7 @@ pub mod manager;
 pub mod screen;
 pub mod adapters;
 pub mod windows;
+pub mod dialogs;
 pub mod terminal;
 pub mod console;
 pub mod keyboard;

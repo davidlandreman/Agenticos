@@ -44,6 +44,8 @@ pub struct WindowManager {
     active_menu: Option<WindowId>,
     /// Taskbar window ID (if any)
     taskbar_id: Option<WindowId>,
+    /// Currently active modal dialog (if any)
+    modal_dialog: Option<WindowId>,
 }
 
 impl WindowManager {
@@ -67,6 +69,7 @@ impl WindowManager {
             cursor: CursorRenderer::new(),
             active_menu: None,
             taskbar_id: None,
+            modal_dialog: None,
         };
 
         // Create default text screen
@@ -273,6 +276,21 @@ impl WindowManager {
     pub fn route_keyboard_event(&mut self, event: KeyboardEvent) {
         crate::debug_trace!("route_keyboard_event called");
 
+        // If modal dialog is active, only route to it or its children
+        if let Some(modal_id) = self.modal_dialog {
+            if let Some(focused) = self.focused_window() {
+                if self.is_modal_window(focused) {
+                    self.route_event_to_window(focused, Event::Keyboard(event));
+                } else {
+                    // Focus is on non-modal window, route to modal instead
+                    self.route_event_to_window(modal_id, Event::Keyboard(event));
+                }
+            } else {
+                self.route_event_to_window(modal_id, Event::Keyboard(event));
+            }
+            return;
+        }
+
         // Send to focused window
         if let Some(focused) = self.focused_window() {
             crate::debug_trace!("Routing to focused window: {:?}", focused);
@@ -318,6 +336,30 @@ impl WindowManager {
                     }
                 }
             }
+        }
+
+        // If modal dialog is active, only route to modal dialog and its children
+        if let Some(modal_id) = self.modal_dialog {
+            // Find window under cursor within modal dialog hierarchy
+            for &window_id in self.z_order.iter().rev() {
+                if !self.is_modal_window(window_id) && window_id != modal_id {
+                    continue; // Skip non-modal windows
+                }
+
+                if let Some(global_bounds) = self.get_global_bounds(window_id) {
+                    if global_bounds.contains_point(global_pos) {
+                        let mut local_event = event;
+                        local_event.position = Point::new(
+                            global_pos.x - global_bounds.x,
+                            global_pos.y - global_bounds.y,
+                        );
+                        self.route_event_to_window(window_id, Event::Mouse(local_event));
+                        return;
+                    }
+                }
+            }
+            // Click outside modal dialog - ignore
+            return;
         }
 
         // Walk z-order from front to back (topmost windows first)
@@ -939,6 +981,50 @@ impl WindowManager {
     /// Get the taskbar window ID
     pub fn get_taskbar_id(&self) -> Option<WindowId> {
         self.taskbar_id
+    }
+
+    // Modal Dialog Management
+
+    /// Set the modal dialog window ID
+    /// When set, events will only be routed to the modal dialog and its children
+    pub fn set_modal_dialog(&mut self, dialog_id: Option<WindowId>) {
+        self.modal_dialog = dialog_id;
+        if let Some(id) = dialog_id {
+            // Focus the modal dialog
+            self.focus_window(id);
+        }
+    }
+
+    /// Get the current modal dialog window ID
+    pub fn get_modal_dialog(&self) -> Option<WindowId> {
+        self.modal_dialog
+    }
+
+    /// Check if a modal dialog is currently active
+    pub fn has_modal_dialog(&self) -> bool {
+        self.modal_dialog.is_some()
+    }
+
+    /// Check if a window is part of the modal dialog (is the dialog or a child of it)
+    fn is_modal_window(&self, window_id: WindowId) -> bool {
+        if let Some(modal_id) = self.modal_dialog {
+            if window_id == modal_id {
+                return true;
+            }
+            // Check if window is a descendant of the modal dialog
+            let mut current = window_id;
+            while let Some(window) = self.window_registry.get(&current) {
+                if let Some(parent) = window.parent() {
+                    if parent == modal_id {
+                        return true;
+                    }
+                    current = parent;
+                } else {
+                    break;
+                }
+            }
+        }
+        false
     }
 
     /// Get all frame windows with their titles

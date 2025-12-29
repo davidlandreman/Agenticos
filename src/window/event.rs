@@ -13,6 +13,7 @@ pub enum KeyCode {
     // Special keys
     Escape, Enter, Space, Tab, Backspace, Delete,
     Left, Right, Up, Down,
+    Home, End, PageUp, PageDown, Insert,
     // Modifiers
     LeftShift, RightShift, LeftCtrl, RightCtrl, LeftAlt, RightAlt,
     // Function keys

@@ -1,0 +1,275 @@
+//! Open file dialog for selecting files to open
+
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use crate::fs::Directory;
+use crate::graphics::color::Color;
+use crate::window::windows::dialog::{
+    clear_dialog_state, close_dialog_with_result, get_dialog_result, is_dialog_open,
+    set_dialog_state, DialogResult,
+};
+use crate::window::windows::{Button, Column, ContainerWindow, FrameWindow, Label, MultiColumnList};
+use crate::window::{with_window_manager, Rect, Window, WindowId};
+
+/// Show the open file dialog and return selected file path (or None if cancelled)
+pub fn show_open_dialog() -> Option<String> {
+    // Dialog dimensions
+    let dialog_width = 500u32;
+    let dialog_height = 400u32;
+
+    // Get screen size and center dialog
+    let (screen_width, screen_height) = with_window_manager(|wm| {
+        (
+            wm.graphics_device.width() as i32,
+            wm.graphics_device.height() as i32,
+        )
+    })
+    .unwrap_or((800, 600));
+
+    let dialog_x = (screen_width - dialog_width as i32) / 2;
+    let dialog_y = (screen_height - dialog_height as i32) / 2;
+
+    // Get file list from filesystem
+    let files = get_file_list("/");
+
+    // Create dialog structure
+    let frame_id = with_window_manager(|wm| {
+        // Get desktop for parenting
+        let desktop_id = wm
+            .get_active_screen()
+            .and_then(|s| s.root_window)
+            .unwrap_or(WindowId::new());
+
+        // Create frame window
+        let frame_id = wm.create_window(Some(desktop_id));
+        let mut frame = FrameWindow::new(frame_id, "Open File");
+        frame.set_bounds(Rect::new(dialog_x, dialog_y, dialog_width, dialog_height));
+        frame.set_parent(Some(desktop_id));
+
+        let content_area = frame.content_area();
+
+        // Create container for content
+        let container_id = wm.create_window(Some(frame_id));
+        let mut container = ContainerWindow::new_with_id(
+            container_id,
+            Rect::new(
+                content_area.x,
+                content_area.y,
+                content_area.width,
+                content_area.height,
+            ),
+        );
+        container.set_parent(Some(frame_id));
+        container.set_background_color(Color::new(240, 240, 240));
+
+        // Path label
+        let path_label_id = wm.create_window(Some(container_id));
+        let path_label_bounds = Rect::new(content_area.x + 10, content_area.y + 10, content_area.width - 20, 20);
+        let mut path_label = Label::new_with_id(path_label_id, path_label_bounds);
+        path_label.set_text("Location: /");
+        path_label.set_parent(Some(container_id));
+
+        // File list
+        let list_id = wm.create_window(Some(container_id));
+        let list_bounds = Rect::new(
+            content_area.x + 10,
+            content_area.y + 40,
+            content_area.width - 20,
+            content_area.height - 100,
+        );
+        let mut file_list = MultiColumnList::new_with_id(list_id, list_bounds);
+        file_list.set_parent(Some(container_id));
+        file_list.add_column(Column::new("Name", 250));
+        file_list.add_column(Column::new("Size", 80));
+        file_list.add_column(Column::new("Type", 100));
+
+        // Populate list with files
+        for (name, size, file_type) in &files {
+            file_list.add_row(alloc::vec![name.clone(), size.clone(), file_type.clone()]);
+        }
+
+        // Set up selection callback
+        let files_clone = files.clone();
+        file_list.on_select(move |row_idx| {
+            if let Some((name, _, _)) = files_clone.get(row_idx) {
+                close_dialog_with_result(DialogResult::FilePath(format!("/{}", name)));
+            }
+        });
+
+        // Cancel button
+        let cancel_button_id = wm.create_window(Some(container_id));
+        let cancel_bounds = Rect::new(
+            content_area.x + content_area.width as i32 - 100,
+            content_area.y + content_area.height as i32 - 45,
+            80,
+            30,
+        );
+        let mut cancel_button = Button::new_with_id(cancel_button_id, cancel_bounds);
+        cancel_button.set_label("Cancel");
+        cancel_button.set_parent(Some(container_id));
+        cancel_button.on_click(|| {
+            close_dialog_with_result(DialogResult::Cancel);
+        });
+
+        // Open button
+        let open_button_id = wm.create_window(Some(container_id));
+        let open_bounds = Rect::new(
+            content_area.x + content_area.width as i32 - 190,
+            content_area.y + content_area.height as i32 - 45,
+            80,
+            30,
+        );
+        let mut open_button = Button::new_with_id(open_button_id, open_bounds);
+        open_button.set_label("Open");
+        open_button.set_parent(Some(container_id));
+        open_button.set_background_color(Color::new(0, 120, 215));
+        open_button.set_text_color(Color::WHITE);
+        let list_id_for_open = list_id;
+        let files_for_open = files.clone();
+        open_button.on_click(move || {
+            // Get selected item from list
+            if let Some(Some(selected)) = with_window_manager(|wm| {
+                wm.window_registry
+                    .get(&list_id_for_open)
+                    .and_then(|w| {
+                        // Try to downcast to MultiColumnList
+                        // For now, we'll use the selection tracking differently
+                        None::<usize>
+                    })
+            }) {
+                if let Some((name, _, _)) = files_for_open.get(selected) {
+                    close_dialog_with_result(DialogResult::FilePath(format!("/{}", name)));
+                }
+            }
+        });
+
+        // Register windows
+        wm.set_window_impl(frame_id, Box::new(frame));
+        wm.set_window_impl(container_id, Box::new(container));
+        wm.set_window_impl(path_label_id, Box::new(path_label));
+        wm.set_window_impl(list_id, Box::new(file_list));
+        wm.set_window_impl(cancel_button_id, Box::new(cancel_button));
+        wm.set_window_impl(open_button_id, Box::new(open_button));
+
+        // Add to z-order
+        wm.z_order.push(frame_id);
+        wm.z_order.push(container_id);
+        wm.z_order.push(path_label_id);
+        wm.z_order.push(list_id);
+        wm.z_order.push(cancel_button_id);
+        wm.z_order.push(open_button_id);
+
+        // Add children
+        if let Some(desktop) = wm.window_registry.get_mut(&desktop_id) {
+            desktop.add_child(frame_id);
+        }
+        if let Some(frame) = wm.window_registry.get_mut(&frame_id) {
+            frame.add_child(container_id);
+        }
+        if let Some(container) = wm.window_registry.get_mut(&container_id) {
+            container.add_child(path_label_id);
+            container.add_child(list_id);
+            container.add_child(cancel_button_id);
+            container.add_child(open_button_id);
+        }
+
+        // Set as modal dialog
+        wm.set_modal_dialog(Some(frame_id));
+
+        frame_id
+    })
+    .unwrap();
+
+    // Set dialog state
+    set_dialog_state(frame_id);
+
+    // Wait for dialog to close
+    while is_dialog_open() {
+        crate::process::yield_if_needed();
+
+        let exists = with_window_manager(|wm| wm.window_registry.contains_key(&frame_id))
+            .unwrap_or(false);
+
+        if !exists {
+            break;
+        }
+
+        for _ in 0..10000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    // Get result before cleanup
+    let result = get_dialog_result();
+
+    // Clean up
+    with_window_manager(|wm| {
+        wm.set_modal_dialog(None);
+        wm.destroy_window(frame_id);
+    });
+
+    clear_dialog_state();
+
+    // Return file path if one was selected
+    match result {
+        Some(DialogResult::FilePath(path)) => Some(path),
+        _ => None,
+    }
+}
+
+/// Get list of files from a directory
+fn get_file_list(path: &str) -> Vec<(String, String, String)> {
+    let mut files = Vec::new();
+
+    if let Ok(dir) = Directory::open(path) {
+        for entry in dir.entries() {
+            let name = entry.name_str();
+            let size = if entry.is_directory() {
+                String::from("<DIR>")
+            } else {
+                format_size(entry.size as u64)
+            };
+            let file_type = if entry.is_directory() {
+                String::from("Folder")
+            } else {
+                get_file_type(&name)
+            };
+            files.push((name, size, file_type));
+        }
+    }
+
+    files
+}
+
+/// Format file size in human-readable form
+fn format_size(size: u64) -> String {
+    if size < 1024 {
+        format!("{} B", size)
+    } else if size < 1024 * 1024 {
+        format!("{} KB", size / 1024)
+    } else {
+        format!("{} MB", size / (1024 * 1024))
+    }
+}
+
+/// Get file type from extension
+fn get_file_type(name: &str) -> String {
+    if let Some(dot_pos) = name.rfind('.') {
+        let ext = &name[dot_pos + 1..].to_uppercase();
+        match ext.as_str() {
+            "TXT" => String::from("Text File"),
+            "MD" => String::from("Markdown"),
+            "RS" => String::from("Rust Source"),
+            "C" | "H" => String::from("C Source"),
+            "BMP" => String::from("Bitmap Image"),
+            "PNG" => String::from("PNG Image"),
+            "FNT" => String::from("Font File"),
+            "TTF" => String::from("TrueType Font"),
+            _ => format!("{} File", ext),
+        }
+    } else {
+        String::from("File")
+    }
+}

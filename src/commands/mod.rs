@@ -14,3 +14,4 @@ pub mod ls;
 pub mod painting;
 pub mod calc;
 pub mod guishell;
+pub mod notepad;

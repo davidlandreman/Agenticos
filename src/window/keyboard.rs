@@ -97,7 +97,12 @@ pub fn scancode_to_keycode(scancode: u8) -> Option<KeyCode> {
         0x72 => Some(KeyCode::Down),     // Arrow Down
         
         0x71 => Some(KeyCode::Delete),   // Delete
-        
+        0x6C => Some(KeyCode::Home),     // Home (extended)
+        0x69 => Some(KeyCode::End),      // End (extended)
+        0x7D => Some(KeyCode::PageUp),   // Page Up
+        0x7A => Some(KeyCode::PageDown), // Page Down
+        0x70 => Some(KeyCode::Insert),   // Insert
+
         _ => None,
     }
 }

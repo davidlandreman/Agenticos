@@ -38,6 +38,7 @@ pub enum PendingAction {
     SpawnTerminal,
     SpawnPainting,
     SpawnCalc,
+    SpawnNotepad,
     FocusWindow(WindowId),
 }
 
@@ -199,6 +200,7 @@ fn show_start_menu() {
 
         // Add menu items
         menu.add_item("Terminal");
+        menu.add_item("Notepad");
         menu.add_item("Painting");
         menu.add_item("Calc");
 
@@ -207,8 +209,9 @@ fn show_start_menu() {
         menu.on_select(|index| {
             match index {
                 0 => queue_action(PendingAction::SpawnTerminal),
-                1 => queue_action(PendingAction::SpawnPainting),
-                2 => queue_action(PendingAction::SpawnCalc),
+                1 => queue_action(PendingAction::SpawnNotepad),
+                2 => queue_action(PendingAction::SpawnPainting),
+                3 => queue_action(PendingAction::SpawnCalc),
                 _ => {}
             }
         });
@@ -290,6 +293,14 @@ fn spawn_calc() {
     }
 }
 
+/// Spawn notepad
+fn spawn_notepad() {
+    crate::debug_info!("GUIShell: Spawning notepad...");
+    if let Err(e) = crate::process::execute_command("notepad", None) {
+        crate::debug_warn!("GUIShell: Failed to spawn notepad: {:?}", e);
+    }
+}
+
 /// Poll the GUIShell - updates taskbar buttons and handles events
 pub fn poll() {
     // First, sync menu state with window manager
@@ -338,6 +349,10 @@ pub fn poll() {
             PendingAction::SpawnCalc => {
                 close_start_menu();
                 spawn_calc();
+            }
+            PendingAction::SpawnNotepad => {
+                close_start_menu();
+                spawn_notepad();
             }
             PendingAction::FocusWindow(frame_id) => {
                 focus_window(frame_id);
