@@ -21,7 +21,7 @@ pub enum InterruptIndex {
 }
 
 impl InterruptIndex {
-    fn as_u8(self) -> u8 {
+    pub fn as_u8(self) -> u8 {
         self as u8
     }
 
@@ -33,7 +33,7 @@ impl InterruptIndex {
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
-        
+
         // Set up exception handlers
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
@@ -46,12 +46,19 @@ lazy_static! {
         idt.segment_not_present.set_handler_fn(segment_not_present_handler);
         idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
         idt.alignment_check.set_handler_fn(alignment_check_handler);
-        
+
         // Set up hardware interrupt handlers
-        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+        // Timer uses the preemptive handler for true multitasking
+        unsafe {
+            use x86_64::structures::idt::HandlerFunc;
+            use crate::arch::x86_64::preemption::timer_interrupt_handler_preemptive;
+            let handler_addr = timer_interrupt_handler_preemptive as usize;
+            idt[InterruptIndex::Timer.as_usize()]
+                .set_handler_addr(x86_64::VirtAddr::new(handler_addr as u64));
+        }
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Mouse.as_usize()].set_handler_fn(mouse_interrupt_handler);
-        
+
         idt
     };
 }
@@ -141,9 +148,11 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
-    
-    
+
     let accessed_addr = Cr2::read();
+
+    // Immediate debug output to see if we're getting page faults
+    debug_info!(">>> PAGE FAULT at {:?}, error: {:?}", accessed_addr, error_code);
     
     // Don't check for physical memory offset access here - let the mapper handle it
     // The mapper knows the actual physical memory offset from the bootloader
@@ -151,16 +160,24 @@ extern "x86-interrupt" fn page_fault_handler(
     // Check if the fault is in our heap region
     const HEAP_START: u64 = 0x_4444_4444_0000;
     const HEAP_END: u64 = HEAP_START + (100 * 1024 * 1024); // 100 MiB
-    
-    if accessed_addr.as_u64() >= HEAP_START && accessed_addr.as_u64() < HEAP_END {
-        // This is a heap access - we should allocate and map a page
-        debug_info!("Page fault in heap region at {:?}", accessed_addr);
-        
+
+    // Check if the fault is in our process stack region
+    const STACK_REGION_START: u64 = 0x_5555_0000_0000;
+    const STACK_REGION_END: u64 = STACK_REGION_START + (64 * 68 * 1024); // 64 stacks * 68KB each
+
+    let addr = accessed_addr.as_u64();
+
+    if (addr >= HEAP_START && addr < HEAP_END) ||
+       (addr >= STACK_REGION_START && addr < STACK_REGION_END) {
+        // This is a heap or stack access - allocate and map a page
+        let region = if addr >= STACK_REGION_START { "stack" } else { "heap" };
+        debug_info!("Page fault in {} region at {:?}", region, accessed_addr);
+
         // Try to handle the page fault
         if let Some(mapper) = unsafe { crate::mm::paging::get_mapper() } {
             if let Err(e) = mapper.handle_page_fault(accessed_addr) {
                 debug_error!("Failed to handle page fault: {:?}", e);
-                panic!("Failed to allocate memory for heap");
+                panic!("Failed to allocate memory for {}", region);
             }
             // Successfully mapped - return and retry the instruction
             return;

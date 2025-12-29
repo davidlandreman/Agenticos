@@ -1,22 +1,24 @@
 //! CPU context for process context switching
 //!
 //! This module defines the CPU register state that must be saved and restored
-//! during context switches between processes. Only callee-saved registers need
-//! to be preserved, as the caller-saved registers are handled by the compiler.
+//! during context switches between processes.
+//!
+//! For voluntary switches (yield), only callee-saved registers need preservation.
+//! For interrupt-based preemption, ALL registers must be saved since an interrupt
+//! can occur at any point during execution.
 
 /// CPU context representing the saved state of a process.
 ///
-/// This structure stores the callee-saved registers according to the System V AMD64 ABI:
-/// - RBX, RBP, R12-R15 are callee-saved (must be preserved across function calls)
-/// - RSP is the stack pointer
-/// - RIP is stored as the return address for context switch
-/// - RFLAGS stores the processor flags
+/// This structure stores ALL general-purpose registers to support both:
+/// - Voluntary context switches (only callee-saved registers matter)
+/// - Interrupt-based preemption (all registers must be preserved)
 ///
-/// The `#[repr(C)]` attribute ensures the struct has a predictable memory layout
-/// for the assembly context switch code.
+/// The layout is designed to match the order we push/pop in assembly.
+/// The `#[repr(C)]` attribute ensures predictable memory layout.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct CpuContext {
+    // Callee-saved registers (used by voluntary switch_context)
     /// RBX - callee-saved general purpose register
     pub rbx: u64,
     /// RBP - base pointer (callee-saved)
@@ -35,6 +37,26 @@ pub struct CpuContext {
     pub rip: u64,
     /// RFLAGS - processor flags
     pub rflags: u64,
+
+    // Caller-saved registers (needed for interrupt-based preemption)
+    /// RAX - accumulator register
+    pub rax: u64,
+    /// RCX - counter register
+    pub rcx: u64,
+    /// RDX - data register
+    pub rdx: u64,
+    /// RSI - source index
+    pub rsi: u64,
+    /// RDI - destination index
+    pub rdi: u64,
+    /// R8 - general purpose register
+    pub r8: u64,
+    /// R9 - general purpose register
+    pub r9: u64,
+    /// R10 - general purpose register
+    pub r10: u64,
+    /// R11 - general purpose register
+    pub r11: u64,
 }
 
 impl CpuContext {
@@ -50,6 +72,15 @@ impl CpuContext {
             rsp: 0,
             rip: 0,
             rflags: 0,
+            rax: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
         }
     }
 
@@ -65,8 +96,9 @@ impl CpuContext {
     /// # Returns
     /// A new CpuContext ready for context switching
     pub fn init_for_new_process(stack_top: u64, entry_point: u64) -> Self {
-        // Initial flags: interrupts enabled (bit 9), reserved bit 1 always set
-        const INITIAL_RFLAGS: u64 = 0x202;
+        // Initial flags: interrupts DISABLED initially, reserved bit 1 always set
+        // The process will enable interrupts once it's safely running
+        const INITIAL_RFLAGS: u64 = 0x002; // Only reserved bit 1, no IF
 
         CpuContext {
             rbx: 0,
@@ -80,6 +112,15 @@ impl CpuContext {
             rsp: stack_top - 8,
             rip: entry_point,
             rflags: INITIAL_RFLAGS,
+            rax: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
         }
     }
 }

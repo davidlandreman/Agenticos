@@ -20,6 +20,14 @@ impl ContainerWindow {
             background_color: Color::new(240, 240, 240), // Light gray
         }
     }
+
+    /// Create a new container window with a specific ID
+    pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
+        ContainerWindow {
+            base: WindowBase::new_with_id(id, bounds),
+            background_color: Color::new(240, 240, 240), // Light gray
+        }
+    }
     
     /// Set the background color
     pub fn set_background_color(&mut self, color: Color) {

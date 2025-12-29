@@ -55,12 +55,8 @@ impl ProcessManager {
     
     /// Execute a command by name with arguments
     ///
-    /// Currently runs commands synchronously. The terminal_id is used to route
-    /// output to the correct terminal.
-    ///
-    /// NOTE: Process spawning infrastructure exists (spawn_process, scheduler)
-    /// but context switching back to kernel loop isn't fully integrated yet.
-    /// Commands run synchronously for now until that's resolved.
+    /// Spawns the command as a separate process that runs via the scheduler.
+    /// The terminal_id is used to route output to the correct terminal.
     pub fn execute_command(&self, command_line: &str, terminal_id: Option<WindowId>) -> ProcessResult {
         let parts: Vec<&str> = command_line.trim().split_whitespace().collect();
         if parts.is_empty() {
@@ -71,19 +67,29 @@ impl ProcessManager {
         let args: Vec<String> = parts[1..].iter().map(|s| String::from(*s)).collect();
 
         if let Some(factory) = self.command_registry.get(command_name) {
-            crate::debug_info!("Executing command: {} with {} args", command_name, args.len());
+            crate::debug_info!("Spawning command: {} with {} args", command_name, args.len());
 
-            // Set up output routing to the correct terminal
-            if let Some(tid) = terminal_id {
-                crate::window::terminal::set_current_output_terminal(tid);
-            }
-
-            // Run the command synchronously
+            // Create the process object
             let mut process = factory(args);
-            process.run();
+            let process_name = String::from(process.get_name());
 
-            // Clear output routing
-            crate::window::terminal::clear_current_output_terminal();
+            // Spawn as a separate process
+            let _pid = crate::process::spawn_process(
+                process_name,
+                terminal_id,
+                move || {
+                    // Set up output routing to the correct terminal
+                    if let Some(tid) = terminal_id {
+                        crate::window::terminal::set_current_output_terminal(tid);
+                    }
+
+                    // Run the process
+                    process.run();
+
+                    // Clear output routing
+                    crate::window::terminal::clear_current_output_terminal();
+                },
+            );
 
             Ok(())
         } else {
@@ -91,9 +97,30 @@ impl ProcessManager {
         }
     }
 
-    /// Execute a command synchronously (blocking) - same as execute_command for now
+    /// Execute a command synchronously (blocking)
+    ///
+    /// Runs the command directly without spawning a process.
+    /// Used by commands like `time` that need to measure execution.
     pub fn execute_command_sync(&self, command_line: &str) -> ProcessResult {
-        self.execute_command(command_line, None)
+        let parts: Vec<&str> = command_line.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            return Ok(()); // Empty command, do nothing
+        }
+
+        let command_name = parts[0];
+        let args: Vec<String> = parts[1..].iter().map(|s| String::from(*s)).collect();
+
+        if let Some(factory) = self.command_registry.get(command_name) {
+            crate::debug_info!("Executing command synchronously: {} with {} args", command_name, args.len());
+
+            // Run the command synchronously
+            let mut process = factory(args);
+            process.run();
+
+            Ok(())
+        } else {
+            Err(format!("Unknown command: {}", command_name))
+        }
     }
     
     /// Get list of registered commands

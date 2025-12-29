@@ -289,7 +289,8 @@ pub fn run() -> ! {
     crate::process::register_command("grep", crate::commands::grep::create_grep_process);
     crate::process::register_command("pwd", crate::commands::pwd::create_pwd_process);
     crate::process::register_command("ls", crate::commands::ls::create_ls_process);
-    debug_info!("All {} commands registered successfully.", 12);
+    crate::process::register_command("painting", crate::commands::painting::create_painting_process);
+    debug_info!("All {} commands registered successfully.", 13);
 
     // Start the shell in a simple way - we'll run it but render frames between inputs
     debug_info!("Starting shell with window system...");
@@ -323,11 +324,14 @@ pub fn run() -> ! {
 
     loop {
         // Check for preemption (timer-based context switch)
-        // NOTE: Process spawning/scheduling infrastructure exists but isn't fully
-        // integrated yet. Commands run synchronously for now.
         if interrupts::check_and_clear_preemption() {
             crate::process::handle_preemption();
         }
+
+        // Run any scheduled processes (spawned via spawn_process)
+        // This saves kernel context and switches to the process.
+        // When the process terminates, it switches back here.
+        crate::process::try_run_scheduled_processes();
 
         // Poll VirtIO tablet for events (if using VirtIO)
         // This must be done in the main loop since VirtIO tablet uses polling
