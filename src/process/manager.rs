@@ -74,8 +74,9 @@ impl ProcessManager {
             let process_name = String::from(process.get_name());
 
             // Spawn as a separate process
+            crate::debug_info!("execute_command: about to call spawn_process for '{}'", process_name);
             let _pid = crate::process::spawn_process(
-                process_name,
+                process_name.clone(),
                 terminal_id,
                 move || {
                     // Set up output routing to the correct terminal
@@ -90,6 +91,7 @@ impl ProcessManager {
                     crate::window::terminal::clear_current_output_terminal();
                 },
             );
+            crate::debug_info!("execute_command: spawn_process returned for '{}'", process_name);
 
             Ok(())
         } else {

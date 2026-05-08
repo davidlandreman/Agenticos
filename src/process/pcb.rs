@@ -181,6 +181,10 @@ pub struct ProcessControlBlock {
 
     /// Signals that have been delivered to this process
     pub pending_signals: SignalFlags,
+
+    /// Last tick when process made progress (yielded, slept, or syscall).
+    /// Used by watchdog to detect hung processes.
+    pub last_activity_tick: u64,
 }
 
 impl ProcessControlBlock {
@@ -204,6 +208,7 @@ impl ProcessControlBlock {
             wake_at_tick: None,
             wake_events: WakeEvents::NONE,
             pending_signals: SignalFlags::NONE,
+            last_activity_tick: 0, // Will be set when process is spawned
         }
     }
 

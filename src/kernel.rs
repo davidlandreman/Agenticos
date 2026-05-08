@@ -322,6 +322,47 @@ pub fn run() -> ! {
             crate::process::handle_preemption();
         }
 
+        // === WATCHDOG HANDLING ===
+        // Check if timer detected a hung process that needs to be killed
+        {
+            use core::sync::atomic::Ordering;
+            use crate::arch::x86_64::preemption::WATCHDOG_KILL_PID;
+            use crate::process::ProcessId;
+
+            let kill_pid_raw = WATCHDOG_KILL_PID.swap(0, Ordering::AcqRel);
+            if kill_pid_raw != 0 {
+                let pid = kill_pid_raw as ProcessId;
+
+                // Get process name before killing it (for the alert dialog)
+                let process_name = {
+                    let sched = crate::process::scheduler::SCHEDULER.lock();
+                    sched.get_process(pid)
+                        .map(|pcb| pcb.name.clone())
+                        .unwrap_or_else(|| alloc::string::String::from("Unknown"))
+                };
+
+                debug_warn!("Watchdog: Terminating hung process {:?} '{}'", pid, process_name);
+
+                // Terminate the process
+                crate::process::terminate_process(pid);
+
+                // Show alert dialog in a separate process (non-blocking)
+                // Can't use blocking dialog from kernel loop because the kernel
+                // loop IS the event processing loop - would deadlock
+                let message = alloc::format!(
+                    "Process '{}' was terminated because it stopped responding.",
+                    process_name
+                );
+                crate::process::spawn_process(
+                    alloc::string::String::from("watchdog-alert"),
+                    None,
+                    move || {
+                        crate::window::dialogs::show_error("Process Terminated", &message);
+                    },
+                );
+            }
+        }
+
         // === PROCESS SCHEDULING ===
         // Run any ready processes (GUIShell, spawned commands, etc.)
         // Processes that call sleep_ticks/sleep_until_event return here

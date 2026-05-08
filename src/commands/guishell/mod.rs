@@ -310,6 +310,7 @@ fn spawn_notepad() {
     if let Err(e) = crate::process::execute_command("notepad", None) {
         crate::debug_warn!("GUIShell: Failed to spawn notepad: {:?}", e);
     }
+    crate::debug_info!("GUIShell: spawn_notepad() completed");
 }
 
 /// Poll the GUIShell - updates taskbar buttons and handles events

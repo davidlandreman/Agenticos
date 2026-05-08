@@ -135,26 +135,21 @@ pub fn init_window_manager(device: Box<dyn GraphicsDevice>) {
 /// Execute a function with the window manager
 ///
 /// IMPORTANT: Disables interrupts while holding the lock to prevent
-/// deadlocks with preemptive multitasking.
+/// deadlocks with preemptive multitasking. Uses RAII guard to ensure
+/// interrupts are restored even if the closure panics.
 pub fn with_window_manager<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut WindowManager) -> R,
 {
-    // Disable interrupts to prevent preemption while holding the lock
-    let was_enabled = x86_64::instructions::interrupts::are_enabled();
-    x86_64::instructions::interrupts::disable();
+    use crate::arch::x86_64::interrupt_guard::InterruptGuard;
 
-    let result = {
-        let mut wm_lock = WINDOW_MANAGER.lock();
-        wm_lock.as_mut().map(f)
-    };
+    // RAII guard ensures interrupts are restored even on panic
+    let _guard = InterruptGuard::disable();
 
-    // Re-enable interrupts if they were enabled before
-    if was_enabled {
-        x86_64::instructions::interrupts::enable();
-    }
+    let mut wm_lock = WINDOW_MANAGER.lock();
+    wm_lock.as_mut().map(f)
 
-    result
+    // _guard dropped here, restoring interrupt state
 }
 
 /// Try to execute a function with the window manager without blocking

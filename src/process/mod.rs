@@ -65,7 +65,16 @@ where
     );
 
     // Add to scheduler
-    scheduler::SCHEDULER.lock().spawn(pcb)
+    crate::debug_info!("spawn_process: about to lock scheduler");
+    let pid = {
+        let mut sched = scheduler::SCHEDULER.lock();
+        crate::debug_info!("spawn_process: scheduler locked, calling spawn()");
+        let p = sched.spawn(pcb);
+        crate::debug_info!("spawn_process: spawn() returned PID {:?}", p);
+        p
+    };
+    crate::debug_info!("spawn_process: scheduler lock released, returning PID {:?}", pid);
+    pid
 }
 
 /// Yield the current process voluntarily
@@ -75,6 +84,7 @@ where
 /// will be resumed later by the scheduler.
 pub fn yield_current() {
     use crate::arch::x86_64::context_switch::switch_context;
+    use crate::arch::x86_64::interrupts::get_timer_ticks;
 
     let (old_ctx_ptr, new_ctx) = {
         let mut sched = scheduler::SCHEDULER.lock();
@@ -82,6 +92,11 @@ pub fn yield_current() {
             Some(pid) => pid,
             None => return, // No current process
         };
+
+        // Update activity tick to show process is making progress (not hung)
+        if let Some(pcb) = sched.get_process_mut(current_pid) {
+            pcb.last_activity_tick = get_timer_ticks();
+        }
 
         sched.yield_current();
 
@@ -109,6 +124,18 @@ pub fn yield_current() {
         (old_ctx, new_ctx)
     };
 
+    // Pre-map the stack pages before switching context
+    // This is critical for new processes that haven't started yet
+    let stack_top = new_ctx.rsp;
+    unsafe {
+        let page_size = 4096u64;
+        for offset in (0..page_size * 4).step_by(page_size as usize) {
+            let addr = stack_top - offset - 8;
+            // Volatile read to trigger page fault (which will map the page)
+            core::ptr::read_volatile(addr as *const u8);
+        }
+    }
+
     // Perform the context switch - this saves our state and switches
     // When we're scheduled again, we'll resume right after this call
     unsafe {
@@ -119,9 +146,20 @@ pub fn yield_current() {
 /// Check if preemption is pending and yield if so
 ///
 /// Call this periodically in long-running processes to allow
-/// the scheduler to preempt them.
+/// the scheduler to preempt them. Also updates the activity tick
+/// to show the process is making progress (for watchdog).
 pub fn yield_if_needed() {
-    use crate::arch::x86_64::interrupts;
+    use crate::arch::x86_64::interrupts::{self, get_timer_ticks};
+
+    // Always update activity tick to show process is responsive
+    // This prevents watchdog from killing processes that are polling
+    if let Some(mut sched) = scheduler::SCHEDULER.try_lock() {
+        if let Some(pid) = sched.current() {
+            if let Some(pcb) = sched.get_process_mut(pid) {
+                pcb.last_activity_tick = get_timer_ticks();
+            }
+        }
+    }
 
     if interrupts::check_and_clear_preemption() {
         yield_current();
@@ -158,6 +196,17 @@ pub fn terminate_current() {
 
     if let Some(ctx) = next_ctx {
         crate::debug_trace!("terminate_current: switching to next process");
+
+        // Pre-map the stack pages before switching context
+        let stack_top = ctx.rsp;
+        unsafe {
+            let page_size = 4096u64;
+            for offset in (0..page_size * 4).step_by(page_size as usize) {
+                let addr = stack_top - offset - 8;
+                core::ptr::read_volatile(addr as *const u8);
+            }
+        }
+
         // Switch to next process
         unsafe {
             crate::arch::x86_64::context_switch::switch_to_context(&ctx);
@@ -251,17 +300,27 @@ pub fn handle_preemption() {
             Some(ctx) => ctx as *mut CpuContext,
             None => return,
         };
-        let new_ctx = match sched.get_context(next_pid) {
+        let new_ctx_ptr = match sched.get_context(next_pid) {
             Some(ctx) => ctx as *const CpuContext,
             None => return,
         };
+        let stack_top = unsafe { (*new_ctx_ptr).rsp };
 
         // Drop the lock before switching
         drop(sched);
 
+        // Pre-map the stack pages before switching context
+        unsafe {
+            let page_size = 4096u64;
+            for offset in (0..page_size * 4).step_by(page_size as usize) {
+                let addr = stack_top - offset - 8;
+                core::ptr::read_volatile(addr as *const u8);
+            }
+        }
+
         // Perform the context switch
         unsafe {
-            switch_context(old_ctx, new_ctx);
+            switch_context(old_ctx, new_ctx_ptr);
         }
     } else {
         // No current process - just switch to the new one
@@ -269,9 +328,19 @@ pub fn handle_preemption() {
             Some(ctx) => *ctx,
             None => return,
         };
+        let stack_top = new_ctx.rsp;
 
         // Drop the lock before switching
         drop(sched);
+
+        // Pre-map the stack pages before switching context
+        unsafe {
+            let page_size = 4096u64;
+            for offset in (0..page_size * 4).step_by(page_size as usize) {
+                let addr = stack_top - offset - 8;
+                core::ptr::read_volatile(addr as *const u8);
+            }
+        }
 
         // Switch to new process (no save needed)
         unsafe {
@@ -309,6 +378,11 @@ pub fn try_run_scheduled_processes() {
     }
 
     if let Some(next_pid) = sched.schedule() {
+        // Get process name for logging
+        let process_name = sched.get_process(next_pid)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| alloc::string::String::from("unknown"));
+
         if let Some(next_ctx) = sched.get_context(next_pid) {
             let next_ctx = next_ctx as *const CpuContext;
 
@@ -317,14 +391,15 @@ pub fn try_run_scheduled_processes() {
 
             drop(sched);
 
-            crate::debug_trace!("Starting process {:?}", next_pid);
-            crate::debug_trace!("  Target RIP: {:#x}", ctx_copy.rip);
-            crate::debug_trace!("  Target RSP: {:#x}", ctx_copy.rsp);
+            crate::debug_info!("try_run: Switching to process {:?} '{}'", next_pid, process_name);
+            crate::debug_info!("try_run:   Target RIP: {:#x}", ctx_copy.rip);
+            crate::debug_info!("try_run:   Target RSP: {:#x}", ctx_copy.rsp);
 
             // Pre-map the stack pages before switching context
             // This is critical because if we page fault with an unmapped stack,
             // the CPU can't push the exception frame and we get a triple fault
             let stack_top = ctx_copy.rsp;
+            crate::debug_info!("try_run: Pre-mapping stack pages near {:#x}", stack_top);
             unsafe {
                 // Touch a few pages at the top of the stack to ensure they're mapped
                 let page_size = 4096u64;
@@ -334,6 +409,7 @@ pub fn try_run_scheduled_processes() {
                     core::ptr::read_volatile(addr as *const u8);
                 }
             }
+            crate::debug_info!("try_run: Stack pages pre-mapped successfully");
 
             // Mark that we're entering a spawned process
             IN_SPAWNED_PROCESS.store(true, Ordering::Release);
@@ -341,6 +417,8 @@ pub fn try_run_scheduled_processes() {
             // Save kernel context to global for timer handler to use
             // The switch_context_full_restore will save our current state here
             let kernel_ctx_ptr = unsafe { &mut KERNEL_CONTEXT as *mut CpuContext };
+
+            crate::debug_info!("try_run: About to switch_context_full_restore");
 
             // Switch to the process using full context restore
             // This saves kernel's callee-saved regs and restores ALL process regs
@@ -403,6 +481,7 @@ pub fn update_cpu_percentages(elapsed_ticks: u64) {
 pub fn sleep_ticks(ticks: u64) {
     use crate::arch::x86_64::context_switch::switch_context;
     use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
+    use crate::arch::x86_64::interrupts::get_timer_ticks;
     use core::sync::atomic::Ordering;
 
     let ticks = ticks.max(1);
@@ -413,6 +492,11 @@ pub fn sleep_ticks(ticks: u64) {
             Some(pid) => pid,
             None => return, // No current process
         };
+
+        // Update activity tick before sleeping (shows process is making progress)
+        if let Some(pcb) = sched.get_process_mut(current_pid) {
+            pcb.last_activity_tick = get_timer_ticks();
+        }
 
         // Mark as sleeping
         sched.sleep_current(ticks);
@@ -450,6 +534,19 @@ pub fn sleep_ticks(ticks: u64) {
     // Perform the context switch
     match switch_target {
         SwitchTarget::Process(new_ctx) => {
+            // Pre-map the stack pages before switching context
+            // This is critical because if we page fault with an unmapped stack,
+            // the CPU can't push the exception frame and we get a triple fault
+            let stack_top = new_ctx.rsp;
+            unsafe {
+                let page_size = 4096u64;
+                for offset in (0..page_size * 4).step_by(page_size as usize) {
+                    let addr = stack_top - offset - 8;
+                    // Volatile read to trigger page fault (which will map the page)
+                    core::ptr::read_volatile(addr as *const u8);
+                }
+            }
+
             // Switch to another process
             unsafe {
                 switch_context(old_ctx_ptr, &new_ctx);
@@ -497,6 +594,7 @@ pub fn sleep_ms(ms: u64) {
 pub fn sleep_until_event(events: WakeEvents) {
     use crate::arch::x86_64::context_switch::switch_context;
     use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
+    use crate::arch::x86_64::interrupts::get_timer_ticks;
     use core::sync::atomic::Ordering;
 
     let result: Option<(*mut CpuContext, SwitchTarget)> = {
@@ -505,6 +603,11 @@ pub fn sleep_until_event(events: WakeEvents) {
             Some(pid) => pid,
             None => return,
         };
+
+        // Update activity tick before sleeping (shows process is making progress)
+        if let Some(pcb) = sched.get_process_mut(current_pid) {
+            pcb.last_activity_tick = get_timer_ticks();
+        }
 
         // Mark as waiting for signal
         sched.sleep_until_signaled(events);
@@ -539,6 +642,19 @@ pub fn sleep_until_event(events: WakeEvents) {
 
     match switch_target {
         SwitchTarget::Process(new_ctx) => {
+            // Pre-map the stack pages before switching context
+            // This is critical because if we page fault with an unmapped stack,
+            // the CPU can't push the exception frame and we get a triple fault
+            let stack_top = new_ctx.rsp;
+            unsafe {
+                let page_size = 4096u64;
+                for offset in (0..page_size * 4).step_by(page_size as usize) {
+                    let addr = stack_top - offset - 8;
+                    // Volatile read to trigger page fault (which will map the page)
+                    core::ptr::read_volatile(addr as *const u8);
+                }
+            }
+
             unsafe {
                 switch_context(old_ctx_ptr, &new_ctx);
             }

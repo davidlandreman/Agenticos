@@ -6,7 +6,18 @@
 //! process without any cooperation from the running process.
 
 use core::arch::naked_asm;
+use core::sync::atomic::AtomicU64;
 use crate::process::context::CpuContext;
+
+/// Watchdog timeout in timer ticks (1000 ticks = 10 seconds at 100Hz).
+/// If a process runs this long without yielding, sleeping, or making progress,
+/// it will be killed by the watchdog.
+pub const WATCHDOG_TIMEOUT_TICKS: u64 = 1000;
+
+/// PID of process to be killed by watchdog (0 = none).
+/// Set by timer interrupt, handled by kernel main loop.
+/// We can't kill in interrupt context, so we defer to main loop.
+pub static WATCHDOG_KILL_PID: AtomicU64 = AtomicU64::new(0);
 
 /// Saved context pointer for the current process during interrupt handling
 /// This is set by the timer interrupt handler before calling the scheduler
@@ -239,6 +250,29 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
         if sched.is_initialized() {
             // Check sleep queue and wake any processes whose time has come
             sched.check_sleep_queue(ticks);
+
+            // Watchdog check: detect hung processes
+            if in_process {
+                if let Some(current_pid) = sched.current() {
+                    // Skip idle process
+                    if sched.idle_pid != Some(current_pid) {
+                        if let Some(pcb) = sched.get_process(current_pid) {
+                            let elapsed = ticks.saturating_sub(pcb.last_activity_tick);
+                            if elapsed > WATCHDOG_TIMEOUT_TICKS {
+                                // Process is hung! Request kill (handled in kernel loop)
+                                // Only set if not already set (don't override pending kill)
+                                if WATCHDOG_KILL_PID.load(Ordering::Relaxed) == 0 {
+                                    crate::debug_warn!(
+                                        "WATCHDOG: Process {:?} '{}' unresponsive for {} ticks",
+                                        current_pid, pcb.name, elapsed
+                                    );
+                                    WATCHDOG_KILL_PID.store(current_pid as u64, Ordering::Release);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // Only check for preemption if we're in a spawned process
             if in_process {

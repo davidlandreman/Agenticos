@@ -47,7 +47,7 @@ pub struct Scheduler {
     /// Currently running process (None if idle)
     current: Option<ProcessId>,
     /// The idle process PID (runs when nothing else is ready)
-    idle_pid: Option<ProcessId>,
+    pub idle_pid: Option<ProcessId>,
     /// Whether scheduler is initialized
     initialized: bool,
     /// Processes sleeping until a specific tick, ordered by wake time
@@ -100,6 +100,8 @@ impl Scheduler {
         let pid = pcb.pid;
         pcb.state = ProcessState::Ready;
         pcb.time_slice_remaining = DEFAULT_TIME_SLICE;
+        // Initialize activity tick so watchdog doesn't immediately kill new processes
+        pcb.last_activity_tick = crate::arch::x86_64::interrupts::get_timer_ticks();
 
         crate::debug_info!("Scheduler: Spawning process '{}' with PID {:?}", pcb.name, pid);
 
@@ -148,6 +150,8 @@ impl Scheduler {
             if let Some(next_pcb) = self.processes.get_mut(&next_pid) {
                 next_pcb.state = ProcessState::Running;
                 next_pcb.time_slice_remaining = DEFAULT_TIME_SLICE;
+                // Reset activity tick so watchdog doesn't kill processes that waited in queue
+                next_pcb.last_activity_tick = crate::arch::x86_64::interrupts::get_timer_ticks();
             }
 
             self.current = Some(next_pid);
