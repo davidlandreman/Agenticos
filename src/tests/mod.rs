@@ -12,6 +12,8 @@ pub mod heap;
 pub mod arc;
 #[cfg(feature = "test")]
 pub mod filesystem;
+#[cfg(feature = "test")]
+pub mod tools;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -28,7 +30,8 @@ pub fn run_tests() {
     let heap_tests = heap::get_tests();
     let arc_tests = arc::get_tests();
     let filesystem_tests = filesystem::get_tests();
-    
+    let tools_tests = tools::get_tests();
+
     let mut total_tests = 0;
     
     // Run basic tests
@@ -86,7 +89,15 @@ pub fn run_tests() {
         test.run();
         total_tests += 1;
     }
-    
+
+    // Run Tools (registry) tests
+    debug_info!("\n[Tools Tests]");
+    debug_info!("Running {} tests", tools_tests.len());
+    for test in tools_tests {
+        test.run();
+        total_tests += 1;
+    }
+
     debug_info!("\n=== All {} tests passed! ===", total_tests);
     exit_qemu_success();
 }

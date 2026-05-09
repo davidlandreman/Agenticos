@@ -1,0 +1,16 @@
+[project]
+name = "agenticos-mcp-bridge"
+version = "0.1.0"
+description = "MCP bridge that exposes the AgenticOS kernel tool registry to MCP clients."
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.0",
+    "pillow>=10.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["bridge.py", "kernel_client.py", "serial_tail.py"]

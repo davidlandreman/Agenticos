@@ -48,3 +48,9 @@ host_share/*
 !host_share/.gitkeep
 !host_share/HELLO.TXT
 !host_share/HOST.TXT
+
+# Python venv + bytecode for the host-side MCP bridge.
+# uv.lock IS tracked so versions are reproducible.
+tools/mcp-bridge/.venv/
+tools/mcp-bridge/__pycache__/
+**/*.pyc

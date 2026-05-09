@@ -4,6 +4,18 @@ use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::Font;
 use super::types::{Rect, ColorDepth};
 
+/// Owned snapshot of the device's current pixels plus enough metadata to
+/// reconstruct an image on the host. Returned by [`GraphicsDevice::snapshot`].
+pub struct Snapshot {
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
+    pub bytes_per_pixel: usize,
+    /// `"rgb"`, `"bgr"`, or `"u8"` — matches the bootloader's `PixelFormat`.
+    pub pixel_format: &'static str,
+    pub pixels: alloc::vec::Vec<u8>,
+}
+
 /// Abstract interface for graphics rendering
 /// 
 /// Note: All implementations ultimately write to the single physical framebuffer
@@ -51,6 +63,13 @@ pub trait GraphicsDevice: Send {
     
     /// Flush any pending operations (for double-buffered implementations)
     fn flush(&mut self);
+
+    /// Snapshot the device's current pixels into an owned buffer. Default
+    /// returns `None`; adapters that back the framebuffer override this.
+    /// Used by the `screenshot` tool.
+    fn snapshot(&self) -> Option<Snapshot> {
+        None
+    }
 }
 
 /// Window buffer for per-window rendering

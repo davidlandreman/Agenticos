@@ -68,7 +68,51 @@ pub fn init(boot_info: &'static mut BootInfo) {
     } else {
         crate::drivers::mouse::init();
     }
-    
+
+    // Initialize the kernel-resident MCP tool registry and serial dispatcher.
+    // Brings up COM2 (additive — COM1 / -serial stdio is unchanged), registers
+    // the four kernel-resident tools, registers the synthetic terminal that
+    // shell_run captures stdout into, and spawns the dispatcher loop as a
+    // kernel process. `read_serial` is implemented bridge-side; not in the
+    // kernel registry.
+    init_mcp_bridge();
+}
+
+fn init_mcp_bridge() {
+    use alloc::boxed::Box;
+    use alloc::string::String;
+
+    debug_info!("Initializing MCP tool registry...");
+
+    crate::drivers::serial::init();
+    crate::tools::init();
+
+    if let Some(reg_lock) = crate::tools::registry() {
+        let mut reg = reg_lock.lock();
+        // screenshot is implemented but not registered in v1: byte-by-byte
+        // UART transmission of a multi-MB framebuffer is prohibitively slow
+        // (each byte is a vmexit). Re-enable once the transport swaps to
+        // virtio-serial or IRQ-driven UART (deferred per plan).
+        // reg.register(Box::new(crate::tools::screenshot::Screenshot));
+        reg.register(Box::new(crate::tools::shell_run::ShellRun));
+        reg.register(Box::new(crate::tools::send_input::SendInput));
+        reg.register(Box::new(crate::tools::kernel_state::KernelState));
+        debug_info!("Registered {} kernel tools", reg.enumerate().len());
+    }
+
+    // Synthetic terminal id used by shell_run to capture stdout. Must be
+    // registered explicitly; otherwise write_to_terminal_id silently drops.
+    crate::window::terminal::register_terminal(crate::tools::shell_run::RPC_TERMINAL_ID);
+
+    // Spawn the dispatcher loop as a kernel process so long tool calls don't
+    // stall the main event loop or input.
+    crate::process::spawn_process(
+        String::from("rpc-dispatcher"),
+        None,
+        || crate::tools::rpc::run_dispatcher(),
+    );
+
+    debug_info!("MCP dispatcher process spawned; serving on COM2");
 }
 
 fn init_display(boot_info: &'static mut BootInfo) -> Option<(u32, u32)> {

@@ -17,15 +17,42 @@ impl LockedHeap {
     }
 
     pub unsafe fn init(&self, heap_start: usize, heap_size: usize) {
-        debug_info!("Initializing heap allocator at 0x{:x} with size {} MiB", 
+        debug_info!("Initializing heap allocator at 0x{:x} with size {} MiB",
             heap_start, heap_size / (1024 * 1024));
-            
+
         let mut heap = linked_list_allocator::Heap::empty();
         heap.init(heap_start as *mut u8, heap_size);
         *self.0.lock() = Some(heap);
-        
+
         debug_info!("Heap allocator initialized successfully");
     }
+
+    /// Snapshot the current heap state. Returns `None` if the heap has not
+    /// been initialized yet. Used by `kernel_state("heap")`.
+    pub fn stats(&self) -> Option<HeapStats> {
+        let heap = self.0.lock();
+        heap.as_ref().map(|h| HeapStats {
+            size: h.size(),
+            used: h.used(),
+            free: h.free(),
+            bottom: h.bottom() as u64,
+            top: h.top() as u64,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HeapStats {
+    pub size: usize,
+    pub used: usize,
+    pub free: usize,
+    pub bottom: u64,
+    pub top: u64,
+}
+
+/// Snapshot the global allocator's heap stats. Convenience for `kernel_state`.
+pub fn stats() -> Option<HeapStats> {
+    ALLOCATOR.stats()
 }
 
 unsafe impl GlobalAlloc for LockedHeap {

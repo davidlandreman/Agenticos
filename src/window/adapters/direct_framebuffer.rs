@@ -5,6 +5,7 @@ use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::Font;
 use crate::drivers::display::frame_buffer::FrameBufferWriter;
 use crate::window::{GraphicsDevice, Rect, ColorDepth};
+use crate::window::graphics::Snapshot;
 use spin::Mutex;
 
 /// Graphics device that writes directly to the physical framebuffer
@@ -163,5 +164,19 @@ impl GraphicsDevice for DirectFrameBufferDevice {
     
     fn flush(&mut self) {
         // Direct framebuffer doesn't need flushing
+    }
+
+    fn snapshot(&self) -> Option<Snapshot> {
+        let writer = self.writer.lock();
+        let (width, height, stride, bytes_per_pixel, pixel_format, pixels) =
+            writer.snapshot_bytes();
+        Some(Snapshot {
+            width,
+            height,
+            stride,
+            bytes_per_pixel,
+            pixel_format,
+            pixels,
+        })
     }
 }

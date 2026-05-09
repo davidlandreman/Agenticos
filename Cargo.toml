@@ -25,6 +25,9 @@ x86_64 = "0.14"
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 pic8259 = "0.10"
 linked_list_allocator = "0.10"
+uart_16550 = "0.2.19"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc", "raw_value"] }
 
 
 #[package.metadata.bootimage]

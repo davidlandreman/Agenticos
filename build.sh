@@ -87,13 +87,30 @@ echo "✅ Build complete!"
 if [ "$RUN_QEMU" = true ]; then
     BIOS_IMAGE="${AGENTICOS_BIOS_IMAGE:-target/bootloader/bios.img}"
     HOST_SHARE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
+    RPC_SOCK="${AGENTICOS_RPC_SOCK:-/tmp/agenticos-rpc.sock}"
     mkdir -p "$HOST_SHARE"
+    # Stale socket from a previous run will block QEMU's listener.
+    rm -f "$RPC_SOCK"
     echo "🚀 Launching QEMU with image: $BIOS_IMAGE"
     echo "📂 Mounting host folder: $HOST_SHARE -> /host (read-only)"
+    echo "🔌 MCP RPC chardev socket: $RPC_SOCK (chmod 0600 once QEMU creates it)"
+    # Restrict the socket to the launching user as soon as QEMU creates it.
+    # Backgrounded so it races QEMU startup; if the socket isn't there yet,
+    # chmod will fail silently — that's fine, we retry until QEMU is up.
+    (
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if [ -S "$RPC_SOCK" ]; then
+                chmod 0600 "$RPC_SOCK" && exit 0
+            fi
+            sleep 0.2
+        done
+    ) &
     qemu-system-x86_64 \
         -drive format=raw,file="$BIOS_IMAGE",if=ide,index=0 \
         -drive file=fat:ro:"$HOST_SHARE",if=ide,index=1,snapshot=on \
         -serial stdio \
+        -chardev socket,id=rpc,path="$RPC_SOCK",server=on,wait=off \
+        -serial chardev:rpc \
         -no-reboot -no-shutdown \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -device virtio-tablet-pci \

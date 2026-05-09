@@ -5,6 +5,7 @@ use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::Font;
 use crate::drivers::display::double_buffer::DoubleBufferedFrameBuffer;
 use crate::window::{GraphicsDevice, Rect, ColorDepth};
+use crate::window::graphics::Snapshot;
 use spin::Mutex;
 
 /// Graphics device that uses double buffering for smooth rendering
@@ -190,5 +191,19 @@ impl GraphicsDevice for DoubleBufferedDevice {
             drop(buffer);
             self.dirty = false;
         }
+    }
+
+    fn snapshot(&self) -> Option<Snapshot> {
+        let buffer = self.buffer.lock();
+        let (width, height, stride, bytes_per_pixel, pixel_format, pixels) =
+            buffer.snapshot_bytes();
+        Some(Snapshot {
+            width,
+            height,
+            stride,
+            bytes_per_pixel,
+            pixel_format,
+            pixels,
+        })
     }
 }
