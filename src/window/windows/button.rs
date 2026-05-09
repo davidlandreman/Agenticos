@@ -25,6 +25,10 @@ pub struct Button {
     bg_color: Color,
     /// Text color
     text_color: Color,
+    /// Whether the button is enabled. Disabled buttons paint in a
+    /// greyed-out state and ignore `ButtonDown` / `ButtonUp` events
+    /// (the click callback never fires).
+    enabled: bool,
 }
 
 impl Button {
@@ -35,8 +39,9 @@ impl Button {
             label: String::from(label),
             pressed: false,
             on_click: None,
-            bg_color: Color::LIGHT_GRAY,
-            text_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
+            enabled: true,
         }
     }
 
@@ -78,6 +83,26 @@ impl Button {
         self.base.invalidate();
     }
 
+    /// Set whether the button is enabled. When disabled, the button
+    /// paints in a greyed-out state and ignores `ButtonDown` / `ButtonUp`
+    /// events (the click callback never fires).
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled != enabled {
+            self.enabled = enabled;
+            // Drop any in-flight pressed state when disabling so the
+            // visual doesn't get stuck mid-click.
+            if !enabled {
+                self.pressed = false;
+            }
+            self.base.invalidate();
+        }
+    }
+
+    /// Returns whether the button is currently enabled.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Check if a point is within the button bounds
     /// Note: point is expected to be in local coordinates (relative to button's top-left)
     fn contains_point(&self, point: Point) -> bool {
@@ -91,48 +116,12 @@ impl Button {
 }
 
 impl Window for Button {
-    fn id(&self) -> WindowId {
-        self.base.id()
+    fn base(&self) -> &WindowBase {
+        &self.base
     }
 
-    fn bounds(&self) -> Rect {
-        self.base.bounds()
-    }
-
-    fn visible(&self) -> bool {
-        self.base.visible()
-    }
-
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.base.set_bounds(bounds);
-    }
-
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        self.base.set_bounds_no_invalidate(bounds);
-    }
-
-    fn set_visible(&mut self, visible: bool) {
-        self.base.set_visible(visible);
-    }
-
-    fn parent(&self) -> Option<WindowId> {
-        self.base.parent()
-    }
-
-    fn children(&self) -> &[WindowId] {
-        self.base.children()
-    }
-
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.base.set_parent(parent);
-    }
-
-    fn add_child(&mut self, child: WindowId) {
-        self.base.add_child(child);
-    }
-
-    fn remove_child(&mut self, child: WindowId) {
-        self.base.remove_child(child);
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base
     }
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
@@ -155,8 +144,23 @@ impl Window for Button {
         let highlight = Color::WHITE;
         let shadow = Color::DARK_GRAY;
 
+        // Disabled buttons paint with a lighter background and a
+        // mid-grey label; the 3D edge highlight/shadow still draws so
+        // the bounds remain visible, just muted.
+        let (bg, label_color) = if self.enabled {
+            (self.bg_color, self.text_color)
+        } else {
+            // Lighter than the default LIGHT_GRAY (192/192/192).
+            let disabled_bg = Color {
+                red: 224,
+                green: 224,
+                blue: 224,
+            };
+            (disabled_bg, Color::GRAY)
+        };
+
         // Draw button background
-        device.fill_rect(x, y, width, height, self.bg_color);
+        device.fill_rect(x, y, width, height, bg);
 
         if self.pressed {
             // Pressed state: shadow on top/left, highlight on bottom/right
@@ -198,10 +202,14 @@ impl Window for Button {
                 (text_x, text_y)
             };
 
-            device.draw_text(draw_x, draw_y, &self.label, font.as_font(), self.text_color);
+            device.draw_text(draw_x, draw_y, &self.label, font.as_font(), label_color);
         }
 
         self.base.clear_needs_repaint();
+    }
+
+    fn as_button_mut(&mut self) -> Option<&mut Button> {
+        Some(self)
     }
 
     fn handle_event(&mut self, event: Event) -> EventResult {
@@ -210,6 +218,13 @@ impl Window for Button {
                 let in_bounds = self.contains_point(mouse_event.position);
 
                 match mouse_event.event_type {
+                    // Disabled buttons ignore press/release entirely so
+                    // they neither flip pressed state nor fire callbacks.
+                    MouseEventType::ButtonDown | MouseEventType::ButtonUp
+                        if !self.enabled =>
+                    {
+                        EventResult::Ignored
+                    }
                     MouseEventType::ButtonDown if in_bounds && mouse_event.buttons.left => {
                         self.pressed = true;
                         self.base.invalidate();
@@ -240,24 +255,4 @@ impl Window for Button {
         }
     }
 
-    fn set_focus(&mut self, focused: bool) {
-        self.base.set_focus(focused);
-    }
-
-    fn has_focus(&self) -> bool {
-        self.base.has_focus()
-    }
-
-    fn can_focus(&self) -> bool {
-        // Buttons can receive focus for future keyboard support
-        false
-    }
-
-    fn needs_repaint(&self) -> bool {
-        self.base.needs_repaint()
-    }
-
-    fn invalidate(&mut self) {
-        self.base.invalidate();
-    }
 }

@@ -3,6 +3,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
+use core::sync::atomic::{AtomicPtr, Ordering};
 use crate::drivers::mouse;
 use crate::graphics::compositor::Compositor;
 use super::cursor::CursorRenderer;
@@ -377,6 +378,25 @@ impl WindowManager {
         let root_id = self.get_active_screen().and_then(|s| s.root_window);
         if let Some(root_id) = root_id {
             if let Some((hit_id, hit_bounds)) = self.topmost_at(root_id, global_pos, 0, 0) {
+                // Scroll wheel events are routed to the nearest enclosing
+                // ScrollView ancestor of the hit window (innermost match
+                // wins). If no ScrollView is found in the chain, fall
+                // through to standard delivery to the hit window.
+                if matches!(event.event_type, MouseEventType::Scroll { .. }) {
+                    if let Some(sv_id) = self.nearest_scroll_view_ancestor(hit_id) {
+                        let sv_bounds = self
+                            .get_global_bounds(sv_id)
+                            .unwrap_or(hit_bounds);
+                        let mut local_event = event;
+                        local_event.position = Point::new(
+                            global_pos.x - sv_bounds.x,
+                            global_pos.y - sv_bounds.y,
+                        );
+                        self.route_event_to_window(sv_id, Event::Mouse(local_event));
+                        return;
+                    }
+                }
+
                 let mut local_event = event;
                 local_event.position = Point::new(
                     global_pos.x - hit_bounds.x,
@@ -385,6 +405,21 @@ impl WindowManager {
                 self.route_event_to_window(hit_id, Event::Mouse(local_event));
             }
         }
+    }
+
+    /// Walk the parent chain starting at `id` (inclusive) and return the
+    /// first window for which `is_scroll_view()` returns `true`. Returns
+    /// `None` if no `ScrollView` ancestor exists.
+    fn nearest_scroll_view_ancestor(&self, id: WindowId) -> Option<WindowId> {
+        let mut current = Some(id);
+        while let Some(cur_id) = current {
+            let window = self.window_registry.get(&cur_id)?;
+            if window.is_scroll_view() {
+                return Some(cur_id);
+            }
+            current = window.parent();
+        }
+        None
     }
 
     /// Walk the subtree rooted at `id` and return the topmost visible window
@@ -472,7 +507,7 @@ impl WindowManager {
     /// Route an event to a specific window
     fn route_event_to_window(&mut self, window_id: WindowId, event: Event) {
         crate::debug_trace!("route_event_to_window: window={:?}, event={:?}", window_id, event);
-        
+
         let result = if let Some(window) = self.window_registry.get_mut(&window_id) {
             crate::debug_trace!("Calling handle_event on window");
             let result = window.handle_event(event.clone());
@@ -482,7 +517,25 @@ impl WindowManager {
             crate::debug_trace!("Window not found in registry!");
             EventResult::Ignored
         };
-        
+
+        // After dispatching, drain any staged `EnsureVisible` rect from
+        // the target widget (e.g. `TextEditor` after a cursor move) and
+        // forward it to the nearest enclosing `ScrollView` ancestor.
+        // This keeps cursor-into-view automatic for any widget that
+        // overrides `take_pending_ensure_visible` without requiring it
+        // to hold a typed reference to its parent.
+        let pending_rect = self
+            .window_registry
+            .get_mut(&window_id)
+            .and_then(|w| w.take_pending_ensure_visible());
+        if let Some(rect) = pending_rect {
+            if let Some(sv_id) = self.nearest_scroll_view_ancestor(window_id) {
+                if sv_id != window_id {
+                    self.route_event_to_window(sv_id, Event::EnsureVisible(rect));
+                }
+            }
+        }
+
         // Handle propagation
         if result == EventResult::Propagate {
             if let Some(window) = self.window_registry.get(&window_id) {
@@ -1247,4 +1300,68 @@ impl WindowManager {
             self.graphics_device.height() as u32,
         )
     }
+
+    /// Borrow a single window from the registry mutably as a `&mut dyn
+    /// Window` and run `f` against it. Returns `true` if the window was
+    /// found, `false` otherwise.
+    ///
+    /// While `f` runs, this manager is also exposed as the "active
+    /// manager" via [`with_active_manager`]. That lets the closure (or
+    /// methods called from inside it — notably layout containers'
+    /// `set_bounds` overrides) reach back into the manager to mutate
+    /// other windows. The window passed to `f` is detached from the
+    /// registry for the duration of the call, so it cannot itself be
+    /// re-entered through `with_active_manager` until `f` returns.
+    pub fn with_window_mut<F>(&mut self, window_id: WindowId, f: F) -> bool
+    where
+        F: FnOnce(&mut dyn Window),
+    {
+        let mut window = match self.window_registry.remove(&window_id) {
+            Some(w) => w,
+            None => return false,
+        };
+
+        let self_ptr = self as *mut WindowManager;
+        let prev = ACTIVE_MANAGER.swap(self_ptr, Ordering::SeqCst);
+
+        f(&mut *window);
+
+        ACTIVE_MANAGER.store(prev, Ordering::SeqCst);
+        self.window_registry.insert(window_id, window);
+        true
+    }
+}
+
+/// Pointer to the manager whose `with_window_mut` is currently on the
+/// stack, or null if no `with_window_mut` call is active. Used by
+/// layout containers to write children's bounds back into the manager
+/// from inside a `set_bounds` override.
+///
+/// SAFETY: only set/read inside `WindowManager::with_window_mut`. The
+/// pointer is valid for the duration of that call because the closure
+/// runs synchronously on the same thread; interrupts that touch the
+/// manager are blocked by the surrounding `with_window_manager`'s
+/// `InterruptGuard`.
+static ACTIVE_MANAGER: AtomicPtr<WindowManager> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Run `f` against the currently-active `WindowManager`. Returns
+/// `Some(f's result)` when called from inside a
+/// `WindowManager::with_window_mut` callback, `None` otherwise.
+///
+/// Callers must not invoke `with_window_mut` on the same window id
+/// that is currently being mutated — that window is removed from the
+/// registry while its closure runs and would not be found.
+pub fn with_active_manager<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut WindowManager) -> R,
+{
+    let ptr = ACTIVE_MANAGER.load(Ordering::SeqCst);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: see ACTIVE_MANAGER doc comment. The pointer was set by
+    // `with_window_mut` and we are still inside that call (or any
+    // recursive `with_window_mut` it triggered).
+    let manager = unsafe { &mut *ptr };
+    Some(f(manager))
 }

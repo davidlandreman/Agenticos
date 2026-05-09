@@ -43,10 +43,10 @@ impl TextInput {
             text: String::new(),
             max_length: None,
             on_change: None,
-            bg_color: Color::WHITE,
-            text_color: Color::BLACK,
-            border_color: Color::GRAY,
-            focus_border_color: Color::BLUE,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
+            border_color: crate::window::PALETTE_BORDER,
+            focus_border_color: crate::window::PALETTE_CHROME_ACTIVE,
         }
     }
 
@@ -152,48 +152,12 @@ impl TextInput {
 }
 
 impl Window for TextInput {
-    fn id(&self) -> WindowId {
-        self.base.id()
+    fn base(&self) -> &WindowBase {
+        &self.base
     }
 
-    fn bounds(&self) -> Rect {
-        self.base.bounds()
-    }
-
-    fn visible(&self) -> bool {
-        self.base.visible()
-    }
-
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.base.set_bounds(bounds);
-    }
-
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        self.base.set_bounds_no_invalidate(bounds);
-    }
-
-    fn set_visible(&mut self, visible: bool) {
-        self.base.set_visible(visible);
-    }
-
-    fn parent(&self) -> Option<WindowId> {
-        self.base.parent()
-    }
-
-    fn children(&self) -> &[WindowId] {
-        self.base.children()
-    }
-
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.base.set_parent(parent);
-    }
-
-    fn add_child(&mut self, child: WindowId) {
-        self.base.add_child(child);
-    }
-
-    fn remove_child(&mut self, child: WindowId) {
-        self.base.remove_child(child);
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base
     }
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
@@ -300,23 +264,7 @@ impl Window for TextInput {
         }
     }
 
-    fn set_focus(&mut self, focused: bool) {
-        self.base.set_focus(focused);
-    }
-
-    fn has_focus(&self) -> bool {
-        self.base.has_focus()
-    }
-
     fn can_focus(&self) -> bool {
         self.base.can_focus()
-    }
-
-    fn needs_repaint(&self) -> bool {
-        self.base.needs_repaint()
-    }
-
-    fn invalidate(&mut self) {
-        self.base.invalidate();
     }
 }

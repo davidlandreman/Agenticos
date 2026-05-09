@@ -16,6 +16,7 @@ pub mod graphics;
 pub mod manager;
 pub mod screen;
 pub mod adapters;
+pub mod selection;
 pub mod windows;
 pub mod dialogs;
 pub mod terminal;
@@ -33,65 +34,167 @@ pub use screen::*;
 pub use self::types::{WindowId, ScreenId, Rect, Point};
 pub use self::event::{Event, EventResult};
 pub use self::graphics::GraphicsDevice;
+pub use self::selection::{Selection, SelectionMode, ClickMods};
 
-/// Core window trait that all visual elements implement
+// =====================================================================
+// Default widget palette
+//
+// Reconciles default color values across all widget constructors so
+// default-styled widgets in the same window look visually consistent.
+// Out of scope: a configurable theming system. Widgets that need a
+// different look can still override their colors via setter methods.
+//
+// - PALETTE_CHROME_ACTIVE:   window-frame chrome when active (blue)
+// - PALETTE_CHROME_INACTIVE: window-frame chrome when inactive (grey)
+// - PALETTE_CONTENT_BG:      shared content background (used by
+//                            Container, List, MultiColumnList,
+//                            TreeView, IconView, ScrollView, Toolbar,
+//                            StatusBar, PathBar, Menu, ProgressBar,
+//                            TextInput, TextEditor, Button)
+// - PALETTE_BORDER:          borders and dividers
+// - PALETTE_HIGHLIGHT_BG:    selection / hover highlight background
+// - PALETTE_HIGHLIGHT_TEXT:  text on highlight background
+// - PALETTE_TEXT:            text on light backgrounds
+// - PALETTE_PROGRESS_FILL:   filled portion of ProgressBar
+//                            (matches highlight)
+//
+// Intentionally NOT covered by this palette (kept distinct on purpose):
+// - DesktopWindow background (deep blue identity color).
+// - TextWindow / TerminalWindow (dark grey background, light text).
+// =====================================================================
+
+/// Window-frame chrome color when the frame is active (focused).
+pub const PALETTE_CHROME_ACTIVE: crate::graphics::color::Color =
+    crate::graphics::color::Color::new(0, 100, 200);
+
+/// Window-frame chrome color when the frame is inactive.
+pub const PALETTE_CHROME_INACTIVE: crate::graphics::color::Color =
+    crate::graphics::color::Color::new(100, 100, 100);
+
+/// Shared light content background used by most widgets.
+pub const PALETTE_CONTENT_BG: crate::graphics::color::Color =
+    crate::graphics::color::Color::new(240, 240, 240);
+
+/// Default border / divider color.
+pub const PALETTE_BORDER: crate::graphics::color::Color =
+    crate::graphics::color::Color::new(100, 100, 100);
+
+/// Default selection / hover highlight background.
+pub const PALETTE_HIGHLIGHT_BG: crate::graphics::color::Color =
+    crate::graphics::color::Color::new(0, 120, 215);
+
+/// Default text color drawn on `PALETTE_HIGHLIGHT_BG`.
+pub const PALETTE_HIGHLIGHT_TEXT: crate::graphics::color::Color =
+    crate::graphics::color::Color::WHITE;
+
+/// Default text color on light backgrounds.
+pub const PALETTE_TEXT: crate::graphics::color::Color =
+    crate::graphics::color::Color::BLACK;
+
+/// Filled portion of a `ProgressBar` — matches the highlight color.
+pub const PALETTE_PROGRESS_FILL: crate::graphics::color::Color = PALETTE_HIGHLIGHT_BG;
+
+/// Core window trait that all visual elements implement.
+///
+/// Most plumbing methods (id/bounds/visible/parent/children/needs_repaint/
+/// invalidate/has_focus/set_focus/set_bounds/set_visible/...) default to a
+/// one-line delegation through `base()` / `base_mut()`. Each widget only
+/// supplies `base()`, `base_mut()`, `paint`, `handle_event`, and any
+/// override (`can_focus`, `set_bounds` if it does extra work, etc.).
 pub trait Window: Send {
+    /// Borrow the widget's `WindowBase`. Used by the default implementations
+    /// of the plumbing methods below (id/bounds/visible/...).
+    fn base(&self) -> &windows::base::WindowBase;
+
+    /// Mutably borrow the widget's `WindowBase`. Used by the default
+    /// implementations of the plumbing methods below.
+    fn base_mut(&mut self) -> &mut windows::base::WindowBase;
+
+    /// Paint this window to the graphics device
+    fn paint(&mut self, device: &mut dyn GraphicsDevice);
+
+    /// Handle an event
+    fn handle_event(&mut self, event: Event) -> EventResult;
+
+    /// Check if this window can receive keyboard focus
+    fn can_focus(&self) -> bool {
+        false
+    }
+
     /// Get the unique identifier for this window
-    fn id(&self) -> WindowId;
-    
+    fn id(&self) -> WindowId {
+        self.base().id()
+    }
+
     /// Get the bounds of this window relative to its parent
-    fn bounds(&self) -> Rect;
-    
+    fn bounds(&self) -> Rect {
+        self.base().bounds()
+    }
+
     /// Set the bounds of this window
-    fn set_bounds(&mut self, bounds: Rect);
+    fn set_bounds(&mut self, bounds: Rect) {
+        self.base_mut().set_bounds(bounds);
+    }
 
     /// Set bounds without triggering invalidation (for render-time transforms)
     fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        // Default implementation - subclasses should override
-        self.set_bounds(bounds);
+        self.base_mut().set_bounds_no_invalidate(bounds);
     }
-    
+
     /// Check if this window is visible
-    fn visible(&self) -> bool;
-    
+    fn visible(&self) -> bool {
+        self.base().visible()
+    }
+
     /// Set the visibility of this window
-    fn set_visible(&mut self, visible: bool);
-    
+    fn set_visible(&mut self, visible: bool) {
+        self.base_mut().set_visible(visible);
+    }
+
     /// Get the parent window ID, if any
-    fn parent(&self) -> Option<WindowId>;
-    
+    fn parent(&self) -> Option<WindowId> {
+        self.base().parent()
+    }
+
     /// Get child window IDs
-    fn children(&self) -> &[WindowId];
-    
+    fn children(&self) -> &[WindowId] {
+        self.base().children()
+    }
+
     /// Set the parent of this window
-    fn set_parent(&mut self, parent: Option<WindowId>);
-    
+    fn set_parent(&mut self, parent: Option<WindowId>) {
+        self.base_mut().set_parent(parent);
+    }
+
     /// Add a child window
-    fn add_child(&mut self, child: WindowId);
-    
+    fn add_child(&mut self, child: WindowId) {
+        self.base_mut().add_child(child);
+    }
+
     /// Remove a child window
-    fn remove_child(&mut self, child: WindowId);
-    
-    /// Paint this window to the graphics device
-    fn paint(&mut self, device: &mut dyn GraphicsDevice);
-    
+    fn remove_child(&mut self, child: WindowId) {
+        self.base_mut().remove_child(child);
+    }
+
     /// Check if this window needs repainting
-    fn needs_repaint(&self) -> bool;
-    
+    fn needs_repaint(&self) -> bool {
+        self.base().needs_repaint()
+    }
+
     /// Mark this window as needing repaint
-    fn invalidate(&mut self);
-    
-    /// Handle an event
-    fn handle_event(&mut self, event: Event) -> EventResult;
-    
-    /// Check if this window can receive keyboard focus
-    fn can_focus(&self) -> bool;
-    
+    fn invalidate(&mut self) {
+        self.base_mut().invalidate();
+    }
+
     /// Check if this window currently has focus
-    fn has_focus(&self) -> bool;
-    
+    fn has_focus(&self) -> bool {
+        self.base().has_focus()
+    }
+
     /// Set the focus state of this window
-    fn set_focus(&mut self, focused: bool);
+    fn set_focus(&mut self, focused: bool) {
+        self.base_mut().set_focus(focused);
+    }
 
     /// Get the window title if this is a frame window
     /// Returns None for non-frame windows
@@ -116,6 +219,44 @@ pub trait Window: Send {
 
     /// Close popup menu (used by MenuBar)
     fn close_popup_menu(&mut self) {}
+
+    /// Discriminator used by the manager when routing `MouseEventType::Scroll`
+    /// events. Returns `true` for `ScrollView`; default `false` for every
+    /// other window type. The manager-side downcast performed when this
+    /// returns `true` lets new scrollable wrappers be added without
+    /// requiring every widget to opt into a typed accessor.
+    fn is_scroll_view(&self) -> bool {
+        false
+    }
+
+    /// Drain a pending `Event::EnsureVisible(rect)` payload, if any. The
+    /// window manager calls this immediately after dispatching an event
+    /// to a window; if the return value is `Some(rect)`, the manager
+    /// forwards an `Event::EnsureVisible(rect)` to the nearest enclosing
+    /// `ScrollView` ancestor so the rect is scrolled into view.
+    ///
+    /// The default returns `None`. Widgets like `TextEditor` (cursor
+    /// move) override this to plumb cursor-into-view requests upward
+    /// without needing a typed reference to their parent `ScrollView`.
+    fn take_pending_ensure_visible(&mut self) -> Option<Rect> {
+        None
+    }
+
+    /// Typed accessor used by `Toolbar` to toggle a button's enabled
+    /// state through the manager. Returns `None` by default; `Button`
+    /// overrides it to return `Some(self)`. Following the same opt-in
+    /// pattern as `is_scroll_view`, this avoids a generic downcast
+    /// machinery while keeping the trait small.
+    fn as_button_mut(&mut self) -> Option<&mut windows::button::Button> {
+        None
+    }
+
+    /// Typed accessor used by `StatusBar` to update a section's text
+    /// through the manager. Returns `None` by default; `Label`
+    /// overrides it to return `Some(self)`.
+    fn as_label_mut(&mut self) -> Option<&mut windows::label::Label> {
+        None
+    }
 }
 
 /// Global window manager instance

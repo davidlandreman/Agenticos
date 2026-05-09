@@ -60,6 +60,14 @@ struct MouseEntry {
     global_y: Option<i32>,
     #[serde(default)]
     buttons: MouseButtonsEntry,
+    #[serde(default)]
+    modifiers: ModifierEntry,
+    /// For `Scroll` events: horizontal wheel delta. Ignored for other types.
+    #[serde(default)]
+    delta_x: i32,
+    /// For `Scroll` events: vertical wheel delta. Ignored for other types.
+    #[serde(default)]
+    delta_y: i32,
 }
 
 #[derive(Deserialize, Default)]
@@ -116,7 +124,7 @@ impl Tool for SendInput {
             }));
         }
         for m in &args.mouse {
-            let event_type = parse_mouse_event_type(&m.event_type)
+            let event_type = parse_mouse_event_type(&m.event_type, m.delta_x, m.delta_y)
                 .ok_or_else(|| ToolError::bad_args(format!("unknown event_type {:?}", m.event_type)))?;
             events.push(Event::Mouse(MouseEvent {
                 event_type,
@@ -129,6 +137,12 @@ impl Tool for SendInput {
                     left: m.buttons.left,
                     right: m.buttons.right,
                     middle: m.buttons.middle,
+                },
+                modifiers: KeyModifiers {
+                    shift: m.modifiers.shift,
+                    ctrl: m.modifiers.ctrl,
+                    alt: m.modifiers.alt,
+                    meta: m.modifiers.meta,
                 },
             }));
         }
@@ -201,12 +215,12 @@ fn parse_key_code(s: &str) -> Option<KeyCode> {
     })
 }
 
-fn parse_mouse_event_type(s: &str) -> Option<MouseEventType> {
+fn parse_mouse_event_type(s: &str, delta_x: i32, delta_y: i32) -> Option<MouseEventType> {
     Some(match s {
         "Move" | "move" => MouseEventType::Move,
         "ButtonDown" | "button_down" => MouseEventType::ButtonDown,
         "ButtonUp" | "button_up" => MouseEventType::ButtonUp,
-        "Scroll" | "scroll" => MouseEventType::Scroll,
+        "Scroll" | "scroll" => MouseEventType::Scroll { delta_x, delta_y },
         _ => return None,
     })
 }

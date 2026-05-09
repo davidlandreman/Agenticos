@@ -17,7 +17,7 @@ impl ContainerWindow {
     pub fn new(bounds: Rect) -> Self {
         ContainerWindow {
             base: WindowBase::new(bounds),
-            background_color: Color::new(240, 240, 240), // Light gray
+            background_color: crate::window::PALETTE_CONTENT_BG,
         }
     }
 
@@ -25,7 +25,7 @@ impl ContainerWindow {
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
         ContainerWindow {
             base: WindowBase::new_with_id(id, bounds),
-            background_color: Color::new(240, 240, 240), // Light gray
+            background_color: crate::window::PALETTE_CONTENT_BG,
         }
     }
     
@@ -37,50 +37,14 @@ impl ContainerWindow {
 }
 
 impl Window for ContainerWindow {
-    fn id(&self) -> WindowId {
-        self.base.id()
-    }
-    
-    fn bounds(&self) -> Rect {
-        self.base.bounds()
-    }
-    
-    fn visible(&self) -> bool {
-        self.base.visible()
-    }
-    
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.base.set_bounds(bounds);
+    fn base(&self) -> &WindowBase {
+        &self.base
     }
 
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        self.base.set_bounds_no_invalidate(bounds);
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base
     }
 
-    fn set_visible(&mut self, visible: bool) {
-        self.base.set_visible(visible);
-    }
-    
-    fn parent(&self) -> Option<WindowId> {
-        self.base.parent()
-    }
-    
-    fn children(&self) -> &[WindowId] {
-        self.base.children()
-    }
-    
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.base.set_parent(parent);
-    }
-    
-    fn add_child(&mut self, child: WindowId) {
-        self.base.add_child(child);
-    }
-    
-    fn remove_child(&mut self, child: WindowId) {
-        self.base.remove_child(child);
-    }
-    
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         if !self.visible() {
             return;
@@ -102,29 +66,13 @@ impl Window for ContainerWindow {
         // Clear repaint flag
         self.base.clear_needs_repaint();
     }
-    
-    fn needs_repaint(&self) -> bool {
-        self.base.needs_repaint()
-    }
-    
-    fn invalidate(&mut self) {
-        self.base.invalidate();
-    }
-    
+
     fn handle_event(&mut self, _event: Event) -> EventResult {
         // Container doesn't handle events by default
         EventResult::Propagate
     }
-    
+
     fn can_focus(&self) -> bool {
         self.base.can_focus()
-    }
-    
-    fn has_focus(&self) -> bool {
-        self.base.has_focus()
-    }
-    
-    fn set_focus(&mut self, focused: bool) {
-        self.base.set_focus(focused);
     }
 }

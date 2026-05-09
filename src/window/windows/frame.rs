@@ -55,9 +55,9 @@ impl FrameWindow {
 
     fn draw_title_bar(&self, device: &mut dyn GraphicsDevice) {
         let title_bar_color = if self.active {
-            Color::new(0, 100, 200)  // Blue when active
+            crate::window::PALETTE_CHROME_ACTIVE
         } else {
-            Color::new(100, 100, 100)  // Grey when inactive
+            crate::window::PALETTE_CHROME_INACTIVE
         };
 
         // Draw title bar background
@@ -194,9 +194,12 @@ impl FrameWindow {
 
     fn draw_borders(&self, device: &mut dyn GraphicsDevice) {
         let border_color = if self.active {
-            Color::new(0, 100, 200)  // Blue when active
+            crate::window::PALETTE_CHROME_ACTIVE
         } else {
-            Color::new(150, 150, 150)  // Light grey when inactive
+            // Borders use a slightly lighter grey than the title-bar
+            // chrome inactive color so the inactive frame still shows
+            // some edge definition. Kept distinct from PALETTE_BORDER.
+            Color::new(150, 150, 150)
         };
 
         let bounds = self.base.bounds();
@@ -240,31 +243,13 @@ impl FrameWindow {
 }
 
 impl Window for FrameWindow {
-    fn id(&self) -> WindowId {
-        self.base.id()
+    fn base(&self) -> &WindowBase {
+        &self.base
     }
 
-    fn bounds(&self) -> Rect {
-        self.base.bounds()
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base
     }
-
-
-    fn visible(&self) -> bool {
-        self.base.visible()
-    }
-
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.base.set_bounds(bounds);
-    }
-
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        self.base.set_bounds_no_invalidate(bounds);
-    }
-
-    fn set_visible(&mut self, visible: bool) {
-        self.base.set_visible(visible);
-    }
-
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         if !self.base.visible() {
@@ -284,14 +269,6 @@ impl Window for FrameWindow {
         self.base.clear_needs_repaint();
     }
 
-    fn needs_repaint(&self) -> bool {
-        self.base.needs_repaint()
-    }
-
-    fn invalidate(&mut self) {
-        self.base.invalidate();
-    }
-
     fn handle_event(&mut self, event: Event) -> EventResult {
         match event {
             Event::Focus(focus_event) => {
@@ -307,28 +284,10 @@ impl Window for FrameWindow {
         true
     }
 
+    // FrameWindow tracks its own focus state in `active` (drives blue/grey
+    // title-bar chrome) — do NOT delegate to `WindowBase`.
     fn has_focus(&self) -> bool {
         self.active
-    }
-
-    fn parent(&self) -> Option<WindowId> {
-        self.base.parent()
-    }
-
-    fn children(&self) -> &[WindowId] {
-        self.base.children()
-    }
-
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.base.set_parent(parent);
-    }
-
-    fn add_child(&mut self, child: WindowId) {
-        self.base.add_child(child);
-    }
-
-    fn remove_child(&mut self, child: WindowId) {
-        self.base.remove_child(child);
     }
 
     fn set_focus(&mut self, focused: bool) {

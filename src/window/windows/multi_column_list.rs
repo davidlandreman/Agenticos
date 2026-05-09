@@ -1,18 +1,30 @@
-//! Multi-column list widget with headers
+//! Multi-column list widget with headers.
+//!
+//! After the U6 migration this widget no longer manages its own scroll
+//! offset or paints a scrollbar. Callers wrap it in a
+//! [`ScrollView`](crate::window::windows::scroll_view::ScrollView) for
+//! scrolling. Selection state is delegated to the shared
+//! [`Selection`](crate::window::selection::Selection) model so click and
+//! arrow-key semantics stay consistent across list-shaped widgets.
+//!
+//! Right-click semantics are preserved verbatim: the right-clicked row
+//! becomes selected and `on_right_click(row_index, global_position)` is
+//! invoked, matching the prior contract.
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
-use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice, Point};
 use crate::window::event::MouseEventType;
+use crate::window::selection::{ArrowDirection, ClickMods, Selection, SelectionMode};
+use crate::window::{Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId};
 use super::base::WindowBase;
 
-/// Callback type for selection change events
-pub type MultiColumnSelectionCallback = Box<dyn FnMut(usize) + Send>;
+/// Callback invoked when the user changes the selection.
+pub type MultiColumnSelectionCallback = Box<dyn FnMut(&Selection) + Send>;
 
-/// Callback type for right-click events (row_index, global_position)
+/// Callback type for right-click events `(row_index, global_position)`.
 pub type RightClickCallback = Box<dyn FnMut(usize, Point) + Send>;
 
 /// Column definition for the multi-column list
@@ -34,7 +46,7 @@ impl Column {
     }
 }
 
-/// A multi-column list widget with headers
+/// A multi-column list widget with headers.
 pub struct MultiColumnList {
     /// Base window functionality
     base: WindowBase,
@@ -42,10 +54,10 @@ pub struct MultiColumnList {
     columns: Vec<Column>,
     /// Row data (each row is a vector of strings, one per column)
     rows: Vec<Vec<String>>,
-    /// Currently selected row index
-    selected_index: Option<usize>,
-    /// Scroll offset (first visible row index)
-    scroll_offset: usize,
+    /// Selection state (delegated to the shared model).
+    selection: Selection,
+    /// Selection mode (Single by default; opt-in Multi).
+    selection_mode: SelectionMode,
     /// Height of the header row
     header_height: usize,
     /// Height of each data row
@@ -75,18 +87,20 @@ impl MultiColumnList {
             base: WindowBase::new_with_id(id, bounds),
             columns,
             rows: Vec::new(),
-            selected_index: None,
-            scroll_offset: 0,
+            selection: Selection::None,
+            selection_mode: SelectionMode::Single,
             header_height: 20,
             row_height: 16,
             on_select: None,
             on_right_click: None,
-            bg_color: Color::WHITE,
-            text_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
+            // Header is slightly distinct from the row body so the
+            // header row reads as a separate band; LIGHT_GRAY is kept.
             header_bg_color: Color::LIGHT_GRAY,
-            header_text_color: Color::BLACK,
-            selected_bg_color: Color::BLUE,
-            selected_text_color: Color::WHITE,
+            header_text_color: crate::window::PALETTE_TEXT,
+            selected_bg_color: crate::window::PALETTE_HIGHLIGHT_BG,
+            selected_text_color: crate::window::PALETTE_HIGHLIGHT_TEXT,
         }
     }
 
@@ -111,8 +125,7 @@ impl MultiColumnList {
     /// Clear all rows (keep columns)
     pub fn clear_rows(&mut self) {
         self.rows.clear();
-        self.selected_index = None;
-        self.scroll_offset = 0;
+        self.selection = Selection::None;
         self.base.invalidate();
     }
 
@@ -126,37 +139,66 @@ impl MultiColumnList {
         self.rows.is_empty()
     }
 
-    /// Get the currently selected row index
+    /// Get the currently selected row index. For multi-select this returns
+    /// the first selected index in ascending order.
     pub fn selected(&self) -> Option<usize> {
-        self.selected_index
+        self.selection.iter().next()
     }
 
-    /// Get the selected row data
+    /// Borrow the underlying selection state.
+    pub fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// Get the selected row data (first selected row in ascending order).
     pub fn selected_row(&self) -> Option<&Vec<String>> {
-        self.selected_index.map(|i| &self.rows[i])
+        self.selected().and_then(|i| self.rows.get(i))
     }
 
-    /// Set the selected row index
+    /// Set the selected row index. Passing `None` clears the selection.
     pub fn set_selected(&mut self, index: Option<usize>) {
-        let new_index = index.filter(|&i| i < self.rows.len());
-        if self.selected_index != new_index {
-            self.selected_index = new_index;
+        let new_sel = match index.filter(|&i| i < self.rows.len()) {
+            Some(i) => Selection::Single(i),
+            None => Selection::None,
+        };
+        if self.selection != new_sel {
+            self.selection = new_sel;
             self.base.invalidate();
-            if let Some(idx) = new_index {
-                self.ensure_visible(idx);
-            }
         }
+    }
+
+    /// Configure the selection mode. Switching from `Multi` back to `Single`
+    /// collapses any existing multi-selection to its first index in
+    /// ascending order.
+    pub fn set_selection_mode(&mut self, mode: SelectionMode) {
+        if self.selection_mode == mode {
+            return;
+        }
+        self.selection_mode = mode;
+        if matches!(mode, SelectionMode::Single) {
+            let first = self.selection.iter().next();
+            self.selection = match first {
+                Some(i) => Selection::Single(i),
+                None => Selection::None,
+            };
+            self.base.invalidate();
+        }
+    }
+
+    /// Current selection mode.
+    pub fn selection_mode(&self) -> SelectionMode {
+        self.selection_mode
     }
 
     /// Set the selection change callback
     pub fn on_select<F>(&mut self, callback: F)
     where
-        F: FnMut(usize) + Send + 'static,
+        F: FnMut(&Selection) + Send + 'static,
     {
         self.on_select = Some(Box::new(callback));
     }
 
-    /// Set the right-click callback
+    /// Set the right-click callback.
     ///
     /// The callback receives the row index and the global mouse position,
     /// which can be used to position a context menu.
@@ -167,37 +209,43 @@ impl MultiColumnList {
         self.on_right_click = Some(Box::new(callback));
     }
 
-    /// Calculate how many rows can be displayed
-    fn visible_rows(&self) -> usize {
-        let bounds = self.base.bounds();
-        let data_height = (bounds.height as usize).saturating_sub(self.header_height);
-        data_height / self.row_height
+    /// Header row height in pixels.
+    pub fn header_height(&self) -> usize {
+        self.header_height
     }
 
-    /// Ensure a row is visible by adjusting scroll offset
-    fn ensure_visible(&mut self, index: usize) {
-        let visible = self.visible_rows();
-        if index < self.scroll_offset {
-            self.scroll_offset = index;
-            self.base.invalidate();
-        } else if index >= self.scroll_offset + visible {
-            self.scroll_offset = index.saturating_sub(visible - 1);
-            self.base.invalidate();
-        }
+    /// Data row height in pixels.
+    pub fn row_height(&self) -> usize {
+        self.row_height
     }
 
-    /// Convert y coordinate to row index
+    /// Natural content height in pixels (`header + row_count * row_height`).
+    /// Use to feed `ScrollView::set_content_size` from the caller.
+    pub fn content_height(&self) -> u32 {
+        (self.header_height + self.rows.len() * self.row_height) as u32
+    }
+
+    /// Convert a y coordinate (in the list's local frame, same frame as
+    /// `MouseEvent::position`) to a row index, if any. Header clicks
+    /// return `None`.
     fn y_to_row_index(&self, y: i32) -> Option<usize> {
         let bounds = self.base.bounds();
-        let relative_y = (y - bounds.y) as usize;
+        let relative_y = y - bounds.y;
+        if relative_y < 0 {
+            return None;
+        }
+        let relative_y = relative_y as usize;
 
         // Check if in header
         if relative_y < self.header_height {
             return None;
         }
 
+        if self.row_height == 0 {
+            return None;
+        }
         let row_relative_y = relative_y - self.header_height;
-        let index = self.scroll_offset + row_relative_y / self.row_height;
+        let index = row_relative_y / self.row_height;
 
         if index < self.rows.len() {
             Some(index)
@@ -205,51 +253,46 @@ impl MultiColumnList {
             None
         }
     }
+
+    /// Apply a click to the selection model and fire the callback.
+    fn apply_click(&mut self, idx: usize, mods: ClickMods) {
+        let before = self.selection.clone();
+        self.selection.click(idx, mods, self.selection_mode);
+        if before != self.selection {
+            self.base.invalidate();
+        }
+        if let Some(ref mut callback) = self.on_select {
+            callback(&self.selection);
+        }
+    }
+
+    /// Apply an arrow-key navigation step to the selection.
+    fn apply_arrow(&mut self, direction: ArrowDirection, mods: ClickMods) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let before = self.selection.clone();
+        self.selection.arrow(direction, self.rows.len(), mods, self.selection_mode);
+        if before != self.selection {
+            self.base.invalidate();
+            if let Some(ref mut callback) = self.on_select {
+                callback(&self.selection);
+            }
+        }
+    }
 }
 
 impl Window for MultiColumnList {
-    fn id(&self) -> WindowId {
-        self.base.id()
+    fn base(&self) -> &WindowBase {
+        &self.base
     }
 
-    fn bounds(&self) -> Rect {
-        self.base.bounds()
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base
     }
 
-    fn visible(&self) -> bool {
-        self.base.visible()
-    }
-
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.base.set_bounds(bounds);
-    }
-
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        self.base.set_bounds_no_invalidate(bounds);
-    }
-
-    fn set_visible(&mut self, visible: bool) {
-        self.base.set_visible(visible);
-    }
-
-    fn parent(&self) -> Option<WindowId> {
-        self.base.parent()
-    }
-
-    fn children(&self) -> &[WindowId] {
-        self.base.children()
-    }
-
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.base.set_parent(parent);
-    }
-
-    fn add_child(&mut self, child: WindowId) {
-        self.base.add_child(child);
-    }
-
-    fn remove_child(&mut self, child: WindowId) {
-        self.base.remove_child(child);
+    fn can_focus(&self) -> bool {
+        true
     }
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
@@ -264,15 +307,12 @@ impl Window for MultiColumnList {
         let x = bounds.x;
         let y = bounds.y;
         let width = bounds.width;
-        let height = bounds.height;
         let header_h = self.header_height as i32;
         let row_h = self.row_height as i32;
 
-        // Draw background
-        device.fill_rect(x, y, width, height, self.bg_color);
-
-        // Draw border
-        device.draw_rect(x, y, width, height, Color::GRAY);
+        // Background covers the full bounds (which, when wrapped in a
+        // ScrollView, may equal the full content extent during paint).
+        device.fill_rect(x, y, width, bounds.height, self.bg_color);
 
         let font = get_default_font();
         let line_h = font.line_height() as i32;
@@ -280,7 +320,7 @@ impl Window for MultiColumnList {
         let padding: i32 = 4;
 
         // Draw header row
-        device.fill_rect(x + 1, y + 1, width - 2, self.header_height as u32, self.header_bg_color);
+        device.fill_rect(x + 1, y + 1, width.saturating_sub(2), self.header_height as u32, self.header_bg_color);
 
         let mut col_x = x + 1;
         for column in &self.columns {
@@ -305,36 +345,28 @@ impl Window for MultiColumnList {
         let header_bottom = y + header_h;
         device.draw_line(x + 1, header_bottom, x + width as i32 - 2, header_bottom, Color::GRAY);
 
-        // Draw data rows
-        let visible_count = self.visible_rows();
-        for i in 0..visible_count {
-            let row_index = self.scroll_offset + i;
-            if row_index >= self.rows.len() {
-                break;
-            }
+        // Draw all data rows. When embedded in ScrollView, the active clip
+        // rect limits visible pixels.
+        for (row_index, row_data) in self.rows.iter().enumerate() {
+            let row_y = y + header_h + 1 + (row_index as i32) * row_h;
+            let is_selected = self.selection.is_selected(row_index);
 
-            let row_y = y + header_h + 1 + (i as i32) * row_h;
-            let is_selected = self.selected_index == Some(row_index);
-
-            // Draw row background
             if is_selected {
                 device.fill_rect(
                     x + 1,
                     row_y,
-                    width - 2,
+                    width.saturating_sub(2),
                     self.row_height as u32,
                     self.selected_bg_color,
                 );
             }
 
-            // Draw row cells
             let text_color = if is_selected {
                 self.selected_text_color
             } else {
                 self.text_color
             };
 
-            let row_data = &self.rows[row_index];
             let mut cell_x = x + 1;
             for (col_idx, column) in self.columns.iter().enumerate() {
                 let text = row_data.get(col_idx).map(|s| s.as_str()).unwrap_or("");
@@ -360,36 +392,6 @@ impl Window for MultiColumnList {
             }
         }
 
-        // Draw scrollbar if needed
-        let visible = self.visible_rows();
-        if self.rows.len() > visible && visible > 0 {
-            let scrollbar_width: u32 = 8;
-            let scrollbar_x = x + width as i32 - scrollbar_width as i32 - 1;
-            let scrollbar_y = y + header_h + 1;
-            let scrollbar_height = height.saturating_sub(self.header_height as u32 + 2);
-
-            // Scrollbar track
-            device.fill_rect(
-                scrollbar_x,
-                scrollbar_y,
-                scrollbar_width,
-                scrollbar_height,
-                Color::LIGHT_GRAY,
-            );
-
-            // Scrollbar thumb
-            let thumb_height = (visible as u32 * scrollbar_height) / self.rows.len() as u32;
-            let thumb_height = thumb_height.max(10);
-            let thumb_pos = ((self.scroll_offset as u32) * scrollbar_height) / self.rows.len() as u32;
-            device.fill_rect(
-                scrollbar_x,
-                scrollbar_y + thumb_pos as i32,
-                scrollbar_width,
-                thumb_height,
-                Color::GRAY,
-            );
-        }
-
         self.base.clear_needs_repaint();
     }
 
@@ -404,24 +406,27 @@ impl Window for MultiColumnList {
                 match mouse_event.event_type {
                     MouseEventType::ButtonDown if mouse_event.buttons.left => {
                         if let Some(index) = self.y_to_row_index(mouse_event.position.y) {
-                            if self.selected_index != Some(index) {
-                                self.selected_index = Some(index);
-                                self.base.invalidate();
-                                if let Some(ref mut callback) = self.on_select {
-                                    callback(index);
-                                }
-                            }
+                            let mods = ClickMods::new(
+                                mouse_event.modifiers.shift,
+                                mouse_event.modifiers.ctrl,
+                            );
+                            self.apply_click(index, mods);
                         }
                         EventResult::Handled
                     }
                     MouseEventType::ButtonDown if mouse_event.buttons.right => {
                         if let Some(index) = self.y_to_row_index(mouse_event.position.y) {
-                            // Select the row on right-click too
-                            if self.selected_index != Some(index) {
-                                self.selected_index = Some(index);
+                            // Right-click selects the row (preserve prior
+                            // contract: selection moves to the right-clicked
+                            // row regardless of selection mode). We force a
+                            // collapse to Single(index) for symmetry with
+                            // the prior behavior, where right-click never
+                            // extended a multi-selection.
+                            let new_sel = Selection::Single(index);
+                            if self.selection != new_sel {
+                                self.selection = new_sel;
                                 self.base.invalidate();
                             }
-                            // Trigger right-click callback with global position for menu placement
                             if let Some(ref mut callback) = self.on_right_click {
                                 callback(index, mouse_event.global_position);
                             }
@@ -433,37 +438,14 @@ impl Window for MultiColumnList {
             }
             Event::Keyboard(kbd_event) if kbd_event.pressed => {
                 use crate::window::event::KeyCode;
+                let mods = ClickMods::new(kbd_event.modifiers.shift, kbd_event.modifiers.ctrl);
                 match kbd_event.key_code {
                     KeyCode::Up => {
-                        if let Some(idx) = self.selected_index {
-                            if idx > 0 {
-                                self.set_selected(Some(idx - 1));
-                                if let Some(ref mut callback) = self.on_select {
-                                    callback(idx - 1);
-                                }
-                            }
-                        } else if !self.rows.is_empty() {
-                            self.set_selected(Some(0));
-                            if let Some(ref mut callback) = self.on_select {
-                                callback(0);
-                            }
-                        }
+                        self.apply_arrow(ArrowDirection::Up, mods);
                         EventResult::Handled
                     }
                     KeyCode::Down => {
-                        if let Some(idx) = self.selected_index {
-                            if idx + 1 < self.rows.len() {
-                                self.set_selected(Some(idx + 1));
-                                if let Some(ref mut callback) = self.on_select {
-                                    callback(idx + 1);
-                                }
-                            }
-                        } else if !self.rows.is_empty() {
-                            self.set_selected(Some(0));
-                            if let Some(ref mut callback) = self.on_select {
-                                callback(0);
-                            }
-                        }
+                        self.apply_arrow(ArrowDirection::Down, mods);
                         EventResult::Handled
                     }
                     _ => EventResult::Ignored,
@@ -471,25 +453,5 @@ impl Window for MultiColumnList {
             }
             _ => EventResult::Ignored,
         }
-    }
-
-    fn set_focus(&mut self, focused: bool) {
-        self.base.set_focus(focused);
-    }
-
-    fn has_focus(&self) -> bool {
-        self.base.has_focus()
-    }
-
-    fn can_focus(&self) -> bool {
-        true
-    }
-
-    fn needs_repaint(&self) -> bool {
-        self.base.needs_repaint()
-    }
-
-    fn invalidate(&mut self) {
-        self.base.invalidate();
     }
 }

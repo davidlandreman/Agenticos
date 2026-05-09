@@ -5,10 +5,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem;
 use crate::window::{
-    Window, WindowId, Rect, Event, EventResult, GraphicsDevice,
+    Window, Rect, Event, EventResult, GraphicsDevice,
     keyboard::keycode_to_char,
 };
 use crate::window::event::KeyCode;
+use super::base::WindowBase;
 use super::text::TextWindow;
 
 /// Callback type for when input is received
@@ -199,18 +200,16 @@ impl TerminalWindow {
 
 // Implement Window trait by delegating to text_window
 impl Window for TerminalWindow {
-    fn id(&self) -> WindowId {
-        self.text_window.id()
+    fn base(&self) -> &WindowBase {
+        self.text_window.base()
     }
-    
-    fn bounds(&self) -> Rect {
-        self.text_window.bounds()
+
+    fn base_mut(&mut self) -> &mut WindowBase {
+        self.text_window.base_mut()
     }
-    
-    fn visible(&self) -> bool {
-        self.text_window.visible()
-    }
-    
+
+    // TextWindow's custom set_bounds reallocates its grid buffer; route
+    // through it instead of touching WindowBase directly.
     fn set_bounds(&mut self, bounds: Rect) {
         self.text_window.set_bounds(bounds);
     }
@@ -219,30 +218,6 @@ impl Window for TerminalWindow {
         self.text_window.set_bounds_no_invalidate(bounds);
     }
 
-    fn set_visible(&mut self, visible: bool) {
-        self.text_window.set_visible(visible);
-    }
-    
-    fn parent(&self) -> Option<WindowId> {
-        self.text_window.parent()
-    }
-    
-    fn children(&self) -> &[WindowId] {
-        self.text_window.children()
-    }
-    
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.text_window.set_parent(parent);
-    }
-    
-    fn add_child(&mut self, child: WindowId) {
-        self.text_window.add_child(child);
-    }
-    
-    fn remove_child(&mut self, child: WindowId) {
-        self.text_window.remove_child(child);
-    }
-    
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         crate::debug_trace!("TerminalWindow::paint called");
 
@@ -316,24 +291,8 @@ impl Window for TerminalWindow {
             _ => self.text_window.handle_event(event),
         }
     }
-    
-    fn set_focus(&mut self, focused: bool) {
-        self.text_window.set_focus(focused);
-    }
-    
-    fn has_focus(&self) -> bool {
-        self.text_window.has_focus()
-    }
-    
+
     fn can_focus(&self) -> bool {
         self.text_window.can_focus()
-    }
-    
-    fn needs_repaint(&self) -> bool {
-        self.text_window.needs_repaint()
-    }
-    
-    fn invalidate(&mut self) {
-        self.text_window.invalidate();
     }
 }

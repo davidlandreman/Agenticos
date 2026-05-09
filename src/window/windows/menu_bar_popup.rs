@@ -40,8 +40,8 @@ impl MenuBarPopup {
             items,
             hover_index: None,
             menu_bar_id,
-            bg_color: Color::new(240, 240, 240),
-            text_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
             pending_selection: None,
         }
     }
@@ -89,48 +89,12 @@ impl MenuBarPopup {
 }
 
 impl Window for MenuBarPopup {
-    fn id(&self) -> WindowId {
-        self.base.id()
+    fn base(&self) -> &WindowBase {
+        &self.base
     }
 
-    fn bounds(&self) -> Rect {
-        self.base.bounds()
-    }
-
-    fn visible(&self) -> bool {
-        self.base.visible()
-    }
-
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.base.set_bounds(bounds);
-    }
-
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        self.base.set_bounds_no_invalidate(bounds);
-    }
-
-    fn set_visible(&mut self, visible: bool) {
-        self.base.set_visible(visible);
-    }
-
-    fn parent(&self) -> Option<WindowId> {
-        self.base.parent()
-    }
-
-    fn children(&self) -> &[WindowId] {
-        self.base.children()
-    }
-
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.base.set_parent(parent);
-    }
-
-    fn add_child(&mut self, child: WindowId) {
-        self.base.add_child(child);
-    }
-
-    fn remove_child(&mut self, child: WindowId) {
-        self.base.remove_child(child);
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base
     }
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
@@ -154,7 +118,7 @@ impl Window for MenuBarPopup {
         device.fill_rect(x, y, width, height, self.bg_color);
 
         // Border
-        device.draw_rect(x, y, width, height, Color::new(100, 100, 100));
+        device.draw_rect(x, y, width, height, crate::window::PALETTE_BORDER);
 
         // Draw items
         let mut item_y: i32 = y + 2;
@@ -170,13 +134,13 @@ impl Window for MenuBarPopup {
                             item_y,
                             width - 4,
                             item_height,
-                            Color::new(0, 120, 215),
+                            crate::window::PALETTE_HIGHLIGHT_BG,
                         );
                     }
 
                     // Draw label
                     let text_color = if self.hover_index == Some(i) {
-                        Color::WHITE
+                        crate::window::PALETTE_HIGHLIGHT_TEXT
                     } else {
                         self.text_color
                     };
@@ -273,10 +237,8 @@ impl Window for MenuBarPopup {
         }
     }
 
-    fn can_focus(&self) -> bool {
-        false
-    }
-
+    // Popup is never focusable; override the default delegation so
+    // `set_focus(true)` cannot flip `WindowBase::has_focus`.
     fn has_focus(&self) -> bool {
         false
     }
@@ -285,13 +247,5 @@ impl Window for MenuBarPopup {
 
     fn poll_pending_popup_selection(&mut self) -> Option<(WindowId, usize)> {
         self.pending_selection.take().map(|idx| (self.menu_bar_id, idx))
-    }
-
-    fn needs_repaint(&self) -> bool {
-        self.base.needs_repaint()
-    }
-
-    fn invalidate(&mut self) {
-        self.base.invalidate();
     }
 }

@@ -26,6 +26,32 @@ pub mod window_clipping;
 pub mod graphics_device_image;
 #[cfg(feature = "test")]
 pub mod desktop_window;
+#[cfg(feature = "test")]
+pub mod mouse_event_extension_tests;
+#[cfg(feature = "test")]
+pub mod layout_tests;
+#[cfg(feature = "test")]
+pub mod selection_tests;
+#[cfg(feature = "test")]
+pub mod scroll_view_tests;
+#[cfg(feature = "test")]
+pub mod trait_delegation_tests;
+#[cfg(feature = "test")]
+pub mod list_migration_tests;
+#[cfg(feature = "test")]
+pub mod tree_view_tests;
+#[cfg(feature = "test")]
+pub mod splitter_tests;
+#[cfg(feature = "test")]
+pub mod toolbar_status_tests;
+#[cfg(feature = "test")]
+pub mod path_bar_tests;
+#[cfg(feature = "test")]
+pub mod icon_view_tests;
+#[cfg(feature = "test")]
+pub mod progress_bar_tests;
+#[cfg(feature = "test")]
+pub mod text_editor_migration_tests;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -48,6 +74,19 @@ pub fn run_tests() {
     let window_clipping_tests = window_clipping::get_tests();
     let graphics_device_image_tests = graphics_device_image::get_tests();
     let desktop_window_tests = desktop_window::get_tests();
+    let mouse_event_extension_tests = mouse_event_extension_tests::get_tests();
+    let layout_tests = layout_tests::get_tests();
+    let selection_tests = selection_tests::get_tests();
+    let scroll_view_tests = scroll_view_tests::get_tests();
+    let trait_delegation_tests = trait_delegation_tests::get_tests();
+    let list_migration_tests = list_migration_tests::get_tests();
+    let tree_view_tests = tree_view_tests::get_tests();
+    let splitter_tests = splitter_tests::get_tests();
+    let toolbar_status_tests = toolbar_status_tests::get_tests();
+    let path_bar_tests = path_bar_tests::get_tests();
+    let icon_view_tests = icon_view_tests::get_tests();
+    let progress_bar_tests = progress_bar_tests::get_tests();
+    let text_editor_migration_tests = text_editor_migration_tests::get_tests();
 
     let mut total_tests = 0;
 
@@ -151,6 +190,110 @@ pub fn run_tests() {
     debug_info!("\n[DesktopWindow Tests]");
     debug_info!("Running {} tests", desktop_window_tests.len());
     for test in desktop_window_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run MouseEvent extension tests (U16)
+    debug_info!("\n[MouseEvent Extension Tests]");
+    debug_info!("Running {} tests", mouse_event_extension_tests.len());
+    for test in mouse_event_extension_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Layout tests (U2)
+    debug_info!("\n[Layout Tests]");
+    debug_info!("Running {} tests", layout_tests.len());
+    for test in layout_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Selection tests (U1)
+    debug_info!("\n[Selection Tests]");
+    debug_info!("Running {} tests", selection_tests.len());
+    for test in selection_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run ScrollView tests (U3)
+    debug_info!("\n[ScrollView Tests]");
+    debug_info!("Running {} tests", scroll_view_tests.len());
+    for test in scroll_view_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run trait-delegation tests (U5)
+    debug_info!("\n[Trait Delegation Tests]");
+    debug_info!("Running {} tests", trait_delegation_tests.len());
+    for test in trait_delegation_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run List/MultiColumnList migration tests (U6)
+    debug_info!("\n[List Migration Tests]");
+    debug_info!("Running {} tests", list_migration_tests.len());
+    for test in list_migration_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run TreeView tests (U9)
+    debug_info!("\n[TreeView Tests]");
+    debug_info!("Running {} tests", tree_view_tests.len());
+    for test in tree_view_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Splitter tests (U10)
+    debug_info!("\n[Splitter Tests]");
+    debug_info!("Running {} tests", splitter_tests.len());
+    for test in splitter_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Toolbar/StatusBar tests (U11)
+    debug_info!("\n[Toolbar/StatusBar Tests]");
+    debug_info!("Running {} tests", toolbar_status_tests.len());
+    for test in toolbar_status_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run PathBar tests (U12)
+    debug_info!("\n[PathBar Tests]");
+    debug_info!("Running {} tests", path_bar_tests.len());
+    for test in path_bar_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run IconView tests (U13)
+    debug_info!("\n[IconView Tests]");
+    debug_info!("Running {} tests", icon_view_tests.len());
+    for test in icon_view_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run ProgressBar tests (U14)
+    debug_info!("\n[ProgressBar Tests]");
+    debug_info!("Running {} tests", progress_bar_tests.len());
+    for test in progress_bar_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run TextEditor migration tests (U7)
+    debug_info!("\n[TextEditor Migration Tests]");
+    debug_info!("Running {} tests", text_editor_migration_tests.len());
+    for test in text_editor_migration_tests {
         test.run();
         total_tests += 1;
     }

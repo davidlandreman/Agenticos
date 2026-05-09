@@ -6,7 +6,7 @@
 //! - Tracking mouse position with screen bounds clamping
 //! - Button state change detection
 
-use crate::window::event::{MouseButtons, MouseEvent, MouseEventType};
+use crate::window::event::{KeyModifiers, MouseButtons, MouseEvent, MouseEventType};
 use crate::window::types::Point;
 
 /// Mouse driver state machine for processing PS/2 packets.
@@ -131,12 +131,15 @@ impl MouseDriver {
         // Determine event type based on what changed
         let event_type = self.determine_event_type(old_buttons, old_pos);
 
-        // Only generate event if something actually changed
+        // Only generate event if something actually changed.
+        // Modifiers default to all-false here; the InputProcessor fuses the
+        // tracked keyboard modifier state in before the event is dispatched.
         event_type.map(|et| MouseEvent {
             event_type: et,
             position: Point::new(self.position.0, self.position.1),
             global_position: Point::new(self.position.0, self.position.1),
             buttons: self.buttons,
+            modifiers: KeyModifiers::default(),
         })
     }
 

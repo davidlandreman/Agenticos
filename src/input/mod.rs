@@ -132,7 +132,14 @@ impl InputProcessor {
                 if self.using_virtio {
                     return None;
                 }
-                self.mouse.process_byte(byte).map(Event::Mouse)
+                // Fuse current keyboard modifier state into the mouse event
+                // so widgets can observe e.g. Shift-click without consulting
+                // global keyboard state.
+                let modifiers = self.keyboard.current_modifiers();
+                self.mouse.process_byte(byte).map(|mut ev| {
+                    ev.modifiers = modifiers;
+                    Event::Mouse(ev)
+                })
             }
         }
     }
@@ -204,6 +211,8 @@ impl InputProcessor {
             position: pos,
             global_position: pos,
             buttons: mouse_buttons,
+            // Fuse current keyboard modifier state, same as PS/2 path.
+            modifiers: self.keyboard.current_modifiers(),
         }))
     }
 
