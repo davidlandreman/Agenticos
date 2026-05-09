@@ -1,7 +1,7 @@
 ---
 title: "feat: Render bitmaps via GraphicsDevice and default desktop wallpaper"
 type: feat
-status: active
+status: completed
 created: 2026-05-08
 ---
 
