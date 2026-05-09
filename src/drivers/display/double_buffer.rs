@@ -56,6 +56,22 @@ impl DoubleBufferedFrameBuffer {
         writer
     }
     
+    /// Owned snapshot of the back buffer (DRAM) plus metadata. Reading the
+    /// back buffer is fast and avoids tearing against the compositor's
+    /// `swap_buffers`. Caller must hold the device-level mutex around this
+    /// call to serialize against renders.
+    pub fn snapshot_bytes(&self) -> (usize, usize, usize, usize, &'static str, alloc::vec::Vec<u8>) {
+        let pixel_format = match self.pixel_format {
+            PixelFormat::Rgb => "rgb",
+            PixelFormat::Bgr => "bgr",
+            PixelFormat::U8 => "u8",
+            _ => "unknown",
+        };
+        let bytes_total = self.height * self.stride * self.bytes_per_pixel;
+        let bytes = self.back_buffer[..bytes_total].to_vec();
+        (self.width, self.height, self.stride, self.bytes_per_pixel, pixel_format, bytes)
+    }
+
     pub fn get_dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
     }

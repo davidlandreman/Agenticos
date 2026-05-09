@@ -21,6 +21,7 @@ mod mm;
 mod process;
 mod stdlib;
 mod tests;
+mod tools;
 mod userland;
 mod window;
 

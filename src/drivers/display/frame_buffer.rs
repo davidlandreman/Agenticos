@@ -19,6 +19,22 @@ impl FrameBufferWriter {
         let info = self.framebuffer.info();
         (info.width, info.height)
     }
+
+    /// Owned snapshot of the framebuffer's current bytes plus metadata.
+    /// In direct mode this is uncached MMIO; expect it to be slower than
+    /// reading from DRAM. The caller (typically `screenshot`) should drop
+    /// any held WindowManager lock before transmitting the result.
+    pub fn snapshot_bytes(&self) -> (usize, usize, usize, usize, &'static str, alloc::vec::Vec<u8>) {
+        let info = self.framebuffer.info();
+        let pixel_format = match info.pixel_format {
+            PixelFormat::Rgb => "rgb",
+            PixelFormat::Bgr => "bgr",
+            PixelFormat::U8 => "u8",
+            _ => "unknown",
+        };
+        let bytes = self.framebuffer.buffer().to_vec();
+        (info.width, info.height, info.stride, info.bytes_per_pixel, pixel_format, bytes)
+    }
     
     pub fn new(framebuffer: &'static mut FrameBuffer) -> Self {
         use crate::debug_debug;

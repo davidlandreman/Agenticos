@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "agenticos": {
+      "command": "tools/mcp-bridge/run.sh",
+      "args": [],
+      "env": {
+        "AGENTICOS_RPC_SOCK": "/tmp/agenticos-rpc.sock",
+        "AGENTICOS_LOG_FILE": "/tmp/agenticos.log"
+      }
+    }
+  }
+}

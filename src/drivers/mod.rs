@@ -5,4 +5,5 @@ pub mod keyboard;
 pub mod mouse;
 pub mod pci;
 pub mod ps2_controller;
+pub mod serial;
 pub mod virtio;
