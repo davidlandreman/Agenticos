@@ -22,9 +22,9 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 
 | Type | Purpose | Notes |
 |---|---|---|
-| `DesktopWindow` | Full-screen background | Blue (RGB `0, 50, 100`). |
+| `DesktopWindow` | Full-screen background | Optionally owns BMP wallpaper bytes (loaded via `window::load_default_wallpaper`) and blits them through `GraphicsDevice::draw_image_scaled`. Falls back to solid blue (RGB `0, 50, 100`) when no wallpaper is provided or parsing fails — boot must succeed in either branch. |
 | `FrameWindow` | Title bar + borders | Active = blue chrome; inactive = grey. Title bar 24 px, border 2 px. Uses `WindowBase`. |
-| `TextWindow` | Grid-based text rendering | 8x8 bitmap font default. Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
+| `TextWindow` | Grid-based text rendering | Cell size derived from the system TTF (`get_default_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
 
@@ -34,7 +34,7 @@ All windows derive from `WindowBase` for consistent parent-child tracking.
 
 Boot lands in GUI mode:
 
-- `DesktopWindow` (full-screen, blue).
+- `DesktopWindow` (full-screen). Reads `/WALLPAPR.BMP` from the FAT root via `window::load_default_wallpaper` during `init_guishell`; on success, the BMP is stretched to the full screen via `GraphicsDevice::draw_image_scaled`. Missing or malformed wallpaper degrades to the legacy solid-blue fill — never panics.
 - `FrameWindow` titled "AgenticOS Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller).
 - `TerminalWindow` inside the frame.
 

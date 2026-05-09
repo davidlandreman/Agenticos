@@ -48,8 +48,8 @@ impl TextEditor {
     /// Create a new text editor with a specific ID
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
         let font = get_default_font();
-        let char_width = font.char_width();
-        let char_height = font.char_height();
+        let char_width = font.cell_width() as usize;
+        let char_height = font.line_height() as usize;
 
         let visible_cols = (bounds.width as usize) / char_width;
         let visible_rows = (bounds.height as usize) / char_height;
@@ -481,10 +481,10 @@ impl Window for TextEditor {
 
         // Fill background
         device.fill_rect(
-            bounds.x as usize,
-            bounds.y as usize,
-            bounds.width as usize,
-            bounds.height as usize,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
             self.bg_color,
         );
 
@@ -496,7 +496,7 @@ impl Window for TextEditor {
             }
 
             let line = &self.lines[line_idx];
-            let y = bounds.y as usize + row * self.char_height;
+            let y = bounds.y + (row * self.char_height) as i32;
 
             // Get visible portion of line
             let start_col = self.scroll_x;
@@ -510,7 +510,7 @@ impl Window for TextEditor {
                     .collect();
 
                 device.draw_text(
-                    bounds.x as usize,
+                    bounds.x,
                     y,
                     &visible_text,
                     font.as_font(),
@@ -529,11 +529,11 @@ impl Window for TextEditor {
                 && cursor_screen_col >= 0
                 && cursor_screen_col < self.visible_cols as isize
             {
-                let cursor_x = bounds.x as usize + cursor_screen_col as usize * self.char_width;
-                let cursor_y = bounds.y as usize + cursor_screen_row as usize * self.char_height;
+                let cursor_x = bounds.x + (cursor_screen_col as usize * self.char_width) as i32;
+                let cursor_y = bounds.y + (cursor_screen_row as usize * self.char_height) as i32;
 
                 // Draw cursor as vertical bar
-                device.fill_rect(cursor_x, cursor_y, 2, self.char_height, self.cursor_color);
+                device.fill_rect(cursor_x, cursor_y, 2, self.char_height as u32, self.cursor_color);
             }
         }
 

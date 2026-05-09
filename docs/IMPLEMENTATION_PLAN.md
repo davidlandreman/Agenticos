@@ -19,7 +19,7 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - **VGA Alternative**: Implemented modern framebuffer support instead of VGA
   - Single and double buffering modes
   - Full RGB color support
-  - Multiple font formats (bitmap, VFNT, TrueType)
+  - TrueType font rendering (8bpp AA via `ttf-parser` + `ab_glyph_rasterizer`); embedded 8x8 bitmap kept as parse-failure fallback
 - **Serial Port**: Debug logging system via QEMU serial
   - Hierarchical log levels (Error, Warn, Info, Debug, Trace)
   - Macro-based interface with compile-time filtering

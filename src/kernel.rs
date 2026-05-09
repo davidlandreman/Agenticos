@@ -44,6 +44,11 @@ pub fn init(boot_info: &'static mut BootInfo) {
     }
     debug_info!("Heap initialized successfully!");
 
+    // Parse and install the system font. Must run after heap init (the TTF
+    // rasterizer allocates) and before any window or TTY is constructed (the
+    // grid layout reads the font's cell dimensions exactly once).
+    crate::graphics::fonts::core_font::init_fonts();
+
     // Initialize the process scheduler
     crate::process::init_scheduler();
     debug_info!("Process scheduler initialized!");
