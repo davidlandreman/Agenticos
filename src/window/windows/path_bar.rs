@@ -293,6 +293,10 @@ impl Window for PathBar {
         &mut self.base
     }
 
+    fn as_path_bar_mut(&mut self) -> Option<&mut PathBar> {
+        Some(self)
+    }
+
     fn set_bounds(&mut self, bounds: Rect) {
         let prev = self.base.bounds();
         self.base.set_bounds(bounds);

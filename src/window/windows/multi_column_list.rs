@@ -27,6 +27,10 @@ pub type MultiColumnSelectionCallback = Box<dyn FnMut(&Selection) + Send>;
 /// Callback type for right-click events `(row_index, global_position)`.
 pub type RightClickCallback = Box<dyn FnMut(usize, Point) + Send>;
 
+/// Callback fired when the user "activates" a row — clicking an
+/// already-selected row, or pressing Enter while a row is selected.
+pub type ActivateCallback = Box<dyn FnMut(usize) + Send>;
+
 /// Column definition for the multi-column list
 #[derive(Debug, Clone)]
 pub struct Column {
@@ -66,6 +70,14 @@ pub struct MultiColumnList {
     on_select: Option<MultiColumnSelectionCallback>,
     /// Right-click callback (row_index, global_position)
     on_right_click: Option<RightClickCallback>,
+    /// Row-activation callback (fires on click of already-selected row
+    /// and on Enter key).
+    on_activate: Option<ActivateCallback>,
+    /// Last click bookkeeping for double-click detection. The tick
+    /// value is the kernel tick (100 Hz) at click time; comparing
+    /// against `get_timer_ticks()` gives elapsed time.
+    last_click_row: Option<usize>,
+    last_click_tick: u64,
     /// Background color
     bg_color: Color,
     /// Text color
@@ -93,6 +105,9 @@ impl MultiColumnList {
             row_height: 16,
             on_select: None,
             on_right_click: None,
+            on_activate: None,
+            last_click_row: None,
+            last_click_tick: 0,
             bg_color: crate::window::PALETTE_CONTENT_BG,
             text_color: crate::window::PALETTE_TEXT,
             // Header is slightly distinct from the row body so the
@@ -209,6 +224,17 @@ impl MultiColumnList {
         self.on_right_click = Some(Box::new(callback));
     }
 
+    /// Set the row-activation callback. Fires when the user clicks an
+    /// already-selected row, or presses Enter while a row is selected.
+    /// First click of an unselected row only updates selection; the
+    /// second click (with the row still selected) activates.
+    pub fn on_activate<F>(&mut self, callback: F)
+    where
+        F: FnMut(usize) + Send + 'static,
+    {
+        self.on_activate = Some(Box::new(callback));
+    }
+
     /// Header row height in pixels.
     pub fn header_height(&self) -> usize {
         self.header_height
@@ -293,6 +319,10 @@ impl Window for MultiColumnList {
 
     fn can_focus(&self) -> bool {
         true
+    }
+
+    fn as_multi_column_list_mut(&mut self) -> Option<&mut MultiColumnList> {
+        Some(self)
     }
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
@@ -405,12 +435,56 @@ impl Window for MultiColumnList {
 
                 match mouse_event.event_type {
                     MouseEventType::ButtonDown if mouse_event.buttons.left => {
+                        crate::debug_info!(
+                            "MultiColumnList: ButtonDown at position=({}, {}) bounds=({}, {}, {}, {})",
+                            mouse_event.position.x, mouse_event.position.y,
+                            bounds.x, bounds.y, bounds.width, bounds.height
+                        );
                         if let Some(index) = self.y_to_row_index(mouse_event.position.y) {
+                            crate::debug_info!(
+                                "MultiColumnList: hit row index={}, on_activate present={}",
+                                index, self.on_activate.is_some()
+                            );
+                            let was_selected = self.selection.is_selected(index);
                             let mods = ClickMods::new(
                                 mouse_event.modifiers.shift,
                                 mouse_event.modifiers.ctrl,
                             );
                             self.apply_click(index, mods);
+                            // Activation fires on either:
+                            //   1. A rapid second click on the same row
+                            //      (true double-click; <500ms apart),
+                            //   2. A single click on an already-selected
+                            //      row (matches "single-click open" mode).
+                            // Modifier-driven toggles (ctrl-click) skip
+                            // activation in both branches.
+                            let now =
+                                crate::arch::x86_64::interrupts::get_timer_ticks();
+                            let is_double_click = self.last_click_row == Some(index)
+                                && now.saturating_sub(self.last_click_tick) < 50;
+                            let still_selected = self.selection.is_selected(index);
+                            let activate_via_reclick =
+                                was_selected && still_selected;
+                            crate::debug_info!(
+                                "MultiColumnList: was_selected={} still_selected={} double_click={} reclick={}",
+                                was_selected, still_selected, is_double_click, activate_via_reclick
+                            );
+                            self.last_click_row = Some(index);
+                            self.last_click_tick = now;
+                            if !mods.ctrl && (is_double_click || activate_via_reclick) {
+                                if let Some(ref mut callback) = self.on_activate {
+                                    crate::debug_info!(
+                                        "MultiColumnList: firing on_activate for row {}",
+                                        index
+                                    );
+                                    callback(index);
+                                }
+                            }
+                        } else {
+                            crate::debug_info!(
+                                "MultiColumnList: y_to_row_index returned None for y={}",
+                                mouse_event.position.y
+                            );
                         }
                         EventResult::Handled
                     }
@@ -446,6 +520,14 @@ impl Window for MultiColumnList {
                     }
                     KeyCode::Down => {
                         self.apply_arrow(ArrowDirection::Down, mods);
+                        EventResult::Handled
+                    }
+                    KeyCode::Enter => {
+                        if let Some(idx) = self.selection.iter().next() {
+                            if let Some(ref mut callback) = self.on_activate {
+                                callback(idx);
+                            }
+                        }
                         EventResult::Handled
                     }
                     _ => EventResult::Ignored,

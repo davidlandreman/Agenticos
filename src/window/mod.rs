@@ -257,6 +257,26 @@ pub trait Window: Send {
     fn as_label_mut(&mut self) -> Option<&mut windows::label::Label> {
         None
     }
+
+    /// Typed accessor used by app code (e.g. File Explorer) to mutate
+    /// a `MultiColumnList`'s rows through the manager.
+    fn as_multi_column_list_mut(
+        &mut self,
+    ) -> Option<&mut windows::multi_column_list::MultiColumnList> {
+        None
+    }
+
+    /// Typed accessor used by app code (e.g. File Explorer) to mutate
+    /// a `TreeView` through the manager.
+    fn as_tree_view_mut(&mut self) -> Option<&mut windows::tree_view::TreeView> {
+        None
+    }
+
+    /// Typed accessor used by app code (e.g. File Explorer) to update
+    /// a `PathBar`'s path through the manager.
+    fn as_path_bar_mut(&mut self) -> Option<&mut windows::path_bar::PathBar> {
+        None
+    }
 }
 
 /// Global window manager instance

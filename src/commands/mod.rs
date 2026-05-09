@@ -17,3 +17,4 @@ pub mod guishell;
 pub mod notepad;
 pub mod tasks;
 pub mod run;
+pub mod explorer;
