@@ -1,5 +1,6 @@
 //! Graphics device abstraction for the window system
 
+use bootloader_api::info::PixelFormat;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::Font;
 use crate::graphics::images::Image;
@@ -160,49 +161,179 @@ pub trait GraphicsDevice: Send {
     fn snapshot(&self) -> Option<Snapshot> {
         None
     }
+
+    /// Pixel byte order used by this device's underlying framebuffer.
+    ///
+    /// Used by windows that maintain framebuffer-native backing stores
+    /// (see `WindowBuffer`) so subsequent blits become row `memcpy`. The
+    /// default is `Bgr` — matches the historical fallback in
+    /// `DoubleBufferedFrameBuffer::draw_pixel`'s wildcard arm and is the
+    /// common QEMU/UEFI shape. Adapters with a known different format
+    /// (real RGB framebuffers, headless test fakes) should override.
+    fn pixel_format(&self) -> PixelFormat {
+        PixelFormat::Bgr
+    }
+
+    /// Bytes occupied by each pixel in the device's framebuffer (typically
+    /// 4 — three color bytes plus one padding byte). The default matches
+    /// the common 32-bit framebuffer; adapters with a different backing
+    /// memory layout should override.
+    fn bytes_per_pixel(&self) -> usize {
+        4
+    }
+
+    /// Pixel stride between consecutive rows, in pixels. May exceed `width`
+    /// when the framebuffer is padded for alignment. The default mirrors
+    /// the device width, which is correct for tightly-packed framebuffers.
+    fn stride(&self) -> usize {
+        self.width()
+    }
+
+    /// Blit a `WindowBuffer` to `(x, y)`, honoring the active clip rect and
+    /// device bounds. The trait default walks every pixel through
+    /// `draw_pixel` (correct but slow); adapters that share their pixel
+    /// format with the buffer can override for a row `memcpy`.
+    ///
+    /// Used by the opt-in compositor path to render windows whose
+    /// `wants_backing_store()` returns true — see `Window::backing_store`.
+    fn blit_buffer(&mut self, x: i32, y: i32, buffer: &WindowBuffer) {
+        for by in 0..buffer.height {
+            let dst_y = y + by as i32;
+            let row_start = buffer.row_byte_offset(by);
+            for bx in 0..buffer.width {
+                let off = row_start + bx * buffer.bytes_per_pixel;
+                let bytes = &buffer.pixels[off..off + 3];
+                let color = match buffer.pixel_format {
+                    PixelFormat::Rgb => Color::new(bytes[0], bytes[1], bytes[2]),
+                    _ => Color::new(bytes[2], bytes[1], bytes[0]),
+                };
+                self.draw_pixel(x + bx as i32, dst_y, color);
+            }
+        }
+    }
 }
 
-/// Window buffer for per-window rendering
+/// Framebuffer-native pixel buffer for windows that opt into the backing-
+/// store compositor (see `Window::wants_backing_store`).
+///
+/// Pixels are stored in the same byte layout as the target framebuffer —
+/// three color bytes per pixel slot in `pixel_format` order, with a
+/// fourth padding byte left unwritten. Each row spans `stride_pixels *
+/// bytes_per_pixel` bytes; rows are tightly packed by default
+/// (`stride_pixels == width`) but the buffer can hold a wider stride
+/// when needed.
+///
+/// Storing in framebuffer-native format means the compositor blit is a
+/// straight `memcpy` per row — the price of the layout choice is paid
+/// once at rasterization (`write_pixel`), not every frame.
 pub struct WindowBuffer {
-    /// RGBA pixel data
-    pub pixels: alloc::vec::Vec<u32>,
-    /// Buffer width
+    /// Raw pixel bytes — `height * stride_pixels * bytes_per_pixel` long.
+    pub pixels: alloc::vec::Vec<u8>,
     pub width: usize,
-    /// Buffer height
     pub height: usize,
-    /// Dirty region that needs redrawing
-    pub dirty_region: Option<Rect>,
+    /// Pixel stride (in pixels). May exceed `width` when the source
+    /// framebuffer is padded.
+    pub stride_pixels: usize,
+    pub bytes_per_pixel: usize,
+    pub pixel_format: PixelFormat,
 }
 
 impl WindowBuffer {
-    /// Create a new window buffer
-    pub fn new(width: usize, height: usize) -> Self {
-        let pixels = alloc::vec![0u32; width * height];
+    /// Create a tightly-packed (`stride == width`) buffer matching the
+    /// given format. Pixel bytes are zero-initialized.
+    pub fn new(
+        width: usize,
+        height: usize,
+        pixel_format: PixelFormat,
+        bytes_per_pixel: usize,
+    ) -> Self {
+        let stride_pixels = width;
+        let len = height
+            .saturating_mul(stride_pixels)
+            .saturating_mul(bytes_per_pixel);
         WindowBuffer {
-            pixels,
+            pixels: alloc::vec![0u8; len],
             width,
             height,
-            dirty_region: None,
+            stride_pixels,
+            bytes_per_pixel,
+            pixel_format,
         }
     }
 
-    /// Mark a region as dirty
-    pub fn mark_dirty(&mut self, rect: Rect) {
-        self.dirty_region = match self.dirty_region {
-            None => Some(rect),
-            Some(existing) => {
-                // Expand dirty region to include new rect
-                let x1 = existing.x.min(rect.x);
-                let y1 = existing.y.min(rect.y);
-                let x2 = (existing.x + existing.width as i32).max(rect.x + rect.width as i32);
-                let y2 = (existing.y + existing.height as i32).max(rect.y + rect.height as i32);
-                Some(Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32))
-            }
-        };
+    /// Construct a buffer matching the device's reported pixel format. Use
+    /// this from any `Window::paint_into_backing_store` impl that wants to
+    /// be format-agnostic.
+    pub fn for_device(width: usize, height: usize, device: &dyn GraphicsDevice) -> Self {
+        Self::new(width, height, device.pixel_format(), device.bytes_per_pixel())
     }
 
-    /// Clear the dirty region
-    pub fn clear_dirty(&mut self) {
-        self.dirty_region = None;
+    /// Reallocate to new dimensions if they differ from the current size.
+    /// Returns `true` when reallocation happened (and pixels were zeroed).
+    pub fn resize_to(&mut self, width: usize, height: usize) -> bool {
+        if self.width == width && self.height == height {
+            return false;
+        }
+        self.width = width;
+        self.height = height;
+        self.stride_pixels = width;
+        let len = height
+            .saturating_mul(self.stride_pixels)
+            .saturating_mul(self.bytes_per_pixel);
+        self.pixels = alloc::vec![0u8; len];
+        true
+    }
+
+    /// Total backing-store size in bytes.
+    pub fn byte_len(&self) -> usize {
+        self.height * self.stride_pixels * self.bytes_per_pixel
+    }
+
+    /// Byte offset of the start of row `y`. Out-of-range `y` returns 0;
+    /// callers that pass in-range coordinates get a valid offset and
+    /// callers that don't aren't trying to read pixels.
+    #[inline]
+    pub fn row_byte_offset(&self, y: usize) -> usize {
+        y.saturating_mul(self.stride_pixels)
+            .saturating_mul(self.bytes_per_pixel)
+    }
+
+    /// Write a single pixel using the buffer's `pixel_format`. Out-of-
+    /// range coordinates are silently ignored — matches the existing
+    /// `draw_pixel` clipping contract.
+    pub fn write_pixel(&mut self, x: usize, y: usize, color: Color) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let offset = self.row_byte_offset(y) + x * self.bytes_per_pixel;
+        match self.pixel_format {
+            PixelFormat::Rgb => {
+                self.pixels[offset] = color.red;
+                self.pixels[offset + 1] = color.green;
+                self.pixels[offset + 2] = color.blue;
+            }
+            PixelFormat::Bgr => {
+                self.pixels[offset] = color.blue;
+                self.pixels[offset + 1] = color.green;
+                self.pixels[offset + 2] = color.red;
+            }
+            // Mirror DoubleBufferedFrameBuffer::draw_pixel's wildcard arm
+            // (treat unknown formats as BGR-shaped). Keeps the back buffer
+            // and backing store byte-identical so the blit stays a
+            // memcpy.
+            _ => {
+                self.pixels[offset] = color.blue;
+                self.pixels[offset + 1] = color.green;
+                self.pixels[offset + 2] = color.red;
+            }
+        }
+    }
+
+    /// Borrow row `y`'s bytes (length = `width * bytes_per_pixel`). Used
+    /// by the compositor's blit path to feed `ptr::copy_nonoverlapping`.
+    pub fn row_bytes(&self, y: usize) -> &[u8] {
+        let start = self.row_byte_offset(y);
+        let len = self.width * self.bytes_per_pixel;
+        &self.pixels[start..start + len]
     }
 }

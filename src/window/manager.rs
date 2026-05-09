@@ -687,14 +687,10 @@ impl WindowManager {
         // it's clean, leaving the front frame's title bar overdrawn.
         self.cascade_invalidation();
 
-        // Check if any windows need repaint and mark their regions dirty
-        for (window_id, window) in &self.window_registry {
-            if window.needs_repaint() {
-                let bounds = window.bounds();
-                self.compositor.dirty.mark_dirty(bounds);
-                crate::debug_trace!("Window {:?} needs repaint, marking dirty: {:?}", window_id, bounds);
-            }
-        }
+        // Mark every invalidated window's absolute bounds dirty. See
+        // `mark_dirty_for_invalidated_windows` for why this walks render
+        // order rather than the flat registry.
+        self.mark_dirty_for_invalidated_windows();
 
         // Early exit if nothing needs rendering
         if !self.compositor.needs_render() && !mouse_moved {
@@ -741,6 +737,108 @@ impl WindowManager {
         self.graphics_device.flush();
     }
 
+    /// Walk the render-order tree and mark every invalidated window's
+    /// **absolute** bounds dirty. The render tree is the source of absolute
+    /// bounds; iterating the flat registry would mark dirty using each
+    /// window's *local* bounds, which silently aliases unrelated screen
+    /// regions for any window whose parent is at a non-zero offset.
+    fn mark_dirty_for_invalidated_windows(&mut self) {
+        let order = self.collect_render_order();
+        for (window_id, abs_bounds) in &order {
+            let needs_repaint = self
+                .window_registry
+                .get(window_id)
+                .map(|w| w.needs_repaint())
+                .unwrap_or(false);
+            if needs_repaint {
+                self.compositor.dirty.mark_dirty(*abs_bounds);
+                crate::debug_trace!(
+                    "Window {:?} needs repaint, marking dirty: {:?}",
+                    window_id,
+                    abs_bounds
+                );
+            }
+        }
+    }
+
+    /// Test-only: drive just the dirty-marking pass without the rest of
+    /// `render`. Used by `tests/window_manager_render.rs`.
+    #[cfg(feature = "test")]
+    pub fn test_mark_dirty_for_invalidated_windows(&mut self) {
+        self.mark_dirty_for_invalidated_windows();
+    }
+
+    /// Test-only: snapshot of the compositor's currently-marked dirty rects.
+    #[cfg(feature = "test")]
+    pub fn test_dirty_regions(&self) -> alloc::vec::Vec<Rect> {
+        self.compositor.dirty.dirty_regions().collect()
+    }
+
+    /// Test-only: clear the compositor's dirty state and full-repaint flag
+    /// (the constructor sets full-repaint for the first frame, which a test
+    /// that wants a quiet baseline needs to reset).
+    #[cfg(feature = "test")]
+    pub fn test_clear_dirty(&mut self) {
+        self.compositor.dirty.clear();
+    }
+
+    /// Test-only: mark a single rect dirty.
+    #[cfg(feature = "test")]
+    pub fn test_mark_dirty(&mut self, rect: Rect) {
+        self.compositor.dirty.mark_dirty(rect);
+    }
+
+    /// Test-only: mark a full repaint.
+    #[cfg(feature = "test")]
+    pub fn test_mark_full_repaint(&mut self) {
+        self.compositor.dirty.mark_full_repaint();
+    }
+
+    /// Test-only: drive just the active screen's render-tree walk. Skips the
+    /// cursor and dirty-marking phases of `render`; tests set up dirty state
+    /// and invalidations themselves.
+    #[cfg(feature = "test")]
+    pub fn test_render_active_screen(&mut self) {
+        if let Some(screen) = self.get_active_screen() {
+            if let Some(root_id) = screen.root_window {
+                self.render_window_tree(root_id);
+            }
+        }
+    }
+
+    /// Test-only: force the manager into a Dragging interaction state and
+    /// pretend the left mouse button is held. Lets a test drive the drag
+    /// arm of `handle_dragging` without going through hit-testing on a
+    /// title bar.
+    #[cfg(feature = "test")]
+    pub fn test_force_drag_state(
+        &mut self,
+        window_id: WindowId,
+        start_mouse: Point,
+        start_window: Point,
+    ) {
+        self.interaction_state = InteractionState::Dragging {
+            window: window_id,
+            start_mouse,
+            start_window,
+        };
+        self.last_mouse_buttons = 0x01;
+    }
+
+    /// Test-only: invoke `handle_dragging` directly so a test can drive
+    /// drag/resize ticks without simulating mouse input through the full
+    /// interrupt pipeline.
+    #[cfg(feature = "test")]
+    pub fn test_handle_dragging(&mut self, mouse_x: i32, mouse_y: i32, buttons: u8) {
+        self.handle_dragging(mouse_x, mouse_y, buttons);
+    }
+
+    /// Test-only: did the compositor's dirty manager flip to full-repaint?
+    #[cfg(feature = "test")]
+    pub fn test_needs_full_repaint(&self) -> bool {
+        self.compositor.dirty.needs_full_repaint()
+    }
+
     /// Mark a window as needing repaint (for external callers).
     pub fn invalidate_window(&mut self, window_id: WindowId) {
         if let Some(window) = self.window_registry.get(&window_id) {
@@ -759,35 +857,37 @@ impl WindowManager {
         self.render_window_tree_with_offset(window_id, 0, 0);
     }
     
-    /// Recursively render a window and its children with parent offset
+    /// Recursively render a window and its children with parent offset.
+    ///
+    /// Decides per-window whether to paint based on the dirty union (computed
+    /// from the compositor's tracked rects). A window paints when it is
+    /// `needs_repaint()` OR its absolute bounds intersect the dirty union; the
+    /// active clip is set to the intersection of bounds with the dirty union
+    /// so paint() only writes the freshly-dirty subset of the window. Windows
+    /// that meet neither criterion are skipped entirely — that is the
+    /// dividend dirty tracking has been waiting on.
+    ///
+    /// Children are *not* force-invalidated when their parent paints. Each
+    /// window's clip is `bounds ∩ dirty_union`, so the parent's paint never
+    /// touches pixels outside the dirty union. Any child whose own bounds
+    /// intersect the dirty union picks up `should_paint = true` via
+    /// `intersects_dirty` and repaints itself; a child outside the dirty
+    /// union has no pixels overdrawn and can stay clean. (Forcing children
+    /// to invalidate here was a regression — TextWindow's incremental-cells
+    /// path requires `needs_repaint == false` to skip the full-grid redraw.)
     fn render_window_tree_with_offset(&mut self, window_id: WindowId, parent_x: i32, parent_y: i32) {
-        self.render_window_tree_with_offset_propagate(window_id, parent_x, parent_y, false);
-    }
-
-    /// Internal helper for rendering with invalidation propagation
-    fn render_window_tree_with_offset_propagate(
-        &mut self,
-        window_id: WindowId,
-        parent_x: i32,
-        parent_y: i32,
-        parent_was_repainted: bool,
-    ) {
         crate::debug_trace!("render_window_tree: {:?}, offset=({}, {})", window_id, parent_x, parent_y);
+
+        // Read once per recursive frame; the dirty manager isn't mutated
+        // during the walk so this is safe and cheap.
+        let dirty_bbox = self.compositor.dirty.bounding_box();
+
         // We need to temporarily take the window out to avoid borrowing issues
         if let Some(mut window) = self.window_registry.remove(&window_id) {
             // Get window properties before painting
             let mut bounds = window.bounds();
             let visible = window.visible();
             let children = window.children().to_vec();
-
-            // If parent was repainted, this window must also repaint
-            // (because the parent's background covered us)
-            if parent_was_repainted && !window.needs_repaint() {
-                window.invalidate();
-            }
-
-            // Check if this window will repaint (for propagating to children)
-            let will_repaint = window.needs_repaint();
 
             // Adjust bounds by parent offset
             bounds.x += parent_x;
@@ -796,33 +896,69 @@ impl WindowManager {
             crate::debug_trace!("Window {:?}: absolute_bounds={:?}, visible={}", window_id, bounds, visible);
 
             if visible {
-                // Save the original bounds
-                let original_bounds = window.bounds();
+                let intersects_dirty = dirty_bbox.map_or(false, |b| bounds.intersects(&b));
+                let should_paint = window.needs_repaint() || intersects_dirty;
 
-                // Temporarily set absolute bounds for rendering (without invalidation!)
-                window.set_bounds_no_invalidate(bounds);
+                if should_paint {
+                    let original_bounds = window.bounds();
+                    window.set_bounds_no_invalidate(bounds);
 
-                // Set clipping to window bounds
-                self.graphics_device.set_clip_rect(Some(bounds));
+                    // Clip to (bounds ∩ dirty union) so paint() / blit
+                    // targets only the freshly-dirty pixels. With no dirty
+                    // bbox (full-repaint path) fall back to the window's
+                    // own bounds.
+                    let clip = match dirty_bbox {
+                        Some(db) => bounds.intersection(&db).unwrap_or(bounds),
+                        None => bounds,
+                    };
+                    self.graphics_device.set_clip_rect(Some(clip));
 
-                // Paint the window
-                crate::debug_trace!("Calling paint on window {:?}", window_id);
-                window.paint(&mut *self.graphics_device);
+                    if window.wants_backing_store() {
+                        // Opt-in path: rasterize into the cached buffer
+                        // only when content actually changed; otherwise
+                        // (cursor-only ticks, drag of an unrelated frame
+                        // over us) just blit the existing pixels. This is
+                        // where the desktop wallpaper stops paying
+                        // re-rasterization cost on every render pass.
+                        if window.needs_repaint() || window.backing_store().is_none() {
+                            crate::debug_trace!(
+                                "Rasterizing backing store for {:?}", window_id
+                            );
+                            window.paint_into_backing_store(&*self.graphics_device);
+                        }
+                        if let Some(buf) = window.backing_store() {
+                            self.graphics_device.blit_buffer(bounds.x, bounds.y, buf);
+                        } else {
+                            // Pathological — paint_into_backing_store
+                            // didn't produce a buffer. Fall back to direct
+                            // paint() so the window doesn't disappear.
+                            crate::debug_warn!(
+                                "Window {:?} wants_backing_store but produced no \
+                                 buffer; falling back to direct paint",
+                                window_id
+                            );
+                            window.paint(&mut *self.graphics_device);
+                        }
+                    } else {
+                        crate::debug_trace!("Calling paint on window {:?}", window_id);
+                        window.paint(&mut *self.graphics_device);
+                    }
 
-                // Restore original bounds (without invalidation!)
-                window.set_bounds_no_invalidate(original_bounds);
-
-                // Put the window back
-                self.window_registry.insert(window_id, window);
-
-                // Recursively render children with updated offset
-                // Propagate repaint flag to children if this window was repainted
-                for child_id in children {
-                    self.render_window_tree_with_offset_propagate(child_id, bounds.x, bounds.y, will_repaint);
+                    window.set_bounds_no_invalidate(original_bounds);
+                    self.graphics_device.set_clip_rect(None);
+                } else {
+                    crate::debug_trace!(
+                        "Skipping paint for {:?}: clean and outside dirty union",
+                        window_id
+                    );
                 }
 
-                // Clear clipping
-                self.graphics_device.set_clip_rect(None);
+                // Put the window back before recursing into children.
+                self.window_registry.insert(window_id, window);
+
+                for child_id in children {
+                    self.render_window_tree_with_offset(child_id, bounds.x, bounds.y);
+                }
             } else {
                 // Put the window back even if not visible
                 self.window_registry.insert(window_id, window);
@@ -870,11 +1006,25 @@ impl WindowManager {
                         // Only update if position actually changed
                         if new_x != old_bounds.x || new_y != old_bounds.y {
                             // Update bounds
-                            win.set_bounds(Rect::new(new_x, new_y, old_bounds.width, old_bounds.height));
+                            let new_bounds = Rect::new(
+                                new_x, new_y, old_bounds.width, old_bounds.height,
+                            );
+                            win.set_bounds(new_bounds);
                             win.invalidate();
 
-                            // Force full repaint to properly redraw exposed areas
-                            self.compositor.dirty.mark_full_repaint();
+                            // Mark only the union of (old, new) bounds dirty
+                            // — not the whole screen. Cascade invalidation
+                            // (run later in render()) propagates this to
+                            // overlapping siblings; the desktop / background
+                            // beneath the now-exposed area is dirty-clipped
+                            // by U4's intersection logic.
+                            //
+                            // Top-level windows (the only ones draggable per
+                            // start_drag_if_on_title_bar) are children of the
+                            // root at (0, 0), so local bounds equal absolute
+                            // bounds — passing them straight to mark_dirty is
+                            // correct.
+                            self.compositor.dirty.mark_dirty(old_bounds.union(&new_bounds));
 
                             crate::debug_trace!("Dragging window {:?} to ({}, {})", window, new_x, new_y);
                         }
@@ -910,8 +1060,9 @@ impl WindowManager {
                             win.set_bounds(new_bounds);
                             win.invalidate();
 
-                            // Force full repaint to properly redraw exposed areas
-                            self.compositor.dirty.mark_full_repaint();
+                            // Same union-mark pattern as the drag arm above.
+                            // Resize is also restricted to top-level windows.
+                            self.compositor.dirty.mark_dirty(old_bounds.union(&new_bounds));
 
                             crate::debug_trace!("Resizing window {:?} to {:?}", window, new_bounds);
                         }

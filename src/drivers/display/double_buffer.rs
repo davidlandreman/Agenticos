@@ -79,11 +79,36 @@ impl DoubleBufferedFrameBuffer {
     pub fn width(&self) -> usize {
         self.width
     }
-    
+
     pub fn height(&self) -> usize {
         self.height
     }
-    
+
+    pub fn pixel_format(&self) -> PixelFormat {
+        self.pixel_format
+    }
+
+    pub fn bytes_per_pixel(&self) -> usize {
+        self.bytes_per_pixel
+    }
+
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// Mutable access to a single row of the back buffer, returned as a
+    /// byte slice of length `width * bytes_per_pixel`. Used by adapter-
+    /// level bulk blits (see `DoubleBufferedDevice::blit_buffer`) that
+    /// need to memcpy whole rows from a same-format source.
+    pub fn back_buffer_row_mut(&mut self, y: usize) -> Option<&mut [u8]> {
+        if y >= self.height {
+            return None;
+        }
+        let row_start = y * self.stride * self.bytes_per_pixel;
+        let row_end = row_start + self.width * self.bytes_per_pixel;
+        Some(&mut self.back_buffer[row_start..row_end])
+    }
+
     pub fn set_color(&mut self, color: Color) {
         self.color = color;
     }

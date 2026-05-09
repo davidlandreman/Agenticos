@@ -99,8 +99,11 @@ impl DirtyRectManager {
 
     /// Get an iterator over dirty regions.
     ///
-    /// If full repaint is needed, returns a single region covering the screen.
-    pub fn dirty_regions(&self) -> impl Iterator<Item = &Rect> {
+    /// If full repaint is needed, yields a single rect covering the screen
+    /// and then ends. Otherwise yields each tracked dirty rect once. The
+    /// iterator yields owned `Rect` values (cheap — `Rect` is `Copy`) so
+    /// callers can hold the iterator across borrows of the manager.
+    pub fn dirty_regions(&self) -> impl Iterator<Item = Rect> + '_ {
         DirtyRegionIter {
             manager: self,
             index: 0,
@@ -184,7 +187,7 @@ struct DirtyRegionIter<'a> {
 }
 
 impl<'a> Iterator for DirtyRegionIter<'a> {
-    type Item = &'a Rect;
+    type Item = Rect;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.manager.force_full_repaint {
@@ -192,12 +195,15 @@ impl<'a> Iterator for DirtyRegionIter<'a> {
                 None
             } else {
                 self.returned_full = true;
-                // Return a static full-screen rect
-                // This is a bit hacky but avoids allocation
-                None // We'll handle this differently in practice
+                Some(Rect::new(
+                    0,
+                    0,
+                    self.manager.screen_width,
+                    self.manager.screen_height,
+                ))
             }
         } else if self.index < self.manager.regions.len() {
-            let rect = &self.manager.regions[self.index];
+            let rect = self.manager.regions[self.index];
             self.index += 1;
             Some(rect)
         } else {
@@ -385,35 +391,24 @@ impl Compositor {
         self.dirty.mark_dirty(bounds);
     }
 
-    /// Update cursor position and mark dirty regions.
+    /// Record that the cursor has moved.
     ///
-    /// Returns true if the cursor actually moved.
+    /// Returns true if the cursor actually moved. Does **not** mark the
+    /// old/new cursor footprints dirty: `CursorRenderer` already restores
+    /// the saved-background pixels at the old position and re-saves at the
+    /// new position every frame, so the windows underneath the cursor do
+    /// not need to repaint to keep their pixels intact. Marking the
+    /// cursor's footprint dirty was a regression — it caused every mouse
+    /// motion to trigger a wallpaper-blit + child-window-repaint chain
+    /// (`TextWindow: Drew 228 non-space characters` perpetually) and, after
+    /// dropping the eager `parent_was_repainted` propagation, left
+    /// wallpaper bleeding through child windows that early-return when
+    /// their own content hasn't changed.
     pub fn update_cursor(&mut self, new_x: usize, new_y: usize) -> bool {
         if !self.cursor.has_moved(new_x, new_y) {
             return false;
         }
-
-        // Mark both old and new cursor positions as dirty
-        let (old_bounds, new_bounds) = self.cursor.move_to(new_x, new_y);
-
-        // Include some padding for cursor outline
-        let padding = 2;
-        let old_padded = Rect::new(
-            old_bounds.x - padding,
-            old_bounds.y - padding,
-            old_bounds.width + (padding * 2) as u32,
-            old_bounds.height + (padding * 2) as u32,
-        );
-        let new_padded = Rect::new(
-            new_bounds.x - padding,
-            new_bounds.y - padding,
-            new_bounds.width + (padding * 2) as u32,
-            new_bounds.height + (padding * 2) as u32,
-        );
-
-        self.dirty.mark_dirty(old_padded);
-        self.dirty.mark_dirty(new_padded);
-
+        self.cursor.move_to(new_x, new_y);
         true
     }
 
