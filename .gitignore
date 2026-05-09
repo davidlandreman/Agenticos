@@ -41,3 +41,10 @@ qemu.pid
 # Temporary files
 *.tmp
 .tmp/
+
+# Host-share folder mounted into the guest at /host. Only the seed files
+# (.gitkeep, HELLO.TXT, HOST.TXT) are tracked; everything else is local.
+host_share/*
+!host_share/.gitkeep
+!host_share/HELLO.TXT
+!host_share/HOST.TXT

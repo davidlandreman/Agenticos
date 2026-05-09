@@ -54,6 +54,35 @@ AgenticOS boots into a GUI desktop with a windowed terminal application. The OS 
 ./test.sh
 ```
 
+### Host Folder Mount
+
+Files placed in `host_share/` at the repo root are exposed inside the running OS at `/host`, read-only. This is the easiest way to stage fixtures, sample images, or seed config files without rebuilding the bundled BIOS image.
+
+```bash
+# Default: ./host_share/ is mounted at /host
+./build.sh
+
+# Override with any folder on disk
+AGENTICOS_HOST_SHARE=/path/to/folder ./build.sh
+```
+
+Inside the guest:
+
+```
+> ls /host
+HELLO.TXT  HOST.TXT
+> cat /host/HELLO.TXT
+Hello from the host!
+```
+
+**Caveats** (inherent to the QEMU vvfat mechanism this uses):
+
+- Filenames must be **uppercase 8.3** (e.g. `HELLO.TXT`, not `hello.txt` or `notes.markdown`). The kernel's FAT driver does not parse VFAT long-filename entries, so anything else is hidden.
+- The directory listing is **snapshotted at QEMU start**. Adding or removing a file on the host while the guest is running will not be reflected until the next boot. File contents do update live, but new files do not appear.
+- Read-only. The kernel filesystem stack does not support writes today.
+- Subdirectories are not yet traversable (existing FAT-driver limitation).
+- `host_share/` is gitignored except for the seed files. **Do not drop secrets, `.env` files, or credentials there** — the guest has no kernel/user boundary, so anything in `/host` is fully readable to anything running in the OS.
+
 ## Shell Commands
 
 Once booted, the terminal supports these commands:

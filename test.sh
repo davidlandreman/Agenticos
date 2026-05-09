@@ -18,9 +18,13 @@ cargo build --features test
 
 # Run with QEMU configured for testing
 BIOS_IMAGE="${AGENTICOS_BIOS_IMAGE:-target/bootloader/bios.img}"
+HOST_SHARE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
+mkdir -p "$HOST_SHARE"
 echo "Running tests against: $BIOS_IMAGE"
+echo "Host folder: $HOST_SHARE -> /host (read-only)"
 qemu-system-x86_64 \
-    -drive format=raw,file="$BIOS_IMAGE" \
+    -drive format=raw,file="$BIOS_IMAGE",if=ide,index=0 \
+    -drive file=fat:ro:"$HOST_SHARE",if=ide,index=1,snapshot=on \
     -serial stdio \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -display none \

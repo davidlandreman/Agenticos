@@ -1,0 +1,15 @@
+host_share/ -- developer-only host folder mounted into AgenticOS at /host.
+
+Anything you place here ships into the running guest at QEMU launch.
+QEMU re-snapshots the directory listing on each boot, so add or remove
+files between rebuilds, not while the guest is running.
+
+This folder is gitignored except for .gitkeep, HELLO.TXT, and HOST.TXT.
+DO NOT drop secrets, .env files, or credentials here. The guest has no
+user/kernel boundary; anything in /host is fully readable to anything
+running in the OS.
+
+Filenames must be uppercase 8.3 to be visible from the guest. The
+kernel's FAT driver does not parse VFAT long filename entries, so
+"my_file.txt" or "MyFile.TXT" will be hidden. Use names like
+"HELLO.TXT", "DATA.BIN", or "CONFIG.CFG".

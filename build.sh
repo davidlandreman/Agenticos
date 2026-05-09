@@ -86,8 +86,13 @@ echo "✅ Build complete!"
 # Run in QEMU if requested
 if [ "$RUN_QEMU" = true ]; then
     BIOS_IMAGE="${AGENTICOS_BIOS_IMAGE:-target/bootloader/bios.img}"
+    HOST_SHARE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
+    mkdir -p "$HOST_SHARE"
     echo "🚀 Launching QEMU with image: $BIOS_IMAGE"
-    qemu-system-x86_64 -drive format=raw,file="$BIOS_IMAGE" \
+    echo "📂 Mounting host folder: $HOST_SHARE -> /host (read-only)"
+    qemu-system-x86_64 \
+        -drive format=raw,file="$BIOS_IMAGE",if=ide,index=0 \
+        -drive file=fat:ro:"$HOST_SHARE",if=ide,index=1,snapshot=on \
         -serial stdio \
         -no-reboot -no-shutdown \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
