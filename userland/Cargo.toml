@@ -1,0 +1,27 @@
+# Userland sibling cargo workspace (D9).
+#
+# Not a member of the kernel's workspace. Built independently with its own
+# `target/`, its own `build-std`, and its own custom linker script. The
+# resulting ELF is staged into `host_share/HELLO.ELF` by `build.sh` so the
+# guest can `run /HOST/HELLO.ELF`.
+#
+# See userland/README.md for how to add a new app.
+
+[workspace]
+resolver = "2"
+members = ["runtime", "apps/hello"]
+
+# Release profile: small, panic-abort, LTO, strip. The output ELF must fit
+# inside the FAT16/vvfat-friendly 64 KiB ceiling and be acceptable to the U6
+# loader (static, non-PIE, ET_EXEC, x86_64).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+overflow-checks = false
+
+[profile.dev]
+panic = "abort"
