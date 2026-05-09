@@ -687,14 +687,10 @@ impl WindowManager {
         // it's clean, leaving the front frame's title bar overdrawn.
         self.cascade_invalidation();
 
-        // Check if any windows need repaint and mark their regions dirty
-        for (window_id, window) in &self.window_registry {
-            if window.needs_repaint() {
-                let bounds = window.bounds();
-                self.compositor.dirty.mark_dirty(bounds);
-                crate::debug_trace!("Window {:?} needs repaint, marking dirty: {:?}", window_id, bounds);
-            }
-        }
+        // Mark every invalidated window's absolute bounds dirty. See
+        // `mark_dirty_for_invalidated_windows` for why this walks render
+        // order rather than the flat registry.
+        self.mark_dirty_for_invalidated_windows();
 
         // Early exit if nothing needs rendering
         if !self.compositor.needs_render() && !mouse_moved {
@@ -739,6 +735,51 @@ impl WindowManager {
 
         // Flush to physical framebuffer
         self.graphics_device.flush();
+    }
+
+    /// Walk the render-order tree and mark every invalidated window's
+    /// **absolute** bounds dirty. The render tree is the source of absolute
+    /// bounds; iterating the flat registry would mark dirty using each
+    /// window's *local* bounds, which silently aliases unrelated screen
+    /// regions for any window whose parent is at a non-zero offset.
+    fn mark_dirty_for_invalidated_windows(&mut self) {
+        let order = self.collect_render_order();
+        for (window_id, abs_bounds) in &order {
+            let needs_repaint = self
+                .window_registry
+                .get(window_id)
+                .map(|w| w.needs_repaint())
+                .unwrap_or(false);
+            if needs_repaint {
+                self.compositor.dirty.mark_dirty(*abs_bounds);
+                crate::debug_trace!(
+                    "Window {:?} needs repaint, marking dirty: {:?}",
+                    window_id,
+                    abs_bounds
+                );
+            }
+        }
+    }
+
+    /// Test-only: drive just the dirty-marking pass without the rest of
+    /// `render`. Used by `tests/window_manager_render.rs`.
+    #[cfg(feature = "test")]
+    pub fn test_mark_dirty_for_invalidated_windows(&mut self) {
+        self.mark_dirty_for_invalidated_windows();
+    }
+
+    /// Test-only: snapshot of the compositor's currently-marked dirty rects.
+    #[cfg(feature = "test")]
+    pub fn test_dirty_regions(&self) -> alloc::vec::Vec<Rect> {
+        self.compositor.dirty.dirty_regions().collect()
+    }
+
+    /// Test-only: clear the compositor's dirty state and full-repaint flag
+    /// (the constructor sets full-repaint for the first frame, which a test
+    /// that wants a quiet baseline needs to reset).
+    #[cfg(feature = "test")]
+    pub fn test_clear_dirty(&mut self) {
+        self.compositor.dirty.clear();
     }
 
     /// Mark a window as needing repaint (for external callers).

@@ -58,6 +58,8 @@ pub mod explorer_dir_model_tests;
 pub mod explorer_dispatch_tests;
 #[cfg(feature = "test")]
 pub mod compositor;
+#[cfg(feature = "test")]
+pub mod window_manager_render;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -96,6 +98,7 @@ pub fn run_tests() {
     let explorer_dir_model_tests = explorer_dir_model_tests::get_tests();
     let explorer_dispatch_tests = explorer_dispatch_tests::get_tests();
     let compositor_tests = compositor::get_tests();
+    let window_manager_render_tests = window_manager_render::get_tests();
 
     let mut total_tests = 0;
 
@@ -327,6 +330,14 @@ pub fn run_tests() {
     debug_info!("\n[Compositor Tests]");
     debug_info!("Running {} tests", compositor_tests.len());
     for test in compositor_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run WindowManager render tests
+    debug_info!("\n[WindowManager Render Tests]");
+    debug_info!("Running {} tests", window_manager_render_tests.len());
+    for test in window_manager_render_tests {
         test.run();
         total_tests += 1;
     }
