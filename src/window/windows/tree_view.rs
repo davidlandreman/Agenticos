@@ -71,6 +71,10 @@ pub struct TreeNode {
 /// action). Receives the activated `NodeId`.
 pub type ActivateCallback = Box<dyn FnMut(NodeId) + Send>;
 
+/// Callback fired when the user clicks on a node label (selection
+/// changed via mouse). Receives the newly-selected `NodeId`.
+pub type SelectCallback = Box<dyn FnMut(NodeId) + Send>;
+
 /// Hierarchical list with expand/collapse nodes.
 pub struct TreeView {
     base: WindowBase,
@@ -82,6 +86,7 @@ pub struct TreeView {
     selection_mode: SelectionMode,
     row_height: usize,
     on_activate: Option<ActivateCallback>,
+    on_select: Option<SelectCallback>,
     bg_color: Color,
     text_color: Color,
     selected_bg_color: Color,
@@ -104,6 +109,7 @@ impl TreeView {
             selection_mode: SelectionMode::Single,
             row_height: 16,
             on_activate: None,
+            on_select: None,
             bg_color: crate::window::PALETTE_CONTENT_BG,
             text_color: crate::window::PALETTE_TEXT,
             selected_bg_color: crate::window::PALETTE_HIGHLIGHT_BG,
@@ -257,6 +263,17 @@ impl TreeView {
         F: FnMut(NodeId) + Send + 'static,
     {
         self.on_activate = Some(Box::new(callback));
+    }
+
+    /// Register the select callback (fired when the user clicks a node
+    /// label, changing the selection). Not fired by arrow-key navigation
+    /// — keyboard navigation only commits to the new selection on Enter
+    /// (which fires `on_activate`).
+    pub fn on_select<F>(&mut self, callback: F)
+    where
+        F: FnMut(NodeId) + Send + 'static,
+    {
+        self.on_select = Some(Box::new(callback));
     }
 
     /// Number of currently visible rows (non-collapsed nodes).
@@ -509,6 +526,10 @@ impl Window for TreeView {
         true
     }
 
+    fn as_tree_view_mut(&mut self) -> Option<&mut TreeView> {
+        Some(self)
+    }
+
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         if !self.base.visible() {
             return;
@@ -614,6 +635,17 @@ impl Window for TreeView {
                                 mouse_event.modifiers.ctrl,
                             );
                             self.apply_click(row, mods);
+                            // Fire on_select with the now-selected NodeId
+                            // (not the row index — callers want the
+                            // stable node identity, not the ephemeral
+                            // visible-row position).
+                            if let Some(nid) =
+                                self.visible_rows.get(row).copied()
+                            {
+                                if let Some(ref mut callback) = self.on_select {
+                                    callback(nid);
+                                }
+                            }
                         }
                         EventResult::Handled
                     }
