@@ -192,9 +192,11 @@ pub unsafe extern "C" fn syscall_fastpath_entry() {
         "pop r11",                  // user RFLAGS
 
         // Sanitize RFLAGS: clear AC (18), RF (16), NT (14), IOPL (12-13),
-        // VM (17). Mask 0xFFF88FFF clears those six bits and is sign-
-        // extended from imm32 to a 64-bit mask of 0xFFFFFFFFFFF88FFF.
-        "and r11, 0xFFF88FFF",
+        // VM (17). RFLAGS only uses bits 0-31 in long mode, so a 32-bit
+        // AND on r11d (which zeroes the upper 32 bits) is sufficient and
+        // avoids the LLVM 'invalid operand for instruction' issue with
+        // an `and r64, imm32` whose immediate has bit 31 set.
+        "and r11d, 0xFFF88FFF",
         // Force IF (9) = 1 and reserved bit 1 = 1.
         "or  r11, 0x202",
 
