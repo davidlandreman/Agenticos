@@ -782,6 +782,30 @@ impl WindowManager {
         self.compositor.dirty.clear();
     }
 
+    /// Test-only: mark a single rect dirty.
+    #[cfg(feature = "test")]
+    pub fn test_mark_dirty(&mut self, rect: Rect) {
+        self.compositor.dirty.mark_dirty(rect);
+    }
+
+    /// Test-only: mark a full repaint.
+    #[cfg(feature = "test")]
+    pub fn test_mark_full_repaint(&mut self) {
+        self.compositor.dirty.mark_full_repaint();
+    }
+
+    /// Test-only: drive just the active screen's render-tree walk. Skips the
+    /// cursor and dirty-marking phases of `render`; tests set up dirty state
+    /// and invalidations themselves.
+    #[cfg(feature = "test")]
+    pub fn test_render_active_screen(&mut self) {
+        if let Some(screen) = self.get_active_screen() {
+            if let Some(root_id) = screen.root_window {
+                self.render_window_tree(root_id);
+            }
+        }
+    }
+
     /// Mark a window as needing repaint (for external callers).
     pub fn invalidate_window(&mut self, window_id: WindowId) {
         if let Some(window) = self.window_registry.get(&window_id) {
@@ -805,7 +829,22 @@ impl WindowManager {
         self.render_window_tree_with_offset_propagate(window_id, parent_x, parent_y, false);
     }
 
-    /// Internal helper for rendering with invalidation propagation
+    /// Internal helper for rendering with invalidation propagation.
+    ///
+    /// Decides per-window whether to paint based on the dirty union (computed
+    /// from the compositor's tracked rects). A window paints when it is
+    /// `needs_repaint()` OR its absolute bounds intersect the dirty union; the
+    /// active clip is set to the intersection of bounds with the dirty union
+    /// so paint() only writes the freshly-dirty subset of the window. Windows
+    /// that meet neither criterion are skipped entirely — that is the
+    /// dividend dirty tracking has been waiting on.
+    ///
+    /// `will_repaint` (propagated to children as `parent_was_repainted`) is
+    /// `should_paint`, NOT `needs_repaint()` — when a parent paints because
+    /// its bounds intersected dirty (not because its content changed), it
+    /// still overdraws children's pixel area, so children must repaint over
+    /// it. Threading the older `needs_repaint()` value here would let a
+    /// child silently keep stale pixels.
     fn render_window_tree_with_offset_propagate(
         &mut self,
         window_id: WindowId,
@@ -814,6 +853,11 @@ impl WindowManager {
         parent_was_repainted: bool,
     ) {
         crate::debug_trace!("render_window_tree: {:?}, offset=({}, {})", window_id, parent_x, parent_y);
+
+        // Read once per recursive frame; the dirty manager isn't mutated
+        // during the walk so this is safe and cheap.
+        let dirty_bbox = self.compositor.dirty.bounding_box();
+
         // We need to temporarily take the window out to avoid borrowing issues
         if let Some(mut window) = self.window_registry.remove(&window_id) {
             // Get window properties before painting
@@ -827,9 +871,6 @@ impl WindowManager {
                 window.invalidate();
             }
 
-            // Check if this window will repaint (for propagating to children)
-            let will_repaint = window.needs_repaint();
-
             // Adjust bounds by parent offset
             bounds.x += parent_x;
             bounds.y += parent_y;
@@ -837,33 +878,49 @@ impl WindowManager {
             crate::debug_trace!("Window {:?}: absolute_bounds={:?}, visible={}", window_id, bounds, visible);
 
             if visible {
-                // Save the original bounds
-                let original_bounds = window.bounds();
+                let intersects_dirty = dirty_bbox.map_or(false, |b| bounds.intersects(&b));
+                let should_paint = window.needs_repaint() || intersects_dirty;
 
-                // Temporarily set absolute bounds for rendering (without invalidation!)
-                window.set_bounds_no_invalidate(bounds);
+                // Propagate "I painted" to children regardless of WHY I
+                // painted. See doc comment above.
+                let will_repaint = should_paint;
 
-                // Set clipping to window bounds
-                self.graphics_device.set_clip_rect(Some(bounds));
+                if should_paint {
+                    let original_bounds = window.bounds();
+                    window.set_bounds_no_invalidate(bounds);
 
-                // Paint the window
-                crate::debug_trace!("Calling paint on window {:?}", window_id);
-                window.paint(&mut *self.graphics_device);
+                    // Clip to (bounds ∩ dirty union) so paint() targets only
+                    // the freshly-dirty pixels of this window. When the
+                    // dirty union exists but misses the window (e.g. a child
+                    // invalidated mid-walk via parent_was_repainted), fall
+                    // back to the window's own bounds — its content has to
+                    // land somewhere.
+                    let clip = match dirty_bbox {
+                        Some(db) => bounds.intersection(&db).unwrap_or(bounds),
+                        None => bounds,
+                    };
+                    self.graphics_device.set_clip_rect(Some(clip));
 
-                // Restore original bounds (without invalidation!)
-                window.set_bounds_no_invalidate(original_bounds);
+                    crate::debug_trace!("Calling paint on window {:?}", window_id);
+                    window.paint(&mut *self.graphics_device);
 
-                // Put the window back
-                self.window_registry.insert(window_id, window);
-
-                // Recursively render children with updated offset
-                // Propagate repaint flag to children if this window was repainted
-                for child_id in children {
-                    self.render_window_tree_with_offset_propagate(child_id, bounds.x, bounds.y, will_repaint);
+                    window.set_bounds_no_invalidate(original_bounds);
+                    self.graphics_device.set_clip_rect(None);
+                } else {
+                    crate::debug_trace!(
+                        "Skipping paint for {:?}: clean and outside dirty union",
+                        window_id
+                    );
                 }
 
-                // Clear clipping
-                self.graphics_device.set_clip_rect(None);
+                // Put the window back before recursing into children.
+                self.window_registry.insert(window_id, window);
+
+                for child_id in children {
+                    self.render_window_tree_with_offset_propagate(
+                        child_id, bounds.x, bounds.y, will_repaint,
+                    );
+                }
             } else {
                 // Put the window back even if not visible
                 self.window_registry.insert(window_id, window);

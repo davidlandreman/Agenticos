@@ -11,8 +11,10 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use spin::Mutex;
 
 use crate::graphics::color::Color;
+use crate::lib::arc::Arc;
 use crate::lib::test_utils::Testable;
 use crate::window::{
     ColorDepth, Event, EventResult, GraphicsDevice, Rect, Window, WindowId, WindowManager,
@@ -30,29 +32,46 @@ pub(super) struct RecordedFill {
     pub color: Color,
 }
 
-pub(super) struct RecordingDevice {
-    width: usize,
-    height: usize,
-    clip: Option<Rect>,
+pub(super) struct RecordedState {
+    pub clip: Option<Rect>,
     pub fills: Vec<RecordedFill>,
     pub clip_changes: Vec<Option<Rect>>,
 }
 
-impl RecordingDevice {
-    pub fn new(width: usize, height: usize) -> Self {
-        Self {
-            width,
-            height,
-            clip: None,
-            fills: Vec::new(),
-            clip_changes: Vec::new(),
-        }
+impl RecordedState {
+    fn new() -> Self {
+        Self { clip: None, fills: Vec::new(), clip_changes: Vec::new() }
     }
 
-    /// Reset recorded operations between phases of a multi-step test.
     pub fn reset(&mut self) {
         self.fills.clear();
         self.clip_changes.clear();
+    }
+
+    /// Find every fill recorded with the given color (each TestWindow paints
+    /// a single fill keyed on its `paint_color`, so this answers "which paints
+    /// of window-X happened, and under what clip rect?").
+    pub fn fills_with_color(&self, color: Color) -> Vec<RecordedFill> {
+        self.fills.iter().copied().filter(|f| f.color == color).collect()
+    }
+}
+
+pub(super) struct RecordingDevice {
+    width: usize,
+    height: usize,
+    state: Arc<Mutex<RecordedState>>,
+}
+
+impl RecordingDevice {
+    /// Construct a paired device + shared state handle. Tests give the device
+    /// to the `WindowManager`; the state handle stays in the test for
+    /// inspection.
+    pub fn new_paired(width: usize, height: usize)
+        -> (Self, Arc<Mutex<RecordedState>>)
+    {
+        let state = Arc::new(Mutex::new(RecordedState::new()));
+        let dev = Self { width, height, state: state.clone() };
+        (dev, state)
     }
 }
 
@@ -68,12 +87,15 @@ impl GraphicsDevice for RecordingDevice {
     fn draw_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
 
     fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
-        self.fills.push(RecordedFill { clip: self.clip, x, y, width, height, color });
+        let mut s = self.state.lock();
+        let clip = s.clip;
+        s.fills.push(RecordedFill { clip, x, y, width, height, color });
     }
 
     fn set_clip_rect(&mut self, rect: Option<Rect>) {
-        self.clip = rect;
-        self.clip_changes.push(rect);
+        let mut s = self.state.lock();
+        s.clip = rect;
+        s.clip_changes.push(rect);
     }
 
     fn flush(&mut self) {}
@@ -153,12 +175,13 @@ impl Window for TestWindow {
 // ---- Helpers ------------------------------------------------------------
 
 /// Build a `WindowManager` whose graphics device is a `RecordingDevice` of
-/// the given dimensions. Returns the manager; the device is owned by the
-/// manager and is not directly accessible. Tests that need to inspect the
-/// device must drive their assertions through the manager's render path.
-fn make_manager(width: u32, height: u32) -> WindowManager {
-    let device = Box::new(RecordingDevice::new(width as usize, height as usize));
-    WindowManager::new(device)
+/// the given dimensions. Returns the manager and a handle on the device's
+/// shared state so the test can inspect what was drawn.
+fn make_manager(width: u32, height: u32)
+    -> (WindowManager, Arc<Mutex<RecordedState>>)
+{
+    let (device, state) = RecordingDevice::new_paired(width as usize, height as usize);
+    (WindowManager::new(Box::new(device)), state)
 }
 
 /// Construct a fresh test scene rooted at a screen with a top-level "desktop"
@@ -199,8 +222,7 @@ fn quiesce(wm: &mut WindowManager) {
     let ids: Vec<WindowId> = wm.window_registry.keys().cloned().collect();
     for id in ids {
         if let Some(w) = wm.window_registry.get_mut(&id) {
-            // Clear via paint into a throwaway device.
-            let mut throwaway = RecordingDevice::new(0, 0);
+            let (mut throwaway, _ignore) = RecordingDevice::new_paired(0, 0);
             w.paint(&mut throwaway);
         }
     }
@@ -210,7 +232,7 @@ fn quiesce(wm: &mut WindowManager) {
 // ---- U3 tests: absolute-bounds dirty marking ----------------------------
 
 fn test_top_level_dirty_marks_at_absolute_bounds() {
-    let mut wm = make_manager(800, 600);
+    let (mut wm, _state) = make_manager(800, 600);
     let (_root_id, _children) = build_simple_scene(
         &mut wm,
         Rect::new(0, 0, 800, 600),
@@ -231,7 +253,7 @@ fn test_top_level_dirty_marks_at_absolute_bounds() {
 }
 
 fn test_nested_child_dirty_marks_at_parent_offset() {
-    let mut wm = make_manager(800, 600);
+    let (mut wm, _state) = make_manager(800, 600);
     use crate::window::ScreenMode;
     let screen_id = wm.create_screen(ScreenMode::Gui);
     wm.switch_screen(screen_id);
@@ -270,7 +292,7 @@ fn test_nested_child_dirty_marks_at_parent_offset() {
 }
 
 fn test_two_children_at_distinct_absolute_positions() {
-    let mut wm = make_manager(800, 600);
+    let (mut wm, _state) = make_manager(800, 600);
     let (_root_id, child_ids) = build_simple_scene(
         &mut wm,
         Rect::new(0, 0, 800, 600),
@@ -289,7 +311,7 @@ fn test_two_children_at_distinct_absolute_positions() {
 }
 
 fn test_clean_window_does_not_register_dirty() {
-    let mut wm = make_manager(800, 600);
+    let (mut wm, _state) = make_manager(800, 600);
     let _ = build_simple_scene(
         &mut wm,
         Rect::new(0, 0, 800, 600),
@@ -303,11 +325,131 @@ fn test_clean_window_does_not_register_dirty() {
     assert!(dirty.is_empty(), "expected no dirty rects, got {:?}", dirty);
 }
 
+// ---- U4 tests: skip-paint + dirty-clip ---------------------------------
+
+const ROOT_COLOR: Color = Color { red: 10, green: 10, blue: 10 };
+const CHILD0_COLOR: Color = Color { red: 100, green: 0, blue: 0 };
+
+fn test_clean_distant_window_skipped() {
+    let (mut wm, state) = make_manager(800, 600);
+    let _ = build_simple_scene(
+        &mut wm,
+        Rect::new(0, 0, 800, 600),
+        &[Rect::new(400, 400, 50, 50)], // far from cursor area
+    );
+    quiesce(&mut wm);
+    state.lock().reset();
+
+    // Cursor-sized dirty rect well away from the child window.
+    wm.test_mark_dirty(Rect::new(10, 10, 22, 22));
+    wm.test_render_active_screen();
+
+    let s = state.lock();
+    assert!(
+        s.fills_with_color(CHILD0_COLOR).is_empty(),
+        "clean window outside dirty union must be skipped; got fills {:?}",
+        s.fills_with_color(CHILD0_COLOR)
+    );
+    // Root is full-screen so it always intersects any dirty rect — it should
+    // still paint (this is the AE2-residual cost the desktop opt-in resolves
+    // in U8/U9, not at this layer).
+    assert!(
+        !s.fills_with_color(ROOT_COLOR).is_empty(),
+        "full-screen root should paint when dirty intersects"
+    );
+}
+
+fn test_window_intersecting_dirty_paints_with_clipped_rect() {
+    let (mut wm, state) = make_manager(800, 600);
+    let _ = build_simple_scene(
+        &mut wm,
+        Rect::new(0, 0, 800, 600),
+        &[Rect::new(50, 50, 100, 100)],
+    );
+    quiesce(&mut wm);
+    state.lock().reset();
+
+    // Dirty fully inside child bounds.
+    wm.test_mark_dirty(Rect::new(75, 75, 50, 50));
+    wm.test_render_active_screen();
+
+    let s = state.lock();
+    let fills = s.fills_with_color(CHILD0_COLOR);
+    assert_eq!(fills.len(), 1, "child should paint exactly once");
+    // Clip is bounds ∩ dirty_bbox = (50..150) ∩ (75..125) = (75, 75, 50, 50).
+    assert_eq!(fills[0].clip, Some(Rect::new(75, 75, 50, 50)));
+}
+
+fn test_full_repaint_clips_to_window_bounds() {
+    let (mut wm, state) = make_manager(800, 600);
+    let _ = build_simple_scene(
+        &mut wm,
+        Rect::new(0, 0, 800, 600),
+        &[Rect::new(50, 50, 100, 100)],
+    );
+    quiesce(&mut wm);
+    state.lock().reset();
+
+    wm.test_mark_full_repaint();
+    // mark_full_repaint alone doesn't flag windows for repaint; render() does
+    // that via its own loop. Mirror that here so the test mirrors render's
+    // contract.
+    let ids: Vec<WindowId> = wm.window_registry.keys().cloned().collect();
+    for id in ids {
+        if let Some(w) = wm.window_registry.get_mut(&id) { w.invalidate(); }
+    }
+
+    wm.test_render_active_screen();
+
+    let s = state.lock();
+    let fills = s.fills_with_color(CHILD0_COLOR);
+    assert_eq!(fills.len(), 1);
+    // Full-repaint dirty bbox is the whole screen → clip ∩ bounds = bounds.
+    assert_eq!(fills[0].clip, Some(Rect::new(50, 50, 100, 100)));
+}
+
+fn test_parent_painted_propagates_to_clean_non_intersecting_child() {
+    // The doc-review-issue regression guard for `will_repaint = should_paint`.
+    // A parent that paints because its bounds intersected the dirty union
+    // (not because of an explicit invalidate) must still mark its children
+    // dirty so they paint over the parent's overdraw.
+    let (mut wm, state) = make_manager(800, 600);
+    let _ = build_simple_scene(
+        &mut wm,
+        Rect::new(0, 0, 800, 600),       // root: full screen
+        &[Rect::new(50, 50, 80, 80)],    // child: (50, 50, 80, 80)
+    );
+    quiesce(&mut wm);
+    state.lock().reset();
+
+    // Dirty rect lands inside root but outside child:
+    //   root  = (0..800, 0..600)
+    //   child = (50..130, 50..130)
+    //   dirty = (10..30, 10..30) — intersects root, not child.
+    wm.test_mark_dirty(Rect::new(10, 10, 20, 20));
+    wm.test_render_active_screen();
+
+    let s = state.lock();
+    assert!(!s.fills_with_color(ROOT_COLOR).is_empty(), "root should paint");
+    assert!(
+        !s.fills_with_color(CHILD0_COLOR).is_empty(),
+        "child must paint after parent overdraw, even though child neither \
+         had needs_repaint=true nor intersected the dirty rect — propagation \
+         relies on will_repaint = should_paint"
+    );
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
+        // U3 — absolute-bounds dirty marking
         &test_top_level_dirty_marks_at_absolute_bounds,
         &test_nested_child_dirty_marks_at_parent_offset,
         &test_two_children_at_distinct_absolute_positions,
         &test_clean_window_does_not_register_dirty,
+        // U4 — skip-paint + dirty-clip
+        &test_clean_distant_window_skipped,
+        &test_window_intersecting_dirty_paints_with_clipped_rect,
+        &test_full_repaint_clips_to_window_bounds,
+        &test_parent_painted_propagates_to_clean_non_intersecting_child,
     ]
 }
