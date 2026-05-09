@@ -16,6 +16,11 @@ use super::console::take_pending_invalidations;
 use super::windows::MenuBarPopup;
 
 /// The Window Manager coordinates all windows across all screens
+///
+/// Z-order is encoded directly in each parent's `children` list:
+/// `children[0]` is the bottom-most sibling, `children[len-1]` is the top.
+/// Hit-testing and rendering both consult that single ordering — there is no
+/// separate flat z-order list to drift out of sync.
 pub struct WindowManager {
     /// All screens in the system
     screens: Vec<Screen>,
@@ -25,8 +30,6 @@ pub struct WindowManager {
     pub window_registry: BTreeMap<WindowId, Box<dyn Window>>,
     /// Focus stack - top element has focus
     focus_stack: Vec<WindowId>,
-    /// Z-order of windows (back to front)
-    z_order: Vec<WindowId>,
     /// Graphics device for rendering
     pub graphics_device: Box<dyn GraphicsDevice>,
     /// Compositor for dirty tracking and cursor overlay
@@ -62,7 +65,6 @@ impl WindowManager {
             active_screen: ScreenId(0), // Will be set when first screen is created
             window_registry: BTreeMap::new(),
             focus_stack: Vec::new(),
-            z_order: Vec::new(),
             graphics_device,
             compositor: Compositor::new(width, height),
             keyboard_state: KeyboardState::default(),
@@ -125,98 +127,96 @@ impl WindowManager {
         window_id
     }
     
-    /// Set the implementation for a window
+    /// Set the implementation for a window. If the window has a parent set,
+    /// this also attaches it to the parent's children list (to the top of the
+    /// sibling z-order). Callers no longer need a separate `parent.add_child`.
     pub fn set_window_impl(&mut self, id: WindowId, window: Box<dyn Window>) {
-        // Check if this window should have a parent based on how it was created
-        // For now, we'll rely on the window having its parent set before calling this
         let parent_id = window.parent();
-        
-        // Add to registry
         self.window_registry.insert(id, window);
-        
-        // Only add to z-order if not already present
-        if !self.z_order.contains(&id) {
-            self.z_order.push(id);
-        }
-        
-        // If the window has a parent, update the parent's children list
-        if let Some(_parent_id) = parent_id {
-            // We need to add this window to its parent's children
-            // However, the current Window trait doesn't have add_child method
-            // This is a design limitation we need to work around
-        }
-    }
-    
-    /// Destroy a window and all its children
-    pub fn destroy_window(&mut self, id: WindowId) {
-        // Remove from all tracking structures
-        self.window_registry.remove(&id);
-        self.focus_stack.retain(|&wid| wid != id);
-        self.z_order.retain(|&wid| wid != id);
-        
-        // TODO: Recursively destroy children
-    }
-    
-    /// Move a window to a new position
-    pub fn move_window(&mut self, _id: WindowId, _x: i32, _y: i32) {
-        // TODO: Implement window movement
-    }
-
-    /// Resize a window
-    pub fn resize_window(&mut self, _id: WindowId, _width: u32, _height: u32) {
-        // TODO: Implement window resizing
-    }
-    
-    // Focus management
-    
-    /// Give focus to a specific window
-    pub fn focus_window(&mut self, id: WindowId) {
-        // Remove from focus stack if already present
-        self.focus_stack.retain(|&wid| wid != id);
-
-        // Add to top of focus stack
-        if let Some(window) = self.window_registry.get(&id) {
-            if window.can_focus() {
-                // Remove focus from current window AND its parent frame
-                if let Some(&current_focus) = self.focus_stack.last() {
-                    if let Some(current_window) = self.window_registry.get_mut(&current_focus) {
-                        current_window.set_focus(false);
-                    }
-                    // Also unfocus the parent frame if it exists
-                    if let Some(current_window) = self.window_registry.get(&current_focus) {
-                        if let Some(parent_id) = current_window.parent() {
-                            if let Some(parent) = self.window_registry.get_mut(&parent_id) {
-                                parent.set_focus(false);
-                            }
-                        }
-                    }
-                }
-
-                // Set focus on new window
-                self.focus_stack.push(id);
-                if let Some(window) = self.window_registry.get_mut(&id) {
-                    window.set_focus(true);
-                }
+        if let Some(parent_id) = parent_id {
+            if let Some(parent) = self.window_registry.get_mut(&parent_id) {
+                parent.add_child(id);
             }
         }
     }
-    
+
+    /// Destroy a window and all of its descendants.
+    pub fn destroy_window(&mut self, id: WindowId) {
+        // Snapshot children first (since registry is mutated below).
+        let children: Vec<WindowId> = self.window_registry
+            .get(&id)
+            .map(|w| w.children().to_vec())
+            .unwrap_or_default();
+        for child_id in children {
+            self.destroy_window(child_id);
+        }
+
+        // Detach from parent's children list.
+        let parent_id = self.window_registry.get(&id).and_then(|w| w.parent());
+        if let Some(parent_id) = parent_id {
+            if let Some(parent) = self.window_registry.get_mut(&parent_id) {
+                parent.remove_child(id);
+            }
+        }
+
+        self.window_registry.remove(&id);
+        self.focus_stack.retain(|&wid| wid != id);
+    }
+
+    // Focus management
+
+    /// Give focus to a specific window.
+    ///
+    /// Also brings the window (and its ancestors) to the front of their parent's
+    /// children list, and sets the visual focus state on a parent frame so the
+    /// chrome displays as active. Most callers want this — focus implies the
+    /// window should be visible and on top.
+    pub fn focus_window(&mut self, id: WindowId) {
+        let can_focus = self.window_registry.get(&id).map(|w| w.can_focus()).unwrap_or(false);
+        if !can_focus {
+            return;
+        }
+
+        // Unfocus the previously focused window and its parent frame (if any).
+        if let Some(&current_focus) = self.focus_stack.last() {
+            let current_parent = self.window_registry
+                .get(&current_focus)
+                .and_then(|w| w.parent());
+            if let Some(w) = self.window_registry.get_mut(&current_focus) {
+                w.set_focus(false);
+            }
+            if let Some(parent_id) = current_parent {
+                if let Some(parent) = self.window_registry.get_mut(&parent_id) {
+                    parent.set_focus(false);
+                }
+            }
+        }
+
+        // Move to top of focus stack.
+        self.focus_stack.retain(|&wid| wid != id);
+        self.focus_stack.push(id);
+
+        // Set focus on the target.
+        if let Some(w) = self.window_registry.get_mut(&id) {
+            w.set_focus(true);
+        }
+
+        // Visually focus parent frame too (so the title bar turns blue when a
+        // content window like a terminal is the keyboard target).
+        let parent_id = self.window_registry.get(&id).and_then(|w| w.parent());
+        if let Some(parent_id) = parent_id {
+            if let Some(parent) = self.window_registry.get_mut(&parent_id) {
+                parent.set_focus(true);
+            }
+        }
+
+        // Bring this window (and its ancestor chain) to the front.
+        self.bring_to_front(id);
+    }
+
     /// Get the currently focused window
     pub fn focused_window(&self) -> Option<WindowId> {
         self.focus_stack.last().copied()
-    }
-    
-    /// Write text to a specific window (if it's a TextWindow)
-    pub fn write_to_window(&mut self, window_id: WindowId, _text: &str) {
-        // We need to temporarily remove the window to get mutable access
-        if let Some(window) = self.window_registry.remove(&window_id) {
-            // Try to downcast to TextWindow and write
-            // This is a bit hacky but works for now
-            // In the future we'd want a better interface
-            
-            // Put the window back
-            self.window_registry.insert(window_id, window);
-        }
     }
     
     // Event routing
@@ -354,44 +354,112 @@ impl WindowManager {
             }
         }
 
-        // If modal dialog is active, only route to modal dialog and its children
+        // If modal dialog is active, only route within the modal subtree.
         if let Some(modal_id) = self.modal_dialog {
-            // Find window under cursor within modal dialog hierarchy
-            for &window_id in self.z_order.iter().rev() {
-                if !self.is_modal_window(window_id) && window_id != modal_id {
-                    continue; // Skip non-modal windows
-                }
-
-                if let Some(global_bounds) = self.get_global_bounds(window_id) {
-                    if global_bounds.contains_point(global_pos) {
-                        let mut local_event = event;
-                        local_event.position = Point::new(
-                            global_pos.x - global_bounds.x,
-                            global_pos.y - global_bounds.y,
-                        );
-                        self.route_event_to_window(window_id, Event::Mouse(local_event));
-                        return;
-                    }
-                }
+            if let Some((hit_id, hit_bounds)) = self.topmost_at(modal_id, global_pos, 0, 0) {
+                let mut local_event = event;
+                local_event.position = Point::new(
+                    global_pos.x - hit_bounds.x,
+                    global_pos.y - hit_bounds.y,
+                );
+                self.route_event_to_window(hit_id, Event::Mouse(local_event));
             }
             // Click outside modal dialog - ignore
             return;
         }
 
-        // Walk z-order from front to back (topmost windows first)
-        for &window_id in self.z_order.iter().rev() {
-            // Get global bounds for this window (accounts for parent hierarchy)
-            if let Some(global_bounds) = self.get_global_bounds(window_id) {
-                if global_bounds.contains_point(global_pos) {
-                    // Create local event with position relative to this window's global position
-                    let mut local_event = event;
-                    local_event.position = Point::new(
-                        global_pos.x - global_bounds.x,
-                        global_pos.y - global_bounds.y,
-                    );
+        // Walk the active screen's window tree front-to-back, descending
+        // into children last-first (so topmost siblings are tested first).
+        let root_id = self.get_active_screen().and_then(|s| s.root_window);
+        if let Some(root_id) = root_id {
+            if let Some((hit_id, hit_bounds)) = self.topmost_at(root_id, global_pos, 0, 0) {
+                let mut local_event = event;
+                local_event.position = Point::new(
+                    global_pos.x - hit_bounds.x,
+                    global_pos.y - hit_bounds.y,
+                );
+                self.route_event_to_window(hit_id, Event::Mouse(local_event));
+            }
+        }
+    }
 
-                    self.route_event_to_window(window_id, Event::Mouse(local_event));
-                    break;
+    /// Walk the subtree rooted at `id` and return the topmost visible window
+    /// whose absolute bounds contain `point`, along with those absolute bounds.
+    /// Children are tested last-to-first to honor sibling z-order.
+    fn topmost_at(&self, id: WindowId, point: Point, parent_x: i32, parent_y: i32) -> Option<(WindowId, Rect)> {
+        let window = self.window_registry.get(&id)?;
+        if !window.visible() {
+            return None;
+        }
+        let local = window.bounds();
+        let abs = Rect::new(local.x + parent_x, local.y + parent_y, local.width, local.height);
+        if !abs.contains_point(point) {
+            return None;
+        }
+        for &child_id in window.children().iter().rev() {
+            if let Some(hit) = self.topmost_at(child_id, point, abs.x, abs.y) {
+                return Some(hit);
+            }
+        }
+        Some((id, abs))
+    }
+
+    /// Walk the active screen's tree in render order (depth-first, children
+    /// in declaration order — same order `render_window_tree` paints in)
+    /// and return each window's id and absolute bounds.
+    fn collect_render_order(&self) -> Vec<(WindowId, Rect)> {
+        let mut out = Vec::new();
+        if let Some(root_id) = self.get_active_screen().and_then(|s| s.root_window) {
+            self.collect_render_order_recursive(root_id, 0, 0, &mut out);
+        }
+        out
+    }
+
+    fn collect_render_order_recursive(
+        &self,
+        id: WindowId,
+        parent_x: i32,
+        parent_y: i32,
+        out: &mut Vec<(WindowId, Rect)>,
+    ) {
+        let window = match self.window_registry.get(&id) {
+            Some(w) => w,
+            None => return,
+        };
+        if !window.visible() {
+            return;
+        }
+        let local = window.bounds();
+        let abs = Rect::new(local.x + parent_x, local.y + parent_y, local.width, local.height);
+        out.push((id, abs));
+        for &child_id in window.children() {
+            self.collect_render_order_recursive(child_id, abs.x, abs.y, out);
+        }
+    }
+
+    /// For each dirty window, mark every later (above-in-z-order) window
+    /// whose absolute bounds overlap as also dirty. This propagates in a
+    /// single forward pass: by the time the loop reaches an index, any
+    /// earlier overlapping dirty window has already invalidated it.
+    fn cascade_invalidation(&mut self) {
+        let order = self.collect_render_order();
+        for i in 0..order.len() {
+            let (id_i, bounds_i) = order[i];
+            let dirty_i = self.window_registry
+                .get(&id_i)
+                .map(|w| w.needs_repaint())
+                .unwrap_or(false);
+            if !dirty_i {
+                continue;
+            }
+            for j in (i + 1)..order.len() {
+                let (id_j, bounds_j) = order[j];
+                if bounds_i.intersects(&bounds_j) {
+                    if let Some(w) = self.window_registry.get_mut(&id_j) {
+                        if !w.needs_repaint() {
+                            w.invalidate();
+                        }
+                    }
                 }
             }
         }
@@ -552,6 +620,13 @@ impl WindowManager {
 
         // Update cursor position in compositor (this marks dirty regions)
         let mouse_moved = self.compositor.update_cursor(mouse_x, mouse_y);
+
+        // Cascade invalidation across the z-order so that any window in
+        // front of a dirty one (and overlapping it) repaints too. Without
+        // this, a dirty inner widget (e.g. an editor in the inactive
+        // notepad) paints over the chrome of a later sibling that thinks
+        // it's clean, leaving the front frame's title bar overdrawn.
+        self.cascade_invalidation();
 
         // Check if any windows need repaint and mark their regions dirty
         for (window_id, window) in &self.window_registry {
@@ -792,28 +867,25 @@ impl WindowManager {
             return;
         }
 
-        // Find the topmost window under the mouse
-        // Only check top-level windows (direct children of desktop, which have a parent)
-        // Skip child windows like terminals inside frames - their bounds are parent-relative
+        // Find the topmost top-level window under the mouse. "Top-level" means
+        // a direct child of the screen's root (i.e., a frame on the desktop).
+        // Children of top-level windows (like terminals inside frames) are
+        // intentionally skipped: drag/resize hit-testing operates on the frame.
         let mut target_window = None;
         let mut target_hit = HitTestResult::None;
 
-        for &window_id in self.z_order.iter().rev() {
-            if let Some(window) = self.window_registry.get(&window_id) {
-                // Skip windows that are children of other windows (not top-level)
-                // Top-level windows have a parent (the desktop), but their children
-                // (like terminals inside frames) should be skipped
-                if let Some(parent_id) = window.parent() {
-                    // Check if parent is a frame (has its own parent = desktop)
-                    if let Some(parent) = self.window_registry.get(&parent_id) {
-                        if parent.parent().is_some() {
-                            // This window's parent has a parent, so this is a grandchild
-                            // (e.g., terminal inside frame inside desktop) - skip it
-                            continue;
-                        }
-                    }
-                }
+        let root_id = self.get_active_screen().and_then(|s| s.root_window);
+        let top_level: Vec<WindowId> = root_id
+            .and_then(|rid| self.window_registry.get(&rid))
+            .map(|root| root.children().to_vec())
+            .unwrap_or_default();
 
+        // Walk last-to-first so topmost siblings are tested first.
+        for &window_id in top_level.iter().rev() {
+            if let Some(window) = self.window_registry.get(&window_id) {
+                if !window.visible() {
+                    continue;
+                }
                 let bounds = window.bounds();
                 let local_x = mouse_x - bounds.x;
                 let local_y = mouse_y - bounds.y;
@@ -903,7 +975,6 @@ impl WindowManager {
                             start_mouse: Point::new(mouse_x, mouse_y),
                             start_window: Point::new(bounds.x, bounds.y),
                         };
-                        self.bring_to_front(window_id);
                         self.focus_frame_and_content(window_id);
                     }
                     HitTestResult::Border(edge) => {
@@ -914,13 +985,11 @@ impl WindowManager {
                             start_mouse: Point::new(mouse_x, mouse_y),
                             start_bounds: bounds,
                         };
-                        self.bring_to_front(window_id);
                         self.focus_frame_and_content(window_id);
                     }
                     HitTestResult::Client => {
                         // Clicked in client area - focus the window
                         crate::debug_info!("Clicked client area of {:?}", window_id);
-                        self.bring_to_front(window_id);
                         self.focus_frame_and_content(window_id);
                     }
                     HitTestResult::CloseButton => {
@@ -935,88 +1004,56 @@ impl WindowManager {
         }
     }
 
-    /// Focus a frame window and its content (terminal) window
+    /// Click landed on a frame window — focus its content for keyboard
+    /// input. We search depth-first for the first focusable descendant
+    /// (e.g. the editor or terminal), since a frame's literal first child
+    /// might be a menu bar or other non-focusable widget. Falls back to
+    /// the frame itself, which is always focusable.
     fn focus_frame_and_content(&mut self, frame_id: WindowId) {
-        // First, unfocus the currently focused window and its parent frame
-        if let Some(&current_focus) = self.focus_stack.last() {
-            // Unfocus the current window
-            if let Some(window) = self.window_registry.get_mut(&current_focus) {
-                window.set_focus(false);
-            }
-            // Also unfocus its parent frame if it has one
-            if let Some(window) = self.window_registry.get(&current_focus) {
-                if let Some(parent_id) = window.parent() {
-                    if let Some(parent) = self.window_registry.get_mut(&parent_id) {
-                        parent.set_focus(false);
-                    }
+        let target = self.first_focusable_descendant(frame_id).unwrap_or(frame_id);
+        self.focus_window(target);
+    }
+
+    /// Depth-first search for the first focusable window in `id`'s subtree
+    /// (excluding `id` itself).
+    fn first_focusable_descendant(&self, id: WindowId) -> Option<WindowId> {
+        let window = self.window_registry.get(&id)?;
+        for &child_id in window.children() {
+            if let Some(child) = self.window_registry.get(&child_id) {
+                if child.can_focus() {
+                    return Some(child_id);
+                }
+                if let Some(found) = self.first_focusable_descendant(child_id) {
+                    return Some(found);
                 }
             }
         }
-
-        // Focus the frame window (for blue title bar)
-        if let Some(frame) = self.window_registry.get_mut(&frame_id) {
-            frame.set_focus(true);
-        }
-
-        // Find and focus the content window (terminal) for keyboard input
-        let content_id = {
-            if let Some(frame) = self.window_registry.get(&frame_id) {
-                // Get the first child which should be the terminal
-                frame.children().first().copied()
-            } else {
-                None
-            }
-        };
-
-        if let Some(content_id) = content_id {
-            // Update focus stack
-            self.focus_stack.retain(|&id| id != content_id);
-            self.focus_stack.push(content_id);
-
-            if let Some(content) = self.window_registry.get_mut(&content_id) {
-                content.set_focus(true);
-            }
-            crate::debug_info!("Focused frame {:?} and content {:?}", frame_id, content_id);
-        } else {
-            // No content, just focus the frame itself
-            self.focus_stack.retain(|&id| id != frame_id);
-            self.focus_stack.push(frame_id);
-            crate::debug_info!("Focused frame {:?} (no content)", frame_id);
-        }
+        None
     }
 
-    /// Bring a window to the front of the z-order.
-    /// Also brings all children to front (after the parent).
+    /// Bring a window to the front of its parent's children list (i.e. the
+    /// top of its sibling z-order), and recursively do the same for every
+    /// ancestor up to the root. This is the single source of truth for
+    /// z-order — rendering and hit-testing both read it from `children()`.
     pub fn bring_to_front(&mut self, window_id: WindowId) {
-        // First collect all children recursively
-        let children = self.collect_children_recursive(window_id);
-
-        // Remove from current position
-        self.z_order.retain(|&id| id != window_id);
-        // Add to front
-        self.z_order.push(window_id);
-
-        // Also move all children to front (after parent)
-        for child_id in children {
-            self.z_order.retain(|&id| id != child_id);
-            self.z_order.push(child_id);
-        }
-
-        // Mark entire screen as needing repaint for proper layering
-        self.compositor.dirty.mark_full_repaint();
-    }
-
-    /// Recursively collect all children of a window
-    fn collect_children_recursive(&self, window_id: WindowId) -> Vec<WindowId> {
-        let mut result = Vec::new();
-        if let Some(window) = self.window_registry.get(&window_id) {
-            for &child_id in window.children() {
-                result.push(child_id);
-                // Recursively get children of children
-                result.extend(self.collect_children_recursive(child_id));
+        let mut current = window_id;
+        loop {
+            let parent_id = match self.window_registry.get(&current).and_then(|w| w.parent()) {
+                Some(p) => p,
+                None => break, // reached the root
+            };
+            if let Some(parent) = self.window_registry.get_mut(&parent_id) {
+                // remove_child + add_child moves the entry to the end of the
+                // children Vec, which is the top of the local z-order.
+                parent.remove_child(current);
+                parent.add_child(current);
             }
+            current = parent_id;
         }
-        result
+
+        // Sibling reordering means areas previously occluded may now be
+        // visible (and vice versa), so force a full repaint.
+        self.compositor.dirty.mark_full_repaint();
     }
 
     /// Calculate the global bounds of a window by traversing the parent chain
