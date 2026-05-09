@@ -3,7 +3,7 @@ use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use crate::{debug_error, debug_info, println};
+use crate::{debug_error, debug_info, debug_trace, println};
 use crate::userland::lifecycle::{cleanup_user_process, frame_is_user, AbnormalExit};
 
 /// If the saved CS in the interrupt frame has RPL=3, the fault occurred in
@@ -98,20 +98,11 @@ lazy_static! {
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Mouse.as_usize()].set_handler_fn(mouse_interrupt_handler);
 
-        // Userland syscall vector (D1 / U5). DPL=3 so ring-3 code may issue
-        // `int 0x80` without #GP. We use an interrupt gate (IF auto-cleared
-        // on entry) — the safer default for the first cut. The handler is
-        // a `#[naked]` stub that builds a SyscallArgs frame on the stack
-        // and calls into the Rust dispatcher; see `arch::x86_64::syscall`.
-        unsafe {
-            use x86_64::PrivilegeLevel;
-            use crate::arch::x86_64::syscall::{syscall_interrupt_handler, SYSCALL_VECTOR};
-            let handler_addr = syscall_interrupt_handler as usize;
-            idt[SYSCALL_VECTOR as usize]
-                .set_handler_addr(x86_64::VirtAddr::new(handler_addr as u64))
-                .set_privilege_level(PrivilegeLevel::Ring3);
-        }
-
+        // The legacy `int 0x80` IDT vector that PR #12 installed has been
+        // removed: userland now enters the kernel via the `syscall` instruction
+        // (programmed in `arch::x86_64::syscall::init_syscall_msrs`). A stray
+        // `int 0x80` from a user binary now triggers `#GP`, which the
+        // existing exception path routes to `cleanup_user_process`.
         idt
     };
 }
@@ -265,9 +256,14 @@ extern "x86-interrupt" fn page_fault_handler(
 
     if (addr >= HEAP_START && addr < HEAP_END) ||
        (addr >= STACK_REGION_START && addr < STACK_REGION_END) {
-        // This is a heap or stack access - allocate and map a page
+        // This is a heap or stack access - allocate and map a page.
+        // Per-fault trace logging only; routine demand-paging at default
+        // log level shouldn't burn UART vmexits. See plan U2
+        // (docs/plans/2026-05-09-002-perf-frame-allocator-and-page-fault-hot-path-plan.md).
+        // The opening `>>> PAGE FAULT at ...` line above stays at info so
+        // an unexpected fault is still visible.
         let region = if addr >= STACK_REGION_START { "stack" } else { "heap" };
-        debug_info!("Page fault in {} region at {:?}", region, accessed_addr);
+        debug_trace!("Page fault in {} region at {:?}", region, accessed_addr);
 
         // Try to handle the page fault
         if let Some(mapper) = unsafe { crate::mm::paging::get_mapper() } {

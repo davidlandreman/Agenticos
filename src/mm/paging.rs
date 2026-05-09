@@ -8,7 +8,7 @@ use x86_64::{
     },
     VirtAddr, PhysAddr,
 };
-use crate::{debug_info, debug_error};
+use crate::{debug_info, debug_error, debug_trace};
 use super::frame_allocator::BootInfoFrameAllocator;
 
 /// Base virtual address where a static non-PIE user binary is loaded.
@@ -17,14 +17,44 @@ pub const USER_LOAD_BASE: u64 = 0x0000_0000_0040_0000;
 /// Top of the user stack (exclusive). The stack grows down from here.
 pub const USER_STACK_TOP: u64 = 0x0000_0000_0080_0000;
 
-/// Fixed virtual address of the user trampoline page (4 KiB, R+X+USER, NX off).
-/// Set up in U5; U4 only reserves the address.
-pub const USER_TRAMPOLINE_VA: u64 = 0x0000_0000_0090_0000;
+/// Base virtual address of the per-process TLS region.
+///
+/// Layout (x86-64 TLS variant II):
+/// - `[USER_TLS_IMAGE_VA, USER_TLS_IMAGE_VA + 0x1000)` — TLS image (tdata + tbss)
+/// - `[USER_TCB_VA, USER_TCB_VA + 0x1000)` — TCB. FS_BASE points at this page;
+///   `%fs:0` returns the self-pointer recorded at offset 0.
+///
+/// Sized at 1 page each for the milestone — libstdc++'s static TLS image
+/// (errno + `__cxa_eh_globals` slots, etc.) is well under 4 KiB. The
+/// loader rejects with `TlsUnsupported` if `p_memsz` exceeds this.
+///
+/// Sits above the user stack (top 0x80_0000) and well below USER_VA_RANGE_END
+/// at 0x4000_0000, leaving room above for future brk and mmap arenas.
+pub const USER_TLS_IMAGE_VA: u64 = 0x0000_0000_0100_0000;
+pub const USER_TCB_VA: u64 = 0x0000_0000_0100_1000;
+
+/// Initial brk anchor. `brk(0)` returns this; subsequent `brk(addr)` calls
+/// grow up to `addr`, mapping pages on demand. Sized so musl's mallocng
+/// initial heap fits without colliding with the mmap arena above.
+pub const USER_BRK_BASE: u64 = 0x0000_0000_0200_0000; // 32 MiB
+
+/// Base of the per-process mmap arena. Anonymous-only `mmap` calls bump
+/// upward from this address, allocating `len` rounded up to page granularity
+/// per call. Reaches `USER_VA_RANGE_END` at 1 GiB; the gap between the brk
+/// arena and here is ~16 MiB which is plenty for the milestone heap.
+pub const USER_MMAP_BASE: u64 = 0x0000_0000_0300_0000; // 48 MiB
 
 /// Inclusive lower / exclusive upper bounds of the user-VA range. Anything
 /// outside is reserved for the kernel and `map_user_region` rejects it.
+///
+/// Sized to host a multi-MiB libstdc++ static binary plus its TLS block,
+/// brk arena, mmap arena, and stack. The 1 GiB ceiling at 0x4000_0000 is
+/// the U4+U5 expansion from the original ~9 MiB window — well below any
+/// kernel-side VA region. Sub-region constants for the TLS block, brk
+/// anchor, and mmap arena are introduced by U7 / U9 as those features
+/// land; for now only the load base and stack top are pinned.
 pub const USER_VA_RANGE_START: u64 = USER_LOAD_BASE;
-pub const USER_VA_RANGE_END: u64 = USER_TRAMPOLINE_VA + 0x1000;
+pub const USER_VA_RANGE_END: u64 = 0x0000_0000_4000_0000;
 
 /// Permission profile applied to a user-mode mapping. Values are explicit
 /// rather than packed flags so the loader cannot accidentally hand `WRITABLE`
@@ -129,6 +159,22 @@ impl MemoryMapper {
 
     pub fn translate_addr(&self, addr: VirtAddr) -> Option<PhysAddr> {
         self.mapper.translate_addr(addr)
+    }
+
+    /// Test-only: allocate one physical frame from the live frame
+    /// allocator. Used by `tests::memory::test_live_frame_allocator_throughput`
+    /// to confirm the U1 cursor's O(1) claim against the real memory map.
+    /// Each call permanently consumes a frame for the rest of the test run.
+    #[cfg(feature = "test")]
+    pub fn allocate_test_frame(&mut self) -> Option<PhysFrame> {
+        use x86_64::structures::paging::FrameAllocator;
+        self.frame_allocator.allocate_frame()
+    }
+
+    /// Test-only: total frames issued by the live frame allocator.
+    #[cfg(feature = "test")]
+    pub fn frames_issued(&self) -> u64 {
+        self.frame_allocator.frames_issued()
     }
     
     /// Map `num_pages` consecutive 4 KiB pages starting at `virt_start` into
@@ -276,13 +322,18 @@ impl MemoryMapper {
     }
 
     pub fn handle_page_fault(&mut self, addr: VirtAddr) -> Result<(), MapToError<Size4KiB>> {
-        debug_info!("Handling page fault for address: {:?}", addr);
-        
+        // Hot path: per-fault diagnostic logs are at trace level so the
+        // default boot doesn't spend UART vmexits on routine demand-paging.
+        // See plan U2 (docs/plans/2026-05-09-002-perf-frame-allocator-and-page-fault-hot-path-plan.md).
+        // The opening `>>> PAGE FAULT at ...` line in the IDT handler stays
+        // at info — that one line is what a debugger needs to see.
+        debug_trace!("Handling page fault for address: {:?}", addr);
+
         let page = Page::containing_address(addr);
-        
+
         // Don't check if page is already mapped - that check itself might cause a page fault!
         // Just try to map it and handle any errors
-        
+
         // Check if this is a physical memory region access
         // Use the actual physical memory offset from our mapper
         let phys_mem_offset = self.physical_memory_offset.as_u64();
@@ -296,18 +347,18 @@ impl MemoryMapper {
                 .allocate_frame()
                 .ok_or(MapToError::FrameAllocationFailed)?
         };
-            
+
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-        
+
         unsafe {
             match self.mapper.map_to(page, frame, flags, &mut self.frame_allocator) {
                 Ok(flush) => {
                     flush.flush();
-                    debug_info!("Successfully mapped page {:?} to frame {:?}", page, frame);
+                    debug_trace!("Successfully mapped page {:?} to frame {:?}", page, frame);
                 }
                 Err(MapToError::PageAlreadyMapped(_)) => {
                     // Page is already mapped, that's fine
-                    debug_info!("Page {:?} was already mapped", page);
+                    debug_trace!("Page {:?} was already mapped", page);
                     return Ok(());
                 }
                 Err(e) => {
@@ -316,7 +367,7 @@ impl MemoryMapper {
                 }
             }
         }
-        
+
         Ok(())
     }
 }

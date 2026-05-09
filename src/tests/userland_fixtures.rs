@@ -219,27 +219,28 @@ pub fn runnable_elf_rx(code: &[u8]) -> Vec<u8> {
     .build()
 }
 
-/// Hand-assembled "hello + exit(0)" app. Layout in the single R+X page:
+/// Hand-assembled "write(stdout, msg) + exit_group(0)" app using the
+/// Linux x86-64 ABI (`syscall` instruction, Linux syscall numbers).
+///
+/// Layout in the single R+X page:
 ///
 /// ```
-/// 0x40_0000:  mov rax, 0       ; B8 00 00 00 00
-/// 0x40_0005:  mov rdi, 0x400080 ; 48 BF 80 00 40 00 00 00 00 00
-/// 0x40_000F:  mov rsi, 6       ; BE 06 00 00 00
-/// 0x40_0014:  int 0x80         ; CD 80         (print)
-/// 0x40_0016:  mov rax, 1       ; B8 01 00 00 00
-/// 0x40_001B:  mov rdi, 0       ; BF 00 00 00 00
-/// 0x40_0020:  int 0x80         ; CD 80         (exit)
-/// 0x40_0022:  hlt              ; F4            (safety)
+/// 0x40_0000:  mov eax, 1            ; B8 01 00 00 00          (write)
+/// 0x40_0005:  mov edi, 1            ; BF 01 00 00 00          (fd = stdout)
+/// 0x40_000A:  mov rsi, 0x400080     ; 48 BE 80 00 40 00 00 00 00 00  (buf)
+/// 0x40_0014:  mov edx, len          ; BA <len32>              (count)
+/// 0x40_0019:  syscall               ; 0F 05
+/// 0x40_001B:  mov eax, 231          ; B8 E7 00 00 00          (exit_group)
+/// 0x40_0020:  mov edi, exit_code    ; BF <code32>
+/// 0x40_0025:  syscall               ; 0F 05
+/// 0x40_0027:  hlt                   ; F4                      (safety)
 /// ...
 /// 0x40_0080:  "hello\n"
 /// ```
 ///
-/// The user app runs straight through with no GOT/relocations — it issues
-/// `int 0x80` directly, with the syscall ID baked into RAX. This shortcuts
-/// the userland-side trampoline page (which is still mapped, but unused by
-/// this fixture) and lets us prove the ring-3 entry + syscall + long-jump
-/// path without depending on the U6 relocation walker, U8 userlib, or any
-/// linker tooling.
+/// Issuing `syscall` directly with the Linux number baked into EAX lets
+/// us exercise the full SYSCALL fast path (entry stub, dispatcher, IRETQ)
+/// without depending on relocations or any linker tooling.
 pub fn hello_exit0_elf() -> Vec<u8> {
     build_print_exit_elf(b"hello\n", 0)
 }
@@ -247,32 +248,268 @@ pub fn hello_exit0_elf() -> Vec<u8> {
 /// Same shape as `hello_exit0_elf` but with a custom message and exit code.
 pub fn build_print_exit_elf(msg: &[u8], exit_code: u32) -> Vec<u8> {
     let mut code: Vec<u8> = Vec::new();
-    // mov eax, 0  (print syscall id)
-    code.extend_from_slice(&[0xB8, 0x00, 0x00, 0x00, 0x00]);
-    // mov rdi, 0x40_0080 (msg ptr) — REX.W + B8+rd id 0xBF
-    code.extend_from_slice(&[0x48, 0xBF, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00]);
-    // mov esi, msg.len()
-    let len = msg.len() as u32;
-    code.push(0xBE);
-    code.extend_from_slice(&len.to_le_bytes());
-    // int 0x80
-    code.extend_from_slice(&[0xCD, 0x80]);
-    // mov eax, 1 (exit syscall id)
+    // mov eax, 1   (NR_WRITE)
     code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+    // mov edi, 1   (fd = stdout)
+    code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]);
+    // mov rsi, 0x40_0080  (buf addr)  — REX.W mov + 0xBE+rd
+    code.extend_from_slice(&[0x48, 0xBE, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    // mov edx, msg.len()  (count)
+    let len = msg.len() as u32;
+    code.push(0xBA);
+    code.extend_from_slice(&len.to_le_bytes());
+    // syscall      (0F 05)
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // mov eax, 231 (NR_EXIT_GROUP)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
     // mov edi, exit_code
     code.push(0xBF);
     code.extend_from_slice(&exit_code.to_le_bytes());
-    // int 0x80
-    code.extend_from_slice(&[0xCD, 0x80]);
-    // hlt (safety; reached only if exit returns, which it does not)
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt (safety; reached only if exit_group returns, which it does not)
     code.push(0xF4);
 
     // Pad to 0x80 then append message.
     while code.len() < 0x80 {
-        code.push(0x90); // NOP padding
+        code.push(0x90);
     }
     code.extend_from_slice(msg);
     runnable_elf_rx(&code)
+}
+
+/// Fixture D — unhandled-syscall trap.
+///
+/// Issues `syscall RAX=999`. The kernel dispatcher's default arm should
+/// log the number and terminate the process via the existing fault-cleanup
+/// path, recording `ExitKind::UnimplementedSyscall { nr: 999 }`. No
+/// kernel panic, no hang, no silent `-ENOSYS` return.
+pub fn syscall_999_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov eax, 999
+    code.extend_from_slice(&[0xB8, 0xE7, 0x03, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt — only reached if the dispatcher returned cleanly, which would
+    // be a bug.
+    code.push(0xF4);
+    runnable_elf_rx(&code)
+}
+
+/// Fixture A — the Risks-table mandated minimal SYSCALL transition smoke test.
+///
+/// Single instruction: `syscall` with `RAX=231 (exit_group), RDI=42`. Verifies
+/// the SYSCALL fast path end-to-end (entry stub stack switch, dispatcher,
+/// long-jump-via-cooperative_exit) by recording exit code 42 in
+/// `LAST_EXIT_CODE`. This is the smallest possible live test; if it passes,
+/// the rest of the syscall surface can be debugged on solid foundations.
+pub fn syscall_exit42_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov eax, 231  (NR_EXIT_GROUP)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // mov edi, 42
+    code.extend_from_slice(&[0xBF, 0x2A, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt (safety)
+    code.push(0xF4);
+    runnable_elf_rx(&code)
+}
+
+/// Fixture B — Linux initial-stack contract.
+///
+/// Verifies the kernel built `argc/argv/envp/auxv` correctly. The binary:
+///
+/// 1. Reads `argc` from `[rsp]` — must be 1.
+/// 2. Reads `argv[0]` from `[rsp+8]` — must be non-NULL.
+/// 3. Reads `argv[1]` from `[rsp+16]` — must be NULL (argv terminator).
+/// 4. Reads `envp[0]` from `[rsp+24]` — must be NULL.
+/// 5. Walks the auxv (starting at `[rsp+32]`) looking for `AT_RANDOM`.
+///    Verifies the auxv terminates at `AT_NULL` and `AT_RANDOM` is
+///    present with a non-zero value pointer.
+/// 6. Calls `exit_group(0)` if all checks pass; `exit_group(1..6)` for
+///    the specific check that failed.
+///
+/// Hand-assembled x86-64 to keep the test independent of a host
+/// toolchain.
+pub fn auxv_walker_elf() -> Vec<u8> {
+    // Linux x86-64 auxv constants.
+    const AT_NULL: u8 = 0;
+    const AT_RANDOM: u8 = 25;
+
+    // We hand-assemble a small program. Using rax/rcx/rdi/rsi as scratch.
+    // System V calling convention is irrelevant here — only `_start`,
+    // which receives no args by ABI.
+    let mut code: Vec<u8> = Vec::new();
+
+    // 0: cmp qword ptr [rsp], 1     ; argc == 1?
+    code.extend_from_slice(&[0x48, 0x83, 0x3C, 0x24, 0x01]);
+    // 5: jne fail_argc                ; -> mov edi,1; exit_group
+    // We'll resolve forward jumps by patching after we know offsets.
+    // Use placeholder 0xCC so we can spot un-patched jumps.
+    let mut patches: Vec<(usize, usize)> = Vec::new(); // (instr_addr, target_label_id)
+
+    // jne rel8 — opcode 75 imm8.
+    code.extend_from_slice(&[0x75, 0x00]); // patched to fail_argc offset
+    let jne_argc_at = code.len() - 1;
+
+    // 7: mov rcx, [rsp + 8]            ; argv[0]
+    code.extend_from_slice(&[0x48, 0x8B, 0x4C, 0x24, 0x08]);
+    // 12: test rcx, rcx
+    code.extend_from_slice(&[0x48, 0x85, 0xC9]);
+    // 15: je fail_argv0
+    code.extend_from_slice(&[0x74, 0x00]);
+    let je_argv0_at = code.len() - 1;
+
+    // 17: cmp qword ptr [rsp + 16], 0  ; argv[1] == NULL?
+    code.extend_from_slice(&[0x48, 0x83, 0x7C, 0x24, 0x10, 0x00]);
+    // 23: jne fail_argv1
+    code.extend_from_slice(&[0x75, 0x00]);
+    let jne_argv1_at = code.len() - 1;
+
+    // 25: cmp qword ptr [rsp + 24], 0  ; envp[0] == NULL?
+    code.extend_from_slice(&[0x48, 0x83, 0x7C, 0x24, 0x18, 0x00]);
+    // 31: jne fail_envp0
+    code.extend_from_slice(&[0x75, 0x00]);
+    let jne_envp0_at = code.len() - 1;
+
+    // Walk auxv at [rsp+32]. Use rsi as cursor.
+    // 33: lea rsi, [rsp + 32]
+    code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x20]);
+
+    // walk_loop:
+    let walk_loop_target = code.len();
+    // 38: mov rax, [rsi]              ; a_type
+    code.extend_from_slice(&[0x48, 0x8B, 0x06]);
+    // 41: cmp rax, AT_NULL
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, AT_NULL]);
+    // 45: je fail_no_random           ; reached terminator without finding AT_RANDOM
+    code.extend_from_slice(&[0x74, 0x00]);
+    let je_no_random_at = code.len() - 1;
+    // 47: cmp rax, AT_RANDOM
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, AT_RANDOM]);
+    // 51: je found_random
+    code.extend_from_slice(&[0x74, 0x00]);
+    let je_found_random_at = code.len() - 1;
+    // 53: add rsi, 16
+    code.extend_from_slice(&[0x48, 0x83, 0xC6, 0x10]);
+    // 57: jmp walk_loop  (rel8)
+    let jmp_back_at = code.len() + 1;
+    let walk_back_offset = walk_loop_target as i32 - (jmp_back_at + 1) as i32;
+    code.extend_from_slice(&[0xEB, walk_back_offset as i8 as u8]);
+
+    // found_random:
+    let found_random_target = code.len();
+    // mov rcx, [rsi + 8]              ; AT_RANDOM value (ptr)
+    code.extend_from_slice(&[0x48, 0x8B, 0x4E, 0x08]);
+    // test rcx, rcx
+    code.extend_from_slice(&[0x48, 0x85, 0xC9]);
+    // je fail_random_null
+    code.extend_from_slice(&[0x74, 0x00]);
+    let je_random_null_at = code.len() - 1;
+
+    // success: mov edi, 0; mov eax, 231 (NR_EXIT_GROUP); syscall
+    code.extend_from_slice(&[0xBF, 0x00, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.push(0xF4);
+
+    // Failure exits — each one sets edi to its code, then exit_group.
+    // Fail codes: argc=1, argv0=2, argv1=3, envp0=4, no_random=5, random_null=6.
+    let exit_block = |exit_code: u8, code: &mut Vec<u8>| -> usize {
+        let target = code.len();
+        code.extend_from_slice(&[0xBF, exit_code, 0x00, 0x00, 0x00]); // mov edi, code
+        code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);       // mov eax, 231
+        code.extend_from_slice(&[0x0F, 0x05]);                          // syscall
+        code.push(0xF4);                                                // hlt safety
+        target
+    };
+
+    let fail_argc = exit_block(1, &mut code);
+    let fail_argv0 = exit_block(2, &mut code);
+    let fail_argv1 = exit_block(3, &mut code);
+    let fail_envp0 = exit_block(4, &mut code);
+    let fail_no_random = exit_block(5, &mut code);
+    let fail_random_null = exit_block(6, &mut code);
+
+    // Patch all the rel8 forward jumps.
+    let patch = |code: &mut Vec<u8>, instr_at: usize, target: usize, patches: &mut Vec<(usize, usize)>| {
+        let next = instr_at + 1;
+        let off = target as i32 - next as i32;
+        assert!(off >= -128 && off <= 127, "rel8 out of range: {}", off);
+        code[instr_at] = off as i8 as u8;
+        patches.push((instr_at, target));
+    };
+    patch(&mut code, jne_argc_at, fail_argc, &mut patches);
+    patch(&mut code, je_argv0_at, fail_argv0, &mut patches);
+    patch(&mut code, jne_argv1_at, fail_argv1, &mut patches);
+    patch(&mut code, jne_envp0_at, fail_envp0, &mut patches);
+    patch(&mut code, je_no_random_at, fail_no_random, &mut patches);
+    patch(&mut code, je_found_random_at, found_random_target, &mut patches);
+    patch(&mut code, je_random_null_at, fail_random_null, &mut patches);
+
+    runnable_elf_rx(&code)
+}
+
+/// Fixture C — PT_TLS smoke test.
+///
+/// One PT_LOAD with `syscall RAX=231 (exit_group), RDI=0` plus one PT_TLS
+/// segment carrying 4 bytes of `0x55` tdata followed by zero tbss padding.
+/// The binary itself doesn't access TLS — Fixture C only verifies that the
+/// loader accepts PT_TLS, copies tdata correctly, and initializes the TCB
+/// self-pointer. End-to-end TLS access via `arch_prctl(ARCH_SET_FS)` lands
+/// in U9.
+pub fn tls_smoke_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov eax, 231  (NR_EXIT_GROUP)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // mov edi, 0
+    code.extend_from_slice(&[0xBF, 0x00, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.push(0xF4); // hlt safety
+
+    // Fixture builder layout:
+    //   p_offset 0x1000: PT_LOAD payload (the code above, padded to a page)
+    //   p_offset 0x2000: PT_TLS payload (4 bytes of 0x55 + zero tbss tail)
+    let mut load_payload = code;
+    while load_payload.len() < 0x100 {
+        load_payload.push(0x90);
+    }
+    let tls_payload = vec![0x55u8, 0x55, 0x55, 0x55];
+
+    let phdr_load = PhdrSpec {
+        p_type: PT_LOAD,
+        p_flags: PF_R | PF_X,
+        p_offset: 0x1000,
+        p_vaddr: 0x40_0000,
+        p_filesz: load_payload.len() as u64,
+        p_memsz: 0x1000,
+        p_align: 0x1000,
+    };
+    let phdr_tls = PhdrSpec {
+        p_type: PT_TLS,
+        p_flags: PF_R,
+        p_offset: 0x2000,
+        p_vaddr: 0,
+        p_filesz: tls_payload.len() as u64,
+        // 0x100 bytes total = 4 bytes of tdata + 252 bytes of tbss.
+        p_memsz: 0x100,
+        // Word alignment is enough for this fixture.
+        p_align: 8,
+    };
+
+    Fixture {
+        e_type: ET_EXEC,
+        e_machine: EM_X86_64,
+        ei_class: ELFCLASS64,
+        ei_data: ELFDATA2LSB,
+        e_entry: 0x40_0000,
+        phdrs: vec![phdr_load, phdr_tls],
+        payloads: vec![(0x1000, load_payload), (0x2000, tls_payload)],
+        truncate_to: None,
+    }
+    .build()
 }
 
 /// Fixture: first instruction is UD2 (`0F 0B`). Triggers #UD on entry.
@@ -299,26 +536,28 @@ pub fn fault_gp_elf() -> Vec<u8> {
     runnable_elf_rx(&[0xFA, 0xF4])
 }
 
-/// Fixture: calls `print` with a kernel-range pointer. The syscall returns
-/// EFAULT (negative); the app then does `exit(rax_low_byte)`. Demonstrates
+/// Fixture: calls `write(stdout, kernel_ptr, 5)`. The syscall returns
+/// EFAULT (negative); the app then does `exit_group(rax)`. Demonstrates
 /// pointer-validation defense without crashing the kernel.
 pub fn print_kernel_ptr_then_exit_elf() -> Vec<u8> {
     let mut code: Vec<u8> = Vec::new();
-    // mov rax, 0 (print)
-    code.extend_from_slice(&[0xB8, 0x00, 0x00, 0x00, 0x00]);
-    // mov rdi, 0xFFFF_8000_0000_0000 (kernel-range)
-    code.extend_from_slice(&[0x48, 0xBF]);
-    code.extend_from_slice(&0xFFFF_8000_0000_0000u64.to_le_bytes());
-    // mov esi, 5
-    code.extend_from_slice(&[0xBE, 0x05, 0x00, 0x00, 0x00]);
-    // int 0x80     (returns EFAULT in RAX)
-    code.extend_from_slice(&[0xCD, 0x80]);
-    // mov rdi, rax (exit code = whatever print returned)
-    code.extend_from_slice(&[0x48, 0x89, 0xC7]);
-    // mov eax, 1 (exit)
+    // mov eax, 1   (NR_WRITE)
     code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
-    // int 0x80
-    code.extend_from_slice(&[0xCD, 0x80]);
+    // mov edi, 1   (fd = stdout)
+    code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]);
+    // mov rsi, 0xFFFF_8000_0000_0000  (kernel-range buf)
+    code.extend_from_slice(&[0x48, 0xBE]);
+    code.extend_from_slice(&0xFFFF_8000_0000_0000u64.to_le_bytes());
+    // mov edx, 5  (count)
+    code.extend_from_slice(&[0xBA, 0x05, 0x00, 0x00, 0x00]);
+    // syscall (returns -EFAULT in RAX)
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // mov rdi, rax  (exit code = whatever write returned)
+    code.extend_from_slice(&[0x48, 0x89, 0xC7]);
+    // mov eax, 231  (NR_EXIT_GROUP)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
     code.push(0xF4);
     runnable_elf_rx(&code)
 }

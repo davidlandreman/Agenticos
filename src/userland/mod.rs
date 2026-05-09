@@ -9,7 +9,6 @@ pub mod image;
 pub mod lifecycle;
 pub mod loader;
 pub mod syscalls;
-pub mod trampoline;
 
 use core::arch::naked_asm;
 
@@ -20,14 +19,39 @@ use crate::userland::lifecycle::{
     install_continuation, with_active_user, ExitKind, KernelContinuation,
 };
 
+// ---------- Linux x86-64 auxv constants ----------
+
+const AT_NULL: u64 = 0;
+const AT_PHDR: u64 = 3;
+const AT_PHENT: u64 = 4;
+const AT_PHNUM: u64 = 5;
+const AT_PAGESZ: u64 = 6;
+const AT_RANDOM: u64 = 25;
+
+const ELF64_PHDR_SIZE: u64 = 56;
+
+/// 16 fixed bytes the initial-stack builder copies onto the user stack
+/// for `AT_RANDOM`. musl reads bytes 8..16 as the stack-canary seed and
+/// hashes the full 16 for other internal uses. A fixed value is acceptable
+/// per the milestone scope ("quality AT_RANDOM entropy is out of scope");
+/// real entropy is a follow-up swap.
+const AT_RANDOM_BYTES: [u8; 16] = [
+    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+];
+
+/// argv[0] for ring-3 binaries. musl uses this only as a fallback for
+/// `program_invocation_name`; the actual path is irrelevant to the
+/// milestone surface (`write` / `exit_group`). A fixed string keeps the
+/// kernel free of plumbing for the per-binary path.
+const ARGV0: &[u8] = b"agenticos-app\0";
+
 /// Errors that can happen at the lifecycle/entry layer (after the loader has
 /// already produced a `UserImage`).
 #[derive(Debug, Clone, Copy)]
 pub enum EnterError {
     /// A user app is already active. Single-app-synchronous (D5).
     AlreadyActive,
-    /// The trampoline page failed to map.
-    TrampolineMapFailed,
 }
 
 /// Enter ring 3 with `image` as the live user binary.
@@ -63,24 +87,27 @@ pub fn enter_user_mode(image: UserImage) -> Result<(ExitKind, i64), EnterError> 
         Ok(())
     })?;
 
-    // Lazy-map the trampoline (idempotent after the first call). The loader
-    // already calls this, but `enter_user_mode` may be invoked directly from
-    // tests, so guard here too.
-    crate::userland::trampoline::build_and_map_trampoline_page()
-        .map_err(|_| EnterError::TrampolineMapFailed)?;
-
-    // Stamp the syscall pointer-validation bounds, install the image, clear
-    // any prior exit. Single critical section.
+    // Capture the bits the initial-stack builder needs before the image
+    // moves into the active-user slot.
     let entry = image.entry.as_u64();
     let stack_top = image.stack_top.as_u64();
     let bounds = crate::userland::abi::UserVaBounds {
         start: image.bounds_start,
         end: image.bounds_end,
     };
+    let phdr_bytes = image.phdr_bytes.clone();
+    let e_phnum = image.e_phnum;
+
+    // The initial-stack builder writes through the kernel-visible alias
+    // of the user stack pages — those are mapped R+W by the loader.
+    let user_rsp = build_initial_stack(stack_top, &phdr_bytes, e_phnum);
+
     with_active_user(|au| {
         au.image = Some(image);
         au.exit_kind = ExitKind::None;
         au.exit_code = 0;
+        au.brk_current = crate::mm::paging::USER_BRK_BASE;
+        au.mmap_next = crate::mm::paging::USER_MMAP_BASE;
     });
     crate::userland::abi::set_user_va_bounds(bounds);
 
@@ -99,12 +126,6 @@ pub fn enter_user_mode(image: UserImage) -> Result<(ExitKind, i64), EnterError> 
     // IOPL=0, TF/NT/RF clear. 0x202 captures exactly that.
     let user_rflags: u64 = 0x202;
 
-    // The user RSP is one qword below stack_top so that `_start`'s
-    // first-instruction stack alignment matches the System V "post-call"
-    // 16-byte invariant. This matches the loader's record (`stack_top`) and
-    // the kernel-process trampoline pattern in `CpuContext::init_for_new_process`.
-    let user_rsp = stack_top - 8;
-
     // SAFETY: callee-saved regs + RSP are saved into the active-user slot's
     // continuation by the asm prologue; `iretq` then transitions to ring 3.
     // On exit/fault, `restore_continuation` jumps back to the resume label
@@ -121,6 +142,123 @@ pub fn enter_user_mode(image: UserImage) -> Result<(ExitKind, i64), EnterError> 
     crate::userland::abi::clear_user_va_bounds();
 
     Ok((kind, code))
+}
+
+/// Build the Linux x86-64 initial stack frame.
+///
+/// Layout at `_start` (low addr to high), per the System V AMD64 psABI:
+///
+/// ```text
+///   RSP -> argc                                       (1 qword)
+///          argv[0] = ptr to argv0 string              (1 qword)
+///          argv[1] = NULL                             (1 qword)
+///          envp[0] = NULL                             (1 qword)
+///          auxv pairs: AT_PHDR / AT_PHENT / AT_PHNUM /
+///                       AT_PAGESZ / AT_RANDOM / AT_NULL  (6 × 16 bytes)
+///          phdr_table (e_phnum × 56 bytes, padded to 16 align)
+///          AT_RANDOM payload (16 bytes)
+///          argv0 string ("agenticos-app\0", padded to 16 align)
+/// ```
+///
+/// `RSP` is 16-aligned at `_start` per the ABI. The frame is built in
+/// kernel mode by writing through the kernel-visible alias of the user
+/// stack pages (mapped R+W by the loader). `_start` reads through ring-3
+/// loads, which see the same bytes.
+///
+/// The phdrs are placed on the stack rather than at `USER_LOAD_BASE +
+/// e_phoff` because the kernel's hand-rolled fixtures don't include the
+/// program headers inside any PT_LOAD; copying them onto the stack lets
+/// the same code path serve fixtures and real musl-cross-make binaries.
+fn build_initial_stack(stack_top: u64, phdr_bytes: &[u8], e_phnum: u16) -> u64 {
+    // Sizes (all 16-aligned where practical to keep argc 16-aligned).
+    let argv0_size: u64 = align_up_16(ARGV0.len() as u64);
+    let random_size: u64 = 16;
+    let phdr_size: u64 = align_up_16((e_phnum as u64) * ELF64_PHDR_SIZE);
+    // 6 auxv pairs × 16 bytes each.
+    let auxv_size: u64 = 6 * 16;
+    let envp_size: u64 = 8;          // single NULL terminator
+    let argv_size: u64 = 8 + 8;      // argv[0] + NULL
+    let argc_size: u64 = 8;
+    let frame_size: u64 = argv0_size
+        + random_size
+        + phdr_size
+        + auxv_size
+        + envp_size
+        + argv_size
+        + argc_size;
+    debug_assert!(frame_size % 16 == 0, "frame_size must be 16-aligned");
+
+    let frame_base: u64 = stack_top - frame_size;
+
+    // Compute addresses (low to high).
+    let mut p = frame_base;
+    let argc_at = p; p += argc_size;
+    let argv0_ptr_at = p; p += 8;
+    let argv1_at = p; p += 8;
+    let envp0_at = p; p += 8;
+    let auxv_at = p; p += auxv_size;
+    let phdr_at = p; p += phdr_size;
+    let random_at = p; p += random_size;
+    let argv0_str_at = p; p += argv0_size;
+    debug_assert_eq!(p, stack_top, "stack frame layout drift");
+
+    // SAFETY: the user stack pages [stack_top - 8*0x1000, stack_top) are
+    // mapped R+W by the loader, and we are CPL=0 — kernel writes ignore
+    // the USER bit and the leaf flags. The frame fits inside the topmost
+    // page (frame_size ≤ ~512 bytes for a typical phdr count).
+    unsafe {
+        // argc = 1
+        write_u64_at(argc_at, 1);
+
+        // argv[0] = argv0_str_at, argv[1] = NULL
+        write_u64_at(argv0_ptr_at, argv0_str_at);
+        write_u64_at(argv1_at, 0);
+
+        // envp[0] = NULL
+        write_u64_at(envp0_at, 0);
+
+        // auxv pairs (low-to-high in declared order — order doesn't
+        // matter to musl as long as AT_NULL terminates the list).
+        let mut a = auxv_at;
+        write_u64_at(a, AT_PHDR);    a += 8;
+        write_u64_at(a, phdr_at);    a += 8;
+        write_u64_at(a, AT_PHENT);   a += 8;
+        write_u64_at(a, ELF64_PHDR_SIZE); a += 8;
+        write_u64_at(a, AT_PHNUM);   a += 8;
+        write_u64_at(a, e_phnum as u64); a += 8;
+        write_u64_at(a, AT_PAGESZ);  a += 8;
+        write_u64_at(a, 0x1000);     a += 8;
+        write_u64_at(a, AT_RANDOM);  a += 8;
+        write_u64_at(a, random_at);  a += 8;
+        write_u64_at(a, AT_NULL);    a += 8;
+        write_u64_at(a, 0);          let _ = a;
+
+        // Copy phdr bytes onto the stack.
+        let dst = phdr_at as *mut u8;
+        core::ptr::copy_nonoverlapping(phdr_bytes.as_ptr(), dst, phdr_bytes.len());
+
+        // Copy AT_RANDOM payload.
+        let dst = random_at as *mut u8;
+        core::ptr::copy_nonoverlapping(AT_RANDOM_BYTES.as_ptr(), dst, AT_RANDOM_BYTES.len());
+
+        // Copy argv0 string.
+        let dst = argv0_str_at as *mut u8;
+        core::ptr::copy_nonoverlapping(ARGV0.as_ptr(), dst, ARGV0.len());
+    }
+
+    argc_at
+}
+
+#[inline]
+fn align_up_16(n: u64) -> u64 {
+    (n + 15) & !15
+}
+
+/// SAFETY: `addr` must point at a writable user-VA page mapped by the
+/// loader; the kernel must be in CPL=0.
+#[inline]
+unsafe fn write_u64_at(addr: u64, value: u64) {
+    core::ptr::write_unaligned(addr as *mut u64, value);
 }
 
 /// Setjmp prologue + ring-3 transition.
@@ -294,6 +432,8 @@ pub fn force_clear_active_for_test() {
         au.image = None;
         au.exit_kind = ExitKind::None;
         au.exit_code = 0;
+        au.brk_current = 0;
+        au.mmap_next = 0;
     });
     crate::userland::abi::clear_user_va_bounds();
 }

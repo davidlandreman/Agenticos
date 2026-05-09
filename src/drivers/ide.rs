@@ -329,6 +329,8 @@ unsafe fn wait_ready(channel: IdeChannel) -> Result<(), &'static str> {
             core::hint::spin_loop();
         }
     }
+    let final_status = ide_read_register(channel, IdeRegister::StatusCommand);
+    crate::debug_warn!("[ide] wait_ready timeout, channel={:?}, status={:#04x}", channel, final_status);
     Err("IDE drive timeout waiting for ready")
 }
 
@@ -340,6 +342,7 @@ unsafe fn wait_drq(channel: IdeChannel) -> Result<(), &'static str> {
             return Ok(());
         }
         if status & IdeStatus::Error as u8 != 0 {
+            crate::debug_warn!("[ide] wait_drq error bit set, channel={:?}, status={:#04x}", channel, status);
             return Err("IDE drive error");
         }
         // Small delay
@@ -347,6 +350,8 @@ unsafe fn wait_drq(channel: IdeChannel) -> Result<(), &'static str> {
             core::hint::spin_loop();
         }
     }
+    let final_status = ide_read_register(channel, IdeRegister::StatusCommand);
+    crate::debug_warn!("[ide] wait_drq timeout, channel={:?}, status={:#04x}", channel, final_status);
     Err("IDE drive timeout waiting for data request")
 }
 
@@ -512,6 +517,15 @@ impl IdeController {
         let use_lba48 = disk.supports_lba48 && lba > 0x0FFFFFFF;
         drop(disk); // Release lock before I/O operations
 
+        // Disable preemption for the IDE PIO transaction. PIO requires the
+        // CPU to poll the data port immediately when DRQ becomes set; if the
+        // scheduler preempts us mid-read (e.g., to GUIShell during interactive
+        // boot), the DRQ window slips and `wait_drq` times out. The transfer
+        // is small and bounded (one sector batch, ≤ 64 KiB) so holding the
+        // CPU for it is acceptable. Drops on every exit path including
+        // ?-propagated errors via the RAII guard.
+        let _irq_guard = crate::arch::x86_64::interrupt_guard::InterruptGuard::disable();
+
         unsafe {
             // Wait for drive to be ready
             wait_ready(channel)?;
@@ -595,6 +609,15 @@ impl IdeController {
 
         let use_lba48 = disk.supports_lba48 && lba > 0x0FFFFFFF;
         drop(disk); // Release lock before I/O operations
+
+        // Disable preemption for the IDE PIO transaction. PIO requires the
+        // CPU to poll the data port immediately when DRQ becomes set; if the
+        // scheduler preempts us mid-read (e.g., to GUIShell during interactive
+        // boot), the DRQ window slips and `wait_drq` times out. The transfer
+        // is small and bounded (one sector batch, ≤ 64 KiB) so holding the
+        // CPU for it is acceptable. Drops on every exit path including
+        // ?-propagated errors via the RAII guard.
+        let _irq_guard = crate::arch::x86_64::interrupt_guard::InterruptGuard::disable();
 
         unsafe {
             // Wait for drive to be ready

@@ -107,25 +107,33 @@ impl<'a> FatTable<'a> {
     
     pub fn follow_chain(&self, start_cluster: ClusterId, mut callback: impl FnMut(ClusterId) -> Result<(), FatError>) -> Result<(), FatError> {
         let mut current = start_cluster;
-        
+        let mut visited: u32 = 0;
+
         loop {
             if !current.is_valid(self.fat_type) {
+                crate::debug_warn!("[fat] follow_chain: invalid cluster {} after {} visits", current.0, visited);
                 return Err(FatError::InvalidCluster);
             }
-            
+
             if current.is_bad(self.fat_type) {
+                crate::debug_warn!("[fat] follow_chain: bad cluster {} after {} visits", current.0, visited);
                 return Err(FatError::BadCluster);
             }
-            
+
             callback(current)?;
-            
+            visited += 1;
+            if visited.is_multiple_of(32) {
+                crate::debug_info!("[fat] follow_chain: {} clusters visited, current={}", visited, current.0);
+            }
+
             current = self.read_entry(current)?;
-            
+
             if current.is_end_of_chain(self.fat_type) {
+                crate::debug_info!("[fat] follow_chain: end-of-chain after {} clusters", visited);
                 break;
             }
         }
-        
+
         Ok(())
     }
 }

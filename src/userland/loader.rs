@@ -30,13 +30,11 @@ use core::mem::size_of;
 use x86_64::VirtAddr;
 
 use crate::mm::paging::{
-    UserPerms, USER_LOAD_BASE, USER_STACK_TOP, USER_VA_RANGE_END,
-    USER_VA_RANGE_START,
+    UserPerms, USER_BRK_BASE, USER_LOAD_BASE, USER_MMAP_BASE, USER_STACK_TOP,
+    USER_TCB_VA, USER_TLS_IMAGE_VA, USER_VA_RANGE_END, USER_VA_RANGE_START,
 };
-use crate::userland::abi::syscall_id;
 use crate::userland::error::LoaderError;
 use crate::userland::image::UserImage;
-use crate::userland::trampoline::{build_and_map_trampoline_page, resolve as resolve_trampoline};
 
 // ---------- ELF64 constants ----------
 
@@ -72,6 +70,14 @@ const R_X86_64_JUMP_SLOT: u32 = 7;
 
 // User stack: 8 pages = 32 KiB. Plus one guard page below.
 const USER_STACK_PAGES: u64 = 8;
+
+/// Maximum supported PT_TLS image size for this milestone.
+///
+/// libstdc++ static binaries typically use TLS for `errno` and
+/// `__cxa_eh_globals`, total well under 4 KiB. Binaries that need a
+/// larger TLS image (e.g. multiple `__thread` arrays) will need this
+/// raised to a multi-page TLS region — out of scope for U7.
+const MAX_TLS_IMAGE_BYTES: u64 = 0x1000;
 
 // ---------- Header structs ----------
 
@@ -205,6 +211,18 @@ struct ParsedPtLoad {
     head_pad: u64,
 }
 
+/// Captured PT_TLS metadata. Validated and laid out in phase 1; the
+/// allocate-and-copy phase materializes the TLS image and TCB pages.
+#[derive(Clone, Copy)]
+struct ParsedPtTls {
+    /// File offset of the tdata bytes.
+    p_offset: u64,
+    /// Bytes to copy (tdata).
+    p_filesz: u64,
+    /// In-memory image size (tdata + tbss). Bounded by MAX_TLS_IMAGE_BYTES.
+    p_memsz: u64,
+}
+
 // ---------- Public entry point ----------
 
 /// Parse `bytes`, map the binary into the user VA window, walk relocations,
@@ -238,11 +256,19 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
     }
 
     let mut pt_loads: Vec<ParsedPtLoad> = Vec::new();
+    let mut pt_tls: Option<ParsedPtTls> = None;
     for i in 0..phnum {
         let off = phoff + i * phentsize;
         let ph: Elf64Phdr = read_at(bytes, off)?;
         match ph.p_type {
-            PT_TLS => return Err(LoaderError::TlsUnsupported),
+            PT_TLS => {
+                if pt_tls.is_some() {
+                    // Multiple PT_TLS segments are malformed per the ELF
+                    // spec — the dynamic linker only resolves the first.
+                    return Err(LoaderError::TlsUnsupported);
+                }
+                pt_tls = Some(parse_pt_tls(&ph, bytes)?);
+            }
             PT_INTERP => return Err(LoaderError::InterpUnsupported),
             PT_LOAD => pt_loads.push(parse_pt_load(&ph, bytes)?),
             _ => { /* PT_DYNAMIC, PT_PHDR, PT_GNU_*, PT_NULL: ignored */ }
@@ -258,26 +284,33 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
 
     // ---- Phase 2: allocate + copy ----
 
-    // Make sure the trampoline page is built and mapped — the relocation
-    // walk needs trampoline VAs. Idempotent after the first call.
-    build_and_map_trampoline_page().map_err(LoaderError::from)?;
-
-    // bounds: union over PT_LOADs and the stack range. Stack top is fixed
-    // at USER_STACK_TOP per D4/U4.
+    // bounds: union over PT_LOADs, the stack range, and (when present) the
+    // TLS region. Stack top is fixed at USER_STACK_TOP per D4/U4.
     let stack_pages = USER_STACK_PAGES;
     let stack_bottom = USER_STACK_TOP - stack_pages * 0x1000;
-    let bounds_start = pt_loads
+    let mut bounds_start = pt_loads
         .iter()
         .map(|s| s.page_va)
         .min()
         .unwrap_or(USER_LOAD_BASE)
         .min(stack_bottom);
-    let bounds_end = pt_loads
+    let mut bounds_end = pt_loads
         .iter()
         .map(|s| s.page_va + s.page_count * 0x1000)
         .max()
         .unwrap_or(USER_LOAD_BASE)
         .max(USER_STACK_TOP);
+    if pt_tls.is_some() {
+        bounds_start = bounds_start.min(USER_TLS_IMAGE_VA);
+        bounds_end = bounds_end.max(USER_TCB_VA + 0x1000);
+    }
+    // Reserve brk + mmap arena VA space in the bounds so user pointers
+    // returned by `mmap` and reads from the brk region pass
+    // `validate_user_slice`. Mappings here are demand-allocated by the
+    // syscall handlers, but the bounds reflect the reachable region.
+    bounds_start = bounds_start.min(USER_BRK_BASE);
+    bounds_end = bounds_end.max(USER_VA_RANGE_END);
+    let _ = USER_MMAP_BASE;
 
     let mut image = UserImage::new(
         VirtAddr::new(ehdr.e_entry),
@@ -285,6 +318,13 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
         bounds_start,
         bounds_end,
     );
+
+    // Capture the raw phdr bytes for the initial-stack builder's AT_PHDR.
+    // Bounds were already validated against bytes.len() above.
+    let phdrs_size = (phnum * phentsize) as usize;
+    let phdrs_offset = phoff as usize;
+    let phdr_bytes = bytes[phdrs_offset..phdrs_offset + phdrs_size].to_vec();
+    image.set_phdrs(phdr_bytes, ehdr.e_phnum);
 
     for seg in &pt_loads {
         let perms = perms_for_p_flags(seg.p_flags);
@@ -318,10 +358,113 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
     .map_err(LoaderError::from)?;
     image.record_mapping(VirtAddr::new(stack_bottom), stack_pages);
 
+    // ---- Phase 2b: TLS image + TCB (when PT_TLS present) ----
+    if let Some(tls) = pt_tls {
+        install_tls(&mut image, &tls, bytes)?;
+    }
+
     // ---- Phase 3: relocate ----
     apply_relocations(bytes, &ehdr, &pt_loads)?;
 
     Ok(image)
+}
+
+// ---------- PT_TLS parse + install ----------
+
+fn parse_pt_tls(ph: &Elf64Phdr, bytes: &[u8]) -> Result<ParsedPtTls, LoaderError> {
+    let p_offset = { let v = ph.p_offset; v };
+    let p_filesz = { let v = ph.p_filesz; v };
+    let p_memsz = { let v = ph.p_memsz; v };
+
+    if p_memsz == 0 {
+        return Err(LoaderError::TlsUnsupported);
+    }
+    if p_memsz > MAX_TLS_IMAGE_BYTES {
+        // The milestone supports a single-page TLS image. A larger image
+        // would require multi-page TLS handling and a wider TCB layout.
+        return Err(LoaderError::TlsUnsupported);
+    }
+    if p_filesz > p_memsz {
+        return Err(LoaderError::SegmentOverflow);
+    }
+    // tdata bytes must lie within the file.
+    let end = p_offset
+        .checked_add(p_filesz)
+        .ok_or(LoaderError::SegmentOverflow)?;
+    if end > bytes.len() as u64 {
+        return Err(LoaderError::Truncated);
+    }
+    Ok(ParsedPtTls { p_offset, p_filesz, p_memsz })
+}
+
+/// Allocate the per-process TLS image page and TCB page, copy tdata bytes,
+/// and initialize the TCB header (self-pointer at offset 0; dtv slot at
+/// offset 8 zeroed).
+///
+/// Layout (TLS variant II — x86-64 / TLS_BELOW_TP):
+/// ```text
+/// USER_TLS_IMAGE_VA              [tdata + tbss; bss zero-filled by map]
+/// USER_TCB_VA                    [TCB.self = USER_TCB_VA]
+/// USER_TCB_VA + 8                [TCB.dtv  = 0]
+/// ...                            zero-fill
+/// ```
+///
+/// `FS_BASE = USER_TCB_VA`. `%fs:0` returns the TCB self-pointer; libstdc++
+/// static binaries that don't traverse the dtv (the local-exec TLS model)
+/// run cleanly with a NULL dtv — see plan Key Technical Decisions.
+fn install_tls(
+    image: &mut UserImage,
+    tls: &ParsedPtTls,
+    bytes: &[u8],
+) -> Result<(), LoaderError> {
+    use crate::mm::memory;
+
+    // Map TLS image page (R+W; tdata bytes get copied in via the kernel
+    // alias of the freshly mapped frame).
+    memory::with_memory_mapper(|m| {
+        m.map_user_region(VirtAddr::new(USER_TLS_IMAGE_VA), 1, UserPerms::ReadWrite)
+    })
+    .ok_or(LoaderError::OutOfFrames)?
+    .map_err(LoaderError::from)?;
+    image.record_mapping(VirtAddr::new(USER_TLS_IMAGE_VA), 1);
+
+    // Map TCB page.
+    memory::with_memory_mapper(|m| {
+        m.map_user_region(VirtAddr::new(USER_TCB_VA), 1, UserPerms::ReadWrite)
+    })
+    .ok_or(LoaderError::OutOfFrames)?
+    .map_err(LoaderError::from)?;
+    image.record_mapping(VirtAddr::new(USER_TCB_VA), 1);
+
+    // Copy tdata bytes into the TLS image. tbss is already zero (fresh
+    // mapping is zero-filled by `map_user_region`).
+    if tls.p_filesz > 0 {
+        // SAFETY: USER_TLS_IMAGE_VA was just mapped R+W and the kernel-mode
+        // write goes through the user VA; bounds for the copy were
+        // validated in parse_pt_tls. Source is `bytes[p_offset..]`.
+        unsafe {
+            let src = bytes
+                .as_ptr()
+                .wrapping_add(tls.p_offset as usize);
+            let dst = USER_TLS_IMAGE_VA as *mut u8;
+            core::ptr::copy_nonoverlapping(src, dst, tls.p_filesz as usize);
+        }
+    }
+
+    // Initialize TCB header. Variant II: `%fs:0` is the self-pointer; the
+    // dtv pointer at offset 8 stays zero (local-exec TLS doesn't traverse
+    // it). Stack canary at offset 0x28 is populated when AT_RANDOM lands
+    // in U8 — for now zero is fine; nothing reads it before that.
+    unsafe {
+        let tcb = USER_TCB_VA as *mut u64;
+        // Offset 0: self-pointer = USER_TCB_VA.
+        core::ptr::write_unaligned(tcb, USER_TCB_VA);
+        // Offset 8: dtv = NULL.
+        core::ptr::write_unaligned(tcb.add(1), 0);
+    }
+
+    image.set_tls_fs_base(VirtAddr::new(USER_TCB_VA));
+    Ok(())
 }
 
 // ---------- Phase 1: header validation ----------
@@ -568,38 +711,26 @@ fn apply_relocations(
                 other => return Err(LoaderError::UnsupportedReloc(other)),
             }
 
-            // Resolve symbol name.
-            let sym_off = (r_sym as u64)
-                .checked_mul(size_of::<Elf64Sym>() as u64)
-                .ok_or(LoaderError::Truncated)?;
-            let sym_total = dynsym
-                .sh_offset
-                .checked_add(sym_off)
-                .ok_or(LoaderError::Truncated)?;
-            // Bounds-check the symbol against the dynsym section.
-            if sym_off + size_of::<Elf64Sym>() as u64 > dynsym.sh_size {
-                return Err(LoaderError::Truncated);
-            }
-            let sym: Elf64Sym = read_at(bytes, sym_total)?;
-            let name = cstr_at(strtab, sym.st_name);
-
-            // Reject empty or unknown names. We only resolve names against
-            // SYSCALL_TABLE; static-non-PIE never references locals via
-            // GLOB_DAT/JUMP_SLOT.
-            if name.is_empty() || syscall_id(name).is_none() {
-                return Err(LoaderError::UnresolvedImport);
-            }
-            let trampoline_va = resolve_trampoline(name).ok_or(LoaderError::UnresolvedImport)?;
-
-            // S1: r_offset must lie inside a writable PT_LOAD segment. A
-            // crafted ELF could otherwise direct the kernel-mode write to
-            // arbitrary memory.
-            validate_reloc_offset(rela.r_offset, loads)?;
-
-            // Patch *(r_offset) = trampoline_va. r_offset for ET_EXEC is an
-            // absolute VA (no load slide). Write through the kernel alias
-            // of the page so the leaf flags do not matter.
-            patch_user_qword(rela.r_offset, trampoline_va)?;
+            // The legacy name-keyed trampoline-resolution path is gone with
+            // the SYSCALL transition. Static-no-pie ET_EXEC binaries from
+            // musl-cross-make do not emit GLOB_DAT/JUMP_SLOT against
+            // undefined externals, so this branch is unreachable in
+            // practice. If a binary does arrive with such relocations,
+            // there is no longer a kernel-side resolver — fail loudly with
+            // UnresolvedImport so the developer sees the toolchain
+            // mismatch immediately.
+            //
+            // The unused `r_sym` and section bookkeeping above is left in
+            // place because the same walker will be extended for the
+            // reloc types libstdc++ static binaries actually emit
+            // (R_X86_64_RELATIVE, R_X86_64_64, R_X86_64_TPOFF64) when U7
+            // and U9 land. Fixing the symbol-table lookup details here
+            // now would be guessing without a real test binary.
+            let _unused_sym_idx = r_sym;
+            let _unused_dynsym = dynsym;
+            let _unused_strtab = strtab;
+            let _unused_loads = loads;
+            return Err(LoaderError::UnresolvedImport);
         }
     }
     Ok(())

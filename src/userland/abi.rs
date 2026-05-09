@@ -1,62 +1,46 @@
-//! Name-keyed syscall ABI registry (D4).
+//! Linux x86-64 ABI surface.
 //!
-//! Two responsibilities:
+//! Userland enters the kernel via the `syscall` instruction (programmed in
+//! `arch::x86_64::syscall::init_syscall_msrs`). Syscall numbers and the
+//! argument-register convention follow Linux x86-64:
 //!
-//! 1. **Static-slot syscall table.** `register_syscall(name, handler)` reserves
-//!    one of `MAX_SYSCALLS` numeric IDs for a (name, handler) pair. The U6
-//!    ELF loader will resolve user-side import names against this table; the
-//!    syscall dispatcher (called from the naked `int 0x80` stub in
-//!    `arch::x86_64::syscall`) looks up handlers by ID.
+//! ```text
+//!   RAX = syscall number  (return value on exit)
+//!   RDI = arg1
+//!   RSI = arg2
+//!   RDX = arg3
+//!   R10 = arg4   (System V uses RCX; the syscall instruction overwrites it
+//!                with the user RIP, so the kernel ABI moves arg4 to R10)
+//!   R8  = arg5
+//!   R9  = arg6
+//! ```
 //!
-//! 2. **Active user-VA bounds.** Until U7 lands a real "active user PCB"
-//!    notion, the print syscall needs *some* way to know which VA window is
-//!    legal for a user-pointer argument. We expose a static `Option<UserVaBounds>`
-//!    that U6/U7 will populate at user-mode entry and clear at exit. Today's
-//!    tests drive the static directly to exercise the dispatcher.
-
-use core::sync::atomic::{AtomicUsize, Ordering};
+//! Errors are returned as `-errno` in RAX. Negative-errno-style values
+//! follow the Linux convention so unmodified static musl/glibc binaries
+//! interpret them correctly without translation.
+//!
+//! This module owns the dispatcher and the small set of utilities every
+//! handler shares: pointer-slice validation against the active user-VA
+//! window, and the `LAST_EXIT_CODE` mirror that lets in-kernel tests
+//! observe `exit_group(code)` without setting up a full ring-3 process.
 
 use spin::Mutex;
 use x86_64::VirtAddr;
 
 use crate::arch::x86_64::syscall::SyscallArgs;
 
-/// Maximum number of syscalls that can be registered. The trampoline page is
-/// 4 KiB and each stub is ~9 bytes, so 64 fits comfortably.
-pub const MAX_SYSCALLS: usize = 64;
-
-/// Negative i64 sentinel for "syscall ID out of range / unregistered."
-/// Following the Linux convention of negative-errno-style return values.
+/// Linux negative-errno sentinels surfaced by handlers in this kernel.
 pub const ENOSYS: i64 = -38;
-
-/// Negative i64 sentinel for "bad pointer" — the Linux convention for `EFAULT`.
 pub const EFAULT: i64 = -14;
+pub const EBADF: i64 = -9;
+pub const EINVAL: i64 = -22;
+pub const ENOTTY: i64 = -25;
 
-/// One entry in the syscall registry.
-#[derive(Clone, Copy)]
-pub struct SyscallEntry {
-    pub name: &'static str,
-    pub handler: SyscallHandler,
-}
-
-/// Raw handler signature. Receives the saved user GP registers and returns the
-/// value that will end up in user RAX. Handlers must NOT panic — they run in
-/// interrupt-gate context with IF cleared, so a panic would either deadlock
-/// the system (panic handler tries to acquire the serial lock under another
-/// pending IRQ) or trip the panic-handler-in-interrupt rule.
-pub type SyscallHandler = fn(&mut SyscallArgs) -> i64;
-
-static SYSCALL_TABLE: Mutex<[Option<SyscallEntry>; MAX_SYSCALLS]> =
-    Mutex::new([None; MAX_SYSCALLS]);
-
-/// Number of registered syscalls. Always equals the lowest unused slot index.
-/// The trampoline page builder reads this to size the page contents.
-static REGISTERED_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// Active user-VA bounds (inclusive lower, exclusive upper). Populated by U7
-/// before `iretq`-to-ring-3, cleared on exit. Print-syscall pointer validation
-/// reads this static; if it is `None` the print path rejects the call (no
-/// active user process means no valid user pointers).
+/// Active user-VA bounds (inclusive lower, exclusive upper). Populated by
+/// `enter_user_mode` before `iretq`-to-ring-3, cleared on exit. Pointer
+/// validation in user-buffer-touching syscalls (e.g., `write`) consumes
+/// this — when `None`, all user pointers are rejected (no active user
+/// process means no valid user pointers).
 ///
 /// Tests drive this directly via `set_user_va_bounds` / `clear_user_va_bounds`
 /// to exercise the dispatcher without spinning up a full user process.
@@ -68,106 +52,29 @@ pub struct UserVaBounds {
 
 static USER_VA_BOUNDS: Mutex<Option<UserVaBounds>> = Mutex::new(None);
 
-/// Last `exit_handler` exit code — placeholder until U7 wires the real
-/// long-jump. Visible to tests so they can assert `exit(42)` recorded `42`.
+/// Last `exit_group` exit code — visible to in-kernel tests so they can
+/// assert `exit_group(42)` recorded `42`. Real ring-3 entry routes through
+/// `lifecycle::cooperative_exit` which long-jumps; the test path runs the
+/// dispatcher directly without an active continuation, falls back to
+/// recording here, and returns to the caller.
 pub static LAST_EXIT_CODE: Mutex<Option<i64>> = Mutex::new(None);
 
-/// Register a syscall by name. Returns the assigned numeric ID, or `Err` if
-/// the table is full or the name is a duplicate.
-///
-/// Idempotent on duplicate-name registration only insofar as the second call
-/// fails fast — the first registrar wins. Callers should treat a duplicate
-/// as a programmer error (two subsystems both trying to claim `print`).
-pub fn register_syscall(
-    name: &'static str,
-    handler: SyscallHandler,
-) -> Result<usize, RegisterError> {
-    let mut table = SYSCALL_TABLE.lock();
-    // Reject duplicates.
-    for entry in table.iter().flatten() {
-        if entry.name == name {
-            return Err(RegisterError::DuplicateName);
-        }
-    }
-    // Find the first empty slot.
-    for (id, slot) in table.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(SyscallEntry { name, handler });
-            // Update the registered-count high-water mark. Since we always
-            // fill the lowest empty slot and never deregister, this is also
-            // simply `id + 1` whenever it grows.
-            let prev = REGISTERED_COUNT.load(Ordering::Relaxed);
-            if id + 1 > prev {
-                REGISTERED_COUNT.store(id + 1, Ordering::Relaxed);
-            }
-            return Ok(id);
-        }
-    }
-    Err(RegisterError::TableFull)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegisterError {
-    TableFull,
-    DuplicateName,
-}
-
-/// Look up a syscall by name. Returns the assigned numeric ID. Used by the
-/// trampoline-page builder so it can synthesize stubs in the same order the
-/// IDs were assigned.
-pub fn syscall_id(name: &str) -> Option<usize> {
-    let table = SYSCALL_TABLE.lock();
-    for (id, entry) in table.iter().enumerate() {
-        if let Some(e) = entry {
-            if e.name == name {
-                return Some(id);
-            }
-        }
-    }
-    None
-}
-
-/// Number of currently registered syscalls (the trampoline page emits one
-/// stub per registered syscall).
-pub fn registered_count() -> usize {
-    REGISTERED_COUNT.load(Ordering::Relaxed)
-}
-
-/// Snapshot the registered (name, id) pairs. Used by the trampoline-page
-/// builder. Returns up to `MAX_SYSCALLS` `(name, id)` entries.
-pub fn snapshot_registry() -> [(Option<&'static str>, usize); MAX_SYSCALLS] {
-    let table = SYSCALL_TABLE.lock();
-    let mut out: [(Option<&'static str>, usize); MAX_SYSCALLS] =
-        [(None, 0); MAX_SYSCALLS];
-    for (id, entry) in table.iter().enumerate() {
-        if let Some(e) = entry {
-            out[id] = (Some(e.name), id);
-        }
-    }
-    out
-}
-
-/// Set the active user-VA bounds. U7 calls this before entering ring 3.
 pub fn set_user_va_bounds(bounds: UserVaBounds) {
     *USER_VA_BOUNDS.lock() = Some(bounds);
 }
 
-/// Clear the active user-VA bounds. U7 calls this on user-process exit.
 pub fn clear_user_va_bounds() {
     *USER_VA_BOUNDS.lock() = None;
 }
 
-/// Read the active user-VA bounds, if any. The print-syscall pointer-validation
-/// helper consumes this.
 pub fn user_va_bounds() -> Option<UserVaBounds> {
     *USER_VA_BOUNDS.lock()
 }
 
-/// Validate that a user-supplied `(ptr, len)` slice lies entirely within the
-/// active user-VA bounds. **Defends S2** of the doc-review findings: the
-/// addition `ptr + len` is performed with `checked_add` to defeat integer
-/// wraparound near the top of the address space. A `len` of 0 is valid and
-/// returns `Ok(())` regardless of `ptr`.
+/// Validate that a user-supplied `(ptr, len)` slice lies entirely within
+/// the active user-VA bounds. `ptr + len` is computed with `checked_add`
+/// to defeat integer wraparound near the top of the address space. A
+/// `len` of 0 is valid and returns `Ok(())` regardless of `ptr`.
 pub fn validate_user_slice(ptr: u64, len: u64) -> Result<(), i64> {
     if len == 0 {
         return Ok(());
@@ -177,30 +84,87 @@ pub fn validate_user_slice(ptr: u64, len: u64) -> Result<(), i64> {
     if ptr < bounds.start || end > bounds.end {
         return Err(EFAULT);
     }
-    // Also reject obviously-kernel addresses defensively (the bounds check
-    // above already covers this, but if a buggy U7 somehow sets bounds
-    // overlapping kernel space, this would still catch it).
     if VirtAddr::try_new(ptr).is_err() || VirtAddr::try_new(end).is_err() {
         return Err(EFAULT);
     }
     Ok(())
 }
 
-/// Central syscall dispatcher. Called from the naked `int 0x80` entry stub
-/// (via `syscall_dispatch_entry` in `arch::x86_64::syscall`). Looks up the
-/// syscall ID in `SYSCALL_TABLE`; routes to the registered handler or
-/// returns `ENOSYS` if the ID is unregistered or out of range.
+/// Linux x86-64 syscall numbers this kernel handles. The full surface
+/// lives in `syscalls.rs`; the dispatcher below routes by these. Numbers
+/// taken from `arch/x86/entry/syscalls/syscall_64.tbl` in the Linux
+/// kernel.
+pub mod nr {
+    pub const READ: u64 = 0;
+    pub const WRITE: u64 = 1;
+    pub const MMAP: u64 = 9;
+    pub const MPROTECT: u64 = 10;
+    pub const MUNMAP: u64 = 11;
+    pub const BRK: u64 = 12;
+    pub const RT_SIGACTION: u64 = 13;
+    pub const RT_SIGPROCMASK: u64 = 14;
+    pub const IOCTL: u64 = 16;
+    pub const WRITEV: u64 = 20;
+    pub const GETPID: u64 = 39;
+    pub const EXIT: u64 = 60;
+    pub const ARCH_PRCTL: u64 = 158;
+    pub const GETUID: u64 = 102;
+    pub const GETGID: u64 = 104;
+    pub const GETEUID: u64 = 107;
+    pub const GETEGID: u64 = 108;
+    pub const GETPPID: u64 = 110;
+    pub const SET_TID_ADDRESS: u64 = 218;
+    pub const EXIT_GROUP: u64 = 231;
+    pub const SET_ROBUST_LIST: u64 = 273;
+}
+
+/// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
+/// `arch::x86_64::syscall` (via `syscall_dispatch_entry`). Routes by the
+/// syscall number in `args.rax`. Unhandled numbers return `-ENOSYS`; U10
+/// will replace the default arm with a clean per-process termination via
+/// the existing fault-cleanup path.
 pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
-    let id = args.rax as usize;
-    if id >= MAX_SYSCALLS {
-        return ENOSYS;
+    use crate::userland::syscalls;
+    match args.rax {
+        nr::READ => syscalls::read_handler(args),
+        nr::WRITE => syscalls::write_handler(args),
+        nr::MMAP => syscalls::mmap_handler(args),
+        nr::MPROTECT => syscalls::mprotect_handler(args),
+        nr::MUNMAP => syscalls::munmap_handler(args),
+        nr::BRK => syscalls::brk_handler(args),
+        nr::RT_SIGACTION => syscalls::rt_sigaction_handler(args),
+        nr::RT_SIGPROCMASK => syscalls::rt_sigprocmask_handler(args),
+        nr::IOCTL => syscalls::ioctl_handler(args),
+        nr::WRITEV => syscalls::writev_handler(args),
+        nr::GETPID => syscalls::getpid_handler(args),
+        // exit (60) is the single-threaded variant; route to exit_group
+        // so the kernel-side cleanup is identical.
+        nr::EXIT => syscalls::exit_group_handler(args),
+        nr::ARCH_PRCTL => syscalls::arch_prctl_handler(args),
+        nr::GETUID => syscalls::getuid_handler(args),
+        nr::GETGID => syscalls::getgid_handler(args),
+        nr::GETEUID => syscalls::geteuid_handler(args),
+        nr::GETEGID => syscalls::getegid_handler(args),
+        nr::GETPPID => syscalls::getppid_handler(args),
+        nr::SET_TID_ADDRESS => syscalls::set_tid_address_handler(args),
+        nr::EXIT_GROUP => syscalls::exit_group_handler(args),
+        nr::SET_ROBUST_LIST => syscalls::set_robust_list_handler(args),
+        unknown => unhandled_syscall(unknown),
     }
-    let handler = {
-        let table = SYSCALL_TABLE.lock();
-        table[id].map(|e| e.handler)
-    };
-    match handler {
-        Some(h) => h(args),
-        None => ENOSYS,
+}
+
+/// Default arm for `syscall_dispatch`. Routes to a clean per-process
+/// termination via the kernel-continuation long-jump when an active user
+/// process issued the syscall; falls back to returning `-ENOSYS` for the
+/// in-kernel test path that exercises the dispatcher without an
+/// `enter_user_mode`.
+fn unhandled_syscall(nr: u64) -> i64 {
+    let has_cont = crate::userland::lifecycle::with_active_user(|au| au.continuation.is_some());
+    if has_cont {
+        crate::userland::lifecycle::unimplemented_syscall_exit(nr);
     }
+    // Test path: the dispatcher is being driven from kernel mode
+    // synthetically. Returning -ENOSYS keeps unit tests deterministic.
+    crate::debug_warn!("syscall_dispatch: unimplemented nr={} (no active continuation; returning -ENOSYS)", nr);
+    ENOSYS
 }

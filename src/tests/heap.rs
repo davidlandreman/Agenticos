@@ -78,6 +78,63 @@ fn test_allocation_and_deallocation() {
     debug_debug!("Allocation and deallocation test passed!");
 }
 
+// ---------- Diagnostic timing tests ----------
+//
+// These print `[perf]` lines with timing breakdowns so we can see where
+// wall-time is going during multi-MiB workloads. They are diagnostic, not
+// pass/fail in the strict sense — the assertion bound is a very loose
+// "didn't completely lock up" threshold (60 s), and the value lives in the
+// printed numbers, not the green check.
+
+fn test_heap_burst_throughput() {
+    use crate::arch::x86_64::interrupts::get_timer_ticks;
+
+    const SIZE: usize = 6 * 1024 * 1024;
+    const PAGE: usize = 4096;
+    let pages = SIZE / PAGE;
+
+    let t0 = get_timer_ticks();
+
+    // Allocate without zero-filling so the timing is purely the page-fault
+    // path, not Vec::resize's memset on top.
+    let mut buf: Vec<u8> = Vec::with_capacity(SIZE);
+    unsafe {
+        buf.set_len(SIZE);
+    }
+
+    // Touch one byte per page so each backing page faults exactly once.
+    let mut i = 0usize;
+    while i < SIZE {
+        // Volatile write so the optimizer can't drop the touch.
+        unsafe {
+            core::ptr::write_volatile(buf.as_mut_ptr().add(i), 0xCC_u8);
+        }
+        i += PAGE;
+    }
+
+    let t1 = get_timer_ticks();
+    let elapsed = t1.saturating_sub(t0);
+
+    debug_info!(
+        "[perf] heap burst: {} pages ({} MiB) in {} ticks ({}.{:02}s); per-page ~{} us",
+        pages,
+        SIZE / (1024 * 1024),
+        elapsed,
+        elapsed / 100,
+        elapsed % 100,
+        // Each tick = 10 ms = 10_000 us. Per-page us = elapsed * 10_000 / pages.
+        elapsed.saturating_mul(10_000) / (pages as u64).max(1),
+    );
+
+    drop(buf);
+
+    assert!(
+        elapsed < 6000,
+        "heap burst exceeded 60 s ({} ticks); page-fault hot path is broken",
+        elapsed
+    );
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_vec_allocation,
@@ -85,5 +142,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_large_allocation,
         &test_multiple_allocations,
         &test_allocation_and_deallocation,
+        &test_heap_burst_throughput,
     ]
 }

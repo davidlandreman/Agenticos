@@ -50,7 +50,17 @@ These are scope decisions, not bugs — write support is a future track.
 
 `auto_mount` (in `vfs.rs`) supports up to `MAX_FAT_MOUNTS` (4) simultaneous FAT filesystems via a static array of wrappers. The root filesystem takes the first slot at boot; the host-folder mount at `/host` (when present) takes the second. Bumping the limit is a one-line change to `MAX_FAT_MOUNTS` plus extending the `[None; 4]` initializer.
 
+## `Filesystem::read` fast path
+
+`<Fat as Filesystem>::read` (in `fat/fat_filesystem.rs`) has a hot-path branch for the common case `position == 0 && buffer.len() >= file.size`: it passes the caller's buffer directly to `FileSystem::read_file`, which walks clusters and copies straight in. No intermediate file-sized allocation, no zero-fill.
+
+The fallback path (partial reads or short caller buffers) still allocates a temp buffer the size of the file, reads into it, then memcpy's the requested slice — that's intrinsic to `read_file`'s contract (`buffer.len() >= file.size`). The fallback is fine for small files; it bites on multi-MiB reads, which is what the fast path eliminates.
+
+Why it matters: before the fast path, every `File::read` call on a multi-MiB file allocated AND zero-filled a temp the size of the file (~1414 page faults for a 5.79 MiB binary), then memcpy'd the whole thing into the caller — doubling page-fault and heap pressure. Loading a C++ ELF used to look like a hang for that reason.
+
 ## Gotchas
 
+- **Mount point case is byte-exact.** `vfs.rs::find_filesystem` uses `path.starts_with(mount.path)` so `/host/FOO.TXT` works and `/HOST/FOO.TXT` returns NotFound. Files inside the mount are uppercase 8.3 (FAT 8.3 limitation), but the mount POINT is lowercase — keep them straight.
 - File paths are uppercase 8.3 (e.g., `/TEST.TXT`, not `/test.txt`).
 - The FAT cluster-chain follower in `fat_table.rs` does not currently cache; reading a large file walks the FAT each cluster. Acceptable for current sizes; revisit if performance bites.
+- IDE reads are PIO with interrupts disabled per `read_sectors` call — see `src/drivers/CLAUDE.md`. A cluster-walk that issues many `read_sectors` calls is therefore a sequence of small IRQ-disabled windows (one per cluster), not one big window.

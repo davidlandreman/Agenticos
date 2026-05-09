@@ -1,4 +1,4 @@
-//! `run /HOST/<NAME>.ELF` — the userland-app launch verb (U7).
+//! `run /host/<NAME>.ELF` — the userland-app launch verb (U7).
 //!
 //! Reads the file via the FAT FS layer, hands the bytes to the U6 ELF loader,
 //! and on success enters ring 3 via `crate::userland::enter_user_mode`. On
@@ -9,6 +9,26 @@
 //! The single-user-app invariant (D5) is enforced before the loader runs.
 //!
 //! Mirrors the structure of `src/commands/cat/mod.rs`.
+//!
+//! ## Path case sensitivity
+//!
+//! The host folder is mounted at `/host` (lowercase). The VFS path
+//! resolver in `src/fs/vfs.rs` uses byte-exact `path.starts_with(mount.path)`
+//! so `/HOST/HELLOCPP.ELF` returns "File or directory not found". Use
+//! `/host/HELLOCPP.ELF`. Filenames inside the mount must be uppercase 8.3
+//! per the FAT 8.3 limitation (see `src/fs/CLAUDE.md`), but the mount
+//! point itself is lowercase.
+//!
+//! ## Performance hot path
+//!
+//! The run command grabs `crate::userland::lifecycle::BinaryLoadGuard` for
+//! the duration of `RunProcess::run`. The kernel main loop reads
+//! `binary_load_in_progress()` and pauses GUI/render housekeeping while
+//! the guard is held — the run process gets the CPU end-to-end through
+//! `read → load_elf → enter_user_mode → ring-3 → exit`. Without the gate,
+//! `render_frame`'s framebuffer writes contend with PIO IDE reads and
+//! stretch a sub-second load into many seconds (see
+//! `docs/solutions/learnings/2026-05-09-multi-mib-user-binary-load.md`).
 
 use crate::drivers::display::display;
 use crate::graphics::color::Color;
@@ -59,6 +79,16 @@ impl RunProcess {
             return;
         }
 
+        // Mark the kernel as actively loading/running a binary so the kernel
+        // main loop pauses GUI/render housekeeping for the duration. This
+        // covers the full read → load_elf → enter_user_mode → ring-3 →
+        // exit window; without it, `render_frame`'s ~3.7 MiB-per-repaint
+        // framebuffer writes contend with PIO IDE reads and heap demand-
+        // paging, stretching the multi-MiB binary load well past what test
+        // mode (no GUI) measures. RAII guard ensures the marker drops on
+        // every exit path including early returns. (D5 single-user-app.)
+        let _load_guard = crate::userland::lifecycle::BinaryLoadGuard::enter();
+
         let path = self.args[0].clone();
         match self.run_path(&path) {
             Ok(()) => {}
@@ -77,7 +107,9 @@ impl RunProcess {
         }
 
         // Read the ELF bytes through the FAT VFS.
+        crate::debug_info!("[run] read_to_vec({}) starting", path);
         let bytes = read_file_bytes(path)?;
+        crate::debug_info!("[run] read_to_vec returned {} bytes", bytes.len());
 
         // Parse + map + relocate. On error, the partial UserImage drops here
         // and the rollback unmaps any pages the loader had committed.
@@ -110,6 +142,11 @@ impl RunProcess {
                 );
                 display::set_color(Color::WHITE);
             }
+            (ExitKind::UnimplementedSyscall { nr }, _) => {
+                display::set_color(Color::RED);
+                println!("[run] app issued unimplemented syscall nr={}", nr);
+                display::set_color(Color::WHITE);
+            }
             (ExitKind::None, _) => {
                 // Should not happen — `enter_user_mode` only returns after
                 // an exit was recorded. Log defensively.
@@ -121,10 +158,30 @@ impl RunProcess {
     }
 }
 
+/// Largest user binary the loader will accept, in bytes.
+///
+/// A static `g++ -static -no-pie` C++ iostream binary against musl + libstdc++
+/// typically lands between 1 and 4 MiB depending on toolchain version. 16 MiB
+/// gives ample headroom while keeping the failure mode visible: the kernel
+/// heap is sized at 100 MiB, so a 16 MiB ELF plus the loader's working state
+/// is comfortable; an outsized binary fails loud here rather than as a
+/// confusing OOM panic deep inside `Vec::resize`.
+const MAX_USER_BINARY_BYTES: u64 = 16 * 1024 * 1024;
+
 fn read_file_bytes(path: &str) -> Result<Vec<u8>, String> {
     use crate::fs::File;
 
     let file = File::open_read(path).map_err(|e| alloc::format!("open '{}': {}", path, e))?;
+    let size = file.size();
+    if size > MAX_USER_BINARY_BYTES {
+        return Err(alloc::format!(
+            "binary '{}' is {} bytes; max {} bytes ({} MiB)",
+            path,
+            size,
+            MAX_USER_BINARY_BYTES,
+            MAX_USER_BINARY_BYTES / (1024 * 1024)
+        ));
+    }
     file.read_to_vec()
         .map_err(|e| alloc::format!("read '{}': {}", path, e))
 }
