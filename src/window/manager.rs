@@ -378,6 +378,25 @@ impl WindowManager {
         let root_id = self.get_active_screen().and_then(|s| s.root_window);
         if let Some(root_id) = root_id {
             if let Some((hit_id, hit_bounds)) = self.topmost_at(root_id, global_pos, 0, 0) {
+                // Scroll wheel events are routed to the nearest enclosing
+                // ScrollView ancestor of the hit window (innermost match
+                // wins). If no ScrollView is found in the chain, fall
+                // through to standard delivery to the hit window.
+                if matches!(event.event_type, MouseEventType::Scroll { .. }) {
+                    if let Some(sv_id) = self.nearest_scroll_view_ancestor(hit_id) {
+                        let sv_bounds = self
+                            .get_global_bounds(sv_id)
+                            .unwrap_or(hit_bounds);
+                        let mut local_event = event;
+                        local_event.position = Point::new(
+                            global_pos.x - sv_bounds.x,
+                            global_pos.y - sv_bounds.y,
+                        );
+                        self.route_event_to_window(sv_id, Event::Mouse(local_event));
+                        return;
+                    }
+                }
+
                 let mut local_event = event;
                 local_event.position = Point::new(
                     global_pos.x - hit_bounds.x,
@@ -386,6 +405,21 @@ impl WindowManager {
                 self.route_event_to_window(hit_id, Event::Mouse(local_event));
             }
         }
+    }
+
+    /// Walk the parent chain starting at `id` (inclusive) and return the
+    /// first window for which `is_scroll_view()` returns `true`. Returns
+    /// `None` if no `ScrollView` ancestor exists.
+    fn nearest_scroll_view_ancestor(&self, id: WindowId) -> Option<WindowId> {
+        let mut current = Some(id);
+        while let Some(cur_id) = current {
+            let window = self.window_registry.get(&cur_id)?;
+            if window.is_scroll_view() {
+                return Some(cur_id);
+            }
+            current = window.parent();
+        }
+        None
     }
 
     /// Walk the subtree rooted at `id` and return the topmost visible window
