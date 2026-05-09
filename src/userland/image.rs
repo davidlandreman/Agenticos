@@ -64,6 +64,19 @@ pub struct UserImage {
     /// builder in U8 and the `arch_prctl` handler in U9) read this field
     /// to install the per-process FS_BASE.
     pub tls_fs_base: Option<VirtAddr>,
+    /// Raw program-header bytes from the input ELF, captured at load time.
+    ///
+    /// The Linux initial-stack contract requires `AT_PHDR` to point at
+    /// the in-memory program-header table. musl-cross-make binaries
+    /// usually place phdrs inside the first `PT_LOAD`, so AT_PHDR could
+    /// point at `USER_LOAD_BASE + e_phoff`. The kernel's hand-rolled
+    /// fixtures have phdrs *outside* any PT_LOAD though, so we capture
+    /// the bytes here at load time and the initial-stack builder copies
+    /// them onto the user stack — the same code path works for both.
+    pub phdr_bytes: Vec<u8>,
+    /// `e_phnum` from the ELF header — paired with `phdr_bytes` for
+    /// `AT_PHNUM` and to size the on-stack phdr copy.
+    pub e_phnum: u16,
     /// Every region the loader mapped, in mapping order.
     mappings: Vec<MappingRange>,
     /// Set to `false` by the destructor to make Drop idempotent in case a
@@ -84,6 +97,8 @@ impl UserImage {
             bounds_start,
             bounds_end,
             tls_fs_base: None,
+            phdr_bytes: Vec::new(),
+            e_phnum: 0,
             mappings: Vec::new(),
             dropped: false,
         }
@@ -93,6 +108,12 @@ impl UserImage {
     /// from the loader when a `PT_TLS` segment is present.
     pub fn set_tls_fs_base(&mut self, fs_base: VirtAddr) {
         self.tls_fs_base = Some(fs_base);
+    }
+
+    /// Record the program-header bytes and count for AT_PHDR / AT_PHNUM.
+    pub fn set_phdrs(&mut self, bytes: Vec<u8>, e_phnum: u16) {
+        self.phdr_bytes = bytes;
+        self.e_phnum = e_phnum;
     }
 
     /// Record a mapping that has just been installed via `map_user_region`.

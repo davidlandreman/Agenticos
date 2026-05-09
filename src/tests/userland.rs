@@ -641,6 +641,28 @@ fn test_enter_user_mode_single_user_invariant() {
     reset_active_user();
 }
 
+/// Fixture B — Linux initial-stack contract.
+///
+/// The binary walks the kernel-built argc/argv/envp/auxv frame and exits
+/// with code 0 if every check passes, or 1..6 indicating which assertion
+/// failed (argc / argv[0] / argv[1] NULL / envp[0] NULL / AT_RANDOM
+/// missing / AT_RANDOM ptr null).
+fn test_run_initial_stack_fixture_b() {
+    reset_active_user();
+    let bytes = fix::auxv_walker_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let result = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let _ = crate::userland::release_active_image();
+
+    use crate::userland::lifecycle::ExitKind;
+    assert!(matches!(result.0, ExitKind::Cooperative));
+    assert_eq!(
+        result.1, 0,
+        "auxv walker exited with code {} — see fixture comments for the meaning",
+        result.1
+    );
+}
+
 /// Fixture A — SYSCALL fast-path smoke test. The smallest possible end-to-end
 /// proof of the SYSCALL transition: a `syscall` with `RAX=NR_EXIT_GROUP,
 /// RDI=42` records exit code 42 via cooperative_exit.
@@ -791,6 +813,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_loader_rollback_unmaps_on_reloc_failure,
         // enter_user_mode lifecycle
         &test_enter_user_mode_single_user_invariant,
+        &test_run_initial_stack_fixture_b,
         &test_run_syscall_exit42_fixture_a,
         &test_run_happy_path_hello,
         &test_run_fault_ud,

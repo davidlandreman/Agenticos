@@ -298,6 +298,141 @@ pub fn syscall_exit42_elf() -> Vec<u8> {
     runnable_elf_rx(&code)
 }
 
+/// Fixture B — Linux initial-stack contract.
+///
+/// Verifies the kernel built `argc/argv/envp/auxv` correctly. The binary:
+///
+/// 1. Reads `argc` from `[rsp]` — must be 1.
+/// 2. Reads `argv[0]` from `[rsp+8]` — must be non-NULL.
+/// 3. Reads `argv[1]` from `[rsp+16]` — must be NULL (argv terminator).
+/// 4. Reads `envp[0]` from `[rsp+24]` — must be NULL.
+/// 5. Walks the auxv (starting at `[rsp+32]`) looking for `AT_RANDOM`.
+///    Verifies the auxv terminates at `AT_NULL` and `AT_RANDOM` is
+///    present with a non-zero value pointer.
+/// 6. Calls `exit_group(0)` if all checks pass; `exit_group(1..6)` for
+///    the specific check that failed.
+///
+/// Hand-assembled x86-64 to keep the test independent of a host
+/// toolchain.
+pub fn auxv_walker_elf() -> Vec<u8> {
+    // Linux x86-64 auxv constants.
+    const AT_NULL: u8 = 0;
+    const AT_RANDOM: u8 = 25;
+
+    // We hand-assemble a small program. Using rax/rcx/rdi/rsi as scratch.
+    // System V calling convention is irrelevant here — only `_start`,
+    // which receives no args by ABI.
+    let mut code: Vec<u8> = Vec::new();
+
+    // 0: cmp qword ptr [rsp], 1     ; argc == 1?
+    code.extend_from_slice(&[0x48, 0x83, 0x3C, 0x24, 0x01]);
+    // 5: jne fail_argc                ; -> mov edi,1; exit_group
+    // We'll resolve forward jumps by patching after we know offsets.
+    // Use placeholder 0xCC so we can spot un-patched jumps.
+    let mut patches: Vec<(usize, usize)> = Vec::new(); // (instr_addr, target_label_id)
+
+    // jne rel8 — opcode 75 imm8.
+    code.extend_from_slice(&[0x75, 0x00]); // patched to fail_argc offset
+    let jne_argc_at = code.len() - 1;
+
+    // 7: mov rcx, [rsp + 8]            ; argv[0]
+    code.extend_from_slice(&[0x48, 0x8B, 0x4C, 0x24, 0x08]);
+    // 12: test rcx, rcx
+    code.extend_from_slice(&[0x48, 0x85, 0xC9]);
+    // 15: je fail_argv0
+    code.extend_from_slice(&[0x74, 0x00]);
+    let je_argv0_at = code.len() - 1;
+
+    // 17: cmp qword ptr [rsp + 16], 0  ; argv[1] == NULL?
+    code.extend_from_slice(&[0x48, 0x83, 0x7C, 0x24, 0x10, 0x00]);
+    // 23: jne fail_argv1
+    code.extend_from_slice(&[0x75, 0x00]);
+    let jne_argv1_at = code.len() - 1;
+
+    // 25: cmp qword ptr [rsp + 24], 0  ; envp[0] == NULL?
+    code.extend_from_slice(&[0x48, 0x83, 0x7C, 0x24, 0x18, 0x00]);
+    // 31: jne fail_envp0
+    code.extend_from_slice(&[0x75, 0x00]);
+    let jne_envp0_at = code.len() - 1;
+
+    // Walk auxv at [rsp+32]. Use rsi as cursor.
+    // 33: lea rsi, [rsp + 32]
+    code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x20]);
+
+    // walk_loop:
+    let walk_loop_target = code.len();
+    // 38: mov rax, [rsi]              ; a_type
+    code.extend_from_slice(&[0x48, 0x8B, 0x06]);
+    // 41: cmp rax, AT_NULL
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, AT_NULL]);
+    // 45: je fail_no_random           ; reached terminator without finding AT_RANDOM
+    code.extend_from_slice(&[0x74, 0x00]);
+    let je_no_random_at = code.len() - 1;
+    // 47: cmp rax, AT_RANDOM
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, AT_RANDOM]);
+    // 51: je found_random
+    code.extend_from_slice(&[0x74, 0x00]);
+    let je_found_random_at = code.len() - 1;
+    // 53: add rsi, 16
+    code.extend_from_slice(&[0x48, 0x83, 0xC6, 0x10]);
+    // 57: jmp walk_loop  (rel8)
+    let jmp_back_at = code.len() + 1;
+    let walk_back_offset = walk_loop_target as i32 - (jmp_back_at + 1) as i32;
+    code.extend_from_slice(&[0xEB, walk_back_offset as i8 as u8]);
+
+    // found_random:
+    let found_random_target = code.len();
+    // mov rcx, [rsi + 8]              ; AT_RANDOM value (ptr)
+    code.extend_from_slice(&[0x48, 0x8B, 0x4E, 0x08]);
+    // test rcx, rcx
+    code.extend_from_slice(&[0x48, 0x85, 0xC9]);
+    // je fail_random_null
+    code.extend_from_slice(&[0x74, 0x00]);
+    let je_random_null_at = code.len() - 1;
+
+    // success: mov edi, 0; mov eax, 231 (NR_EXIT_GROUP); syscall
+    code.extend_from_slice(&[0xBF, 0x00, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.push(0xF4);
+
+    // Failure exits — each one sets edi to its code, then exit_group.
+    // Fail codes: argc=1, argv0=2, argv1=3, envp0=4, no_random=5, random_null=6.
+    let exit_block = |exit_code: u8, code: &mut Vec<u8>| -> usize {
+        let target = code.len();
+        code.extend_from_slice(&[0xBF, exit_code, 0x00, 0x00, 0x00]); // mov edi, code
+        code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);       // mov eax, 231
+        code.extend_from_slice(&[0x0F, 0x05]);                          // syscall
+        code.push(0xF4);                                                // hlt safety
+        target
+    };
+
+    let fail_argc = exit_block(1, &mut code);
+    let fail_argv0 = exit_block(2, &mut code);
+    let fail_argv1 = exit_block(3, &mut code);
+    let fail_envp0 = exit_block(4, &mut code);
+    let fail_no_random = exit_block(5, &mut code);
+    let fail_random_null = exit_block(6, &mut code);
+
+    // Patch all the rel8 forward jumps.
+    let patch = |code: &mut Vec<u8>, instr_at: usize, target: usize, patches: &mut Vec<(usize, usize)>| {
+        let next = instr_at + 1;
+        let off = target as i32 - next as i32;
+        assert!(off >= -128 && off <= 127, "rel8 out of range: {}", off);
+        code[instr_at] = off as i8 as u8;
+        patches.push((instr_at, target));
+    };
+    patch(&mut code, jne_argc_at, fail_argc, &mut patches);
+    patch(&mut code, je_argv0_at, fail_argv0, &mut patches);
+    patch(&mut code, jne_argv1_at, fail_argv1, &mut patches);
+    patch(&mut code, jne_envp0_at, fail_envp0, &mut patches);
+    patch(&mut code, je_no_random_at, fail_no_random, &mut patches);
+    patch(&mut code, je_found_random_at, found_random_target, &mut patches);
+    patch(&mut code, je_random_null_at, fail_random_null, &mut patches);
+
+    runnable_elf_rx(&code)
+}
+
 /// Fixture C — PT_TLS smoke test.
 ///
 /// One PT_LOAD with `syscall RAX=231 (exit_group), RDI=0` plus one PT_TLS

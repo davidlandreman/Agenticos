@@ -312,6 +312,13 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
         bounds_end,
     );
 
+    // Capture the raw phdr bytes for the initial-stack builder's AT_PHDR.
+    // Bounds were already validated against bytes.len() above.
+    let phdrs_size = (phnum * phentsize) as usize;
+    let phdrs_offset = phoff as usize;
+    let phdr_bytes = bytes[phdrs_offset..phdrs_offset + phdrs_size].to_vec();
+    image.set_phdrs(phdr_bytes, ehdr.e_phnum);
+
     for seg in &pt_loads {
         let perms = perms_for_p_flags(seg.p_flags);
 
