@@ -4,48 +4,58 @@ use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::Font;
 use super::types::{Rect, ColorDepth};
 
-/// Abstract interface for graphics rendering
-/// 
-/// Note: All implementations ultimately write to the single physical framebuffer
+/// Abstract interface for graphics rendering.
+///
+/// All implementations ultimately write to the single physical framebuffer
 /// provided by the bootloader. Different implementations may add buffering or
 /// other features, but they all share the same underlying hardware.
+///
+/// **Coordinate contract.** Drawing primitives accept signed `i32` positions
+/// that may be negative or beyond the device's pixel grid; widths and heights
+/// are unsigned. Callers do not need to clamp — the adapter clips against its
+/// own dimensions and the active `clip_rect` and silently drops pixels that
+/// fall outside the visible region. `width()` and `height()` device queries
+/// remain `usize` because they are always non-negative.
 pub trait GraphicsDevice: Send {
     /// Get the width of the device in pixels
     fn width(&self) -> usize;
-    
+
     /// Get the height of the device in pixels
     fn height(&self) -> usize;
-    
+
     /// Get the color depth of the device
     fn color_depth(&self) -> ColorDepth;
-    
+
     /// Clear the entire device with a color
     fn clear(&mut self, color: Color);
-    
-    /// Draw a single pixel
-    fn draw_pixel(&mut self, x: usize, y: usize, color: Color);
 
-    /// Read a pixel at the given position
-    fn read_pixel(&self, x: usize, y: usize) -> Color;
-    
+    /// Draw a single pixel
+    fn draw_pixel(&mut self, x: i32, y: i32, color: Color);
+
+    /// Read a pixel at the given position. Returns `Color::BLACK` when the
+    /// position is outside the device or active clip rect.
+    fn read_pixel(&self, x: i32, y: i32) -> Color;
+
     /// Draw a line between two points
-    fn draw_line(&mut self, x1: usize, y1: usize, x2: usize, y2: usize, color: Color);
-    
+    fn draw_line(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: Color);
+
     /// Draw a rectangle outline
-    fn draw_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: Color);
-    
+    fn draw_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color);
+
     /// Fill a rectangle with a color
-    fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: Color);
-    
+    fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color);
+
     /// Draw text at a position. `(x, y)` is the top-left of the text cell;
     /// the baseline is `y + font.ascent()`.
     ///
     /// The default implementation walks `text` glyph-by-glyph, blending 8bpp
     /// coverage against existing framebuffer contents via `read_pixel` /
-    /// `draw_pixel`. Adapters that can do faster bulk blits may override.
-    fn draw_text(&mut self, x: usize, y: usize, text: &str, font: &dyn Font, color: Color) {
-        let baseline = y as i32 + font.ascent() as i32;
-        let mut pen_x = x as i32;
+    /// `draw_pixel`. Both primitives clip against the device bounds and the
+    /// active clip rect, so the loop emits raw `i32` coordinates without
+    /// pre-checking. Adapters that can do faster bulk blits may override.
+    fn draw_text(&mut self, x: i32, y: i32, text: &str, font: &dyn Font, color: Color) {
+        let baseline = y + font.ascent() as i32;
+        let mut pen_x = x;
         for ch in text.chars() {
             if ch == '\n' {
                 break;
@@ -57,20 +67,12 @@ pub trait GraphicsDevice: Send {
             let height = glyph.height as i32;
             for row in 0..height {
                 let dst_y = glyph_y + row;
-                if dst_y < 0 {
-                    continue;
-                }
                 for col in 0..width {
                     let dst_x = glyph_x + col;
-                    if dst_x < 0 {
-                        continue;
-                    }
                     let alpha = glyph.coverage[(row * width + col) as usize];
                     if alpha == 0 {
                         continue;
                     }
-                    let dst_x = dst_x as usize;
-                    let dst_y = dst_y as usize;
                     if alpha == 0xFF {
                         self.draw_pixel(dst_x, dst_y, color);
                     } else {
@@ -82,16 +84,17 @@ pub trait GraphicsDevice: Send {
             pen_x += glyph.advance as i32;
         }
     }
-    
+
+
     /// Draw an image (for future use)
-    fn draw_image(&mut self, _x: usize, _y: usize, _data: &[u8], _width: usize, _height: usize) {
+    fn draw_image(&mut self, _x: i32, _y: i32, _data: &[u8], _width: u32, _height: u32) {
         // Default implementation for now
         // TODO: Implement proper image drawing
     }
-    
+
     /// Set the clipping rectangle for drawing operations
     fn set_clip_rect(&mut self, rect: Option<Rect>);
-    
+
     /// Flush any pending operations (for double-buffered implementations)
     fn flush(&mut self);
 }
@@ -119,7 +122,7 @@ impl WindowBuffer {
             dirty_region: None,
         }
     }
-    
+
     /// Mark a region as dirty
     pub fn mark_dirty(&mut self, rect: Rect) {
         self.dirty_region = match self.dirty_region {
@@ -134,7 +137,7 @@ impl WindowBuffer {
             }
         };
     }
-    
+
     /// Clear the dirty region
     pub fn clear_dirty(&mut self) {
         self.dirty_region = None;

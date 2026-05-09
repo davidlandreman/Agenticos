@@ -4,6 +4,7 @@ use bootloader_api::info::FrameBuffer;
 use crate::graphics::color::Color;
 use crate::drivers::display::double_buffer::DoubleBufferedFrameBuffer;
 use crate::window::{GraphicsDevice, Rect, ColorDepth};
+use crate::window::adapters::clip::{clip_line, clip_rect, pixel_visible};
 use spin::Mutex;
 
 /// Graphics device that uses double buffering for smooth rendering
@@ -21,7 +22,7 @@ pub struct DoubleBufferedDevice {
 
 impl DoubleBufferedDevice {
     /// Create a new double-buffered device
-    /// 
+    ///
     /// Note: This requires a pre-allocated back buffer. In the current implementation,
     /// this comes from a static 8MB buffer.
     pub fn new(framebuffer: &'static mut FrameBuffer, back_buffer: &'static mut [u8]) -> Self {
@@ -29,9 +30,9 @@ impl DoubleBufferedDevice {
             let info = framebuffer.info();
             (info.width, info.height)
         };
-        
+
         let buffer = DoubleBufferedFrameBuffer::new(framebuffer, back_buffer);
-        
+
         DoubleBufferedDevice {
             buffer: Mutex::new(buffer),
             clip_rect: None,
@@ -40,27 +41,15 @@ impl DoubleBufferedDevice {
             dirty: false,
         }
     }
-    
+
     /// Create using the global static back buffer
     pub fn new_with_static_buffer(framebuffer: &'static mut FrameBuffer) -> Self {
         // Get the static buffer from the display module
         let back_buffer = unsafe {
             crate::drivers::display::double_buffered_text::get_static_back_buffer()
         };
-        
+
         Self::new(framebuffer, back_buffer)
-    }
-    
-    /// Check if a point is within the clip rectangle
-    fn is_clipped(&self, x: usize, y: usize) -> bool {
-        if let Some(clip) = &self.clip_rect {
-            x < clip.x as usize || 
-            y < clip.y as usize ||
-            x >= (clip.x + clip.width as i32) as usize ||
-            y >= (clip.y + clip.height as i32) as usize
-        } else {
-            false
-        }
     }
 }
 
@@ -68,59 +57,57 @@ impl GraphicsDevice for DoubleBufferedDevice {
     fn width(&self) -> usize {
         self.width
     }
-    
+
     fn height(&self) -> usize {
         self.height
     }
-    
+
     fn color_depth(&self) -> ColorDepth {
         ColorDepth::Bit32
     }
-    
+
     fn clear(&mut self, color: Color) {
         let mut buffer = self.buffer.lock();
         buffer.clear(color);
-        drop(buffer); // Release lock before setting dirty
+        drop(buffer);
         self.dirty = true;
     }
-    
-    fn draw_pixel(&mut self, x: usize, y: usize, color: Color) {
-        if self.is_clipped(x, y) {
+
+    fn draw_pixel(&mut self, x: i32, y: i32, color: Color) {
+        if let Some((px, py)) = pixel_visible(x, y, self.width, self.height, self.clip_rect.as_ref()) {
+            self.buffer.lock().draw_pixel(px, py, color);
+            self.dirty = true;
+        }
+    }
+
+    fn read_pixel(&self, x: i32, y: i32) -> Color {
+        match pixel_visible(x, y, self.width, self.height, self.clip_rect.as_ref()) {
+            Some((px, py)) => self.buffer.lock().get_pixel(px, py),
+            None => Color::BLACK,
+        }
+    }
+
+    fn draw_line(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: Color) {
+        let Some(((cx1, cy1), (cx2, cy2))) =
+            clip_line(x1, y1, x2, y2, self.width, self.height, self.clip_rect.as_ref())
+        else {
             return;
-        }
+        };
 
-        let mut buffer = self.buffer.lock();
-        buffer.draw_pixel(x, y, color);
-        drop(buffer); // Release lock before setting dirty
-        self.dirty = true;
-    }
-
-    fn read_pixel(&self, x: usize, y: usize) -> Color {
-        if self.is_clipped(x, y) || x >= self.width || y >= self.height {
-            return Color::BLACK;
-        }
-        let buffer = self.buffer.lock();
-        buffer.get_pixel(x, y)
-    }
-    
-    fn draw_line(&mut self, x1: usize, y1: usize, x2: usize, y2: usize, color: Color) {
-        // Simple Bresenham line algorithm
-        let dx = (x2 as i32 - x1 as i32).abs();
-        let dy = (y2 as i32 - y1 as i32).abs();
-        let sx = if x1 < x2 { 1 } else { -1 };
-        let sy = if y1 < y2 { 1 } else { -1 };
+        let dx = (cx2 - cx1).abs();
+        let dy = (cy2 - cy1).abs();
+        let sx: i32 = if cx1 < cx2 { 1 } else { -1 };
+        let sy: i32 = if cy1 < cy2 { 1 } else { -1 };
         let mut err = dx - dy;
-        
-        let mut x = x1 as i32;
-        let mut y = y1 as i32;
-        
+
+        let mut x = cx1;
+        let mut y = cy1;
+        let mut buffer = self.buffer.lock();
         loop {
-            self.draw_pixel(x as usize, y as usize, color);
-            
-            if x == x2 as i32 && y == y2 as i32 {
+            buffer.draw_pixel(x as usize, y as usize, color);
+            if x == cx2 && y == cy2 {
                 break;
             }
-            
             let e2 = 2 * err;
             if e2 > -dy {
                 err -= dy;
@@ -131,27 +118,35 @@ impl GraphicsDevice for DoubleBufferedDevice {
                 y += sy;
             }
         }
-    }
-    
-    fn draw_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: Color) {
-        // Draw four lines
-        self.draw_line(x, y, x + width - 1, y, color);
-        self.draw_line(x + width - 1, y, x + width - 1, y + height - 1, color);
-        self.draw_line(x + width - 1, y + height - 1, x, y + height - 1, color);
-        self.draw_line(x, y + height - 1, x, y, color);
-    }
-    
-    fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: Color) {
-        let mut buffer = self.buffer.lock();
-        buffer.fill_rect(x, y, width, height, color);
         drop(buffer);
         self.dirty = true;
     }
-    
+
+    fn draw_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let right = x + width as i32 - 1;
+        let bottom = y + height as i32 - 1;
+        self.draw_line(x, y, right, y, color);
+        self.draw_line(right, y, right, bottom, color);
+        self.draw_line(right, bottom, x, bottom, color);
+        self.draw_line(x, bottom, x, y, color);
+    }
+
+    fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
+        if let Some((cx, cy, cw, ch)) =
+            clip_rect(x, y, width, height, self.width, self.height, self.clip_rect.as_ref())
+        {
+            self.buffer.lock().fill_rect(cx, cy, cw, ch, color);
+            self.dirty = true;
+        }
+    }
+
     fn set_clip_rect(&mut self, rect: Option<Rect>) {
         self.clip_rect = rect;
     }
-    
+
     fn flush(&mut self) {
         // Only swap buffers if we actually drew something
         if self.dirty {

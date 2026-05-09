@@ -62,19 +62,20 @@ impl FrameWindow {
 
         // Draw title bar background
         let bounds = self.base.bounds();
+        let border = self.border_width as i32;
         device.fill_rect(
-            bounds.x as usize + self.border_width,
-            bounds.y as usize + self.border_width,
-            (bounds.width - 2 * self.border_width as u32) as usize,
-            self.title_bar_height,
+            bounds.x + border,
+            bounds.y + border,
+            bounds.width - 2 * self.border_width as u32,
+            self.title_bar_height as u32,
             title_bar_color,
         );
 
         // Draw title text (left-aligned with padding)
         let font = crate::graphics::fonts::core_font::get_default_font();
-        let line_h = font.line_height() as usize;
-        let text_y = bounds.y as usize + self.border_width + (self.title_bar_height - line_h) / 2;
-        let text_x = bounds.x as usize + self.border_width + 8;
+        let line_h = font.line_height() as i32;
+        let text_y = bounds.y + border + (self.title_bar_height as i32 - line_h) / 2;
+        let text_x = bounds.x + border + 8;
         device.draw_text(
             text_x,
             text_y,
@@ -89,23 +90,31 @@ impl FrameWindow {
 
     fn draw_close_button(&self, device: &mut dyn GraphicsDevice) {
         let bounds = self.base.bounds();
+        let border = self.border_width as i32;
+        let close_size = self.close_button_size as i32;
+        let close_pad = self.close_button_padding as i32;
+        let title_height = self.title_bar_height as i32;
 
         // Calculate close button position (right side of titlebar, vertically centered)
-        let btn_x = bounds.x as usize + bounds.width as usize
-            - self.border_width - self.close_button_padding - self.close_button_size;
-        let btn_y = bounds.y as usize + self.border_width
-            + (self.title_bar_height - self.close_button_size) / 2;
+        let btn_x = bounds.x + bounds.width as i32 - border - close_pad - close_size;
+        let btn_y = bounds.y + border + (title_height - close_size) / 2;
 
         // Draw close button background (dark red)
         let btn_color = Color::new(192, 0, 0);
-        device.fill_rect(btn_x, btn_y, self.close_button_size, self.close_button_size, btn_color);
+        device.fill_rect(
+            btn_x,
+            btn_y,
+            self.close_button_size as u32,
+            self.close_button_size as u32,
+            btn_color,
+        );
 
         // Draw X symbol (white lines)
-        let padding = 4; // Padding inside the button for the X
+        let padding: i32 = 4; // Padding inside the button for the X
         let x1 = btn_x + padding;
         let y1 = btn_y + padding;
-        let x2 = btn_x + self.close_button_size - padding - 1;
-        let y2 = btn_y + self.close_button_size - padding - 1;
+        let x2 = btn_x + close_size - padding - 1;
+        let y2 = btn_y + close_size - padding - 1;
 
         // Draw the X using two diagonal lines
         device.draw_line(x1, y1, x2, y2, Color::WHITE);
@@ -191,39 +200,40 @@ impl FrameWindow {
         };
 
         let bounds = self.base.bounds();
+        let border = self.border_width as u32;
         // Top border
         device.fill_rect(
-            bounds.x as usize,
-            bounds.y as usize,
-            bounds.width as usize,
-            self.border_width,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            border,
             border_color,
         );
 
         // Bottom border
         device.fill_rect(
-            bounds.x as usize,
-            (bounds.y + bounds.height as i32 - self.border_width as i32) as usize,
-            bounds.width as usize,
-            self.border_width,
+            bounds.x,
+            bounds.y + bounds.height as i32 - border as i32,
+            bounds.width,
+            border,
             border_color,
         );
 
         // Left border
         device.fill_rect(
-            bounds.x as usize,
-            bounds.y as usize,
-            self.border_width,
-            bounds.height as usize,
+            bounds.x,
+            bounds.y,
+            border,
+            bounds.height,
             border_color,
         );
 
         // Right border
         device.fill_rect(
-            (bounds.x + bounds.width as i32 - self.border_width as i32) as usize,
-            bounds.y as usize,
-            self.border_width,
-            bounds.height as usize,
+            bounds.x + bounds.width as i32 - border as i32,
+            bounds.y,
+            border,
+            bounds.height,
             border_color,
         );
     }

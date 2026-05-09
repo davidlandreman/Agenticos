@@ -395,16 +395,16 @@ impl Window for TextWindow {
 
             // Only update the dirty cells
             for &(col, row) in &self.dirty_cells {
-                let x = bounds.x as usize + col * self.char_width;
-                let y = bounds.y as usize + row * self.char_height;
+                let x = bounds.x + (col * self.char_width) as i32;
+                let y = bounds.y + (row * self.char_height) as i32;
                 let cell = &self.buffer[row][col];
 
                 // Clear the cell area first
                 device.fill_rect(
                     x,
                     y,
-                    self.char_width,
-                    self.char_height,
+                    self.char_width as u32,
+                    self.char_height as u32,
                     cell.bg_color,
                 );
 
@@ -419,14 +419,14 @@ impl Window for TextWindow {
 
             // Draw cursor if focused (always redraw cursor)
             if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
-                let cursor_x = bounds.x as usize + self.cursor_x * self.char_width;
-                let cursor_y = bounds.y as usize + self.cursor_y * self.char_height;
+                let cursor_x = bounds.x + (self.cursor_x * self.char_width) as i32;
+                let cursor_y = bounds.y + (self.cursor_y * self.char_height) as i32;
 
                 // Draw cursor as a filled rectangle
                 device.fill_rect(
                     cursor_x,
-                    cursor_y + self.char_height - 2,
-                    self.char_width,
+                    cursor_y + self.char_height as i32 - 2,
+                    self.char_width as u32,
                     2,
                     Color::WHITE,
                 );
@@ -443,10 +443,10 @@ impl Window for TextWindow {
 
         // Clear background with a dark grey instead of black to see if it's rendering
         device.fill_rect(
-            bounds.x as usize,
-            bounds.y as usize,
-            bounds.width as usize,
-            bounds.height as usize,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
             Color::new(32, 32, 32),
         );
 
@@ -456,16 +456,16 @@ impl Window for TextWindow {
         // Render each character
         for (row, line) in self.buffer.iter().enumerate() {
             for (col, cell) in line.iter().enumerate() {
-                let x = bounds.x as usize + col * self.char_width;
-                let y = bounds.y as usize + row * self.char_height;
+                let x = bounds.x + (col * self.char_width) as i32;
+                let y = bounds.y + (row * self.char_height) as i32;
 
                 // Draw background if not black
                 if cell.bg_color != Color::BLACK {
                     device.fill_rect(
                         x,
                         y,
-                        self.char_width,
-                        self.char_height,
+                        self.char_width as u32,
+                        self.char_height as u32,
                         cell.bg_color,
                     );
                 }
@@ -486,14 +486,14 @@ impl Window for TextWindow {
 
         // Draw cursor if focused
         if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
-            let cursor_x = bounds.x as usize + self.cursor_x * self.char_width;
-            let cursor_y = bounds.y as usize + self.cursor_y * self.char_height;
+            let cursor_x = bounds.x + (self.cursor_x * self.char_width) as i32;
+            let cursor_y = bounds.y + (self.cursor_y * self.char_height) as i32;
 
             // Draw cursor as a filled rectangle
             device.fill_rect(
                 cursor_x,
-                cursor_y + self.char_height - 2,
-                self.char_width,
+                cursor_y + self.char_height as i32 - 2,
+                self.char_width as u32,
                 2,
                 Color::WHITE,
             );

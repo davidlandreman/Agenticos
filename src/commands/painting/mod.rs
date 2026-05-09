@@ -161,18 +161,18 @@ impl RunnableProcess for PaintingProcess {
                     wm.graphics_device.fill_rect(
                         abs_x,
                         abs_y,
-                        content_bounds.width as usize,
-                        content_bounds.height as usize,
+                        content_bounds.width,
+                        content_bounds.height,
                         Color::BLACK,
                     );
 
                     // Draw shapes at their current positions
                     for shape in &shapes {
                         wm.graphics_device.fill_rect(
-                            abs_x + shape.x as usize,
-                            abs_y + shape.y as usize,
-                            shape.width as usize,
-                            shape.height as usize,
+                            abs_x + shape.x,
+                            abs_y + shape.y,
+                            shape.width,
+                            shape.height,
                             shape.color,
                         );
                     }
@@ -205,7 +205,7 @@ impl RunnableProcess for PaintingProcess {
 }
 
 /// Get absolute screen position of a window by traversing parent chain
-fn get_absolute_position(wm: &window::WindowManager, window_id: WindowId) -> (usize, usize) {
+fn get_absolute_position(wm: &window::WindowManager, window_id: WindowId) -> (i32, i32) {
     let mut x = 0i32;
     let mut y = 0i32;
     let mut current_id = Some(window_id);
@@ -221,7 +221,7 @@ fn get_absolute_position(wm: &window::WindowManager, window_id: WindowId) -> (us
         }
     }
 
-    (x.max(0) as usize, y.max(0) as usize)
+    (x, y)
 }
 
 pub fn create_painting_process(args: Vec<String>) -> Box<dyn RunnableProcess> {

@@ -144,10 +144,12 @@ impl Window for Button {
         }
 
         let bounds = self.base.bounds();
-        let x = bounds.x as usize;
-        let y = bounds.y as usize;
-        let width = bounds.width as usize;
-        let height = bounds.height as usize;
+        let x = bounds.x;
+        let y = bounds.y;
+        let width = bounds.width;
+        let height = bounds.height;
+        let right = x + width as i32 - 1;
+        let bottom = y + height as i32 - 1;
 
         // Colors for 3D effect
         let highlight = Color::WHITE;
@@ -158,41 +160,33 @@ impl Window for Button {
 
         if self.pressed {
             // Pressed state: shadow on top/left, highlight on bottom/right
-            // Top edge
-            device.draw_line(x, y, x + width - 1, y, shadow);
-            // Left edge
-            device.draw_line(x, y, x, y + height - 1, shadow);
-            // Bottom edge
-            device.draw_line(x, y + height - 1, x + width - 1, y + height - 1, highlight);
-            // Right edge
-            device.draw_line(x + width - 1, y, x + width - 1, y + height - 1, highlight);
+            device.draw_line(x, y, right, y, shadow);
+            device.draw_line(x, y, x, bottom, shadow);
+            device.draw_line(x, bottom, right, bottom, highlight);
+            device.draw_line(right, y, right, bottom, highlight);
         } else {
             // Normal state: highlight on top/left, shadow on bottom/right
-            // Top edge
-            device.draw_line(x, y, x + width - 1, y, highlight);
-            // Left edge
-            device.draw_line(x, y, x, y + height - 1, highlight);
-            // Bottom edge
-            device.draw_line(x, y + height - 1, x + width - 1, y + height - 1, shadow);
-            // Right edge
-            device.draw_line(x + width - 1, y, x + width - 1, y + height - 1, shadow);
+            device.draw_line(x, y, right, y, highlight);
+            device.draw_line(x, y, x, bottom, highlight);
+            device.draw_line(x, bottom, right, bottom, shadow);
+            device.draw_line(right, y, right, bottom, shadow);
         }
 
         // Draw label centered
         if !self.label.is_empty() {
             let font = get_default_font();
-            let char_width = font.cell_width() as usize;
-            let char_height = font.line_height() as usize;
-            let text_width = self.label.len() * char_width;
+            let char_width = font.cell_width();
+            let char_height = font.line_height();
+            let text_width = (self.label.len() as u32) * char_width;
 
             // Center text in button
             let text_x = if text_width < width {
-                x + (width - text_width) / 2
+                x + ((width - text_width) / 2) as i32
             } else {
                 x + 2
             };
             let text_y = if char_height < height {
-                y + (height - char_height) / 2
+                y + ((height - char_height) / 2) as i32
             } else {
                 y + 2
             };

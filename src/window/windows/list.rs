@@ -240,10 +240,11 @@ impl Window for List {
         }
 
         let bounds = self.base.bounds();
-        let x = bounds.x as usize;
-        let y = bounds.y as usize;
-        let width = bounds.width as usize;
-        let height = bounds.height as usize;
+        let x = bounds.x;
+        let y = bounds.y;
+        let width = bounds.width;
+        let height = bounds.height;
+        let item_height = self.item_height as i32;
 
         // Draw background
         device.fill_rect(x, y, width, height, self.bg_color);
@@ -255,7 +256,7 @@ impl Window for List {
         let font = get_default_font();
         let line_h = font.line_height() as usize;
         let visible_count = self.visible_items();
-        let padding = 4;
+        let padding: i32 = 4;
 
         for i in 0..visible_count {
             let item_index = self.scroll_offset + i;
@@ -263,12 +264,12 @@ impl Window for List {
                 break;
             }
 
-            let item_y = y + i * self.item_height;
+            let item_y = y + (i as i32) * item_height;
             let is_selected = self.selected_index == Some(item_index);
 
             // Draw item background
             if is_selected {
-                device.fill_rect(x + 1, item_y, width - 2, self.item_height, self.selected_bg_color);
+                device.fill_rect(x + 1, item_y, width - 2, self.item_height as u32, self.selected_bg_color);
             }
 
             // Draw item text
@@ -278,7 +279,7 @@ impl Window for List {
                 self.text_color
             };
 
-            let text_y = item_y + self.item_height.saturating_sub(line_h) / 2; // Center vertically
+            let text_y = item_y + (item_height - line_h as i32) / 2; // Center vertically
             device.draw_text(
                 x + padding,
                 text_y,
@@ -290,17 +291,17 @@ impl Window for List {
 
         // Draw scrollbar if needed
         if self.items.len() > visible_count && visible_count > 0 {
-            let scrollbar_width = 8;
-            let scrollbar_x = x + width - scrollbar_width - 1;
+            let scrollbar_width: u32 = 8;
+            let scrollbar_x = x + width as i32 - scrollbar_width as i32 - 1;
             let scrollbar_height = height - 2;
 
             // Scrollbar track
             device.fill_rect(scrollbar_x, y + 1, scrollbar_width, scrollbar_height, Color::LIGHT_GRAY);
 
             // Scrollbar thumb
-            let thumb_height = (visible_count * scrollbar_height) / self.items.len();
-            let thumb_height = thumb_height.max(10); // Minimum thumb size
-            let thumb_pos = (self.scroll_offset * scrollbar_height) / self.items.len();
+            let thumb_height = (visible_count * scrollbar_height as usize) / self.items.len();
+            let thumb_height = thumb_height.max(10) as u32; // Minimum thumb size
+            let thumb_pos = ((self.scroll_offset * scrollbar_height as usize) / self.items.len()) as i32;
             device.fill_rect(
                 scrollbar_x,
                 y + 1 + thumb_pos,
