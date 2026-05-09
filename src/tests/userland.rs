@@ -782,6 +782,149 @@ fn test_loader_rollback_unmaps_on_reloc_failure() {
     });
 }
 
+// ---------- U7: enter_user_mode + lifecycle ----------
+
+/// Helper: drop any active image and clear the active-user slot. Lets tests
+/// run in any order without depending on prior cleanup.
+fn reset_active_user() {
+    // Drop the image (if any) before clearing — its Drop unmaps the user VAs.
+    let _img = crate::userland::release_active_image();
+    drop(_img);
+    crate::userland::force_clear_active_for_test();
+}
+
+/// T-E2E-no-arg analog: enter_user_mode rejects a second invocation while
+/// another image is active.
+fn test_enter_user_mode_single_user_invariant() {
+    reset_active_user();
+
+    // Stuff a fake image into the active slot to simulate "user app active."
+    // We use a dummy UserImage built with no mappings — its Drop is a no-op
+    // because mapping_count==0.
+    let dummy = crate::userland::image::UserImage::new(
+        x86_64::VirtAddr::new(0x40_0000),
+        x86_64::VirtAddr::new(0x80_0000),
+        0x40_0000,
+        0x80_0000,
+    );
+    crate::userland::lifecycle::with_active_user(|au| {
+        au.image = Some(dummy);
+    });
+
+    // Now try to enter again with a real image — must fail with AlreadyActive.
+    let bytes = fix::hello_exit0_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let r = crate::userland::enter_user_mode(image);
+    assert!(matches!(r, Err(crate::userland::EnterError::AlreadyActive)));
+
+    reset_active_user();
+}
+
+/// T-E2E-happy: load + run hello fixture; cooperative exit code 0.
+fn test_run_happy_path_hello() {
+    reset_active_user();
+    let bytes = fix::hello_exit0_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let result = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let _ = crate::userland::release_active_image();
+
+    use crate::userland::lifecycle::ExitKind;
+    assert!(matches!(result.0, ExitKind::Cooperative));
+    assert_eq!(result.1, 0);
+}
+
+/// T-E2E-fault-UD: UD2 as the first instruction causes #UD; cleanup runs;
+/// the run command observes ExitKind::Abnormal.
+fn test_run_fault_ud() {
+    reset_active_user();
+    let bytes = fix::fault_ud_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let result = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let _ = crate::userland::release_active_image();
+
+    use crate::userland::lifecycle::ExitKind;
+    match result.0 {
+        ExitKind::Abnormal { vector, .. } => assert_eq!(vector, 6),
+        other => panic!("expected Abnormal(#UD), got {:?}", other),
+    }
+}
+
+/// T-E2E-fault-PF: deref kernel-range pointer.
+fn test_run_fault_pf() {
+    reset_active_user();
+    let bytes = fix::fault_pf_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let result = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let _ = crate::userland::release_active_image();
+
+    use crate::userland::lifecycle::ExitKind;
+    match result.0 {
+        ExitKind::Abnormal { vector, .. } => assert_eq!(vector, 14),
+        other => panic!("expected Abnormal(#PF), got {:?}", other),
+    }
+}
+
+/// T-E2E-fault-GP: privileged `cli`.
+fn test_run_fault_gp() {
+    reset_active_user();
+    let bytes = fix::fault_gp_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let result = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let _ = crate::userland::release_active_image();
+
+    use crate::userland::lifecycle::ExitKind;
+    match result.0 {
+        ExitKind::Abnormal { vector, .. } => assert_eq!(vector, 13),
+        other => panic!("expected Abnormal(#GP), got {:?}", other),
+    }
+}
+
+/// T-E2E-bad-pointer-syscall: print with kernel-range pointer returns
+/// EFAULT; app calls exit with that. Verifies the exit code reaches the
+/// run-side correctly (low byte of EFAULT = -14 → 0xF2 unsigned, but the
+/// fixture passes RAX directly to RDI of exit, so the exit_code recorded
+/// should be EFAULT (-14) sign-extended through the i32 cast in exit_handler).
+fn test_run_bad_pointer_syscall() {
+    reset_active_user();
+    let bytes = fix::print_kernel_ptr_then_exit_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let result = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let _ = crate::userland::release_active_image();
+
+    use crate::userland::lifecycle::ExitKind;
+    assert!(matches!(result.0, ExitKind::Cooperative));
+    // EFAULT = -14
+    assert_eq!(result.1, -14);
+}
+
+/// T-E2E-leak-loop: load + exit happy fixture three times. Each cycle
+/// must succeed — a leak in user-VA mappings would manifest as
+/// `PageAlreadyMapped` from the loader on the second iteration.
+fn test_run_leak_loop_happy() {
+    for _ in 0..3 {
+        reset_active_user();
+        let bytes = fix::hello_exit0_elf();
+        let image = load_elf(&bytes).expect("load_elf in leak loop");
+        let result = crate::userland::enter_user_mode(image).expect("enter_user_mode in leak loop");
+        let _ = crate::userland::release_active_image();
+        use crate::userland::lifecycle::ExitKind;
+        assert!(matches!(result.0, ExitKind::Cooperative));
+    }
+}
+
+/// T-E2E-fault-leak-loop: same, but with a UD2 fault each time.
+fn test_run_leak_loop_fault() {
+    for _ in 0..3 {
+        reset_active_user();
+        let bytes = fix::fault_ud_elf();
+        let image = load_elf(&bytes).expect("load_elf in fault leak loop");
+        let result = crate::userland::enter_user_mode(image).expect("enter_user_mode in fault leak loop");
+        let _ = crate::userland::release_active_image();
+        use crate::userland::lifecycle::ExitKind;
+        assert!(matches!(result.0, crate::userland::lifecycle::ExitKind::Abnormal { .. }));
+    }
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_gdt_kernel_selectors,
@@ -830,6 +973,15 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_loader_jump_slot_relocation,
         &test_loader_no_relocations_is_ok,
         &test_loader_rollback_unmaps_on_reloc_failure,
+        // U7
+        &test_enter_user_mode_single_user_invariant,
+        &test_run_happy_path_hello,
+        &test_run_fault_ud,
+        &test_run_fault_pf,
+        &test_run_fault_gp,
+        &test_run_bad_pointer_syscall,
+        &test_run_leak_loop_happy,
+        &test_run_leak_loop_fault,
     ]
 }
 

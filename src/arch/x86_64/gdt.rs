@@ -83,6 +83,35 @@ pub fn selectors() -> &'static Selectors {
     &GDT.1
 }
 
+/// Top of the static kernel rsp0 stack — the value the userland subsystem
+/// stamps into `TSS.privilege_stack_table[0]` before entering ring 3 (D6).
+///
+/// Single-app-synchronous (D5) means we always switch *back* to this same
+/// stack on a ring 3 → ring 0 transition; multiplexing per-process rsp0 is
+/// out of scope.
+pub fn kernel_rsp0_top() -> VirtAddr {
+    let stack_start = VirtAddr::from_ptr(&raw const KERNEL_RSP0_STACK);
+    stack_start + KERNEL_RSP0_STACK_SIZE as u64
+}
+
+/// Update `TSS.privilege_stack_table[0]` (rsp0). Call before entering ring 3.
+///
+/// SAFETY: the caller must ensure no ring 3 → ring 0 transition is in flight
+/// while this write is observable in a partial state. Practically this means:
+/// call from CPL=0 with interrupts disabled (or, equivalently, from a context
+/// where no user app is currently active — i.e., from `enter_user_mode` just
+/// before issuing `iretq`). Single-app-synchronous (D5) makes the policy
+/// simple: rsp0 is set once per `run` and not touched again until exit.
+///
+/// We must mutate a `lazy_static` which exposes `&'static TaskStateSegment`
+/// — we go through a raw pointer cast rather than `UnsafeCell` to keep the
+/// `lazy_static` ergonomic. The cast is sound because the static lives for
+/// `'static` and the field is `Copy`.
+pub unsafe fn set_kernel_rsp0(rsp0: VirtAddr) {
+    let tss_ptr = &*TSS as *const TaskStateSegment as *mut TaskStateSegment;
+    (*tss_ptr).privilege_stack_table[0] = rsp0;
+}
+
 /// Install the GDT, reload all segment registers, and load the TSS.
 ///
 /// Must run before any code path that depends on the new selectors — in

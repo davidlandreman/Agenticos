@@ -68,23 +68,34 @@ pub fn print_handler(args: &mut SyscallArgs) -> i64 {
     len as i64
 }
 
-/// `exit(code: i32) -> i64` — placeholder until U7 wires the real long-jump.
+/// `exit(code: i32) -> !` — terminate the user process by long-jumping to
+/// the saved kernel continuation (U7).
 ///
-/// Records the code into `LAST_EXIT_CODE` so tests can observe it. In U7 this
-/// will be replaced by the long-jump back to the saved kernel continuation;
-/// the function will diverge (`-> !`) and never return to the dispatcher.
+/// Records the code in `LAST_EXIT_CODE` (test observability) and into the
+/// active-user slot, then calls `cooperative_exit`, which never returns.
+/// The dispatcher's iretq is therefore *not* executed — the long-jump
+/// resumes the run command's frame instead.
 ///
-/// For now we return 0 so the dispatcher's iretq still runs and execution
-/// continues after the `int 0x80`. A user app calling `exit` today would
-/// continue past the call instead of terminating — that is acceptable
-/// because no real user app exists yet (U7+/U8 land that).
+/// When called from a kernel-mode test (no active continuation), falls back
+/// to recording `LAST_EXIT_CODE` and returning 0 — the test scaffold drives
+/// the dispatcher directly without setting up `enter_user_mode`. This branch
+/// is opt-in via the absence of an active continuation; an active user app
+/// always takes the diverging path.
 pub fn exit_handler(args: &mut SyscallArgs) -> i64 {
-    // The user-side ABI passes `code` in RDI (System V first arg). Sign-extend
-    // from i32 so a user `exit(-1)` is recorded as -1, not 0xFFFFFFFF.
     let code = args.rdi as i32 as i64;
     *LAST_EXIT_CODE.lock() = Some(code);
-    crate::debug_info!("USERLAND: exit({}) recorded (placeholder; U7 wires long-jump)", code);
-    0
+
+    // If no continuation is installed, we are running from a kernel-mode
+    // synthetic test — just record and return.
+    let has_cont =
+        crate::userland::lifecycle::with_active_user(|au| au.continuation.is_some());
+    if !has_cont {
+        crate::debug_info!("USERLAND: exit({}) recorded (no active continuation)", code);
+        return 0;
+    }
+
+    crate::debug_info!("USERLAND: exit({}) — long-jumping to run command", code);
+    crate::userland::lifecycle::cooperative_exit(code);
 }
 
 /// Register `print` and `exit` against the SYSCALL_TABLE. Called once during

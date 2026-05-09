@@ -399,7 +399,8 @@ pub fn run() -> ! {
     crate::process::register_command("calc", crate::commands::calc::create_calc_process);
     crate::process::register_command("notepad", crate::commands::notepad::create_notepad_process);
     crate::process::register_command("tasks", crate::commands::tasks::create_tasks_process);
-    debug_info!("All {} commands registered successfully.", 16);
+    crate::process::register_command("run", crate::commands::run::create_run_process);
+    debug_info!("All {} commands registered successfully.", 17);
 
     // Force an initial render to display the desktop
     window::render_frame();

@@ -185,6 +185,144 @@ pub fn happy_path_elf() -> Vec<u8> {
     .build()
 }
 
+// ---------- runnable fixtures (U7) ----------
+
+/// Build a single-PT_LOAD ELF whose `_start` (at 0x40_0000) is the given byte
+/// stream. The page is mapped R+X (PF_R | PF_X). `p_memsz` is rounded up to a
+/// page so the loader maps exactly one 4 KiB page covering `p_vaddr ..
+/// p_vaddr+0x1000`. Useful for hand-crafted "do one thing" test apps.
+pub fn runnable_elf_rx(code: &[u8]) -> Vec<u8> {
+    let payload = code.to_vec();
+    let p_offset = 0x1000u64;
+    let p_vaddr = 0x40_0000u64;
+    let p_filesz = payload.len() as u64;
+    let p_memsz = 0x1000u64; // full page
+    let phdr = PhdrSpec {
+        p_type: PT_LOAD,
+        p_flags: PF_R | PF_X,
+        p_offset,
+        p_vaddr,
+        p_filesz,
+        p_memsz,
+        p_align: 0x1000,
+    };
+    Fixture {
+        e_type: ET_EXEC,
+        e_machine: EM_X86_64,
+        ei_class: ELFCLASS64,
+        ei_data: ELFDATA2LSB,
+        e_entry: p_vaddr,
+        phdrs: vec![phdr],
+        payloads: vec![(p_offset, payload)],
+        truncate_to: None,
+    }
+    .build()
+}
+
+/// Hand-assembled "hello + exit(0)" app. Layout in the single R+X page:
+///
+/// ```
+/// 0x40_0000:  mov rax, 0       ; B8 00 00 00 00
+/// 0x40_0005:  mov rdi, 0x400080 ; 48 BF 80 00 40 00 00 00 00 00
+/// 0x40_000F:  mov rsi, 6       ; BE 06 00 00 00
+/// 0x40_0014:  int 0x80         ; CD 80         (print)
+/// 0x40_0016:  mov rax, 1       ; B8 01 00 00 00
+/// 0x40_001B:  mov rdi, 0       ; BF 00 00 00 00
+/// 0x40_0020:  int 0x80         ; CD 80         (exit)
+/// 0x40_0022:  hlt              ; F4            (safety)
+/// ...
+/// 0x40_0080:  "hello\n"
+/// ```
+///
+/// The user app runs straight through with no GOT/relocations — it issues
+/// `int 0x80` directly, with the syscall ID baked into RAX. This shortcuts
+/// the userland-side trampoline page (which is still mapped, but unused by
+/// this fixture) and lets us prove the ring-3 entry + syscall + long-jump
+/// path without depending on the U6 relocation walker, U8 userlib, or any
+/// linker tooling.
+pub fn hello_exit0_elf() -> Vec<u8> {
+    build_print_exit_elf(b"hello\n", 0)
+}
+
+/// Same shape as `hello_exit0_elf` but with a custom message and exit code.
+pub fn build_print_exit_elf(msg: &[u8], exit_code: u32) -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov eax, 0  (print syscall id)
+    code.extend_from_slice(&[0xB8, 0x00, 0x00, 0x00, 0x00]);
+    // mov rdi, 0x40_0080 (msg ptr) — REX.W + B8+rd id 0xBF
+    code.extend_from_slice(&[0x48, 0xBF, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    // mov esi, msg.len()
+    let len = msg.len() as u32;
+    code.push(0xBE);
+    code.extend_from_slice(&len.to_le_bytes());
+    // int 0x80
+    code.extend_from_slice(&[0xCD, 0x80]);
+    // mov eax, 1 (exit syscall id)
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+    // mov edi, exit_code
+    code.push(0xBF);
+    code.extend_from_slice(&exit_code.to_le_bytes());
+    // int 0x80
+    code.extend_from_slice(&[0xCD, 0x80]);
+    // hlt (safety; reached only if exit returns, which it does not)
+    code.push(0xF4);
+
+    // Pad to 0x80 then append message.
+    while code.len() < 0x80 {
+        code.push(0x90); // NOP padding
+    }
+    code.extend_from_slice(msg);
+    runnable_elf_rx(&code)
+}
+
+/// Fixture: first instruction is UD2 (`0F 0B`). Triggers #UD on entry.
+pub fn fault_ud_elf() -> Vec<u8> {
+    runnable_elf_rx(&[0x0F, 0x0B])
+}
+
+/// Fixture: dereferences `0x10_0000_0000` (canonical, unmapped) for a read.
+/// Triggers #PF (a non-canonical address would trigger #GP instead).
+pub fn fault_pf_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov rax, 0x10_0000_0000 ; 48 B8 imm64
+    code.extend_from_slice(&[0x48, 0xB8]);
+    code.extend_from_slice(&0x10_0000_0000u64.to_le_bytes());
+    // mov rax, [rax]            ; 48 8B 00
+    code.extend_from_slice(&[0x48, 0x8B, 0x00]);
+    // hlt (unreachable — should fault first)
+    code.push(0xF4);
+    runnable_elf_rx(&code)
+}
+
+/// Fixture: executes `cli` (0xFA), a privileged instruction. Triggers #GP.
+pub fn fault_gp_elf() -> Vec<u8> {
+    runnable_elf_rx(&[0xFA, 0xF4])
+}
+
+/// Fixture: calls `print` with a kernel-range pointer. The syscall returns
+/// EFAULT (negative); the app then does `exit(rax_low_byte)`. Demonstrates
+/// pointer-validation defense without crashing the kernel.
+pub fn print_kernel_ptr_then_exit_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov rax, 0 (print)
+    code.extend_from_slice(&[0xB8, 0x00, 0x00, 0x00, 0x00]);
+    // mov rdi, 0xFFFF_8000_0000_0000 (kernel-range)
+    code.extend_from_slice(&[0x48, 0xBF]);
+    code.extend_from_slice(&0xFFFF_8000_0000_0000u64.to_le_bytes());
+    // mov esi, 5
+    code.extend_from_slice(&[0xBE, 0x05, 0x00, 0x00, 0x00]);
+    // int 0x80     (returns EFAULT in RAX)
+    code.extend_from_slice(&[0xCD, 0x80]);
+    // mov rdi, rax (exit code = whatever print returned)
+    code.extend_from_slice(&[0x48, 0x89, 0xC7]);
+    // mov eax, 1 (exit)
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+    // int 0x80
+    code.extend_from_slice(&[0xCD, 0x80]);
+    code.push(0xF4);
+    runnable_elf_rx(&code)
+}
+
 // ---------- low-level writers ----------
 
 pub fn write_u16(buf: &mut [u8], at: usize, v: u16) {
