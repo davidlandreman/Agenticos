@@ -21,6 +21,11 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // TR before any such fault can fire.
     debug_info!("[boot] gdt+idt");
     gdt::init();
+    // Per-CPU SYSCALL scratch struct + GS_BASE/KERNEL_GS_BASE programming.
+    // No SYSCALL stub is installed yet (U3 lands that), but pointing both GS
+    // bases at PERCPU now means the first swapgs on SYSCALL entry will be
+    // a no-op regardless of MSR ordering.
+    crate::arch::x86_64::syscall::init_percpu();
     interrupts::init_idt();
     ps2_controller::init();
 
