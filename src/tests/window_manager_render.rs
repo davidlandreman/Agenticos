@@ -17,7 +17,7 @@ use crate::graphics::color::Color;
 use crate::lib::arc::Arc;
 use crate::lib::test_utils::Testable;
 use crate::window::{
-    ColorDepth, Event, EventResult, GraphicsDevice, Rect, Window, WindowId, WindowManager,
+    ColorDepth, Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId, WindowManager,
 };
 
 // ---- RecordingDevice ----------------------------------------------------
@@ -439,6 +439,110 @@ fn test_parent_painted_propagates_to_clean_non_intersecting_child() {
     );
 }
 
+// ---- U5 tests: drag/resize bounds-union dirty --------------------------
+
+fn test_drag_tick_marks_bounds_union_not_full_repaint() {
+    let (mut wm, _state) = make_manager(800, 600);
+    use crate::window::ScreenMode;
+    let screen_id = wm.create_screen(ScreenMode::Gui);
+    wm.switch_screen(screen_id);
+
+    // Root at (0, 0) full-screen — dragged windows are top-level children.
+    let root_id = wm.create_window(None);
+    let mut root = Box::new(TestWindow::new(root_id, Rect::new(0, 0, 800, 600), ROOT_COLOR));
+    root.focusable = false;
+    wm.set_window_impl(root_id, root);
+    if let Some(screen) = wm.get_active_screen_mut() {
+        screen.set_root_window(root_id);
+    }
+
+    // Frame to drag at (100, 100, 400, 300).
+    let frame_id = wm.create_window(Some(root_id));
+    let mut frame = Box::new(TestWindow::new(
+        frame_id, Rect::new(100, 100, 400, 300), CHILD0_COLOR,
+    ));
+    frame.set_parent(Some(root_id));
+    wm.set_window_impl(frame_id, frame);
+
+    quiesce(&mut wm);
+
+    // Pretend the user grabbed the title bar at (150, 110) and the frame's
+    // origin was (100, 100); this matches what start_drag_if_on_title_bar
+    // would record for a real click on the title bar.
+    wm.test_force_drag_state(
+        frame_id,
+        Point::new(150, 110),
+        Point::new(100, 100),
+    );
+
+    // Mouse moves 20 px right with left button still held → drag tick.
+    wm.test_handle_dragging(170, 110, 0x01);
+
+    // Frame should now be at (120, 100, 400, 300).
+    assert_eq!(
+        wm.window_registry.get(&frame_id).unwrap().bounds(),
+        Rect::new(120, 100, 400, 300),
+    );
+
+    // Crucially: the drag tick must NOT have marked a full repaint.
+    assert!(
+        !wm.test_needs_full_repaint(),
+        "drag must not call mark_full_repaint anymore — that was the regression \
+         being optimized away"
+    );
+
+    // The dirty union should cover the (old ∪ new) bounds. Old:
+    // (100, 100, 400, 300); new: (120, 100, 400, 300); union:
+    // (100, 100, 420, 300).
+    let union = Rect::new(100, 100, 420, 300);
+    let dirty = wm.test_dirty_regions();
+    assert!(
+        dirty.iter().any(|r| *r == union || (r.x <= union.x
+            && r.y <= union.y
+            && r.x + r.width as i32 >= union.x + union.width as i32
+            && r.y + r.height as i32 >= union.y + union.height as i32)),
+        "expected dirty rects to cover {:?}, got {:?}",
+        union,
+        dirty
+    );
+}
+
+fn test_drag_tick_with_no_position_change_does_nothing() {
+    let (mut wm, _state) = make_manager(800, 600);
+    use crate::window::ScreenMode;
+    let screen_id = wm.create_screen(ScreenMode::Gui);
+    wm.switch_screen(screen_id);
+
+    let root_id = wm.create_window(None);
+    let mut root = Box::new(TestWindow::new(root_id, Rect::new(0, 0, 800, 600), ROOT_COLOR));
+    root.focusable = false;
+    wm.set_window_impl(root_id, root);
+    if let Some(screen) = wm.get_active_screen_mut() {
+        screen.set_root_window(root_id);
+    }
+
+    let frame_id = wm.create_window(Some(root_id));
+    let mut frame = Box::new(TestWindow::new(
+        frame_id, Rect::new(100, 100, 400, 300), CHILD0_COLOR,
+    ));
+    frame.set_parent(Some(root_id));
+    wm.set_window_impl(frame_id, frame);
+
+    quiesce(&mut wm);
+
+    wm.test_force_drag_state(frame_id, Point::new(150, 110), Point::new(100, 100));
+
+    // Drag tick where mouse hasn't actually moved (delta = 0).
+    wm.test_handle_dragging(150, 110, 0x01);
+
+    assert!(!wm.test_needs_full_repaint());
+    assert!(
+        wm.test_dirty_regions().is_empty(),
+        "no-op drag tick must not mark anything dirty; got {:?}",
+        wm.test_dirty_regions()
+    );
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         // U3 — absolute-bounds dirty marking
@@ -451,5 +555,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_window_intersecting_dirty_paints_with_clipped_rect,
         &test_full_repaint_clips_to_window_bounds,
         &test_parent_painted_propagates_to_clean_non_intersecting_child,
+        // U5 — drag/resize bounds-union dirty
+        &test_drag_tick_marks_bounds_union_not_full_repaint,
+        &test_drag_tick_with_no_position_change_does_nothing,
     ]
 }

@@ -806,6 +806,39 @@ impl WindowManager {
         }
     }
 
+    /// Test-only: force the manager into a Dragging interaction state and
+    /// pretend the left mouse button is held. Lets a test drive the drag
+    /// arm of `handle_dragging` without going through hit-testing on a
+    /// title bar.
+    #[cfg(feature = "test")]
+    pub fn test_force_drag_state(
+        &mut self,
+        window_id: WindowId,
+        start_mouse: Point,
+        start_window: Point,
+    ) {
+        self.interaction_state = InteractionState::Dragging {
+            window: window_id,
+            start_mouse,
+            start_window,
+        };
+        self.last_mouse_buttons = 0x01;
+    }
+
+    /// Test-only: invoke `handle_dragging` directly so a test can drive
+    /// drag/resize ticks without simulating mouse input through the full
+    /// interrupt pipeline.
+    #[cfg(feature = "test")]
+    pub fn test_handle_dragging(&mut self, mouse_x: i32, mouse_y: i32, buttons: u8) {
+        self.handle_dragging(mouse_x, mouse_y, buttons);
+    }
+
+    /// Test-only: did the compositor's dirty manager flip to full-repaint?
+    #[cfg(feature = "test")]
+    pub fn test_needs_full_repaint(&self) -> bool {
+        self.compositor.dirty.needs_full_repaint()
+    }
+
     /// Mark a window as needing repaint (for external callers).
     pub fn invalidate_window(&mut self, window_id: WindowId) {
         if let Some(window) = self.window_registry.get(&window_id) {
@@ -968,11 +1001,25 @@ impl WindowManager {
                         // Only update if position actually changed
                         if new_x != old_bounds.x || new_y != old_bounds.y {
                             // Update bounds
-                            win.set_bounds(Rect::new(new_x, new_y, old_bounds.width, old_bounds.height));
+                            let new_bounds = Rect::new(
+                                new_x, new_y, old_bounds.width, old_bounds.height,
+                            );
+                            win.set_bounds(new_bounds);
                             win.invalidate();
 
-                            // Force full repaint to properly redraw exposed areas
-                            self.compositor.dirty.mark_full_repaint();
+                            // Mark only the union of (old, new) bounds dirty
+                            // — not the whole screen. Cascade invalidation
+                            // (run later in render()) propagates this to
+                            // overlapping siblings; the desktop / background
+                            // beneath the now-exposed area is dirty-clipped
+                            // by U4's intersection logic.
+                            //
+                            // Top-level windows (the only ones draggable per
+                            // start_drag_if_on_title_bar) are children of the
+                            // root at (0, 0), so local bounds equal absolute
+                            // bounds — passing them straight to mark_dirty is
+                            // correct.
+                            self.compositor.dirty.mark_dirty(old_bounds.union(&new_bounds));
 
                             crate::debug_trace!("Dragging window {:?} to ({}, {})", window, new_x, new_y);
                         }
@@ -1008,8 +1055,9 @@ impl WindowManager {
                             win.set_bounds(new_bounds);
                             win.invalidate();
 
-                            // Force full repaint to properly redraw exposed areas
-                            self.compositor.dirty.mark_full_repaint();
+                            // Same union-mark pattern as the drag arm above.
+                            // Resize is also restricted to top-level windows.
+                            self.compositor.dirty.mark_dirty(old_bounds.union(&new_bounds));
 
                             crate::debug_trace!("Resizing window {:?} to {:?}", window, new_bounds);
                         }
