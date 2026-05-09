@@ -95,7 +95,12 @@ if command -v "$MUSL_GXX" >/dev/null 2>&1; then
             # Verify ET_EXEC. Some toolchains default to PIE even with
             # -no-pie; the loader rejects ET_DYN, so we'd rather fail
             # here with a clear message than at run-time inside the guest.
-            ET_TYPE=$(readelf -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
+            # macOS doesn't ship a host `readelf`; derive it from the
+            # cross-toolchain (e.g. x86_64-linux-musl-g++ → x86_64-linux-musl-readelf)
+            # and fall back to host `readelf` for Linux build hosts.
+            MUSL_READELF="${MUSL_GXX%g++}readelf"
+            command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
+            ET_TYPE=$("$MUSL_READELF" -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
             if [ "$ET_TYPE" != "EXEC" ]; then
                 echo "❌ $CPP_BIN is $ET_TYPE, expected EXEC. Toolchain likely defaults to PIE."
                 echo "   Try: $MUSL_GXX -static -no-pie -fno-pie ..."

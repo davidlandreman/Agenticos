@@ -9,6 +9,9 @@
 /userland/target/
 Cargo.lock
 
+# C++ userland app build artifacts (Makefile output)
+/userland/apps/*-cpp/build/
+
 # OS development artifacts
 *.img
 *.iso

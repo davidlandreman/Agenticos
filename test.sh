@@ -38,7 +38,9 @@ if command -v "$MUSL_GXX" >/dev/null 2>&1; then
     if make -C userland/apps/hello-cpp MUSL_GXX="$MUSL_GXX"; then
         CPP_BIN="userland/apps/hello-cpp/build/hello-cpp"
         if [ -f "$CPP_BIN" ]; then
-            ET_TYPE=$(readelf -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
+            MUSL_READELF="${MUSL_GXX%g++}readelf"
+            command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
+            ET_TYPE=$("$MUSL_READELF" -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
             if [ "$ET_TYPE" = "EXEC" ]; then
                 STAGED="$HOST_SHARE_STAGE/HELLOCPP.ELF"
                 TMP="$HOST_SHARE_STAGE/.HELLOCPP.ELF.tmp.$$"
