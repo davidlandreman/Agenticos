@@ -18,6 +18,8 @@ pub mod fonts;
 pub mod window_clipping;
 #[cfg(feature = "test")]
 pub mod graphics_device_image;
+#[cfg(feature = "test")]
+pub mod desktop_window;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -37,6 +39,7 @@ pub fn run_tests() {
     let fonts_tests = fonts::get_tests();
     let window_clipping_tests = window_clipping::get_tests();
     let graphics_device_image_tests = graphics_device_image::get_tests();
+    let desktop_window_tests = desktop_window::get_tests();
 
     let mut total_tests = 0;
     
@@ -116,6 +119,14 @@ pub fn run_tests() {
     debug_info!("\n[GraphicsDevice Image Tests]");
     debug_info!("Running {} tests", graphics_device_image_tests.len());
     for test in graphics_device_image_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run DesktopWindow tests
+    debug_info!("\n[DesktopWindow Tests]");
+    debug_info!("Running {} tests", desktop_window_tests.len());
+    for test in desktop_window_tests {
         test.run();
         total_tests += 1;
     }
