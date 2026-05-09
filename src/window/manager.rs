@@ -936,19 +936,31 @@ impl WindowManager {
         }
     }
 
-    /// Click landed on a frame window — focus its content (terminal) for
-    /// keyboard input. `focus_window` itself takes care of activating the
-    /// parent frame's chrome and bringing the stack to the front.
+    /// Click landed on a frame window — focus its content for keyboard
+    /// input. We search depth-first for the first focusable descendant
+    /// (e.g. the editor or terminal), since a frame's literal first child
+    /// might be a menu bar or other non-focusable widget. Falls back to
+    /// the frame itself, which is always focusable.
     fn focus_frame_and_content(&mut self, frame_id: WindowId) {
-        let content_id = self.window_registry
-            .get(&frame_id)
-            .and_then(|f| f.children().first().copied());
+        let target = self.first_focusable_descendant(frame_id).unwrap_or(frame_id);
+        self.focus_window(target);
+    }
 
-        if let Some(content_id) = content_id {
-            self.focus_window(content_id);
-        } else {
-            self.focus_window(frame_id);
+    /// Depth-first search for the first focusable window in `id`'s subtree
+    /// (excluding `id` itself).
+    fn first_focusable_descendant(&self, id: WindowId) -> Option<WindowId> {
+        let window = self.window_registry.get(&id)?;
+        for &child_id in window.children() {
+            if let Some(child) = self.window_registry.get(&child_id) {
+                if child.can_focus() {
+                    return Some(child_id);
+                }
+                if let Some(found) = self.first_focusable_descendant(child_id) {
+                    return Some(found);
+                }
+            }
         }
+        None
     }
 
     /// Bring a window to the front of its parent's children list (i.e. the
@@ -956,7 +968,6 @@ impl WindowManager {
     /// ancestor up to the root. This is the single source of truth for
     /// z-order — rendering and hit-testing both read it from `children()`.
     pub fn bring_to_front(&mut self, window_id: WindowId) {
-        crate::debug_info!("bring_to_front: target={:?}", window_id);
         let mut current = window_id;
         loop {
             let parent_id = match self.window_registry.get(&current).and_then(|w| w.parent()) {
@@ -970,13 +981,6 @@ impl WindowManager {
                 parent.add_child(current);
             }
             current = parent_id;
-        }
-
-        // Log the root's children for diagnostic purposes.
-        if let Some(root_id) = self.get_active_screen().and_then(|s| s.root_window) {
-            if let Some(root) = self.window_registry.get(&root_id) {
-                crate::debug_info!("bring_to_front: root.children = {:?}", root.children());
-            }
         }
 
         // Sibling reordering means areas previously occluded may now be
