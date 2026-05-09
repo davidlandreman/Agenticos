@@ -25,6 +25,9 @@ x86_64 = "0.14"
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 pic8259 = "0.10"
 linked_list_allocator = "0.10"
+ttf-parser = { version = "0.25", default-features = false, features = ["no-std-float"] }
+ab_glyph_rasterizer = { version = "0.1", default-features = false, features = ["libm"] }
+libm = "0.2"
 
 
 #[package.metadata.bootimage]

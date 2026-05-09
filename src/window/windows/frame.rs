@@ -72,10 +72,10 @@ impl FrameWindow {
         );
 
         // Draw title text (left-aligned with padding)
-        let text_y = bounds.y + border + (self.title_bar_height as i32 - 8) / 2;
-        let text_x = bounds.x + border + 8;
-
         let font = crate::graphics::fonts::core_font::get_default_font();
+        let line_h = font.line_height() as i32;
+        let text_y = bounds.y + border + (self.title_bar_height as i32 - line_h) / 2;
+        let text_x = bounds.x + border + 8;
         device.draw_text(
             text_x,
             text_y,

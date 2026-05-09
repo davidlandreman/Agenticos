@@ -150,7 +150,7 @@ impl Window for Label {
         // Draw text
         if !self.text.is_empty() {
             let font = get_default_font();
-            let char_width: u32 = 8; // Default font is 8x8
+            let char_width = font.cell_width();
             let text_width = (self.text.len() as u32) * char_width;
 
             // Calculate x position based on alignment
@@ -173,7 +173,7 @@ impl Window for Label {
             };
 
             // Center vertically
-            let text_y = y + (height.saturating_sub(8) / 2) as i32;
+            let text_y = y + (height.saturating_sub(font.line_height()) / 2) as i32;
 
             device.draw_text(text_x, text_y, &self.text, font.as_font(), self.color);
         }

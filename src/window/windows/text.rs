@@ -84,8 +84,8 @@ impl TextWindow {
     /// Create a new text window with a specific ID
     pub fn new_with_id(id: crate::window::WindowId, bounds: Rect) -> Self {
         let font = get_default_font();
-        let char_width = font.char_width();
-        let char_height = font.char_height();
+        let char_width = font.cell_width() as usize;
+        let char_height = font.line_height() as usize;
 
         // Calculate grid dimensions
         let cols = (bounds.width as usize) / char_width;
@@ -290,8 +290,8 @@ impl Window for TextWindow {
         // Recalculate grid dimensions when bounds change
         let bounds = self.base.bounds();
         let font = crate::graphics::fonts::core_font::get_default_font();
-        self.char_width = font.char_width();
-        self.char_height = font.char_height();
+        self.char_width = font.cell_width() as usize;
+        self.char_height = font.line_height() as usize;
         let new_cols = bounds.width as usize / self.char_width;
         let new_rows = bounds.height as usize / self.char_height;
 

@@ -11,7 +11,7 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
 - `framebuffer.rs` — region save/restore (`SavedRegion`, `RegionCapableBuffer` trait).
 - `render.rs` — `RenderTarget` abstraction for efficient row-based drawing.
 - `mouse_cursor.rs` — 12×12 arrow sprite with background save/restore.
-- `fonts/` — multi-format font support: `core_font.rs` (trait), `embedded_font.rs` (built-in 8x8 bitmap), `vfnt.rs` (vector), `truetype_font.rs` (TrueType parsing/rendering), `font_data.rs`.
+- `fonts/` — font support. `core_font.rs` defines the glyph-centric `Font` trait + `Glyph<'a>` struct (8bpp coverage). `ttf.rs` is the TTF/OTF backend (parses via `ttf-parser`, rasterizes via `ab_glyph_rasterizer`, ASCII pre-rendered into per-glyph `Box<[u8]>` slots, non-ASCII lazy via `BTreeMap`). `embedded_font.rs` is the 8x8 bitmap fallback used only on TTF parse failure. `font_data.rs` holds the embedded font's bit-packed source. The system TTF lives at `assets/system.ttf` and is `include_bytes!`-baked into the kernel; `init_fonts()` parses it once during boot, after heap init.
 - `images/` — `bmp.rs` (full Windows BMP, 4/8/16/24/32-bit). `png.rs` (header parsing only — no decompression yet).
 
 ## Double buffering

@@ -1,204 +1,129 @@
-use super::embedded_font::{Embedded8x8Font, DEFAULT_8X8_FONT};
-use super::vfnt::VFNTFont;
-use super::truetype_font::TrueTypeFont;
+//! Font abstraction. Glyphs carry their own metrics; coverage is 8bpp alpha.
+//!
+//! Boot-time selection only — `init_fonts()` is called once after heap init,
+//! before any window drawing. There is no runtime swap path.
+
+use super::embedded_font::DEFAULT_8X8_FONT;
+use super::ttf::TtfFont;
 use alloc::boxed::Box;
+use spin::Once;
 
-// Unified font trait that all font types must implement
-pub trait Font {
-    /// Get the bitmap data for a character
-    fn get_char_bitmap(&self, ch: char) -> Option<&[u8]>;
-    
-    /// Get the width of characters in this font
-    fn char_width(&self) -> usize;
-    
-    /// Get the height of characters in this font
-    fn char_height(&self) -> usize;
-    
-    /// Get the number of bytes per row for the bitmap data
-    fn bytes_per_row(&self) -> usize {
-        (self.char_width() + 7) / 8
-    }
+/// A rasterized glyph with metrics relative to the pen position and baseline.
+///
+/// `coverage` is `width * height` bytes of 8bpp alpha (0 = transparent, 255 = opaque),
+/// row-major, top-to-bottom.
+pub struct Glyph<'a> {
+    pub width: u32,
+    pub height: u32,
+    /// Pixels from the pen's x to the bitmap's left edge. May be negative
+    /// (e.g. italic glyphs that extend left of the advance origin).
+    pub x_offset: i32,
+    /// Pixels from the baseline y to the bitmap's top edge. Negative for the
+    /// common case where the glyph is above the baseline.
+    pub y_offset: i32,
+    /// Pixels to advance the pen after drawing this glyph.
+    pub advance: u32,
+    pub coverage: &'a [u8],
 }
 
-// Implement Font trait for Embedded8x8Font
-impl Font for Embedded8x8Font {
-    fn get_char_bitmap(&self, ch: char) -> Option<&[u8]> {
-        self.get_char_bitmap(ch).map(|bitmap| &bitmap[..])
-    }
-    
-    fn char_width(&self) -> usize {
-        8
-    }
-    
-    fn char_height(&self) -> usize {
-        8
-    }
+/// Glyph-centric font interface. All measurements are in pixels.
+pub trait Font: Send + Sync {
+    /// Look up a glyph for `ch`. Returns `None` if the character has no glyph.
+    fn glyph(&self, ch: char) -> Option<Glyph<'_>>;
+
+    /// Total vertical advance for one line of text.
+    fn line_height(&self) -> u32;
+
+    /// Pixels from the cell's top to the baseline.
+    fn ascent(&self) -> u32;
+
+    /// Per-character advance for a monospaced font. Used by the cell-grid TTY
+    /// and by widgets that lay out text in fixed-width columns.
+    fn cell_width(&self) -> u32;
 }
 
-// Implement Font trait for VFNTFont
-impl Font for VFNTFont {
-    fn get_char_bitmap(&self, ch: char) -> Option<&[u8]> {
-        self.get_char_bitmap(ch)
-    }
-    
-    fn char_width(&self) -> usize {
-        self.width as usize
-    }
-    
-    fn char_height(&self) -> usize {
-        self.height as usize
-    }
-}
-
-// Implement Font trait for TrueTypeFont
-impl Font for TrueTypeFont {
-    fn get_char_bitmap(&self, ch: char) -> Option<&[u8]> {
-        self.get_char_bitmap(ch)
-    }
-    
-    fn char_width(&self) -> usize {
-        // Return average character width - actual widths vary per character
-        (self.render_size * 2 / 3) as usize
-    }
-    
-    fn char_height(&self) -> usize {
-        self.render_size as usize
-    }
-}
-
-// Font wrapper that can hold any font type
+/// Cheap-to-copy borrowed handle to a `'static` font.
 #[derive(Copy, Clone)]
 pub struct FontRef {
     font: &'static dyn Font,
 }
 
-// Make FontRef thread-safe by implementing Send and Sync
-unsafe impl Send for FontRef {}
-unsafe impl Sync for FontRef {}
-
 impl FontRef {
     pub fn new(font: &'static dyn Font) -> Self {
         Self { font }
     }
-    
-    pub fn as_font(&self) -> &dyn Font {
+
+    pub fn as_font(&self) -> &'static dyn Font {
         self.font
     }
-    
-    pub fn get_char_bitmap(&self, ch: char) -> Option<&[u8]> {
-        self.font.get_char_bitmap(ch)
+
+    pub fn glyph(&self, ch: char) -> Option<Glyph<'_>> {
+        self.font.glyph(ch)
     }
-    
-    pub fn char_width(&self) -> usize {
-        self.font.char_width()
+
+    pub fn line_height(&self) -> u32 {
+        self.font.line_height()
     }
-    
-    pub fn char_height(&self) -> usize {
-        self.font.char_height()
+
+    pub fn ascent(&self) -> u32 {
+        self.font.ascent()
     }
-    
-    pub fn bytes_per_row(&self) -> usize {
-        self.font.bytes_per_row()
+
+    pub fn cell_width(&self) -> u32 {
+        self.font.cell_width()
     }
 }
 
-// Binary Font Data Assets
-static ARIAL_TTF_DATA: &[u8] = include_bytes!("../../../assets/tiny.ttf");
-static IBM_PLEX_DATA: &[u8] = include_bytes!("../../../assets/ibmplex.fnt");
-static IBM_PLEX_LARGE_DATA: &[u8] = include_bytes!("../../../assets/ibmplex-large.fnt");
+// === Default font selection ===
 
-// Create static instance of Arial font
-pub static ARIAL_FONT: spin::Lazy<Option<TrueTypeFont>> = spin::Lazy::new(|| {
-    TrueTypeFont::from_ttf_data(ARIAL_TTF_DATA, 16)
-});
+/// Default size for the system TTF, in pixels.
+const SYSTEM_FONT_PX: u16 = 14;
 
+/// Bundled monospaced TTF used as the default system font.
+static SYSTEM_TTF_DATA: &[u8] = include_bytes!("../../../assets/system.ttf");
 
-// Create static instances of IBM Plex fonts
-pub static IBM_PLEX_FONT: spin::Lazy<Option<VFNTFont>> = spin::Lazy::new(|| {
-    VFNTFont::from_vfnt_data(IBM_PLEX_DATA)
-});
+/// Boot-set default font. Set exactly once by [`init_fonts`]. Reads before
+/// init fall through to the embedded 8x8 fallback.
+static DEFAULT_FONT: Once<FontRef> = Once::new();
 
-pub static IBM_PLEX_LARGE_FONT: spin::Lazy<Option<VFNTFont>> = spin::Lazy::new(|| {
-    VFNTFont::from_vfnt_data(IBM_PLEX_LARGE_DATA)
-});
-
-// Helper functions to get font references
-pub fn get_embedded_font() -> FontRef {
-    FontRef::new(&DEFAULT_8X8_FONT as &dyn Font)
-}
-
-
-pub fn get_ibm_plex_font() -> Option<FontRef> {
-    IBM_PLEX_FONT.as_ref().map(|font| FontRef::new(font as &dyn Font))
-}
-
-pub fn get_ibm_plex_large_font() -> Option<FontRef> {
-    IBM_PLEX_LARGE_FONT.as_ref().map(|font| FontRef::new(font as &dyn Font))
-}
-
-pub fn get_arial_font() -> Option<FontRef> {
-    crate::debug_info!("get_arial_font() called!!!");
-    ARIAL_FONT.as_ref().map(|font| FontRef::new(font as &dyn Font))
-}
-
-pub fn get_arial_font_from_fs() -> Option<FontRef> {
-    match TrueTypeFont::from_ttf_file("/arial.ttf", 16) {
+/// Parse the bundled system TTF and install it as the default font. Called
+/// once during kernel boot, after heap init and before any window drawing.
+///
+/// On parse failure, leaves `DEFAULT_FONT` unset so `get_default_font` returns
+/// the embedded fallback. The kernel boots and is usable, just with the
+/// 8x8 bitmap font.
+pub fn init_fonts() {
+    DEFAULT_FONT.call_once(|| match TtfFont::from_data(SYSTEM_TTF_DATA, SYSTEM_FONT_PX) {
         Some(font) => {
-            // Create a static reference by leaking memory
-            // This is acceptable for fonts which are used throughout kernel lifetime
-            let static_font: &'static TrueTypeFont = Box::leak(Box::new(font));
-            Some(FontRef::new(static_font as &dyn Font))
+            crate::debug_info!(
+                "init_fonts: parsed system.ttf at {}px (cell {}x{}, ascent {})",
+                SYSTEM_FONT_PX,
+                font.cell_width(),
+                font.line_height(),
+                font.ascent(),
+            );
+            // Box::leak: fonts live for the entire kernel lifetime.
+            let leaked: &'static TtfFont = Box::leak(Box::new(font));
+            FontRef::new(leaked)
         }
-        None => None,
-    }
+        None => {
+            crate::debug_warn!("init_fonts: system.ttf failed to parse; using embedded 8x8 fallback");
+            FontRef::new(&DEFAULT_8X8_FONT as &dyn Font)
+        }
+    });
 }
 
-// Global font state for dynamic switching
-use spin::Mutex;
-static CURRENT_DEFAULT_FONT: Mutex<Option<FontRef>> = Mutex::new(None);
-
-// Get default font - use embedded font initially, but allow dynamic switching
+/// Return the system default font. Before [`init_fonts`] runs (or if it fails),
+/// this returns the embedded 8x8 fallback.
 pub fn get_default_font() -> FontRef {
-    // Check if we have a custom font set
-    if let Some(font) = *CURRENT_DEFAULT_FONT.lock() {
-        return font;
+    if let Some(font) = DEFAULT_FONT.get() {
+        return *font;
     }
-    
-    // Fall back to embedded font
     get_embedded_font()
 }
 
-// Set a new default font dynamically
-pub fn set_default_font(font: FontRef) {
-    crate::debug_info!("Setting new default font");
-    *CURRENT_DEFAULT_FONT.lock() = Some(font);
-}
-
-// Reset to embedded font
-pub fn reset_to_embedded_font() {
-    crate::debug_info!("Resetting to embedded font");
-    *CURRENT_DEFAULT_FONT.lock() = None;
-}
-
-// Try to load and set Arial font from filesystem (can be called after boot)
-pub fn try_load_arial_font() -> bool {
-    crate::debug_info!("Attempting to load Arial font from /arial.ttf");
-    
-    // Check if filesystem is available
-    if !crate::fs::exists("/arial.ttf") {
-        crate::debug_info!("Arial font file not found or filesystem not ready");
-        return false;
-    }
-    
-    match get_arial_font_from_fs() {
-        Some(font) => {
-            crate::debug_info!("Arial font loaded successfully from filesystem!");
-            set_default_font(font);
-            true
-        }
-        None => {
-            crate::debug_info!("Arial font failed to load from filesystem");
-            false
-        }
-    }
+/// Return the embedded 8x8 fallback font. Used during early boot before
+/// `init_fonts` runs, and as the parse-failure fallback.
+pub fn get_embedded_font() -> FontRef {
+    FontRef::new(&DEFAULT_8X8_FONT as &dyn Font)
 }

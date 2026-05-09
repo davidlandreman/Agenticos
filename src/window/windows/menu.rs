@@ -197,8 +197,8 @@ impl Window for MenuWindow {
 
         // Draw items
         let font = get_default_font();
-        let char_height: i32 = 8;
-        let item_height: u32 = MENU_ITEM_HEIGHT as u32;
+        let char_height = font.line_height() as i32;
+        let item_height: u32 = MENU_ITEM_HEIGHT;
 
         for (i, item) in self.items.iter().enumerate() {
             let item_y = y + 2 + (i as i32) * item_height as i32;

@@ -24,7 +24,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 |---|---|---|
 | `DesktopWindow` | Full-screen background | Blue (RGB `0, 50, 100`). |
 | `FrameWindow` | Title bar + borders | Active = blue chrome; inactive = grey. Title bar 24 px, border 2 px. Uses `WindowBase`. |
-| `TextWindow` | Grid-based text rendering | 8x8 bitmap font default. Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
+| `TextWindow` | Grid-based text rendering | Cell size derived from the system TTF (`get_default_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
 

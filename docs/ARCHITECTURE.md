@@ -197,16 +197,21 @@ The graphics subsystem has several issues:
 
 The font system supports multiple font formats through a unified interface:
 
-1. **Unified Font Trait** (`core_font.rs`)
-   - Common interface for all font types
-   - Font selection and fallback logic
-   - Static font instances for kernel use
+1. **Glyph-centric `Font` trait** (`core_font.rs`)
+   - `Font::glyph(ch)` returns a `Glyph` carrying its own width/height,
+     baseline-relative offsets, advance, and 8bpp coverage bitmap
+   - `cell_width()`, `line_height()`, `ascent()` for grid layout
+   - Boot-time selection only via `init_fonts()` (no runtime swap)
 
 2. **Font Implementations**
-   - **embedded_font.rs** - Built-in 8x8 bitmap fonts
-   - **vfnt.rs** - VFNT format (vector fonts)
-   - **truetype_font.rs** - TrueType font support
-   - **font_data.rs** - Raw font data storage
+   - **ttf.rs** - TrueType/OpenType backend. Parses outlines via
+     `ttf-parser`, rasterizes via `ab_glyph_rasterizer` into per-glyph
+     `Box<[u8]>` coverage. ASCII pre-rendered at construction; non-ASCII
+     lazy via `BTreeMap`. The bundled `assets/system.ttf` (JetBrains Mono
+     Regular, OFL 1.1) is the system default.
+   - **embedded_font.rs** - 8x8 bitmap fallback used when TTF parse fails.
+     Coverage expanded from 1-bit rows at compile time.
+   - **font_data.rs** - Raw 1-bit data for the embedded fallback.
 
 ## Memory Management (`mm/`)
 

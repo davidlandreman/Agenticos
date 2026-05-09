@@ -45,8 +45,46 @@ pub trait GraphicsDevice: Send {
     /// Fill a rectangle with a color
     fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color);
 
-    /// Draw text at a position
-    fn draw_text(&mut self, x: i32, y: i32, text: &str, font: &dyn Font, color: Color);
+    /// Draw text at a position. `(x, y)` is the top-left of the text cell;
+    /// the baseline is `y + font.ascent()`.
+    ///
+    /// The default implementation walks `text` glyph-by-glyph, blending 8bpp
+    /// coverage against existing framebuffer contents via `read_pixel` /
+    /// `draw_pixel`. Both primitives clip against the device bounds and the
+    /// active clip rect, so the loop emits raw `i32` coordinates without
+    /// pre-checking. Adapters that can do faster bulk blits may override.
+    fn draw_text(&mut self, x: i32, y: i32, text: &str, font: &dyn Font, color: Color) {
+        let baseline = y + font.ascent() as i32;
+        let mut pen_x = x;
+        for ch in text.chars() {
+            if ch == '\n' {
+                break;
+            }
+            let Some(glyph) = font.glyph(ch) else { continue };
+            let glyph_x = pen_x + glyph.x_offset;
+            let glyph_y = baseline + glyph.y_offset;
+            let width = glyph.width as i32;
+            let height = glyph.height as i32;
+            for row in 0..height {
+                let dst_y = glyph_y + row;
+                for col in 0..width {
+                    let dst_x = glyph_x + col;
+                    let alpha = glyph.coverage[(row * width + col) as usize];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    if alpha == 0xFF {
+                        self.draw_pixel(dst_x, dst_y, color);
+                    } else {
+                        let bg = self.read_pixel(dst_x, dst_y);
+                        self.draw_pixel(dst_x, dst_y, bg.blend(&color, alpha));
+                    }
+                }
+            }
+            pen_x += glyph.advance as i32;
+        }
+    }
+
 
     /// Draw an image (for future use)
     fn draw_image(&mut self, _x: i32, _y: i32, _data: &[u8], _width: u32, _height: u32) {

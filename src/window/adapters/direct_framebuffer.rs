@@ -2,7 +2,6 @@
 
 use bootloader_api::info::FrameBuffer;
 use crate::graphics::color::Color;
-use crate::graphics::fonts::core_font::Font;
 use crate::drivers::display::frame_buffer::FrameBufferWriter;
 use crate::window::{GraphicsDevice, Rect, ColorDepth};
 use crate::window::adapters::clip::{clip_line, clip_rect, pixel_visible};
@@ -124,62 +123,6 @@ impl GraphicsDevice for DirectFrameBufferDevice {
             clip_rect(x, y, width, height, self.width, self.height, self.clip_rect.as_ref())
         {
             self.writer.lock().fill_rect(cx, cy, cw, ch, color);
-        }
-    }
-
-    fn draw_text(&mut self, x: i32, y: i32, text: &str, font: &dyn Font, color: Color) {
-        let char_width = font.char_width();
-        let char_height = font.char_height();
-        let bytes_per_row = font.bytes_per_row();
-
-        let mut current_x = x;
-        for ch in text.chars() {
-            // Per-glyph pre-clip: skip glyphs whose bounding box is fully off
-            // the visible region; for fully-inside glyphs, write pixels
-            // unconditionally; for partial glyphs, fall through to per-pixel
-            // visibility checks.
-            let glyph_box = clip_rect(
-                current_x,
-                y,
-                char_width as u32,
-                char_height as u32,
-                self.width,
-                self.height,
-                self.clip_rect.as_ref(),
-            );
-            if glyph_box.is_none() {
-                current_x += char_width as i32;
-                continue;
-            }
-            let fully_inside = glyph_box
-                .map(|(_, _, cw, ch)| cw == char_width && ch == char_height)
-                .unwrap_or(false);
-
-            if let Some(bitmap) = font.get_char_bitmap(ch) {
-                let mut writer = self.writer.lock();
-                for row in 0..char_height {
-                    for col in 0..char_width {
-                        let byte_index = row * bytes_per_row + col / 8;
-                        let bit_index = 7 - (col % 8);
-                        if byte_index < bitmap.len() && (bitmap[byte_index] & (1 << bit_index)) != 0 {
-                            let px = current_x + col as i32;
-                            let py = y + row as i32;
-                            if fully_inside {
-                                writer.draw_pixel(px as usize, py as usize, color);
-                            } else if let Some((ux, uy)) = pixel_visible(
-                                px,
-                                py,
-                                self.width,
-                                self.height,
-                                self.clip_rect.as_ref(),
-                            ) {
-                                writer.draw_pixel(ux, uy, color);
-                            }
-                        }
-                    }
-                }
-            }
-            current_x += char_width as i32;
         }
     }
 

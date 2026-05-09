@@ -275,6 +275,8 @@ impl Window for MultiColumnList {
         device.draw_rect(x, y, width, height, Color::GRAY);
 
         let font = get_default_font();
+        let line_h = font.line_height() as i32;
+        let cell_w = font.cell_width() as usize;
         let padding: i32 = 4;
 
         // Draw header row
@@ -283,7 +285,7 @@ impl Window for MultiColumnList {
         let mut col_x = x + 1;
         for column in &self.columns {
             // Draw header text
-            let text_y = y + (header_h - 8) / 2;
+            let text_y = y + (header_h - line_h) / 2;
             device.draw_text(
                 col_x + padding,
                 text_y,
@@ -336,10 +338,10 @@ impl Window for MultiColumnList {
             let mut cell_x = x + 1;
             for (col_idx, column) in self.columns.iter().enumerate() {
                 let text = row_data.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-                let text_y = row_y + (row_h - 8) / 2;
+                let text_y = row_y + (row_h - line_h) / 2;
 
                 // Truncate text if it doesn't fit
-                let max_chars = (column.width.saturating_sub((padding as usize) * 2)) / 8;
+                let max_chars = column.width.saturating_sub((padding as usize) * 2) / cell_w.max(1);
                 let display_text = if text.len() > max_chars {
                     &text[..max_chars]
                 } else {

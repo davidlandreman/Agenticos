@@ -143,7 +143,7 @@ impl Window for MenuBarPopup {
 
         let bounds = self.bounds();
         let font = get_default_font();
-        let char_height = font.char_height();
+        let char_height = font.line_height() as usize;
 
         let x = bounds.x;
         let y = bounds.y;
@@ -197,7 +197,7 @@ impl Window for MenuBarPopup {
                             Color::new(128, 128, 128)
                         };
                         let shortcut_x = x + width as i32 - 8
-                            - (shortcut.len() * font.char_width()) as i32;
+                            - (shortcut.len() as i32 * font.cell_width() as i32);
                         device.draw_text(
                             shortcut_x,
                             item_y + (item_height as i32 - char_height as i32) / 2,

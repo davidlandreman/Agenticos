@@ -230,8 +230,8 @@ impl Window for TextInput {
         // Draw text with padding
         let padding: i32 = 4;
         let font = get_default_font();
-        let char_width: i32 = 8;
-        let char_height: i32 = 8;
+        let char_width = font.cell_width() as i32;
+        let char_height = font.line_height() as i32;
 
         // Calculate text position (vertically centered)
         let text_x = x + padding;

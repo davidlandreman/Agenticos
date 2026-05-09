@@ -4,10 +4,10 @@ use crate::lib::test_utils::Testable;
 fn test_filesystem_basic_exists() {
     debug_info!("Testing filesystem exists() function...");
     
-    // Test that /arial.ttf exists
-    let exists = crate::fs::exists("/arial.ttf");
-    debug_info!("fs::exists(\"/arial.ttf\") = {}", exists);
-    assert!(exists, "/arial.ttf should exist in filesystem");
+    // Test that /system.ttf exists
+    let exists = crate::fs::exists("/system.ttf");
+    debug_info!("fs::exists(\"/system.ttf\") = {}", exists);
+    assert!(exists, "/system.ttf should exist in filesystem");
     
     // Test a file that shouldn't exist
     let not_exists = crate::fs::exists("/nonexistent.file");
@@ -16,29 +16,29 @@ fn test_filesystem_basic_exists() {
 }
 
 fn test_filesystem_metadata() {
-    debug_info!("Testing filesystem metadata for /arial.ttf...");
+    debug_info!("Testing filesystem metadata for /system.ttf...");
     
-    match crate::fs::metadata("/arial.ttf") {
+    match crate::fs::metadata("/system.ttf") {
         Ok(metadata) => {
-            debug_info!("Successfully got metadata for /arial.ttf");
+            debug_info!("Successfully got metadata for /system.ttf");
             debug_info!("  Name: {}", metadata.name_str());
             debug_info!("  Size: {} bytes", metadata.size);
             debug_info!("  File type: {:?}", metadata.file_type);
-            assert!(metadata.size > 0, "Arial font file should have non-zero size");
+            assert!(metadata.size > 0, "System font file should have non-zero size");
         }
         Err(e) => {
-            debug_error!("Failed to get metadata for /arial.ttf: {:?}", e);
-            panic!("Should be able to get metadata for /arial.ttf");
+            debug_error!("Failed to get metadata for /system.ttf: {:?}", e);
+            panic!("Should be able to get metadata for /system.ttf");
         }
     }
 }
 
 fn test_file_open_arial() {
-    debug_info!("Testing File::open_read(\"/arial.ttf\")...");
+    debug_info!("Testing File::open_read(\"/system.ttf\")...");
     
-    match crate::fs::File::open_read("/arial.ttf") {
+    match crate::fs::File::open_read("/system.ttf") {
         Ok(file) => {
-            debug_info!("Successfully opened /arial.ttf");
+            debug_info!("Successfully opened /system.ttf");
             debug_info!("  Path: {}", file.path());
             debug_info!("  Size: {} bytes", file.size());
             debug_info!("  Position: {}", file.position());
@@ -46,23 +46,23 @@ fn test_file_open_arial() {
             debug_info!("File open test passed!");
         }
         Err(e) => {
-            debug_error!("Failed to open /arial.ttf: {:?}", e);
-            panic!("Should be able to open /arial.ttf for reading");
+            debug_error!("Failed to open /system.ttf: {:?}", e);
+            panic!("Should be able to open /system.ttf for reading");
         }
     }
 }
 
 fn test_file_read_arial_header() {
-    debug_info!("Testing reading first few bytes of /arial.ttf...");
+    debug_info!("Testing reading first few bytes of /system.ttf...");
     
-    match crate::fs::File::open_read("/arial.ttf") {
+    match crate::fs::File::open_read("/system.ttf") {
         Ok(file) => {
             debug_info!("File opened, attempting to read header...");
             
             let mut header = [0u8; 16];
             match file.read(&mut header) {
                 Ok(bytes_read) => {
-                    debug_info!("Successfully read {} bytes from /arial.ttf", bytes_read);
+                    debug_info!("Successfully read {} bytes from /system.ttf", bytes_read);
                     debug_info!("Header bytes: {:02x?}", &header[..bytes_read]);
                     
                     // TTF files should start with version info
@@ -78,22 +78,22 @@ fn test_file_read_arial_header() {
                     debug_info!("File read test passed!");
                 }
                 Err(e) => {
-                    debug_error!("Failed to read from /arial.ttf: {:?}", e);
-                    panic!("Should be able to read from /arial.ttf");
+                    debug_error!("Failed to read from /system.ttf: {:?}", e);
+                    panic!("Should be able to read from /system.ttf");
                 }
             }
         }
         Err(e) => {
-            debug_error!("Failed to open /arial.ttf: {:?}", e);
-            panic!("Should be able to open /arial.ttf for reading");
+            debug_error!("Failed to open /system.ttf: {:?}", e);
+            panic!("Should be able to open /system.ttf for reading");
         }
     }
 }
 
 fn test_file_read_full_arial() {
-    debug_info!("Testing reading entire /arial.ttf file...");
+    debug_info!("Testing reading entire /system.ttf file...");
     
-    match crate::fs::File::open_read("/arial.ttf") {
+    match crate::fs::File::open_read("/system.ttf") {
         Ok(file) => {
             let size = file.size();
             debug_info!("File size: {} bytes, attempting full read...", size);
@@ -122,8 +122,8 @@ fn test_file_read_full_arial() {
             }
         }
         Err(e) => {
-            debug_error!("Failed to open /arial.ttf: {:?}", e);
-            panic!("Should be able to open /arial.ttf for reading");
+            debug_error!("Failed to open /system.ttf: {:?}", e);
+            panic!("Should be able to open /system.ttf for reading");
         }
     }
 }
@@ -190,16 +190,16 @@ fn test_host_mount_does_not_break_root() {
     // Regression check for the U3 multi-mount refactor: reading a known root
     // file must still succeed once a second FAT mount is in the slot array.
 
-    assert!(crate::fs::exists("/arial.ttf"), "/arial.ttf should still exist on root");
+    assert!(crate::fs::exists("/system.ttf"), "/system.ttf should still exist on root");
 
-    match crate::fs::File::open_read("/arial.ttf") {
+    match crate::fs::File::open_read("/system.ttf") {
         Ok(file) => {
-            assert!(file.size() > 0, "/arial.ttf should still have non-zero size");
-            debug_info!("/arial.ttf still readable from root mount");
+            assert!(file.size() > 0, "/system.ttf should still have non-zero size");
+            debug_info!("/system.ttf still readable from root mount");
         }
         Err(e) => {
-            debug_error!("Failed to open /arial.ttf after host mount: {:?}", e);
-            panic!("Root mount regression: /arial.ttf should still open");
+            debug_error!("Failed to open /system.ttf after host mount: {:?}", e);
+            panic!("Root mount regression: /system.ttf should still open");
         }
     }
     debug_info!("Root-mount regression test passed!");
