@@ -171,46 +171,58 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
     }
     
     fn read(&self, handle: &mut FileHandle, buffer: &mut [u8]) -> Result<usize, FilesystemError> {
-        // The FAT filesystem read_file method only supports reading entire files,
-        // so we need to allocate a temporary buffer for the whole file
-        
-        // Check if we're at EOF
         if handle.position >= handle.size {
             return Ok(0);
         }
-        
-        // Reconstruct the FAT file handle from the generic handle
-        // The inode contains the first cluster number
+
+        // Reconstruct the FAT file handle from the generic handle.
+        // The inode contains the first cluster number.
         let fat_handle = crate::fs::fat::filesystem::FileHandle {
-            name: [0; 13], // Name doesn't matter for reading
+            name: [0; 13],
             size: handle.size as u32,
             first_cluster: crate::fs::fat::types::ClusterId(handle.inode as u32),
             is_directory: false,
         };
-        
-        // FAT filesystems use cluster sizes from 512 bytes to 32KB
-        // Use a conservative 4KB (8 sectors) cluster size for buffer allocation
+
+        // Hot path: a full-file read from position 0 with a buffer at least as
+        // large as the file. This is what `File::read_to_vec` and similar
+        // read-everything callers do. Pass the caller's buffer straight to the
+        // FAT cluster walker — no intermediate file-sized allocation, no
+        // double-touch of every page.
+        //
+        // Before this branch, every `read()` allocated and zero-filled a temp
+        // buffer the size of the entire file (rounded to cluster), then
+        // memcpy'd into the caller — for a 5.79 MiB binary that meant ~1414
+        // page faults to zero the temp PLUS ~1414 to copy into the caller.
+        // For multi-MiB user binaries the cost dominated load time and
+        // appeared as a hang under interactive load.
+        if handle.position == 0 && buffer.len() >= handle.size as usize {
+            return match self.inner.read_file(&fat_handle, buffer) {
+                Ok(_) => Ok(handle.size as usize),
+                Err(_) => Err(FilesystemError::IoError),
+            };
+        }
+
+        // Fallback: partial read or short caller buffer — read the file into a
+        // temp the size of the file, then copy out the requested slice. This
+        // path is taken by callers that want a window into the middle of a
+        // file or that pass a smaller buffer than the file size; the cost is
+        // intrinsic to that interface (read_file requires buffer >= file.size)
+        // and not exercised by the multi-MiB-binary load path.
         const ASSUMED_CLUSTER_SIZE: usize = 4096;
-        
-        // Allocate buffer for entire file, rounded up to cluster boundary
-        // This ensures read_file has enough buffer space for cluster-aligned reads
-        let buffer_size = ((handle.size as usize + ASSUMED_CLUSTER_SIZE - 1) / ASSUMED_CLUSTER_SIZE) * ASSUMED_CLUSTER_SIZE;
+        let buffer_size = ((handle.size as usize + ASSUMED_CLUSTER_SIZE - 1)
+            / ASSUMED_CLUSTER_SIZE)
+            * ASSUMED_CLUSTER_SIZE;
         let mut file_buffer = alloc::vec![0u8; buffer_size];
-        
-        // Read the entire file
+
         match self.inner.read_file(&fat_handle, &mut file_buffer) {
             Ok(_) => {
-                // Calculate how much to copy from the current position
                 let remaining = handle.size - handle.position;
                 let to_copy = core::cmp::min(buffer.len(), remaining as usize);
-                
-                // Copy the requested portion
                 buffer[..to_copy].copy_from_slice(
-                    &file_buffer[handle.position as usize..handle.position as usize + to_copy]
+                    &file_buffer
+                        [handle.position as usize..handle.position as usize + to_copy],
                 );
-                
-                // Don't update position here - it's handled by the File handle layer
-                
                 Ok(to_copy)
             }
             Err(_) => Err(FilesystemError::IoError),

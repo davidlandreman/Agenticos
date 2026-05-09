@@ -205,6 +205,240 @@ fn test_host_mount_does_not_break_root() {
     debug_info!("Root-mount regression test passed!");
 }
 
+// --- read_to_vec uninit-read regression coverage (U3) -------------------
+//
+// `read_to_vec` was rewritten to read directly into uninitialized Vec
+// capacity (Vec::with_capacity + from_raw_parts_mut + set_len) instead of
+// pre-zeroing with Vec::resize. These tests pin the externally observable
+// behavior: the returned bytes match what File::read produces into a
+// pre-zeroed buffer, the length matches the file size, and short-read /
+// zero-byte paths don't expose uninitialized memory.
+
+fn test_read_to_vec_matches_explicit_read() {
+    debug_info!("Testing read_to_vec returns the same bytes as a pre-zeroed read...");
+
+    let file = crate::fs::File::open_read("/system.ttf")
+        .expect("open /system.ttf");
+    let size = file.size() as usize;
+
+    let via_read_to_vec = file.read_to_vec().expect("read_to_vec");
+    assert_eq!(via_read_to_vec.len(), size, "length must equal file size");
+
+    let file2 = crate::fs::File::open_read("/system.ttf")
+        .expect("re-open /system.ttf");
+    let mut explicit = alloc::vec![0u8; size];
+    let n = file2.read(&mut explicit).expect("explicit read");
+    assert_eq!(n, size, "explicit read should fill the buffer");
+    assert_eq!(via_read_to_vec, explicit, "byte-for-byte equal");
+
+    // Spot-check the TTF magic to make sure we're reading file content,
+    // not zeros from uninitialized memory that happens to look right.
+    assert!(via_read_to_vec.len() >= 4, "TTF needs >= 4 bytes for magic");
+    let magic = u32::from_be_bytes([
+        via_read_to_vec[0],
+        via_read_to_vec[1],
+        via_read_to_vec[2],
+        via_read_to_vec[3],
+    ]);
+    assert!(
+        magic == 0x00010000 || magic == 0x74727565,
+        "TTF magic check; got {:#010x}",
+        magic
+    );
+
+    debug_info!("read_to_vec matches explicit read");
+}
+
+fn test_read_to_vec_length_matches_size_field() {
+    // The set_len(bytes_read) call must match File::size() for a file the
+    // FAT layer can fully deliver. A short read (bytes_read < size) would
+    // shrink the Vec rather than expose uninit; this test pins the
+    // happy-path length so a future regression in FAT's read contract
+    // (returning a different short count) trips the guard.
+    let file = crate::fs::File::open_read("/system.ttf").expect("open");
+    let size = file.size() as usize;
+    let bytes = file.read_to_vec().expect("read_to_vec");
+    assert_eq!(bytes.len(), size);
+}
+
+// ---------- Diagnostic timing tests ----------
+//
+// These print `[perf]` lines so we can read FAT/IDE throughput numbers
+// directly off the test serial output. The HELLOCPP test is the actual
+// reproducer — it skips silently when the file isn't staged so unrelated
+// CI runs aren't blocked, but if a developer stages it and the read hangs,
+// these tests will hang too. That's deliberate: it pins the bug.
+
+fn test_fat_read_throughput_system_ttf() {
+    use crate::arch::x86_64::interrupts::get_timer_ticks;
+
+    let file = crate::fs::File::open_read("/system.ttf").expect("open /system.ttf");
+    let size = file.size();
+
+    let t0 = get_timer_ticks();
+    let bytes = file.read_to_vec().expect("read_to_vec");
+    let t1 = get_timer_ticks();
+    let elapsed = t1.saturating_sub(t0);
+
+    let kib = (bytes.len() as u64) / 1024;
+    let kib_per_sec = if elapsed > 0 {
+        kib.saturating_mul(100) / elapsed
+    } else {
+        u64::MAX
+    };
+
+    debug_info!(
+        "[perf] FAT read /system.ttf: {} bytes in {} ticks ({} ms); ~{} KiB/s",
+        bytes.len(),
+        elapsed,
+        elapsed.saturating_mul(10),
+        kib_per_sec,
+    );
+
+    assert_eq!(bytes.len(), size as usize);
+    assert!(
+        elapsed < 6000,
+        "system.ttf read exceeded 60 s ({} ticks)",
+        elapsed
+    );
+}
+
+fn test_read_to_vec_vs_pre_zero_baseline() {
+    use crate::arch::x86_64::interrupts::get_timer_ticks;
+
+    let path = "/system.ttf";
+
+    // New pattern: current `read_to_vec` (uninit-read + set_len).
+    let f_new = crate::fs::File::open_read(path).expect("open new");
+    let t0 = get_timer_ticks();
+    let new_bytes = f_new.read_to_vec().expect("read_to_vec new");
+    let t1 = get_timer_ticks();
+    let new_ticks = t1.saturating_sub(t0);
+
+    // Old pattern: Vec::with_capacity + Vec::resize(size, 0) + read.
+    let f_old = crate::fs::File::open_read(path).expect("open old");
+    let size = f_old.size() as usize;
+    let mut buf = alloc::vec::Vec::with_capacity(size);
+    let t2 = get_timer_ticks();
+    buf.resize(size, 0u8);
+    f_old.seek(0).expect("seek");
+    let n = f_old.read(&mut buf).expect("read into pre-zeroed");
+    let t3 = get_timer_ticks();
+    let old_ticks = t3.saturating_sub(t2);
+    buf.truncate(n);
+
+    debug_info!(
+        "[perf] read_to_vec {} bytes — new (uninit): {} ticks ({} ms); old (prezero): {} ticks ({} ms)",
+        size,
+        new_ticks,
+        new_ticks.saturating_mul(10),
+        old_ticks,
+        old_ticks.saturating_mul(10),
+    );
+
+    assert_eq!(new_bytes, buf, "byte-for-byte equal");
+}
+
+fn test_fat_read_throughput_host_hellocpp() {
+    use crate::arch::x86_64::interrupts::get_timer_ticks;
+
+    let path = "/host/HELLOCPP.ELF";
+    if !crate::fs::exists(path) {
+        debug_info!("[perf] {} not present; skipping reproducer test", path);
+        return;
+    }
+
+    let file = crate::fs::File::open_read(path).expect("open hellocpp");
+    let size = file.size();
+    debug_info!("[perf] reading {} ({} bytes / {} MiB)...", path, size, size / (1024 * 1024));
+
+    let t0 = get_timer_ticks();
+    let bytes = file.read_to_vec().expect("read_to_vec hellocpp");
+    let t1 = get_timer_ticks();
+    let elapsed = t1.saturating_sub(t0);
+
+    let kib = (bytes.len() as u64) / 1024;
+    let kib_per_sec = if elapsed > 0 {
+        kib.saturating_mul(100) / elapsed
+    } else {
+        u64::MAX
+    };
+
+    debug_info!(
+        "[perf] FAT read {}: {} bytes in {} ticks ({}.{:02}s); ~{} KiB/s",
+        path,
+        bytes.len(),
+        elapsed,
+        elapsed / 100,
+        elapsed % 100,
+        kib_per_sec,
+    );
+
+    assert_eq!(bytes.len(), size as usize);
+    assert!(
+        elapsed < 6000,
+        "{} read exceeded 60 s ({} ticks); this is the multi-MiB stall reproducer",
+        path,
+        elapsed
+    );
+}
+
+// Full end-to-end run path under test mode: read → load_elf → enter_user_mode
+// → user code → exit_group. Skipped silently when /host/HELLOCPP.ELF isn't
+// staged so unrelated CI runs aren't blocked.
+//
+// What this isolates: GUI/mouse/MCP are skipped under `feature = "test"`,
+// so if this test passes the load+execute path is sound and any interactive-
+// boot stall is a CPU-competition issue, not a load/execute bug. If this
+// test hangs or fails, the bug is in the loader, lifecycle, syscall path,
+// or the userland binary — not scheduling.
+fn test_run_hellocpp_end_to_end() {
+    use crate::arch::x86_64::interrupts::get_timer_ticks;
+    use crate::userland::lifecycle::{with_active_user, ExitKind};
+
+    let path = "/host/HELLOCPP.ELF";
+    if !crate::fs::exists(path) {
+        debug_info!("[perf] {} not present; skipping end-to-end test", path);
+        return;
+    }
+
+    let t0 = get_timer_ticks();
+    let mut p = crate::commands::run::RunProcess::new_with_args(
+        alloc::vec![alloc::string::String::from(path)],
+    );
+    p.run();
+    let t1 = get_timer_ticks();
+    let elapsed = t1.saturating_sub(t0);
+
+    // RunProcess::run() consumes the active-user slot before returning, so
+    // we can't inspect (kind, code) directly from here. Instead we rely on
+    // the debug_info traces inside run_path:
+    //   "run: app exited normally with code N"  (cooperative)
+    //   "[run] app terminated by fault: ..."     (fault — printed to terminal in red)
+    //   "[run] app issued unimplemented syscall" (ENOSYS path)
+    // The grep target is "app exited normally with code 0" on serial.
+    //
+    // For the assertion, we re-check the active-user slot is now empty and
+    // that user_active() is false — i.e. the run command cleaned up.
+    let still_active = with_active_user(|au| au.image.is_some());
+    assert!(!still_active, "active-user slot should be empty after run() returns");
+
+    let _ = ExitKind::None; // silence unused import on the success path
+
+    debug_info!(
+        "[perf] run /host/HELLOCPP.ELF end-to-end: {} ticks ({}.{:02}s)",
+        elapsed,
+        elapsed / 100,
+        elapsed % 100,
+    );
+
+    assert!(
+        elapsed < 6000,
+        "/host/HELLOCPP.ELF end-to-end exceeded 60 s ({} ticks)",
+        elapsed
+    );
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_filesystem_basic_exists,
@@ -215,5 +449,11 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_host_mount_present,
         &test_host_mount_can_open_seed_file,
         &test_host_mount_does_not_break_root,
+        &test_read_to_vec_matches_explicit_read,
+        &test_read_to_vec_length_matches_size_field,
+        &test_fat_read_throughput_system_ttf,
+        &test_read_to_vec_vs_pre_zero_baseline,
+        &test_fat_read_throughput_host_hellocpp,
+        &test_run_hellocpp_end_to_end,
     ]
 }

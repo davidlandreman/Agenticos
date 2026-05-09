@@ -16,6 +16,12 @@ pub fn init(boot_info: &'static mut BootInfo) {
     debug_info!("=== AgenticOS Kernel Starting ===");
     debug_debug!("Boot info address: {:p}", boot_info);
 
+    // Enable SSE/SSE2 in CR0/CR4 before any code path that could end up in
+    // ring 3 (loader → enter_user_mode). musl + libstdc++ binaries emit SSE2
+    // in `__init_tls` before reaching `main`; without this the first SSE
+    // instruction the user app issues `#UD`s.
+    crate::arch::x86_64::fpu::enable_sse();
+
     // Install GDT + TSS before the IDT — exception handlers that reference
     // IST entries (e.g., #DF) consult the TSS at fault time, so it must be in
     // TR before any such fault can fire.
@@ -516,34 +522,60 @@ pub fn run() -> ! {
         // Processes that call sleep_ticks/sleep_until_event return here
         crate::process::try_run_scheduled_processes();
 
-        // === INPUT PROCESSING ===
-        // VirtIO tablet (seamless mouse in QEMU) requires polling
-        if using_virtio {
-            crate::drivers::mouse::poll();
-            if let Some(event) = input_processor.check_virtio_tablet() {
-                window::process_event(event);  // Signals processes on input
+        // While the run command is loading or executing a user binary
+        // (D5: single-user-app-synchronous), skip the rest of the kernel main
+        // loop's housekeeping. The run process gets the CPU end-to-end
+        // (file read, ELF load, ring-3 exec, syscall handling); mouse
+        // polling, input event routing, shell polling, and compositor
+        // rendering all pause until the binary exits. Without this gate,
+        // `render_frame`'s ~3.7 MiB-per-repaint framebuffer writes contend
+        // with PIO IDE reads and heap demand-paging, stretching what's a
+        // 0.6 s job in test mode into many seconds.
+        //
+        // We use `binary_load_in_progress()` rather than `user_active()`
+        // because the slow phase precedes the active-user slot being filled —
+        // user_active() only flips after enter_user_mode has completed the
+        // load.
+        //
+        // Terminal-output processing keeps running so the user app's `write`
+        // syscall bytes still reach the terminal buffer; the compositing
+        // catches up after the binary exits.
+        let user_active = crate::userland::lifecycle::binary_load_in_progress();
+
+        if !user_active {
+            // === INPUT PROCESSING ===
+            // VirtIO tablet (seamless mouse in QEMU) requires polling
+            if using_virtio {
+                crate::drivers::mouse::poll();
+                if let Some(event) = input_processor.check_virtio_tablet() {
+                    window::process_event(event);  // Signals processes on input
+                }
+            }
+
+            // Process keyboard/mouse events from interrupt-driven queue
+            // Each event signals relevant sleeping processes
+            for event in input_processor.process_pending(&crate::input::INPUT_QUEUE) {
+                window::process_event(event);
+            }
+
+            // === SHELL PROCESSING ===
+            // Poll shells that have pending work (cooperative multitasking)
+            // Only processes shells with has_pending_work() == true
+            let exited_terminals = crate::commands::shell::shell_process::poll_all_shells();
+            for terminal_id in exited_terminals {
+                crate::window::terminal_factory::close_terminal(terminal_id);
             }
         }
 
-        // Process keyboard/mouse events from interrupt-driven queue
-        // Each event signals relevant sleeping processes
-        for event in input_processor.process_pending(&crate::input::INPUT_QUEUE) {
-            window::process_event(event);
-        }
-
-        // === SHELL PROCESSING ===
-        // Poll shells that have pending work (cooperative multitasking)
-        // Only processes shells with has_pending_work() == true
-        let exited_terminals = crate::commands::shell::shell_process::poll_all_shells();
-        for terminal_id in exited_terminals {
-            crate::window::terminal_factory::close_terminal(terminal_id);
-        }
-
         // === RENDERING ===
-        // Process pending terminal output (early exit if none)
+        // Process pending terminal output (early exit if none) — runs even
+        // while a user app is active so the binary's `write` syscalls
+        // accumulate visible output once compositing resumes.
         window::process_terminal_output();
-        // Render frame (early exit if compositor has no dirty regions)
-        window::render_frame();
+        if !user_active {
+            // Render frame (early exit if compositor has no dirty regions)
+            window::render_frame();
+        }
 
         // === IDLE ===
         // Halt CPU until next interrupt (keyboard, mouse, timer)

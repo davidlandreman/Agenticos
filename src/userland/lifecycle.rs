@@ -133,6 +133,43 @@ pub fn user_active() -> bool {
     ACTIVE_USER.lock().image.is_some()
 }
 
+/// Counts the number of active "loading-or-running a user binary" calls. The
+/// kernel main loop reads this to skip GUI/render work while the run command
+/// is reading the ELF, mapping pages, or executing the binary in ring 3 —
+/// the long-running phases that pre-date the active-user slot being filled.
+///
+/// Use `BinaryLoadGuard` to bracket the run path; it increments the counter
+/// on construction and decrements on drop so early-return / panic paths still
+/// release the guard.
+static BINARY_LOAD_DEPTH: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Returns true while a binary is being loaded or executed by the run command.
+/// Covers the entire `read_to_vec → load_elf → enter_user_mode → ring-3 →
+/// exit_group → release_active_image` window — `user_active()` only spans the
+/// inner ring-3 portion.
+pub fn binary_load_in_progress() -> bool {
+    BINARY_LOAD_DEPTH.load(core::sync::atomic::Ordering::Acquire) > 0
+}
+
+/// RAII guard that marks the kernel as actively loading-or-running a user
+/// binary. Construct on entry to the run path; drop releases the marker even
+/// if an intermediate step bails out.
+pub struct BinaryLoadGuard;
+
+impl BinaryLoadGuard {
+    pub fn enter() -> Self {
+        BINARY_LOAD_DEPTH.fetch_add(1, core::sync::atomic::Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for BinaryLoadGuard {
+    fn drop(&mut self) {
+        BINARY_LOAD_DEPTH.fetch_sub(1, core::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Save the kernel continuation. Called by `enter_user_mode` immediately
 /// before issuing `iretq` to user space.
 pub fn install_continuation(c: KernelContinuation) {

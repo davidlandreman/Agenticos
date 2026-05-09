@@ -69,6 +69,7 @@ Each entry below points to the folder's own `CLAUDE.md`, which carries the detai
 - `src/process/` — Process traits and command dispatcher (scheduler scaffolding present, not active). See [`src/process/CLAUDE.md`](src/process/CLAUDE.md).
 - `src/stdlib/` — `Read`/`Write` traits, async waker. No folder file yet — currently thin.
 - `src/tests/` — In-kernel test modules. See [`src/tests/CLAUDE.md`](src/tests/CLAUDE.md).
+- `src/userland/` — Ring-3 ELF loader, Linux x86-64 ABI, lifecycle (`enter_user_mode`, `cleanup_user_process`, `BinaryLoadGuard`). No folder file yet; design lives in `docs/plans/2026-05-08-004-feat-userland-app-platform-plan.md` and `docs/plans/2026-05-09-001-feat-userland-linux-abi-cpp-hello-plan.md`.
 - `src/window/` — Window system (hierarchy, types, default desktop, cursor rendering). See [`src/window/CLAUDE.md`](src/window/CLAUDE.md).
 
 ### Configuration files
@@ -84,6 +85,7 @@ Each entry below points to the folder's own `CLAUDE.md`, which carries the detai
 - `docs/conductor-workflow.md` — Conductor workspace lifecycle reference
 - `docs/window_system_design.md` — Window system architecture and implementation status
 - `docs/shell_window_integration.md` — Shell/terminal window integration design
+- `docs/solutions/learnings/` — Post-mortems and patterns from prior debugging journeys. Read the relevant one before touching adjacent code. The `2026-05-09-multi-mib-user-binary-load.md` learning covers the seven-issue chain that made multi-MiB user binaries appear to hang under interactive boot (frame allocator, hot-path logging, `read_to_vec` zero-fill, FAT temp buffer, SSE enable, GUI/render contention, IDE PIO atomicity).
 - `README.md` — Project README
 
 ## Known Issues and Technical Debt

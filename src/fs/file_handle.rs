@@ -193,20 +193,54 @@ impl File {
         Ok(bytes_written)
     }
     
-    /// Read the entire file contents into a Vec<u8>
+    /// Read the entire file contents into a `Vec<u8>`.
+    ///
+    /// Reads directly into the freshly allocated `Vec`'s spare capacity —
+    /// the FAT/IDE copy is the sole writer to each page, so each backing
+    /// page is touched once instead of twice (zero-fill, then overwrite).
+    /// For multi-MiB files this halves the page faults on the caller-side
+    /// buffer and removes a full file-sized memset. See plan U3
+    /// (docs/plans/2026-05-09-002-perf-frame-allocator-and-page-fault-hot-path-plan.md).
     pub fn read_to_vec(&self) -> FileResult<Vec<u8>> {
-        let inner = self.inner.lock();
-        let mut buffer = Vec::with_capacity(inner.size as usize);
-        buffer.resize(inner.size as usize, 0);
-        drop(inner);
-        
-        // Seek to beginning
+        let size = self.inner.lock().size as usize;
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut buffer: Vec<u8> = Vec::with_capacity(size);
         self.seek(0)?;
-        
-        // Read entire file
-        let bytes_read = self.read(&mut buffer)?;
-        buffer.truncate(bytes_read);
-        
+
+        // SAFETY contract for the unsafe block below:
+        //
+        // 1. `Vec::with_capacity(size)` allocated `size` bytes of contiguous
+        //    uninitialized memory we exclusively own. `buffer.len()` is 0,
+        //    so dropping `buffer` on an early-return (`?` below) is safe —
+        //    no element destructors run on uninitialized memory.
+        // 2. `buffer.as_mut_ptr()` is non-null (size > 0 ensures the
+        //    allocator returned a real allocation, not the dangling
+        //    sentinel returned for size 0) and 1-byte aligned (u8 layout).
+        // 3. `from_raw_parts_mut(ptr, size)` constructs a `&mut [u8]` of
+        //    exactly the spare capacity; no aliasing because we hold the
+        //    only reference to `buffer`.
+        // 4. `File::read` is the sole writer to that slice; it returns
+        //    `bytes_read <= size` bytes initialized at the front of the
+        //    slice (the read contract). The debug_assert below documents
+        //    the bound at runtime in test builds.
+        // 5. `Vec::set_len(bytes_read)` then exposes only the initialized
+        //    prefix, which is what `set_len`'s precondition requires
+        //    ("the elements at `0..new_len` must be initialized").
+        unsafe {
+            let dst = core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), size);
+            let bytes_read = self.read(dst)?;
+            debug_assert!(
+                bytes_read <= size,
+                "File::read returned {} bytes for a {}-byte buffer",
+                bytes_read,
+                size
+            );
+            buffer.set_len(bytes_read);
+        }
+
         Ok(buffer)
     }
     

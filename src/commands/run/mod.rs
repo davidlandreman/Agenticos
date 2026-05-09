@@ -1,4 +1,4 @@
-//! `run /HOST/<NAME>.ELF` — the userland-app launch verb (U7).
+//! `run /host/<NAME>.ELF` — the userland-app launch verb (U7).
 //!
 //! Reads the file via the FAT FS layer, hands the bytes to the U6 ELF loader,
 //! and on success enters ring 3 via `crate::userland::enter_user_mode`. On
@@ -9,6 +9,26 @@
 //! The single-user-app invariant (D5) is enforced before the loader runs.
 //!
 //! Mirrors the structure of `src/commands/cat/mod.rs`.
+//!
+//! ## Path case sensitivity
+//!
+//! The host folder is mounted at `/host` (lowercase). The VFS path
+//! resolver in `src/fs/vfs.rs` uses byte-exact `path.starts_with(mount.path)`
+//! so `/HOST/HELLOCPP.ELF` returns "File or directory not found". Use
+//! `/host/HELLOCPP.ELF`. Filenames inside the mount must be uppercase 8.3
+//! per the FAT 8.3 limitation (see `src/fs/CLAUDE.md`), but the mount
+//! point itself is lowercase.
+//!
+//! ## Performance hot path
+//!
+//! The run command grabs `crate::userland::lifecycle::BinaryLoadGuard` for
+//! the duration of `RunProcess::run`. The kernel main loop reads
+//! `binary_load_in_progress()` and pauses GUI/render housekeeping while
+//! the guard is held — the run process gets the CPU end-to-end through
+//! `read → load_elf → enter_user_mode → ring-3 → exit`. Without the gate,
+//! `render_frame`'s framebuffer writes contend with PIO IDE reads and
+//! stretch a sub-second load into many seconds (see
+//! `docs/solutions/learnings/2026-05-09-multi-mib-user-binary-load.md`).
 
 use crate::drivers::display::display;
 use crate::graphics::color::Color;
@@ -59,6 +79,16 @@ impl RunProcess {
             return;
         }
 
+        // Mark the kernel as actively loading/running a binary so the kernel
+        // main loop pauses GUI/render housekeeping for the duration. This
+        // covers the full read → load_elf → enter_user_mode → ring-3 →
+        // exit window; without it, `render_frame`'s ~3.7 MiB-per-repaint
+        // framebuffer writes contend with PIO IDE reads and heap demand-
+        // paging, stretching the multi-MiB binary load well past what test
+        // mode (no GUI) measures. RAII guard ensures the marker drops on
+        // every exit path including early returns. (D5 single-user-app.)
+        let _load_guard = crate::userland::lifecycle::BinaryLoadGuard::enter();
+
         let path = self.args[0].clone();
         match self.run_path(&path) {
             Ok(()) => {}
@@ -77,7 +107,9 @@ impl RunProcess {
         }
 
         // Read the ELF bytes through the FAT VFS.
+        crate::debug_info!("[run] read_to_vec({}) starting", path);
         let bytes = read_file_bytes(path)?;
+        crate::debug_info!("[run] read_to_vec returned {} bytes", bytes.len());
 
         // Parse + map + relocate. On error, the partial UserImage drops here
         // and the rollback unmaps any pages the loader had committed.

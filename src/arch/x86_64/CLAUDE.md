@@ -5,10 +5,11 @@ Low-level x86_64 plumbing: GDT/TSS, IDT, naked-asm context switching, preemption
 ## Key files
 
 - `gdt.rs` — GDT layout, TSS, IST stacks. Loaded once at boot via `gdt::init()`.
+- `fpu.rs` — `enable_sse()` configures CR0/CR4 for SSE/SSE2 execution. Required before any ring-3 transition; musl + libstdc++ binaries emit SSE2 in `__init_tls` before reaching `main` and would `#UD` without it. The kernel target spec uses `+soft-float`, so the kernel itself never needs SSE — but ring 3 does.
 - `interrupts.rs` — IDT setup, all exception handlers, PIC/PIT configuration, hardware-IRQ entry points.
 - `context_switch.rs` — naked-asm `switch_*` functions used by the cooperative scheduler.
 - `preemption.rs` — naked-asm `timer_interrupt_handler_preemptive` and Rust-side `timer_handler_inner`. Round-robin preemptive scheduler.
-- `interrupt_guard.rs` — RAII guard for `cli`/`sti` regions.
+- `interrupt_guard.rs` — RAII guard for `cli`/`sti` regions. Use anywhere a sequence must be atomic with respect to the scheduler — most importantly inside IDE PIO transactions (see `src/drivers/CLAUDE.md`).
 
 ## GDT layout (load-bearing)
 

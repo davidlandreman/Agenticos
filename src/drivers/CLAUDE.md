@@ -16,6 +16,14 @@ PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet for se
 - `virtio/input.rs` — VirtIO tablet (absolute pointing, seamless mouse in QEMU).
 - `display/` — framebuffer driver. `display.rs` controls single/double buffering (the `USE_DOUBLE_BUFFER` flag lives here even though graphics primitives live in `src/graphics/`). `frame_buffer.rs` is the low-level abstraction; `text_buffer.rs` and `double_buffered_text.rs` handle text rendering; `double_buffer.rs` provides the 8 MiB static back buffer.
 
+## IDE PIO atomicity (load-bearing)
+
+`IdeController::read_sectors` and `write_sectors` disable interrupts (via `InterruptGuard::disable()`) for the entire transaction — drive-select writes, `wait_ready`, `wait_drq`, the 256-word data-port loop, and the trailing `wait_ready`. PIO requires the CPU to read the data port immediately when DRQ becomes set; if the scheduler preempts the caller mid-read, the DRQ window slips and subsequent `wait_drq` calls time out (status `0x58` = DRDY|DSC|DRQ — set just after we gave up spinning).
+
+This matters under interactive boot, not test mode. Test mode has no GUIShell competing for slices, so the run process completes IDE reads uninterrupted. Interactive boot has GUIShell + compositor running between every preemption tick; without the IRQ-disable, multi-MiB FAT reads timeout consistently. RAII guard ensures IRQs are restored on every exit path including `?`-propagated errors.
+
+The transaction is bounded (at most 128 sectors / 64 KiB per call), so the IRQ-disabled window is small enough to be acceptable for the rest of the system.
+
 ## Mouse input-method selection
 
 During boot, the kernel:
