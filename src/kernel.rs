@@ -12,90 +12,100 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize debug subsystem
     debug::init();
     debug::set_debug_level(DebugLevel::Debug);
-    
+
     debug_info!("=== AgenticOS Kernel Starting ===");
-    debug_info!("Kernel entry point reached successfully!");
     debug_debug!("Boot info address: {:p}", boot_info);
 
     // Install GDT + TSS before the IDT — exception handlers that reference
     // IST entries (e.g., #DF) consult the TSS at fault time, so it must be in
     // TR before any such fault can fire.
+    debug_info!("[boot] gdt+idt");
     gdt::init();
-    debug_info!("GDT and TSS installed");
-
-    // Initialize interrupt descriptor table
     interrupts::init_idt();
-    
-    // Initialize PS/2 controller configuration for keyboard
     ps2_controller::init();
-    
+
     // Extract what we need from boot_info before borrowing it
     // Use a default offset if not provided by bootloader
     let physical_memory_offset = boot_info.physical_memory_offset.into_option()
         .unwrap_or(0x10000000000); // Default offset for identity mapping
     let rsdp_addr = boot_info.rsdp_addr.into_option();
-    
-    // Initialize memory and heap (this will borrow memory_regions for 'static)
+
+    debug_info!("[boot] heap");
     unsafe {
         // Create a reference that will live for the entire program
         let memory_regions_ref: &'static _ = &*((&boot_info.memory_regions) as *const _);
         memory::init(memory_regions_ref, Some(physical_memory_offset));
         memory::init_heap(physical_memory_offset);
     }
-    debug_info!("Heap initialized successfully!");
 
     // Parse and install the system font. Must run after heap init (the TTF
     // rasterizer allocates) and before any window or TTY is constructed (the
     // grid layout reads the font's cell dimensions exactly once).
+    debug_info!("[boot] fonts");
     crate::graphics::fonts::core_font::init_fonts();
 
-    // Initialize the process scheduler
+    debug_info!("[boot] scheduler");
     crate::process::init_scheduler();
-    debug_info!("Process scheduler initialized!");
 
     // Register the first-class syscalls (`print`, `exit`) so they have stable
     // numeric IDs before any user app loads. The trampoline page is built
     // lazily in U7 when the first user app runs; registration here only
     // populates SYSCALL_TABLE.
     crate::userland::syscalls::register_first_class_syscalls();
-    debug_info!("Userland syscalls registered");
 
-    // Initialize IDE controller and detect drives
-    debug_info!("Initializing IDE controller...");
+    debug_info!("[boot] ide+fs");
     crate::drivers::ide::IDE_CONTROLLER.initialize();
-    
-    // Initialize disk drives and mount filesystems
     init_filesystems();
-    
-    // Print memory information
-    memory::print_memory_info();
-    
-    // Print boot information
+    // Host-disk probe is small (one MBR read on the slave drive) and the
+    // filesystem tests assert /host is mounted, so we keep it in test mode.
+    try_mount_host_disk();
+
     if let Some(rsdp_addr) = rsdp_addr {
         debug_debug!("RSDP address: 0x{:016x}", rsdp_addr);
     }
-    
-    // Initialize display - this can still mutably borrow boot_info
+    memory::print_memory_info();
+
+    debug_info!("[boot] display");
     let screen_dims = init_display(boot_info);
 
-    // Initialize mouse driver with screen dimensions
-    // VirtIO tablet will be tried first (seamless mouse in QEMU)
-    // Falls back to PS/2 mouse if not available
-    if let Some((width, height)) = screen_dims {
-        crate::drivers::mouse::init_with_screen(width, height);
-    } else {
-        crate::drivers::mouse::init();
+    // Mouse, GUIShell desktop, and MCP bridge are not exercised by any
+    // in-kernel test. Skipping them under `feature = "test"` removes the
+    // largest chunks of `./test.sh` startup latency: GUIShell paints the
+    // wallpaper + initial render; the MCP bridge spawns a kernel process
+    // and brings up COM2.
+    #[cfg(not(feature = "test"))]
+    {
+        debug_info!("[boot] mouse");
+        if let Some((width, height)) = screen_dims {
+            crate::drivers::mouse::init_with_screen(width, height);
+        } else {
+            crate::drivers::mouse::init();
+        }
+
+        debug_info!("[boot] guishell");
+        init_guishell_desktop();
+
+        debug_info!("[boot] mcp-bridge");
+        init_mcp_bridge();
     }
 
-    // Initialize the kernel-resident MCP tool registry and serial dispatcher.
-    // Brings up COM2 (additive — COM1 / -serial stdio is unchanged), registers
-    // the four kernel-resident tools, registers the synthetic terminal that
-    // shell_run captures stdout into, and spawns the dispatcher loop as a
-    // kernel process. `read_serial` is implemented bridge-side; not in the
-    // kernel registry.
-    init_mcp_bridge();
+    #[cfg(feature = "test")]
+    {
+        let _ = screen_dims;
+        debug_info!("[boot] test mode — skipping mouse, guishell, mcp");
+    }
+
+    debug_info!("[boot] init complete");
 }
 
+#[cfg(not(feature = "test"))]
+fn init_guishell_desktop() {
+    crate::commands::guishell::init_guishell();
+    // Do an initial render so the desktop is visible immediately.
+    window::render_frame();
+}
+
+#[cfg(not(feature = "test"))]
 fn init_mcp_bridge() {
     use alloc::boxed::Box;
     use alloc::string::String;
@@ -134,42 +144,23 @@ fn init_mcp_bridge() {
 }
 
 fn init_display(boot_info: &'static mut BootInfo) -> Option<(u32, u32)> {
-    debug_info!("Checking for framebuffer...");
-
-    if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
-        debug_info!("Framebuffer found! Initializing window system...");
-
-        let width = framebuffer.info().width as u32;
-        let height = framebuffer.info().height as u32;
-        debug_info!("Screen dimensions: {}x{}", width, height);
-
-        // Create graphics device based on double buffer configuration
-        let device: Box<dyn window::GraphicsDevice> = if display::USE_DOUBLE_BUFFER {
-            debug_info!("Using double-buffered graphics device");
-            Box::new(window::adapters::DoubleBufferedDevice::new_with_static_buffer(framebuffer))
-        } else {
-            debug_info!("Using direct framebuffer device");
-            Box::new(window::adapters::DirectFrameBufferDevice::new(framebuffer))
-        };
-
-        // Initialize window manager
-        window::init_window_manager(device);
-        debug_info!("Window manager initialized successfully!");
-
-        // Initialize GUIShell desktop (taskbar + start menu)
-        crate::commands::guishell::init_guishell();
-        debug_info!("GUIShell desktop initialized!");
-
-        // Do an initial render to show something immediately
-        debug_info!("Performing initial render...");
-        window::render_frame();
-        debug_info!("Initial render complete!");
-
-        Some((width, height))
-    } else {
+    let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
         debug_warn!("No framebuffer available from bootloader");
-        None
-    }
+        return None;
+    };
+
+    let width = framebuffer.info().width as u32;
+    let height = framebuffer.info().height as u32;
+    debug_debug!("Screen dimensions: {}x{}", width, height);
+
+    let device: Box<dyn window::GraphicsDevice> = if display::USE_DOUBLE_BUFFER {
+        Box::new(window::adapters::DoubleBufferedDevice::new_with_static_buffer(framebuffer))
+    } else {
+        Box::new(window::adapters::DirectFrameBufferDevice::new(framebuffer))
+    };
+
+    window::init_window_manager(device);
+    Some((width, height))
 }
 
 // Static storage for IDE block devices and partition devices
@@ -334,11 +325,6 @@ fn init_filesystems() {
         debug_info!("No IDE disk found on primary master");
     }
     
-    // Probe Primary Slave for a host-share disk (vvfat-backed when ./build.sh
-    // attaches it; absent otherwise). Failures here are non-fatal — the host
-    // mount is a developer convenience, not a boot requirement.
-    try_mount_host_disk();
-
     debug_info!("Filesystem initialization complete");
 }
 

@@ -142,6 +142,15 @@ fn test_toolbar_three_buttons_left_aligned() {
     let id_b = tb.add_button("Forward", || {});
     let id_c = tb.add_button("Up", || {});
 
+    // Register the toolbar and cascade an initial layout. `add_button`
+    // calls during construction can't write child bounds back into the
+    // registry (no `with_active_manager` scope), so the cascade only
+    // fires once the toolbar is reachable through `with_window_mut`.
+    with_window_manager(|wm| {
+        wm.set_window_impl(toolbar_id, Box::new(tb));
+        wm.with_window_mut(toolbar_id, |w| w.set_bounds(Rect::new(0, 0, 400, 32)));
+    });
+
     // Each button should land at the X immediately after the previous
     // one — verify left-to-right ordering with monotonically increasing
     // x positions and zero gap between them.
@@ -157,11 +166,7 @@ fn test_toolbar_three_buttons_left_aligned() {
     assert_eq!(bounds_a.height, bounds_b.height);
     assert_eq!(bounds_b.height, bounds_c.height);
 
-    // Clean up.
-    with_window_manager(|wm| {
-        wm.set_window_impl(toolbar_id, Box::new(tb));
-        wm.destroy_window(toolbar_id);
-    });
+    with_window_manager(|wm| wm.destroy_window(toolbar_id));
 }
 
 fn test_toolbar_button_click_fires_callback() {
@@ -249,14 +254,18 @@ fn test_status_bar_single_section_fills_full_width() {
     let mut sb = StatusBar::new_with_id(sb_id, Rect::new(0, 0, 600, 20));
     let sec = sb.add_section("Ready", 1);
 
+    // Register and cascade — see the comment in
+    // `test_toolbar_three_buttons_left_aligned`.
+    with_window_manager(|wm| {
+        wm.set_window_impl(sb_id, Box::new(sb));
+        wm.with_window_mut(sb_id, |w| w.set_bounds(Rect::new(0, 0, 600, 20)));
+    });
+
     let bounds = with_window_manager(|wm| wm.window_registry.get(&sec).unwrap().bounds()).unwrap();
     assert_eq!(bounds.x, 0);
     assert_eq!(bounds.width, 600);
 
-    with_window_manager(|wm| {
-        wm.set_window_impl(sb_id, Box::new(sb));
-        wm.destroy_window(sb_id);
-    });
+    with_window_manager(|wm| wm.destroy_window(sb_id));
 }
 
 fn test_status_bar_two_sections_equal_weight_split_50_50() {
@@ -265,6 +274,11 @@ fn test_status_bar_two_sections_equal_weight_split_50_50() {
     let a = sb.add_section("A", 1);
     let b = sb.add_section("B", 1);
 
+    with_window_manager(|wm| {
+        wm.set_window_impl(sb_id, Box::new(sb));
+        wm.with_window_mut(sb_id, |w| w.set_bounds(Rect::new(0, 0, 600, 20)));
+    });
+
     let bounds_a = with_window_manager(|wm| wm.window_registry.get(&a).unwrap().bounds()).unwrap();
     let bounds_b = with_window_manager(|wm| wm.window_registry.get(&b).unwrap().bounds()).unwrap();
     assert_eq!(bounds_a.x, 0);
@@ -272,10 +286,7 @@ fn test_status_bar_two_sections_equal_weight_split_50_50() {
     assert_eq!(bounds_b.x, 300);
     assert_eq!(bounds_b.width, 300);
 
-    with_window_manager(|wm| {
-        wm.set_window_impl(sb_id, Box::new(sb));
-        wm.destroy_window(sb_id);
-    });
+    with_window_manager(|wm| wm.destroy_window(sb_id));
 }
 
 fn test_status_bar_set_section_text_updates_label() {
@@ -316,6 +327,11 @@ fn test_status_bar_text_wider_than_section_does_not_overflow_into_neighbour() {
     let a = sb.add_section(wide_text, 1);
     let b = sb.add_section("right", 1);
 
+    with_window_manager(|wm| {
+        wm.set_window_impl(sb_id, Box::new(sb));
+        wm.with_window_mut(sb_id, |w| w.set_bounds(Rect::new(0, 0, 600, 20)));
+    });
+
     let bounds_a = with_window_manager(|wm| wm.window_registry.get(&a).unwrap().bounds()).unwrap();
     let bounds_b = with_window_manager(|wm| wm.window_registry.get(&b).unwrap().bounds()).unwrap();
     assert_eq!(bounds_a.width, 300, "wide text should not stretch the slot");
@@ -323,7 +339,6 @@ fn test_status_bar_text_wider_than_section_does_not_overflow_into_neighbour() {
     assert_eq!(bounds_b.width, 300);
 
     with_window_manager(|wm| {
-        wm.set_window_impl(sb_id, Box::new(sb));
         wm.destroy_window(sb_id);
     });
 }
