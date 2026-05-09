@@ -197,11 +197,12 @@ fn test_large_list_wrapped_in_scroll_view_click_translates() {
     let scroll_y = sv.scroll_y();
     list.set_bounds(Rect::new(0, 0 - scroll_y, 200, list.content_height()));
 
-    // The user clicks at viewport y=8 (top of viewport while scrolled to
-    // y=1000). In list-local coords (after ScrollView translation) that's
-    // y = 1000 + 8 = 1008. Row index = 1008 / 16 = 63.
-    let click_local_y = 1008;
-    let _ = list.handle_event(click_at(Point::new(10, click_local_y), false, false));
+    // `MouseEvent::position` arrives in the *parent's* frame (same frame as
+    // `bounds()`), and `List::y_to_index` recovers the list-local y by
+    // subtracting `bounds.y`. So a click at viewport y=8 stays y=8 in the
+    // event; List computes 8 - (-1000) = 1008, and 1008 / 16 = 63.
+    let click_viewport_y = 8;
+    let _ = list.handle_event(click_at(Point::new(10, click_viewport_y), false, false));
     assert_eq!(list.selection(), &Selection::Single(63));
 }
 
@@ -308,11 +309,12 @@ fn test_mcl_right_click_preserves_global_position_under_scroll_view() {
     let scroll_y = 32;
     mcl.set_bounds(Rect::new(0, -scroll_y, 100, mcl.content_height()));
 
-    // Click at global y = 100. Local y (after translation) = 100 + 32 = 132.
-    // Header 20 px → row offset = 132 - 20 = 112. row_index = 112 / 16 = 7.
+    // `MouseEvent::position` arrives in the parent's frame (same frame as
+    // `bounds()`). MultiColumnList::y_to_row_index recovers list-local y by
+    // subtracting `bounds.y`: 100 - (-32) = 132. Header 20 px → row offset
+    // = 112. row_index = 112 / 16 = 7.
     let global = Point::new(40, 100);
-    let local = Point::new(40, 132);
-    let _ = mcl.handle_event(right_click_at(local, global));
+    let _ = mcl.handle_event(right_click_at(global, global));
 
     let captured = CAPTURED.lock().expect("right-click callback should have fired");
     assert_eq!(captured.0, 7, "row index should be 7");

@@ -352,6 +352,14 @@ fn test_buttondown_outside_divider_does_not_drag() {
         wm.set_window_impl(b, Box::new(Spacer::new_with_id(b, Rect::new(0, 0, 0, 0))));
         wm.set_window_impl(splitter_id, Box::new(splitter));
 
+        // Trigger an initial relayout now that both panes are in the
+        // registry — `set_first` / `set_second` ran before the children
+        // were registered, so their bounds in the registry are still the
+        // 0×0 placeholder set above.
+        wm.with_window_mut(splitter_id, |w| {
+            w.set_bounds(Rect::new(0, 0, 400, 200));
+        });
+
         // Click well left of the divider (which sits at x=200..204).
         wm.with_window_mut(splitter_id, |w| {
             let _ = w.handle_event(left_event(
