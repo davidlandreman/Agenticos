@@ -11,7 +11,11 @@ use super::{
     Event, EventResult, KeyboardEvent, MouseEvent, MouseEventType,
     Point, Rect, keyboard::{scancode_to_keycode, KeyboardState},
 };
-use super::types::{InteractionState, HitTestResult, ResizeEdge, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT};
+use super::types::{
+    clamp_drag_x, clamp_drag_y,
+    InteractionState, HitTestResult, ResizeEdge,
+    MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT,
+};
 use super::console::take_pending_invalidations;
 use super::windows::MenuBarPopup;
 
@@ -793,12 +797,22 @@ impl WindowManager {
                     // Continue dragging - move the window
                     let delta_x = mouse_x - start_mouse.x;
                     let delta_y = mouse_y - start_mouse.y;
-                    let new_x = start_window.x + delta_x;
-                    let new_y = start_window.y + delta_y;
+                    let raw_x = start_window.x + delta_x;
+                    let raw_y = start_window.y + delta_y;
+
+                    let screen_w = self.graphics_device.width() as i32;
+                    let screen_h = self.graphics_device.height() as i32;
 
                     // Move the window
                     if let Some(win) = self.window_registry.get_mut(&window) {
                         let old_bounds = win.bounds();
+
+                        // Clamp so the title bar is always grabbable.
+                        // Partial off-screen drag remains supported; the
+                        // clamp only prevents the title bar from leaving
+                        // the screen.
+                        let new_x = clamp_drag_x(raw_x, old_bounds.width as i32, screen_w);
+                        let new_y = clamp_drag_y(raw_y, screen_h);
 
                         // Only update if position actually changed
                         if new_x != old_bounds.x || new_y != old_bounds.y {
