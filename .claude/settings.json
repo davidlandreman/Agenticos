@@ -1,0 +1,31 @@
+{
+  "enabledPlugins": {
+    "compound-engineering@compound-engineering-plugin": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(rustc:*)",
+      "Bash(rustup:*)",
+      "Bash(./build.sh:*)",
+      "Bash(./test.sh:*)",
+      "Bash(./.conductor/setup.sh:*)",
+      "Bash(./.conductor/run.sh:*)",
+      "Bash(./.conductor/archive.sh:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(mkdir:*)",
+      "Bash(mv:*)",
+      "Bash(size:*)",
+      "Bash(llvm-size:*)",
+      "Bash(objdump:*)",
+      "Bash(xxd:*)",
+      "WebFetch(domain:os.phil-opp.com)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:docs.conductor.build)",
+      "WebFetch(domain:www.conductor.build)"
+    ],
+    "deny": []
+  }
+}

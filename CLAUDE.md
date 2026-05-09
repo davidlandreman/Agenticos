@@ -33,6 +33,9 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - `cargo clippy` - Run the Rust linter for code improvements
 - `cargo check` - Quick compilation check without producing binaries (preferred for validating code changes)
 
+### Parallel Development with Conductor
+This repo is configured for [conductor.build](https://www.conductor.build) — see `docs/conductor-workflow.md` for the full reference. Lifecycle is declared in `conductor.json`; `.conductor/setup.sh` bootstraps a workspace, `.conductor/run.sh` invokes `./build.sh`, `.conductor/archive.sh` cleans up QEMU on teardown. Each Conductor workspace is a git worktree with its own `target/` dir and its own QEMU process; the compound-engineering plugin is enabled in every workspace via the committed `.claude/settings.json`. When proposing or evaluating cross-cutting changes, point the user at `docs/conductor-workflow.md` rather than re-deriving the workflow.
+
 ## Project Structure
 
 The project follows a modular monolithic kernel design with clear separation of concerns. All code runs in kernel space (ring 0) with no user/kernel boundary yet.

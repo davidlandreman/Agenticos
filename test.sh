@@ -17,8 +17,10 @@ cargo build --features test
 cargo build --features test
 
 # Run with QEMU configured for testing
+BIOS_IMAGE="${AGENTICOS_BIOS_IMAGE:-target/bootloader/bios.img}"
+echo "Running tests against: $BIOS_IMAGE"
 qemu-system-x86_64 \
-    -drive format=raw,file=target/bootloader/bios.img \
+    -drive format=raw,file="$BIOS_IMAGE" \
     -serial stdio \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -display none \
