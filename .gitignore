@@ -1,6 +1,9 @@
 # Personal Claude Code permissions (shared settings.json IS tracked)
 .claude/settings.local.json
 
+# Per-session scheduled-task lock written by the harness; not user content.
+.claude/scheduled_tasks.lock
+
 # Conductor per-workspace overrides
 .conductor/run.local.sh
 
