@@ -12,7 +12,7 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
 - `render.rs` — `RenderTarget` abstraction for efficient row-based drawing.
 - `mouse_cursor.rs` — 12×12 arrow sprite with background save/restore.
 - `fonts/` — font support. `core_font.rs` defines the glyph-centric `Font` trait + `Glyph<'a>` struct (8bpp coverage). `ttf.rs` is the TTF/OTF backend (parses via `ttf-parser`, rasterizes via `ab_glyph_rasterizer`, ASCII pre-rendered into per-glyph `Box<[u8]>` slots, non-ASCII lazy via `BTreeMap`). `embedded_font.rs` is the 8x8 bitmap fallback used only on TTF parse failure. `font_data.rs` holds the embedded font's bit-packed source. The system TTF lives at `assets/system.ttf` and is `include_bytes!`-baked into the kernel; `init_fonts()` parses it once during boot, after heap init.
-- `images/` — `bmp.rs` (full Windows BMP, 4/8/16/24/32-bit). `png.rs` (header parsing only — no decompression yet).
+- `images/` — `bmp.rs` (full Windows BMP, 1/4/8/16/24/32-bit). `png.rs` (header parsing only — no decompression yet). Parsed images implement the `Image` trait and can be drawn through `GraphicsDevice::draw_image` / `draw_image_scaled` (defined in `src/window/graphics.rs`); both have per-pixel default implementations that respect the device's clip rect, so any adapter gets image rendering for free without an override.
 
 ## Double buffering
 
@@ -46,7 +46,7 @@ The intended next refactor establishes clear layers:
 1. Raw framebuffer access.
 2. Drawing primitives.
 3. Text/font rendering.
-4. Image loading/display.
+4. Image loading/display. (BMP parsing + `GraphicsDevice` rendering landed; PNG decompression and per-adapter bulk-row blits remain.)
 5. Composite operations (windows, widgets).
 
 This is a known-pain marker — when touching this folder, prefer additions that move toward this layering rather than entrenching the current shape.
