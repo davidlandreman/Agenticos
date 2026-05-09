@@ -33,7 +33,7 @@ pub use screen::*;
 // Re-export commonly used types
 pub use self::types::{WindowId, ScreenId, Rect, Point};
 pub use self::event::{Event, EventResult};
-pub use self::graphics::GraphicsDevice;
+pub use self::graphics::{GraphicsDevice, WindowBuffer};
 pub use self::selection::{Selection, SelectionMode, ClickMods};
 
 // =====================================================================
@@ -194,6 +194,37 @@ pub trait Window: Send {
     /// Set the focus state of this window
     fn set_focus(&mut self, focused: bool) {
         self.base_mut().set_focus(focused);
+    }
+
+    /// Whether this window wants the compositor to blit it from a cached
+    /// backing store rather than calling `paint()` per frame. Opting in
+    /// means: the compositor calls `paint_into_backing_store` (only when
+    /// `needs_repaint()` is true), then blits the result from
+    /// `backing_store()` to the back buffer for the dirty intersection.
+    /// Drag, resize, z-order, and cursor-only motion never re-rasterize.
+    ///
+    /// Default: opted out — the compositor uses the normal `paint()` path.
+    /// Most window types should leave this default; opt in only when the
+    /// per-frame rasterization cost is large enough to justify the memory
+    /// (typically a wallpaper-like static surface).
+    fn wants_backing_store(&self) -> bool {
+        false
+    }
+
+    /// Rasterize the window's current content into its own backing buffer.
+    /// Called by the compositor only when `wants_backing_store()` is true
+    /// and `needs_repaint()` is true. Implementations are expected to
+    /// allocate or resize the buffer to current bounds and write pixels
+    /// in framebuffer-native format.
+    ///
+    /// Default: no-op (matches `wants_backing_store == false`).
+    fn paint_into_backing_store(&mut self) {}
+
+    /// Borrow the window's cached backing store. Returns `None` until
+    /// `paint_into_backing_store` has run at least once for the current
+    /// content state, or for windows that don't opt in.
+    fn backing_store(&self) -> Option<&WindowBuffer> {
+        None
     }
 
     /// Get the window title if this is a frame window
