@@ -81,6 +81,45 @@ else
     echo "⚠️  Userland build failed; continuing without HELLO.ELF (kernel tests use embedded fixtures)"
 fi
 
+# C++ userland app — built with the host's musl-based static C++ cross
+# compiler if available. Mirrors the rust userland's soft-fail pattern: a
+# missing toolchain warns + skips so the kernel build still proceeds.
+# Install hint for macOS / Homebrew: `brew install x86_64-linux-musl-cross`
+# or build via musl-cross-make.
+echo "🛠  Building C++ userland (HELLOCPP)..."
+MUSL_GXX="${MUSL_GXX:-x86_64-linux-musl-g++}"
+if command -v "$MUSL_GXX" >/dev/null 2>&1; then
+    if make -C userland/apps/hello-cpp MUSL_GXX="$MUSL_GXX"; then
+        CPP_BIN="userland/apps/hello-cpp/build/hello-cpp"
+        if [ -f "$CPP_BIN" ]; then
+            # Verify ET_EXEC. Some toolchains default to PIE even with
+            # -no-pie; the loader rejects ET_DYN, so we'd rather fail
+            # here with a clear message than at run-time inside the guest.
+            ET_TYPE=$(readelf -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
+            if [ "$ET_TYPE" != "EXEC" ]; then
+                echo "❌ $CPP_BIN is $ET_TYPE, expected EXEC. Toolchain likely defaults to PIE."
+                echo "   Try: $MUSL_GXX -static -no-pie -fno-pie ..."
+                exit 1
+            fi
+            STAGED="$HOST_SHARE_STAGE/HELLOCPP.ELF"
+            TMP="$HOST_SHARE_STAGE/.HELLOCPP.ELF.tmp.$$"
+            cp "$CPP_BIN" "$TMP"
+            mv -f "$TMP" "$STAGED"
+            SIZE=$(wc -c < "$STAGED" | tr -d ' ')
+            echo "📦 Staged $STAGED ($SIZE bytes)"
+        else
+            echo "⚠️  C++ build succeeded but $CPP_BIN not found; skipping stage"
+        fi
+    else
+        echo "❌ C++ userland build failed."
+        exit 1
+    fi
+else
+    echo "⚠️  $MUSL_GXX not found on PATH — skipping HELLOCPP.ELF."
+    echo "   Install hint (macOS): brew install x86_64-linux-musl-cross"
+    echo "   Override the binary name: MUSL_GXX=<path-to-musl-g++> ./build.sh"
+fi
+
 # Determine build flags
 BUILD_FLAGS="--release"
 if [ "$DEBUG" = true ]; then

@@ -23,8 +23,10 @@ The kernel address space is partitioned into disjoint regions, each owned by exa
 
 | Range | Owner | Notes |
 |---|---|---|
-| `0x0040_0000` – `0x0080_0000` | userland binary + stack | User load base (D3) and user stack top (`USER_STACK_TOP = 0x0080_0000`); stack grows down. |
-| `0x0090_0000` – `0x0090_1000` | userland trampoline page | Single 4 KiB page, R+X+USER. Set up in U5. |
+| `0x0040_0000` – `0x0080_0000` | userland binary + stack | `USER_LOAD_BASE` and `USER_STACK_TOP`; stack grows down. |
+| `0x0100_0000` – `0x0100_2000` | userland TLS | TLS image page (`USER_TLS_IMAGE_VA`) + TCB page (`USER_TCB_VA`). FS_BASE points at TCB. Mapped only when the binary has a `PT_TLS` segment. |
+| `0x0200_0000` – `0x0280_0000` | userland brk arena | `USER_BRK_BASE` + 8 MiB cap. `brk(0)` returns the current high water; `brk(addr)` grows on demand. |
+| `0x0300_0000` – `0x4000_0000` | userland mmap arena | `USER_MMAP_BASE`. Anonymous-private bump arena, no coalescing. Reaches `USER_VA_RANGE_END` at 1 GiB. |
 | `0x_4444_4444_0000` + 100 MiB | kernel heap | Demand-mapped on page fault. |
 | `0x_5555_0000_0000` + N stacks | process stacks | `src/process/stack.rs`. |
 

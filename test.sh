@@ -31,6 +31,29 @@ else
     echo "Warning: userland build failed; continuing without HELLO.ELF"
 fi
 
+# C++ userland — same probe + readelf check as build.sh. Soft-fail when
+# the toolchain isn't installed so kernel tests can still run.
+MUSL_GXX="${MUSL_GXX:-x86_64-linux-musl-g++}"
+if command -v "$MUSL_GXX" >/dev/null 2>&1; then
+    if make -C userland/apps/hello-cpp MUSL_GXX="$MUSL_GXX"; then
+        CPP_BIN="userland/apps/hello-cpp/build/hello-cpp"
+        if [ -f "$CPP_BIN" ]; then
+            ET_TYPE=$(readelf -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
+            if [ "$ET_TYPE" = "EXEC" ]; then
+                STAGED="$HOST_SHARE_STAGE/HELLOCPP.ELF"
+                TMP="$HOST_SHARE_STAGE/.HELLOCPP.ELF.tmp.$$"
+                cp "$CPP_BIN" "$TMP"
+                mv -f "$TMP" "$STAGED"
+                echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
+            else
+                echo "Warning: $CPP_BIN is $ET_TYPE, expected EXEC; skipping stage"
+            fi
+        fi
+    fi
+else
+    echo "Note: $MUSL_GXX not found; skipping HELLOCPP.ELF (install: brew install x86_64-linux-musl-cross)"
+fi
+
 # Cargo build must be ran twice to make sure the bootloader image is built
 # from the freshly-compiled kernel binary (the second pass invokes the
 # bootloader-linker build script).
