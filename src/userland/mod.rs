@@ -4,6 +4,9 @@
 // design. This subsystem is built up across implementation units U1..U8.
 
 pub mod abi;
+pub mod error;
+pub mod image;
 pub mod lifecycle;
+pub mod loader;
 pub mod syscalls;
 pub mod trampoline;

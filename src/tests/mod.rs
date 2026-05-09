@@ -14,6 +14,8 @@ pub mod arc;
 pub mod filesystem;
 #[cfg(feature = "test")]
 pub mod userland;
+#[cfg(feature = "test")]
+pub mod userland_fixtures;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
