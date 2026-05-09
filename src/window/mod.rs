@@ -16,6 +16,7 @@ pub mod graphics;
 pub mod manager;
 pub mod screen;
 pub mod adapters;
+pub mod selection;
 pub mod windows;
 pub mod dialogs;
 pub mod terminal;
@@ -33,6 +34,7 @@ pub use screen::*;
 pub use self::types::{WindowId, ScreenId, Rect, Point};
 pub use self::event::{Event, EventResult};
 pub use self::graphics::GraphicsDevice;
+pub use self::selection::{Selection, SelectionMode, ClickMods};
 
 /// Core window trait that all visual elements implement
 pub trait Window: Send {

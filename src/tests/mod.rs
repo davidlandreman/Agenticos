@@ -30,6 +30,8 @@ pub mod desktop_window;
 pub mod mouse_event_extension_tests;
 #[cfg(feature = "test")]
 pub mod layout_tests;
+#[cfg(feature = "test")]
+pub mod selection_tests;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -54,6 +56,7 @@ pub fn run_tests() {
     let desktop_window_tests = desktop_window::get_tests();
     let mouse_event_extension_tests = mouse_event_extension_tests::get_tests();
     let layout_tests = layout_tests::get_tests();
+    let selection_tests = selection_tests::get_tests();
 
     let mut total_tests = 0;
 
@@ -173,6 +176,14 @@ pub fn run_tests() {
     debug_info!("\n[Layout Tests]");
     debug_info!("Running {} tests", layout_tests.len());
     for test in layout_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Selection tests (U1)
+    debug_info!("\n[Selection Tests]");
+    debug_info!("Running {} tests", selection_tests.len());
+    for test in selection_tests {
         test.run();
         total_tests += 1;
     }
