@@ -26,7 +26,7 @@ echo "=================================================================="
 echo " AgenticOS — running workspace ${CONDUCTOR_WORKSPACE_NAME:-<local>}"
 echo "------------------------------------------------------------------"
 echo " image path     : $bios_image"
-echo " reserved ports : $port_lo–$port_hi (currently unused; future GDB)"
+echo " reserved ports : ${port_lo}-${port_hi} (currently unused; future GDB)"
 echo "=================================================================="
 
 # Delegate to build.sh, which handles the two-pass cargo build and launches

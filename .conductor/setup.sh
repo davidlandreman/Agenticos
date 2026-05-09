@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
 # .conductor/setup.sh — runs once at workspace creation under conductor.build.
-# Job: bootstrap the toolchain, verify QEMU is available, and seed personal
-# Claude Code permissions. Must stay fast (no `cargo build`).
+# Job: bootstrap the toolchain, verify QEMU is available, seed personal Claude
+# Code permissions, and warm up target/ with a full build so subsequent Run
+# clicks only recompile changed kernel code (not every dependency and the
+# four BIOS bootloader sub-stages).
 
 set -euo pipefail
 
@@ -52,5 +54,12 @@ JSON
         echo "✓ Created empty $local_settings (no main-checkout copy found)"
     fi
 fi
+
+# Warm up target/ with a full release build (kernel + deps + bootloader stages).
+# Honors AGENTICOS_BIOS_IMAGE just like build.sh; -n skips QEMU. After this,
+# Run's `./build.sh` is an incremental rebuild that only touches changed kernel
+# sources, so workspace boot time drops from minutes to seconds.
+echo "→ Warming up target/ (first build is slow; subsequent Runs are incremental)"
+./build.sh -n
 
 echo "✓ Setup complete. Run \`./build.sh\` (or click Run in Conductor) to boot AgenticOS."
