@@ -121,10 +121,30 @@ impl RunProcess {
     }
 }
 
+/// Largest user binary the loader will accept, in bytes.
+///
+/// A static `g++ -static -no-pie` C++ iostream binary against musl + libstdc++
+/// typically lands between 1 and 4 MiB depending on toolchain version. 16 MiB
+/// gives ample headroom while keeping the failure mode visible: the kernel
+/// heap is sized at 100 MiB, so a 16 MiB ELF plus the loader's working state
+/// is comfortable; an outsized binary fails loud here rather than as a
+/// confusing OOM panic deep inside `Vec::resize`.
+const MAX_USER_BINARY_BYTES: u64 = 16 * 1024 * 1024;
+
 fn read_file_bytes(path: &str) -> Result<Vec<u8>, String> {
     use crate::fs::File;
 
     let file = File::open_read(path).map_err(|e| alloc::format!("open '{}': {}", path, e))?;
+    let size = file.size();
+    if size > MAX_USER_BINARY_BYTES {
+        return Err(alloc::format!(
+            "binary '{}' is {} bytes; max {} bytes ({} MiB)",
+            path,
+            size,
+            MAX_USER_BINARY_BYTES,
+            MAX_USER_BINARY_BYTES / (1024 * 1024)
+        ));
+    }
     file.read_to_vec()
         .map_err(|e| alloc::format!("read '{}': {}", path, e))
 }
