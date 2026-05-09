@@ -1,7 +1,7 @@
 ---
 title: "feat: Onboard AgenticOS to conductor.build with worktree-safe builds and first-class CE plugin"
 type: feat
-status: active
+status: completed
 created: 2026-05-08
 plan_id: 2026-05-08-001
 depth: standard

@@ -7,7 +7,6 @@
       "Bash(cargo:*)",
       "Bash(rustc:*)",
       "Bash(rustup:*)",
-      "Bash(rustup component add:*)",
       "Bash(./build.sh:*)",
       "Bash(./test.sh:*)",
       "Bash(./.conductor/setup.sh:*)",
