@@ -42,6 +42,10 @@ Boot lands in GUI mode:
 
 Child windows are positioned relative to their parent's coordinate system. `render_window_tree_with_offset` (in `manager.rs`) walks the tree, accumulating the offset into each child's bounds during render. Child bounds are temporarily adjusted during rendering — read from `WindowBase` after the render call to get the original.
 
+## Z-order
+
+There is a single source of truth for z-order: each parent's `children` Vec. `children[0]` is the bottom-most sibling, `children[len-1]` is the top. Both rendering (`render_window_tree`) and hit-testing (`topmost_at`, `start_drag_if_on_title_bar`) read from this same ordering, so they cannot drift. `bring_to_front(id)` moves the window to the end of its parent's children, then walks up the ancestor chain doing the same — so focusing a deep child also surfaces the enclosing frame above its siblings. `focus_window` calls `bring_to_front` automatically; callers should not need to call both.
+
 ## Cursor rendering
 
 Owned by this folder, NOT `src/drivers/`. `CursorRenderer` (in `cursor.rs`) saves the framebuffer region under the cursor before drawing, restores it before the next move. The 12×12 arrow sprite lives in `src/graphics/mouse_cursor.rs`. Cursor uses the direct-framebuffer adapter (the double-buffered path is too slow for cursor latency).
