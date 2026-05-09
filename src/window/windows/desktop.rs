@@ -103,16 +103,18 @@ impl Window for DesktopWindow {
     }
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
-        // Direct-paint path. The U9 compositor routes around this for
+        // Direct-paint fallback. The compositor routes around this for
         // opted-in windows (wants_backing_store == true) by calling
-        // paint_into_backing_store + blitting from the cache. paint()
-        // remains usable for direct callers (tests, debug tooling, the
-        // pre-U9 render path) and keeps its prior shape so existing
-        // tests describing this surface stay valid.
+        // paint_into_backing_store + blitting from the cache; this path
+        // is reached only when the backing store is unavailable (e.g. in
+        // tests that bypass the backing-store flow, or pathological
+        // cases where rasterization didn't produce a buffer).
+        //
+        // Per the `Window::paint` contract, this does not early-return on
+        // `!needs_repaint()` — the compositor decides whether to call us
+        // and sets the device clip; our job is just to write correct
+        // pixels within that clip.
         if !self.base.visible() {
-            return;
-        }
-        if !self.base.needs_repaint() {
             return;
         }
 

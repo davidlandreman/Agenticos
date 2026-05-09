@@ -49,9 +49,6 @@ impl Window for ContainerWindow {
         if !self.visible() {
             return;
         }
-        if !self.base.needs_repaint() {
-            return;
-        }
 
         // Fill background
         let bounds = self.bounds();

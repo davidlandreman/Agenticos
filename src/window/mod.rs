@@ -110,7 +110,22 @@ pub trait Window: Send {
     /// implementations of the plumbing methods below.
     fn base_mut(&mut self) -> &mut windows::base::WindowBase;
 
-    /// Paint this window to the graphics device
+    /// Paint this window to the graphics device.
+    ///
+    /// **Contract**: when called, produce correct pixels for every pixel in
+    /// `bounds() ∩ device.clip_rect()`. The compositor decides *whether* to
+    /// call `paint()` (based on `needs_repaint || intersects_dirty`) and
+    /// sets the device clip before the call. Implementations must NOT
+    /// short-circuit on `!needs_repaint()` — that re-implements the
+    /// compositor's decision and breaks the case where a static window
+    /// shares pixels with a freshly-dirtied region (the desktop's
+    /// backing-store blit overwrites those pixels and the window is
+    /// expected to repaint over them).
+    ///
+    /// Internal dirty-tracking (e.g. `TextWindow::dirty_cells`) is allowed
+    /// only as a *performance hint* to choose between full and incremental
+    /// paint paths — never as an excuse to skip work the compositor has
+    /// already decided is needed.
     fn paint(&mut self, device: &mut dyn GraphicsDevice);
 
     /// Handle an event
@@ -229,6 +244,45 @@ pub trait Window: Send {
     /// `paint_into_backing_store` has run at least once for the current
     /// content state, or for windows that don't opt in.
     fn backing_store(&self) -> Option<&WindowBuffer> {
+        None
+    }
+
+    /// Per-frame preparation hook called once per window by the
+    /// compositor *before* it consults dirty state for the frame.
+    ///
+    /// Use this to drain any external buffers whose contents must be
+    /// reflected in the window's internal dirty tracking before the
+    /// compositor decides what to paint. The canonical example is
+    /// `TerminalWindow`, whose pending shell output lives in a
+    /// per-terminal buffer until `process_terminal_output` writes it
+    /// into the underlying `TextWindow`'s grid (which is what
+    /// populates `dirty_cells`). If the drain runs only inside
+    /// `paint()`, the compositor will already have computed
+    /// `dirty_rect_hint()` against an empty `dirty_cells`, fall back
+    /// to the full bounds, and blit the desktop's wallpaper across
+    /// the whole terminal — leaving older lines as wallpaper after
+    /// the incremental paint redraws only the freshly-typed cells.
+    ///
+    /// Default: no-op.
+    fn prepare_for_render(&mut self) {}
+
+    /// Optional narrower invalidation rect (in window-local coordinates,
+    /// origin = window's top-left).
+    ///
+    /// When `Some`, the compositor uses this rect — translated to absolute
+    /// screen coordinates by adding the window's absolute origin — instead
+    /// of the window's full bounds when adding the window's dirty area to
+    /// the dirty-rect tracker. This keeps the desktop's wallpaper blit
+    /// (and any other lower-z window's repaint) confined to just the area
+    /// that actually changed.
+    ///
+    /// Use this when the window has fine-grained internal dirty tracking
+    /// (e.g. `TextWindow`'s per-cell `dirty_cells`) and the `paint()`
+    /// implementation can repaint correctly within the narrowed clip.
+    /// Returning `None` (the default) makes the compositor fall back to
+    /// the full bounds — the safe choice for any window without
+    /// sub-bounds dirty tracking.
+    fn dirty_rect_hint(&self) -> Option<Rect> {
         None
     }
 

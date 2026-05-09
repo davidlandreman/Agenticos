@@ -147,7 +147,7 @@ fn test_paint_clears_needs_repaint_for_fallback_branch() {
     assert!(!desktop.needs_repaint());
 }
 
-fn test_repeated_paint_without_invalidate_is_idempotent() {
+fn test_repeated_paint_without_invalidate_redraws() {
     let bounds = Rect::new(0, 0, 1280, 720);
     let mut desktop = DesktopWindow::new_with_wallpaper(WindowId::new(), bounds, tiny_bmp());
     let mut device = RecordingDevice::default();
@@ -156,9 +156,12 @@ fn test_repeated_paint_without_invalidate_is_idempotent() {
     desktop.paint(&mut device);
     desktop.paint(&mut device);
 
-    // The early-out on !needs_repaint() means only the first paint hits the
-    // image path.
-    assert_eq!(device.draw_image_scaled_calls, 1);
+    // Per the `Window::paint` contract, the compositor decides whether to
+    // call paint(); the window does not second-guess via needs_repaint.
+    // Each call writes pixels (clipped by the device). Cost-control for
+    // Desktop happens through the backing-store path
+    // (`paint_into_backing_store`), not by skipping paint() itself.
+    assert_eq!(device.draw_image_scaled_calls, 3);
 }
 
 // -- registration ---------------------------------------------------------
@@ -170,6 +173,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_paint_with_malformed_wallpaper_falls_back_to_fill_rect,
         &test_paint_clears_needs_repaint_for_wallpaper_branch,
         &test_paint_clears_needs_repaint_for_fallback_branch,
-        &test_repeated_paint_without_invalidate_is_idempotent,
+        &test_repeated_paint_without_invalidate_redraws,
     ]
 }

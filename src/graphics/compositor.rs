@@ -13,7 +13,14 @@ use crate::window::types::Rect;
 const MAX_DIRTY_REGIONS: usize = 16;
 
 /// Threshold area ratio - if dirty area exceeds this fraction of screen, do full repaint.
-const FULL_REPAINT_THRESHOLD: f32 = 0.5;
+///
+/// Only consulted when there are *multiple* dirty rects: a single big rect is
+/// always cheaper to paint as a partial than a full-screen clear-and-redraw,
+/// so it bypasses this check (see `check_area_threshold`). The threshold
+/// guards against the multi-rect degenerate case where many small rects
+/// scattered across the screen would each pay per-rect overhead during the
+/// render walk; at that point, just clearing once and repainting is cheaper.
+const FULL_REPAINT_THRESHOLD: f32 = 0.85;
 
 /// Manages dirty regions for partial screen updates.
 ///
@@ -168,7 +175,18 @@ impl DirtyRectManager {
     }
 
     /// Check if total dirty area exceeds threshold for full repaint.
+    ///
+    /// Skipped when there's only one rect: a single dirty region — even if
+    /// it covers most of the screen — is always cheaper to paint as a
+    /// partial than to clear-and-redraw the whole framebuffer, because the
+    /// partial path skips windows whose bounds don't intersect the rect.
+    /// The threshold exists to bound per-rect overhead in the multi-rect
+    /// case, not to short-circuit a single big update (e.g. a window drag).
     fn check_area_threshold(&mut self) {
+        if self.regions.len() <= 1 {
+            return;
+        }
+
         let screen_area = self.screen_width as u64 * self.screen_height as u64;
         let dirty_area: u64 = self.regions.iter().map(|r| r.area()).sum();
 

@@ -481,9 +481,6 @@ impl Window for TextEditor {
         if !self.visible() {
             return;
         }
-        if !self.base.needs_repaint() {
-            return;
-        }
 
         // `bounds` here is the editor's *content* rect — when the editor
         // is wrapped in a ScrollView, the manager-side render path
