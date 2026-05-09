@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::mem;
 use crate::window::{
     Window, WindowId, Rect, Event, EventResult, GraphicsDevice,
-    keyboard::keycode_to_char, KeyboardEvent,
+    keyboard::keycode_to_char,
 };
 use crate::window::event::KeyCode;
 use super::text::TextWindow;

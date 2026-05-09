@@ -1,6 +1,5 @@
 use crate::graphics::color::Color;
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
-use alloc::vec::Vec;
 use super::base::WindowBase;
 
 /// A desktop window that provides a background

@@ -6,7 +6,6 @@ use crate::graphics::fonts::core_font::Font;
 use crate::drivers::display::double_buffer::DoubleBufferedFrameBuffer;
 use crate::window::{GraphicsDevice, Rect, ColorDepth};
 use spin::Mutex;
-use alloc::boxed::Box;
 
 /// Graphics device that uses double buffering for smooth rendering
 pub struct DoubleBufferedDevice {

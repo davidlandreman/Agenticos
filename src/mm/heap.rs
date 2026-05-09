@@ -1,7 +1,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use spin::Mutex;
-use crate::{debug_info, debug_debug, debug_trace};
+use crate::{debug_info, debug_trace};
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 pub const HEAP_SIZE: usize = 100 * 1024 * 1024; // 100 MiB
@@ -61,7 +61,7 @@ unsafe impl GlobalAlloc for LockedHeap {
 }
 
 pub fn init_heap(
-    mapper: &mut super::paging::MemoryMapper,
+    _mapper: &mut super::paging::MemoryMapper,
 ) -> Result<(), &'static str> {
     debug_info!("Initializing heap memory");
     

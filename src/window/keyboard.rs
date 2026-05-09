@@ -109,7 +109,7 @@ pub fn scancode_to_keycode(scancode: u8) -> Option<KeyCode> {
 
 /// Check if a scancode is a break code (key release)
 /// In scancode set 2, break codes are prefixed with 0xF0
-pub fn is_break_code(scancode: u8) -> bool {
+pub fn is_break_code(_scancode: u8) -> bool {
     // This is a simplified check - in reality we'd need to track
     // if we received an 0xF0 prefix before this scancode
     false // For now, we're only handling make codes

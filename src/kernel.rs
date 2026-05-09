@@ -3,7 +3,7 @@ use crate::lib::debug::{self, DebugLevel};
 use crate::{debug_info, debug_debug, debug_warn};
 use crate::arch::x86_64::interrupts;
 use crate::mm::memory;
-use crate::drivers::display::{display, text_buffer, double_buffered_text};
+use crate::drivers::display::display;
 use crate::drivers::ps2_controller;
 use crate::window;
 use alloc::boxed::Box;
@@ -137,7 +137,7 @@ fn init_filesystems() {
             PRIMARY_MASTER_DISK = Some(IdeBlockDevice::new(IdeChannel::Primary, IdeDrive::Master));
         }
         
-        let primary_master = unsafe { PRIMARY_MASTER_DISK.as_ref().unwrap() };
+        let primary_master = unsafe { (*&raw const PRIMARY_MASTER_DISK).as_ref().unwrap() };
         
         // Try to read the boot sector
         let mut boot_sector = [0u8; 512];
@@ -309,7 +309,6 @@ pub fn run() -> ! {
 
     // Main kernel loop
     debug_info!("Entering idle loop with window rendering...");
-    let mut frame_count = 0u64;
     let using_virtio = crate::drivers::mouse::is_virtio_tablet();
     if using_virtio {
         debug_info!("VirtIO tablet active - mouse will not grab QEMU window");

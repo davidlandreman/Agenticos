@@ -42,7 +42,7 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
         })
     }
     
-    fn read_dir(&self, path: &str) -> Result<DirectoryIterator, FilesystemError> {
+    fn read_dir(&self, path: &str) -> Result<DirectoryIterator<'_>, FilesystemError> {
         // For now, only support root directory
         if path.is_empty() || path == "/" {
             Ok(DirectoryIterator::new(self, path))

@@ -6,7 +6,6 @@
 //! - Frame lifecycle (begin_frame/end_frame)
 
 use alloc::vec::Vec;
-use crate::graphics::color::Color;
 use crate::graphics::framebuffer::SavedRegion;
 use crate::window::types::Rect;
 

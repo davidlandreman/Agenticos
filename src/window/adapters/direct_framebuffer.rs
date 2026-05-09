@@ -6,7 +6,6 @@ use crate::graphics::fonts::core_font::Font;
 use crate::drivers::display::frame_buffer::FrameBufferWriter;
 use crate::window::{GraphicsDevice, Rect, ColorDepth};
 use spin::Mutex;
-use alloc::boxed::Box;
 
 /// Graphics device that writes directly to the physical framebuffer
 /// This is the simplest implementation with no buffering

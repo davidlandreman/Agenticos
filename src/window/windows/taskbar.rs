@@ -3,7 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::graphics::color::Color;
-use crate::window::{Window, WindowId, Rect, Point, Event, EventResult, GraphicsDevice};
+use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice};
 use super::base::WindowBase;
 
 /// Height of the taskbar in pixels

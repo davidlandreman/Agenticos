@@ -390,14 +390,9 @@ fn toggle_start_menu() {
 /// Sync taskbar buttons with current frame windows
 fn sync_taskbar_buttons() {
     let state = GUISHELL_STATE.lock();
-    let taskbar_id = match state.taskbar_id {
-        Some(id) => id,
-        None => return,
-    };
-    let desktop_id = match state.desktop_id {
-        Some(id) => id,
-        None => return,
-    };
+    if state.taskbar_id.is_none() || state.desktop_id.is_none() {
+        return;
+    }
     let current_buttons: Vec<(WindowId, WindowId)> = state.window_buttons.clone();
     drop(state);
 
@@ -526,7 +521,6 @@ fn remove_window_button(button_id: WindowId) {
 fn update_button_layout() {
     let state = GUISHELL_STATE.lock();
     let buttons: Vec<(WindowId, WindowId)> = state.window_buttons.clone();
-    let taskbar_id = state.taskbar_id;
     drop(state);
 
     if buttons.is_empty() {

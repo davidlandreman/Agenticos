@@ -321,7 +321,7 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
 
                 // Return to kernel context
                 unsafe {
-                    NEXT_CONTEXT_PTR = &KERNEL_CONTEXT as *const CpuContext;
+                    NEXT_CONTEXT_PTR = &raw const KERNEL_CONTEXT;
                     SWITCH_TO_KERNEL = true;
                     DO_CONTEXT_SWITCH = true;
                 }

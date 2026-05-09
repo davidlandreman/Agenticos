@@ -1,7 +1,7 @@
 //! Base window implementation with common functionality
 
 use alloc::vec::Vec;
-use crate::window::{Window, WindowId, Rect, Event, EventResult};
+use crate::window::{WindowId, Rect};
 
 /// Base window structure that provides common functionality
 pub struct WindowBase {

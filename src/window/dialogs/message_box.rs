@@ -1,7 +1,6 @@
 //! Message box dialogs for displaying information to the user
 
 use alloc::boxed::Box;
-use alloc::string::String;
 
 use crate::graphics::color::Color;
 use crate::window::windows::dialog::{
@@ -37,7 +36,7 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
     let dialog_y = (screen_height - dialog_height as i32) / 2;
 
     // Create dialog structure
-    let (frame_id, ok_button_id) = with_window_manager(|wm| {
+    let (frame_id, _ok_button_id) = with_window_manager(|wm| {
         // Get desktop for parenting
         let desktop_id = wm
             .get_active_screen()

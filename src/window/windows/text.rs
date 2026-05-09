@@ -1,10 +1,10 @@
 //! Text window for grid-based text rendering
 
 use alloc::{vec, vec::Vec};
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice};
 use crate::graphics::color::Color;
-use crate::graphics::fonts::core_font::{Font, get_default_font};
+use crate::graphics::fonts::core_font::get_default_font;
 use super::base::WindowBase;
 
 /// A character cell in the text grid

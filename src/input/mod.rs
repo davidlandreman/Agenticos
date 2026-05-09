@@ -49,9 +49,9 @@ pub mod keyboard_driver;
 pub mod mouse_driver;
 pub mod queue;
 
-pub use keyboard_driver::{keycode_to_char, KeyboardDriver};
+pub use keyboard_driver::KeyboardDriver;
 pub use mouse_driver::MouseDriver;
-pub use queue::{InputQueue, RawInputEvent, QUEUE_SIZE};
+pub use queue::{InputQueue, RawInputEvent};
 
 use crate::window::event::{Event, KeyModifiers, MouseButtons, MouseEvent, MouseEventType};
 use crate::window::types::Point;

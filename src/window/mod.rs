@@ -8,10 +8,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
 use spin::Mutex;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod types;
 pub mod event;
@@ -29,10 +26,8 @@ pub mod terminal_factory;
 
 pub use types::*;
 pub use event::*;
-pub use graphics::*;
 pub use manager::*;
 pub use screen::*;
-pub use windows::*;
 
 // Re-export commonly used types
 pub use self::types::{WindowId, ScreenId, Rect, Point};

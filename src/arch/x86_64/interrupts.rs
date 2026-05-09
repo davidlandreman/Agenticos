@@ -57,7 +57,7 @@ lazy_static! {
         // Set up hardware interrupt handlers
         // Timer uses the preemptive handler for true multitasking
         unsafe {
-            use x86_64::structures::idt::HandlerFunc;
+            
             use crate::arch::x86_64::preemption::timer_interrupt_handler_preemptive;
             let handler_addr = timer_interrupt_handler_preemptive as usize;
             idt[InterruptIndex::Timer.as_usize()]

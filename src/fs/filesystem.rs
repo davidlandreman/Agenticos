@@ -145,7 +145,7 @@ pub trait Filesystem {
     fn stats(&self) -> Result<FilesystemStats, FilesystemError>;
     
     /// List directory contents
-    fn read_dir(&self, path: &str) -> Result<DirectoryIterator, FilesystemError>;
+    fn read_dir(&self, path: &str) -> Result<DirectoryIterator<'_>, FilesystemError>;
     
     /// Enumerate directory entries into a Vec (convenience method)
     fn enumerate_dir(&self, path: &str) -> Result<alloc::vec::Vec<DirectoryEntry>, FilesystemError> {
