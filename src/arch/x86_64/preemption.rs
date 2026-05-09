@@ -146,12 +146,15 @@ pub unsafe extern "C" fn timer_interrupt_handler_preemptive() {
         // Switch to new stack
         "mov rsp, rax",
 
-        // Push interrupt return frame: SS, RSP, RFLAGS, CS, RIP
-        "push 0x10",        // SS (kernel data segment)
-        "push rax",         // RSP (same as what we just loaded)
-        "push rdx",         // RFLAGS
-        "push 0x08",        // CS (kernel code segment)
-        "push rcx",         // RIP
+        // Push interrupt return frame: SS, RSP, RFLAGS, CS, RIP.
+        // CS/SS come from the saved CpuContext (offsets 144/152) so kernel
+        // processes get 0x08/0x10 and a future ring-3 process would get
+        // 0x23/0x1B without further asm changes.
+        "push qword ptr [rsi + 152]",  // SS
+        "push rax",                    // RSP (same as what we just loaded)
+        "push rdx",                    // RFLAGS
+        "push qword ptr [rsi + 144]",  // CS
+        "push rcx",                    // RIP
 
         // Now load remaining registers from context
         // We need to reload rax, rcx, rdx, rsi, rdi from context
@@ -176,14 +179,15 @@ pub unsafe extern "C" fn timer_interrupt_handler_preemptive() {
         "lea rax, [rip + {next_ctx}]",
         "mov rdi, [rax]",
 
-        // Set up iretq frame on CURRENT stack (safe, we're on interrupt stack)
-        "push 0x10",                      // SS
+        // Set up iretq frame on CURRENT stack (safe, we're on interrupt stack).
+        // CS/SS come from the kernel-context CpuContext at offsets 144/152.
+        "push qword ptr [rdi + 152]",     // SS
         "push qword ptr [rdi + 48]",      // RSP
         // Load flags and ensure IF is set
         "mov rax, [rdi + 64]",
         "or rax, 0x200",                  // Set IF
         "push rax",                       // RFLAGS
-        "push 0x08",                      // CS
+        "push qword ptr [rdi + 144]",     // CS
         "push qword ptr [rdi + 56]",      // RIP
 
         // Restore callee-saved registers from context
@@ -241,6 +245,29 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
 
     // Increment tick counter
     let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+
+    // Ring-3 short-circuit (D7 / D10): if the interrupted CS has RPL=3, the
+    // user app was running. Refresh the active PCB's last_activity_tick so the
+    // watchdog does not reap a CPU-bound but otherwise healthy app, send EOI,
+    // and return immediately — the naked outer wrapper will iretq straight
+    // back to ring 3. This MUST run before any of the save/yield logic below
+    // because that logic writes user-mode RSP/RIP/RFLAGS into the kernel-side
+    // PCB, which would later iretq with kernel CS=0x08 against a user RIP and
+    // double-fault.
+    let frame = unsafe { &*stack_frame };
+    if (frame.cs & 3) == 3 {
+        if let Some(mut sched) = crate::process::scheduler::SCHEDULER.try_lock() {
+            if let Some(current_pid) = sched.current() {
+                if let Some(pcb) = sched.get_process_mut(current_pid) {
+                    pcb.last_activity_tick = ticks;
+                }
+            }
+        }
+        unsafe {
+            PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        }
+        return;
+    }
 
     // Check if we're running a spawned process
     let in_process = crate::process::is_in_spawned_process();
@@ -312,6 +339,8 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
                     ctx.rsp = frame.rsp;
                     ctx.rip = frame.rip;
                     ctx.rflags = frame.rflags;
+                    ctx.cs = frame.cs;
+                    ctx.ss = frame.ss;
 
                     crate::debug_trace!("Saved context for PID {:?}, RIP={:#x}", current_pid, ctx.rip);
                 }
