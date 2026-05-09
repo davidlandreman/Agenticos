@@ -1,27 +1,48 @@
-//! List widget for displaying selectable items
+//! List widget for displaying selectable items.
+//!
+//! After the U6 migration this widget no longer manages its own scroll
+//! offset or paints a scrollbar. Callers wrap it in a
+//! [`ScrollView`](crate::window::windows::scroll_view::ScrollView) for
+//! scrolling. Selection state is delegated to the shared
+//! [`Selection`](crate::window::selection::Selection) model so click and
+//! arrow-key semantics stay consistent across list-shaped widgets.
+//!
+//! Key behavior:
+//! - Default `selection_mode` is `Single` — preserves the prior
+//!   single-select API for existing dialog consumers.
+//! - The selection callback signature is `FnMut(&Selection)`. Use
+//!   `Selection::iter().next()` (or the `selected()` helper) to get the
+//!   first index in the simple case.
+//! - The list paints its full content rect (`width × item_count *
+//!   item_height`); a wrapping `ScrollView` clips and translates as
+//!   needed.
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
-use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice};
 use crate::window::event::MouseEventType;
+use crate::window::selection::{ArrowDirection, ClickMods, Selection, SelectionMode};
+use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 use super::base::WindowBase;
 
-/// Callback type for selection change events
-pub type SelectionCallback = Box<dyn FnMut(usize) + Send>;
+/// Callback invoked when the user changes the selection.
+///
+/// The callback receives a reference to the new [`Selection`]. Most
+/// single-select consumers can convert via `selection.iter().next()`.
+pub type SelectionCallback = Box<dyn FnMut(&Selection) + Send>;
 
-/// A simple single-column list widget with selection
+/// A simple single-column list widget with selection.
 pub struct List {
     /// Base window functionality
     base: WindowBase,
     /// List items
     items: Vec<String>,
-    /// Currently selected item index
-    selected_index: Option<usize>,
-    /// Scroll offset (first visible item index)
-    scroll_offset: usize,
+    /// Selection state (delegated to the shared model).
+    selection: Selection,
+    /// Selection mode (Single by default; opt-in Multi).
+    selection_mode: SelectionMode,
     /// Height of each item in pixels
     item_height: usize,
     /// Selection change callback
@@ -42,8 +63,8 @@ impl List {
         List {
             base: WindowBase::new_with_id(id, bounds),
             items: Vec::new(),
-            selected_index: None,
-            scroll_offset: 0,
+            selection: Selection::None,
+            selection_mode: SelectionMode::Single,
             item_height: 16, // 8px font + 8px padding
             on_select: None,
             bg_color: Color::WHITE,
@@ -75,8 +96,7 @@ impl List {
     /// Clear all items
     pub fn clear(&mut self) {
         self.items.clear();
-        self.selected_index = None;
-        self.scroll_offset = 0;
+        self.selection = Selection::None;
         self.base.invalidate();
     }
 
@@ -90,33 +110,65 @@ impl List {
         self.items.is_empty()
     }
 
-    /// Get the currently selected index
+    /// Get the currently selected index. For multi-select this returns the
+    /// first selected index in ascending order. Returns `None` when nothing
+    /// is selected.
     pub fn selected(&self) -> Option<usize> {
-        self.selected_index
+        self.selection.iter().next()
     }
 
-    /// Get the selected item text
+    /// Borrow the underlying selection state.
+    pub fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// Get the selected item text (first selected item in ascending order).
     pub fn selected_item(&self) -> Option<&str> {
-        self.selected_index.map(|i| self.items[i].as_str())
+        self.selected().and_then(|i| self.items.get(i).map(|s| s.as_str()))
     }
 
-    /// Set the selected index
+    /// Set the selected index. Passing `None` clears the selection. The
+    /// resulting selection is always `Single(idx)` or `None`; switching to
+    /// multi-select selection state should go through the click/arrow paths.
     pub fn set_selected(&mut self, index: Option<usize>) {
-        let new_index = index.filter(|&i| i < self.items.len());
-        if self.selected_index != new_index {
-            self.selected_index = new_index;
+        let new_sel = match index.filter(|&i| i < self.items.len()) {
+            Some(i) => Selection::Single(i),
+            None => Selection::None,
+        };
+        if self.selection != new_sel {
+            self.selection = new_sel;
             self.base.invalidate();
-            // Ensure selected item is visible
-            if let Some(idx) = new_index {
-                self.ensure_visible(idx);
-            }
         }
     }
 
-    /// Set the selection change callback
+    /// Configure the selection mode. Switching from `Multi` back to `Single`
+    /// collapses any existing multi-selection to its first index in ascending
+    /// order so the widget is left in a consistent state.
+    pub fn set_selection_mode(&mut self, mode: SelectionMode) {
+        if self.selection_mode == mode {
+            return;
+        }
+        self.selection_mode = mode;
+        if matches!(mode, SelectionMode::Single) {
+            // Collapse any existing multi/range selection to its first index.
+            let first = self.selection.iter().next();
+            self.selection = match first {
+                Some(i) => Selection::Single(i),
+                None => Selection::None,
+            };
+            self.base.invalidate();
+        }
+    }
+
+    /// Current selection mode.
+    pub fn selection_mode(&self) -> SelectionMode {
+        self.selection_mode
+    }
+
+    /// Set the selection change callback.
     pub fn on_select<F>(&mut self, callback: F)
     where
-        F: FnMut(usize) + Send + 'static,
+        F: FnMut(&Selection) + Send + 'static,
     {
         self.on_select = Some(Box::new(callback));
     }
@@ -153,35 +205,64 @@ impl List {
         self.base.invalidate();
     }
 
-    /// Calculate how many items can be displayed
-    fn visible_items(&self) -> usize {
-        let bounds = self.base.bounds();
-        (bounds.height as usize) / self.item_height
+    /// Item height in pixels (used by callers that wrap this widget in a
+    /// `ScrollView` to compute the content size).
+    pub fn item_height(&self) -> usize {
+        self.item_height
     }
 
-    /// Ensure an item is visible by adjusting scroll offset
-    fn ensure_visible(&mut self, index: usize) {
-        if index < self.scroll_offset {
-            self.scroll_offset = index;
-            self.base.invalidate();
-        } else if index >= self.scroll_offset + self.visible_items() {
-            self.scroll_offset = index.saturating_sub(self.visible_items() - 1);
-            self.base.invalidate();
-        }
+    /// Natural content height in pixels (`item_count * item_height`).
+    /// Use to feed `ScrollView::set_content_size` from the caller.
+    pub fn content_height(&self) -> u32 {
+        (self.items.len() * self.item_height) as u32
     }
 
-    /// Convert y coordinate to item index
+    /// Convert a y coordinate (in the list's local frame, same frame as
+    /// `MouseEvent::position`) to an item index, if any.
     fn y_to_index(&self, y: i32) -> Option<usize> {
         let bounds = self.base.bounds();
         let relative_y = y - bounds.y;
         if relative_y < 0 {
             return None;
         }
-        let index = self.scroll_offset + (relative_y as usize) / self.item_height;
+        if self.item_height == 0 {
+            return None;
+        }
+        let index = (relative_y as usize) / self.item_height;
         if index < self.items.len() {
             Some(index)
         } else {
             None
+        }
+    }
+
+    /// Apply a click to the selection model and fire the callback. Returns
+    /// `true` if the callback was invoked.
+    fn apply_click(&mut self, idx: usize, mods: ClickMods) {
+        let before = self.selection.clone();
+        self.selection.click(idx, mods, self.selection_mode);
+        if before != self.selection {
+            self.base.invalidate();
+        }
+        // Fire callback even when selection didn't change; callers may
+        // rely on per-click signaling (e.g., for double-click semantics).
+        if let Some(ref mut callback) = self.on_select {
+            callback(&self.selection);
+        }
+    }
+
+    /// Apply an arrow-key navigation step to the selection.
+    fn apply_arrow(&mut self, direction: ArrowDirection, mods: ClickMods) {
+        if self.items.is_empty() {
+            return;
+        }
+        let before = self.selection.clone();
+        self.selection.arrow(direction, self.items.len(), mods, self.selection_mode);
+        if before != self.selection {
+            self.base.invalidate();
+            if let Some(ref mut callback) = self.on_select {
+                callback(&self.selection);
+            }
         }
     }
 }
@@ -211,71 +292,51 @@ impl Window for List {
         let x = bounds.x;
         let y = bounds.y;
         let width = bounds.width;
-        let height = bounds.height;
         let item_height = self.item_height as i32;
 
-        // Draw background
-        device.fill_rect(x, y, width, height, self.bg_color);
+        // Background covers the full content rect (when wrapped in
+        // ScrollView the bounds are temporarily extended to cover the
+        // content). When standalone, this still paints the visible area.
+        device.fill_rect(x, y, width, bounds.height, self.bg_color);
 
-        // Draw border
-        device.draw_rect(x, y, width, height, Color::GRAY);
+        // Border around the visible area only when not embedded in a
+        // ScrollView. We can't tell here, so draw none — ScrollView paints
+        // its own border-equivalent and standalone callers can wrap in a
+        // ContainerWindow if they want a border.
 
-        // Draw items
         let font = get_default_font();
         let line_h = font.line_height() as usize;
-        let visible_count = self.visible_items();
         let padding: i32 = 4;
 
-        for i in 0..visible_count {
-            let item_index = self.scroll_offset + i;
-            if item_index >= self.items.len() {
-                break;
-            }
+        // Draw all items. Clipping (when wrapped in ScrollView) ensures
+        // only visible rows hit pixels.
+        for (item_index, item_text) in self.items.iter().enumerate() {
+            let item_y = y + (item_index as i32) * item_height;
+            let is_selected = self.selection.is_selected(item_index);
 
-            let item_y = y + (i as i32) * item_height;
-            let is_selected = self.selected_index == Some(item_index);
-
-            // Draw item background
             if is_selected {
-                device.fill_rect(x + 1, item_y, width - 2, self.item_height as u32, self.selected_bg_color);
+                device.fill_rect(
+                    x + 1,
+                    item_y,
+                    width.saturating_sub(2),
+                    self.item_height as u32,
+                    self.selected_bg_color,
+                );
             }
 
-            // Draw item text
             let text_color = if is_selected {
                 self.selected_text_color
             } else {
                 self.text_color
             };
 
-            let text_y = item_y + (item_height - line_h as i32) / 2; // Center vertically
+            let text_y = item_y + (item_height - line_h as i32) / 2;
             device.draw_text(
                 x + padding,
                 text_y,
-                &self.items[item_index],
+                item_text,
                 font.as_font(),
                 text_color,
-            );
-        }
-
-        // Draw scrollbar if needed
-        if self.items.len() > visible_count && visible_count > 0 {
-            let scrollbar_width: u32 = 8;
-            let scrollbar_x = x + width as i32 - scrollbar_width as i32 - 1;
-            let scrollbar_height = height - 2;
-
-            // Scrollbar track
-            device.fill_rect(scrollbar_x, y + 1, scrollbar_width, scrollbar_height, Color::LIGHT_GRAY);
-
-            // Scrollbar thumb
-            let thumb_height = (visible_count * scrollbar_height as usize) / self.items.len();
-            let thumb_height = thumb_height.max(10) as u32; // Minimum thumb size
-            let thumb_pos = ((self.scroll_offset * scrollbar_height as usize) / self.items.len()) as i32;
-            device.fill_rect(
-                scrollbar_x,
-                y + 1 + thumb_pos,
-                scrollbar_width,
-                thumb_height,
-                Color::GRAY,
             );
         }
 
@@ -293,56 +354,27 @@ impl Window for List {
                 match mouse_event.event_type {
                     MouseEventType::ButtonDown if mouse_event.buttons.left => {
                         if let Some(index) = self.y_to_index(mouse_event.position.y) {
-                            if self.selected_index != Some(index) {
-                                self.selected_index = Some(index);
-                                self.base.invalidate();
-                                if let Some(ref mut callback) = self.on_select {
-                                    callback(index);
-                                }
-                            }
+                            let mods = ClickMods::new(
+                                mouse_event.modifiers.shift,
+                                mouse_event.modifiers.ctrl,
+                            );
+                            self.apply_click(index, mods);
                         }
                         EventResult::Handled
-                    }
-                    MouseEventType::Scroll { delta_x: _, delta_y: _ } => {
-                        // Handle scroll wheel if implemented
-                        EventResult::Ignored
                     }
                     _ => EventResult::Ignored,
                 }
             }
             Event::Keyboard(kbd_event) if kbd_event.pressed => {
                 use crate::window::event::KeyCode;
+                let mods = ClickMods::new(kbd_event.modifiers.shift, kbd_event.modifiers.ctrl);
                 match kbd_event.key_code {
                     KeyCode::Up => {
-                        if let Some(idx) = self.selected_index {
-                            if idx > 0 {
-                                self.set_selected(Some(idx - 1));
-                                if let Some(ref mut callback) = self.on_select {
-                                    callback(idx - 1);
-                                }
-                            }
-                        } else if !self.items.is_empty() {
-                            self.set_selected(Some(0));
-                            if let Some(ref mut callback) = self.on_select {
-                                callback(0);
-                            }
-                        }
+                        self.apply_arrow(ArrowDirection::Up, mods);
                         EventResult::Handled
                     }
                     KeyCode::Down => {
-                        if let Some(idx) = self.selected_index {
-                            if idx + 1 < self.items.len() {
-                                self.set_selected(Some(idx + 1));
-                                if let Some(ref mut callback) = self.on_select {
-                                    callback(idx + 1);
-                                }
-                            }
-                        } else if !self.items.is_empty() {
-                            self.set_selected(Some(0));
-                            if let Some(ref mut callback) = self.on_select {
-                                callback(0);
-                            }
-                        }
+                        self.apply_arrow(ArrowDirection::Down, mods);
                         EventResult::Handled
                     }
                     _ => EventResult::Ignored,
@@ -351,5 +383,4 @@ impl Window for List {
             _ => EventResult::Ignored,
         }
     }
-
 }

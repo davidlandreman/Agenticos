@@ -96,9 +96,11 @@ pub fn open_file_dialog() -> WindowId {
 
         // Set up selection callback (double-click to open)
         let files_clone = files.clone();
-        file_list.on_select(move |row_idx| {
-            if let Some((name, _, _)) = files_clone.get(row_idx) {
-                close_dialog_with_result(DialogResult::FilePath(format!("/{}", name)));
+        file_list.on_select(move |selection| {
+            if let Some(row_idx) = selection.iter().next() {
+                if let Some((name, _, _)) = files_clone.get(row_idx) {
+                    close_dialog_with_result(DialogResult::FilePath(format!("/{}", name)));
+                }
             }
         });
 
