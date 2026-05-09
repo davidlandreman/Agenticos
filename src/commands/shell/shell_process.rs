@@ -24,6 +24,12 @@ pub struct ShellInstance {
     initialized: bool,
     /// Whether the shell should exit
     should_exit: bool,
+    /// True while a spawned command is running for this shell. Suppresses input
+    /// processing and prompt emission until `notify_command_finished` clears it.
+    command_running: bool,
+    /// Set when a spawned command has finished and the next poll should emit a
+    /// fresh prompt.
+    needs_prompt: bool,
 }
 
 impl ShellInstance {
@@ -35,6 +41,8 @@ impl ShellInstance {
             input_queue: Vec::new(),
             initialized: false,
             should_exit: false,
+            command_running: false,
+            needs_prompt: false,
         }
     }
 
@@ -45,7 +53,9 @@ impl ShellInstance {
 
     /// Check if there's pending work
     pub fn has_pending_work(&self) -> bool {
-        !self.initialized || !self.input_queue.is_empty()
+        !self.initialized
+            || self.needs_prompt
+            || (!self.command_running && !self.input_queue.is_empty())
     }
 
     /// Process one unit of work (poll-based)
@@ -61,6 +71,18 @@ impl ShellInstance {
             self.write_output("Type 'help' for commands.\n\n");
             self.write_prompt();
             self.initialized = true;
+            return true;
+        }
+
+        // A spawned command finished — emit the prompt now (after its output).
+        if self.needs_prompt {
+            self.needs_prompt = false;
+            self.write_prompt();
+            return true;
+        }
+
+        // Don't pull new input while a command is still running for this shell.
+        if self.command_running {
             return true;
         }
 
@@ -126,14 +148,13 @@ impl ShellInstance {
                 self.write_prompt();
             }
             _ => {
-                // Try to execute as a registered command
-                // The command will be spawned as a process and run by the scheduler
-                // Output routing is handled by the spawned process itself
+                // Try to execute as a registered command. The command runs as
+                // a spawned process and notifies us via `notify_command_finished`
+                // when done — we defer the next prompt until then so output
+                // appears between the user's command and the new prompt.
                 match crate::process::execute_command(trimmed, Some(self.terminal_id)) {
                     Ok(()) => {
-                        // Command was spawned successfully
-                        // Note: Output may appear after the prompt since it runs asynchronously
-                        self.write_prompt();
+                        self.command_running = true;
                     }
                     Err(e) => {
                         self.write_output(&format!("Error: {}\n", e));
@@ -159,6 +180,25 @@ pub fn register_shell(terminal_id: WindowId, pid: ProcessId) {
 pub fn unregister_shell(terminal_id: WindowId) {
     SHELL_REGISTRY.lock().remove(&terminal_id);
     crate::debug_info!("Unregistered shell for terminal {:?}", terminal_id);
+}
+
+/// Notify the shell attached to `terminal_id` that its spawned command has
+/// finished. The shell will emit a fresh prompt on its next poll.
+pub fn notify_command_finished(terminal_id: WindowId) {
+    let pid_opt = {
+        let mut registry = SHELL_REGISTRY.lock();
+        if let Some(shell) = registry.get_mut(&terminal_id) {
+            shell.command_running = false;
+            shell.needs_prompt = true;
+            Some(shell.pid)
+        } else {
+            None
+        }
+    };
+
+    if let Some(pid) = pid_opt {
+        crate::process::signal_process(pid, crate::process::WakeEvents::INPUT);
+    }
 }
 
 /// Send input to a shell

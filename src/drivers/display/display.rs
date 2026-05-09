@@ -8,9 +8,12 @@ pub const USE_DOUBLE_BUFFER: bool = true;
 
 // Unified print function that routes to the appropriate implementation
 pub fn _print(args: fmt::Arguments) {
-    // Check if window system is available
-    if crate::window::terminal::get_terminal_window().is_some() {
-        // Write to window console
+    // Route through the window console whenever any output terminal is available.
+    // `get_current_output_terminal` returns the per-process current routing target
+    // (set by `execute_command` for spawned commands) and falls back to the global
+    // default terminal — so this gate is true for both the legacy single-terminal
+    // path and the multi-terminal factory path.
+    if crate::window::terminal::get_current_output_terminal().is_some() {
         use core::fmt::Write;
         let mut writer = crate::window::console::ConsoleWriter;
         let _ = writer.write_fmt(args);

@@ -89,6 +89,12 @@ impl ProcessManager {
 
                     // Clear output routing
                     crate::window::terminal::clear_current_output_terminal();
+
+                    // Notify the shell so it can emit its next prompt below the
+                    // command's output (instead of before it).
+                    if let Some(tid) = terminal_id {
+                        crate::commands::shell::shell_process::notify_command_finished(tid);
+                    }
                 },
             );
             crate::debug_info!("execute_command: spawn_process returned for '{}'", process_name);
