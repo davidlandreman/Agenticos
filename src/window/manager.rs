@@ -3,6 +3,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
+use core::sync::atomic::{AtomicPtr, Ordering};
 use crate::drivers::mouse;
 use crate::graphics::compositor::Compositor;
 use super::cursor::CursorRenderer;
@@ -1247,4 +1248,68 @@ impl WindowManager {
             self.graphics_device.height() as u32,
         )
     }
+
+    /// Borrow a single window from the registry mutably as a `&mut dyn
+    /// Window` and run `f` against it. Returns `true` if the window was
+    /// found, `false` otherwise.
+    ///
+    /// While `f` runs, this manager is also exposed as the "active
+    /// manager" via [`with_active_manager`]. That lets the closure (or
+    /// methods called from inside it — notably layout containers'
+    /// `set_bounds` overrides) reach back into the manager to mutate
+    /// other windows. The window passed to `f` is detached from the
+    /// registry for the duration of the call, so it cannot itself be
+    /// re-entered through `with_active_manager` until `f` returns.
+    pub fn with_window_mut<F>(&mut self, window_id: WindowId, f: F) -> bool
+    where
+        F: FnOnce(&mut dyn Window),
+    {
+        let mut window = match self.window_registry.remove(&window_id) {
+            Some(w) => w,
+            None => return false,
+        };
+
+        let self_ptr = self as *mut WindowManager;
+        let prev = ACTIVE_MANAGER.swap(self_ptr, Ordering::SeqCst);
+
+        f(&mut *window);
+
+        ACTIVE_MANAGER.store(prev, Ordering::SeqCst);
+        self.window_registry.insert(window_id, window);
+        true
+    }
+}
+
+/// Pointer to the manager whose `with_window_mut` is currently on the
+/// stack, or null if no `with_window_mut` call is active. Used by
+/// layout containers to write children's bounds back into the manager
+/// from inside a `set_bounds` override.
+///
+/// SAFETY: only set/read inside `WindowManager::with_window_mut`. The
+/// pointer is valid for the duration of that call because the closure
+/// runs synchronously on the same thread; interrupts that touch the
+/// manager are blocked by the surrounding `with_window_manager`'s
+/// `InterruptGuard`.
+static ACTIVE_MANAGER: AtomicPtr<WindowManager> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Run `f` against the currently-active `WindowManager`. Returns
+/// `Some(f's result)` when called from inside a
+/// `WindowManager::with_window_mut` callback, `None` otherwise.
+///
+/// Callers must not invoke `with_window_mut` on the same window id
+/// that is currently being mutated — that window is removed from the
+/// registry while its closure runs and would not be found.
+pub fn with_active_manager<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut WindowManager) -> R,
+{
+    let ptr = ACTIVE_MANAGER.load(Ordering::SeqCst);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: see ACTIVE_MANAGER doc comment. The pointer was set by
+    // `with_window_mut` and we are still inside that call (or any
+    // recursive `with_window_mut` it triggered).
+    let manager = unsafe { &mut *ptr };
+    Some(f(manager))
 }

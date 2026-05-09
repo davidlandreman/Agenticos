@@ -17,6 +17,7 @@ pub mod text_editor;
 pub mod menu_bar;
 pub mod menu_bar_popup;
 pub mod dialog;
+pub mod layout;
 
 pub use container::ContainerWindow;
 pub use terminal::TerminalWindow;
@@ -31,3 +32,4 @@ pub use taskbar::TaskbarWindow;
 pub use text_editor::TextEditor;
 pub use menu_bar::{MenuBar, MenuItemDef, PendingPopup, MENU_BAR_HEIGHT};
 pub use menu_bar_popup::MenuBarPopup;
+pub use layout::{HBox, Padding, SizeHint, Spacer, VBox};

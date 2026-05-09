@@ -28,6 +28,8 @@ pub mod graphics_device_image;
 pub mod desktop_window;
 #[cfg(feature = "test")]
 pub mod mouse_event_extension_tests;
+#[cfg(feature = "test")]
+pub mod layout_tests;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -51,6 +53,7 @@ pub fn run_tests() {
     let graphics_device_image_tests = graphics_device_image::get_tests();
     let desktop_window_tests = desktop_window::get_tests();
     let mouse_event_extension_tests = mouse_event_extension_tests::get_tests();
+    let layout_tests = layout_tests::get_tests();
 
     let mut total_tests = 0;
 
@@ -162,6 +165,14 @@ pub fn run_tests() {
     debug_info!("\n[MouseEvent Extension Tests]");
     debug_info!("Running {} tests", mouse_event_extension_tests.len());
     for test in mouse_event_extension_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Layout tests (U2)
+    debug_info!("\n[Layout Tests]");
+    debug_info!("Running {} tests", layout_tests.len());
+    for test in layout_tests {
         test.run();
         total_tests += 1;
     }
