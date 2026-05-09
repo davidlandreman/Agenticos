@@ -398,41 +398,51 @@ struct DirectoryInner {
 }
 
 impl Directory {
-    /// Open a directory for reading
+    /// Open a directory for reading.
+    ///
+    /// Returns `Err(FileError::NotFound)` if no mounted filesystem covers
+    /// the path or if the underlying filesystem reports the directory does
+    /// not exist. A successfully opened directory may still have zero
+    /// entries (e.g. an empty FAT directory).
     pub fn open(path: &str) -> FileResult<Arc<Directory>> {
-        // Try to use VFS to get a directory iterator and collect entries
-        let mut entries = Vec::new();
-        
-        // Try to use the new enumerate_dir method first
-        if let Some((filesystem, rel_path)) = crate::fs::vfs::get_vfs().find_filesystem(path) {
-            match filesystem.enumerate_dir(rel_path) {
-                Ok(fs_entries) => {
-                    entries = fs_entries;
+        let (filesystem, rel_path) = crate::fs::vfs::get_vfs()
+            .find_filesystem(path)
+            .ok_or(FileError::NotFound)?;
+
+        // Try the optimized enumerate_dir first; on failure, fall back to
+        // the iterator API. If both report the path is unknown, propagate
+        // NotFound rather than silently returning an empty directory.
+        let entries = match filesystem.enumerate_dir(rel_path) {
+            Ok(es) => es,
+            Err(_) => match crate::fs::vfs::vfs_read_dir(path) {
+                Ok(mut dir_iter) => {
+                    let mut es = Vec::new();
+                    while let Some(entry) = dir_iter.next_entry() {
+                        es.push(entry);
+                    }
+                    es
                 }
                 Err(_) => {
-                    // Fall back to VFS read_dir approach
-                    match crate::fs::vfs::vfs_read_dir(path) {
-                        Ok(mut dir_iter) => {
-                            // Use the iterator to collect entries
-                            while let Some(entry) = dir_iter.next_entry() {
-                                entries.push(entry);
-                            }
-                        }
-                        Err(_) => {
-                            // Final fallback: try collect_filesystem_entries
-                            Self::collect_filesystem_entries(filesystem, rel_path, &mut entries);
-                        }
+                    // Legacy hard-coded fallback for the root directory
+                    // before enumerate_dir/read_dir existed. Still produces
+                    // entries only when `rel_path == "/"`, so any non-root
+                    // path that reached here is genuinely unknown.
+                    let mut es = Vec::new();
+                    Self::collect_filesystem_entries(filesystem, rel_path, &mut es);
+                    if es.is_empty() {
+                        return Err(FileError::NotFound);
                     }
+                    es
                 }
-            }
-        }
-        
+            },
+        };
+
         let inner = DirectoryInner {
             path: String::from(path),
             entries,
             position: 0,
         };
-        
+
         Ok(Arc::new(Directory {
             inner: Arc::new(Mutex::new(inner)),
         }))
