@@ -159,12 +159,13 @@ pub unsafe extern "C" fn switch_context_full_restore(
         "mov [rdi + 64], rax",
 
         // ===== RESTORE ALL registers from new context (rsi = new_ctx) =====
-        // Set up iretq frame on CURRENT stack
-        "push 0x10",             // SS (kernel data segment)
-        "push qword ptr [rsi + 48]",  // RSP
-        "push qword ptr [rsi + 64]",  // RFLAGS
-        "push 0x08",             // CS (kernel code segment)
-        "push qword ptr [rsi + 56]",  // RIP
+        // Set up iretq frame on CURRENT stack. CS/SS come from the saved
+        // CpuContext at offsets 144/152 — preserves ring level on resume.
+        "push qword ptr [rsi + 152]",  // SS
+        "push qword ptr [rsi + 48]",   // RSP
+        "push qword ptr [rsi + 64]",   // RFLAGS
+        "push qword ptr [rsi + 144]",  // CS
+        "push qword ptr [rsi + 56]",   // RIP
 
         // Restore all registers from context
         "mov rbx, [rsi + 0]",
@@ -208,13 +209,14 @@ pub unsafe extern "C" fn switch_to_full_context_iretq(new_ctx: *const CpuContext
         // 72: rax, 80: rcx, 88: rdx, 96: rsi, 104: rdi
         // 112: r8, 120: r9, 128: r10, 136: r11
 
-        // Set up iretq frame on CURRENT stack (don't corrupt target stack)
-        // iretq frame: RIP, CS, RFLAGS, RSP, SS (from low to high address)
-        "push 0x10",             // SS (kernel data segment)
-        "push qword ptr [rdi + 48]",  // RSP
-        "push qword ptr [rdi + 64]",  // RFLAGS
-        "push 0x08",             // CS (kernel code segment)
-        "push qword ptr [rdi + 56]",  // RIP
+        // Set up iretq frame on CURRENT stack (don't corrupt target stack).
+        // iretq frame (low to high): RIP, CS, RFLAGS, RSP, SS.
+        // CS/SS come from the saved CpuContext at offsets 144/152.
+        "push qword ptr [rdi + 152]",  // SS
+        "push qword ptr [rdi + 48]",   // RSP
+        "push qword ptr [rdi + 64]",   // RFLAGS
+        "push qword ptr [rdi + 144]",  // CS
+        "push qword ptr [rdi + 56]",   // RIP
 
         // Now restore all registers from context
         // (rdi still points to context)

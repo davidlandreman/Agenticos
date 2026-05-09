@@ -57,10 +57,19 @@ pub struct CpuContext {
     pub r10: u64,
     /// R11 - general purpose register
     pub r11: u64,
+
+    // Ring/segment fields (appended at the END of the struct so all existing
+    // naked-asm offsets — 0..136 — remain stable).
+    /// CS selector at the time of the saved frame. Kernel processes use 0x08;
+    /// ring-3 user processes carry the user code selector (0x23).
+    pub cs: u64,
+    /// SS selector at the time of the saved frame. Kernel processes use 0x10;
+    /// ring-3 user processes carry the user data selector (0x1B).
+    pub ss: u64,
 }
 
 impl CpuContext {
-    /// Create a new CPU context initialized to zero.
+    /// Create a new CPU context initialized to zero (kernel selectors).
     pub const fn new() -> Self {
         CpuContext {
             rbx: 0,
@@ -81,6 +90,8 @@ impl CpuContext {
             r9: 0,
             r10: 0,
             r11: 0,
+            cs: 0x08, // kernel code selector
+            ss: 0x10, // kernel data selector
         }
     }
 
@@ -121,6 +132,8 @@ impl CpuContext {
             r9: 0,
             r10: 0,
             r11: 0,
+            cs: 0x08, // kernel code selector
+            ss: 0x10, // kernel data selector
         }
     }
 }

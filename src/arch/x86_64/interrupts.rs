@@ -4,6 +4,28 @@ use pic8259::ChainedPics;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::{debug_error, debug_info, println};
+use crate::userland::lifecycle::{cleanup_user_process, frame_is_user, AbnormalExit};
+
+/// If the saved CS in the interrupt frame has RPL=3, the fault occurred in
+/// user mode — terminate the user process cleanly instead of panicking.
+/// Vector numbers per Intel SDM Vol. 3A §6.15.
+fn route_user_fault_or_panic(
+    stack_frame: &InterruptStackFrame,
+    vector: u8,
+    error_code: Option<u64>,
+    fault_addr: Option<x86_64::VirtAddr>,
+    panic_msg: &'static str,
+) {
+    if frame_is_user(stack_frame.code_segment as u64) {
+        cleanup_user_process(AbnormalExit {
+            vector,
+            error_code,
+            fault_addr,
+            fault_rip: stack_frame.instruction_pointer,
+        });
+    }
+    panic!("{}", panic_msg);
+}
 
 /// PIT (Programmable Interval Timer) base frequency in Hz
 const PIT_BASE_FREQUENCY: u32 = 1_193_182;
@@ -44,6 +66,16 @@ lazy_static! {
         // Set up exception handlers
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
+        // Wire #DF to the IST stack so a kernel-stack overflow during user-mode
+        // work cannot triple-fault the machine. Same `set_handler_addr` workaround
+        // as the timer handler — the diverging-handler trait shape is not
+        // expressible on this nightly.
+        unsafe {
+            let handler_addr = double_fault_handler as usize;
+            idt.double_fault
+                .set_handler_addr(x86_64::VirtAddr::new(handler_addr as u64))
+                .set_stack_index(crate::arch::x86_64::gdt::DOUBLE_FAULT_IST_INDEX);
+        }
         idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
         idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
         idt.divide_error.set_handler_fn(divide_error_handler);
@@ -65,6 +97,20 @@ lazy_static! {
         }
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Mouse.as_usize()].set_handler_fn(mouse_interrupt_handler);
+
+        // Userland syscall vector (D1 / U5). DPL=3 so ring-3 code may issue
+        // `int 0x80` without #GP. We use an interrupt gate (IF auto-cleared
+        // on entry) — the safer default for the first cut. The handler is
+        // a `#[naked]` stub that builds a SyscallArgs frame on the stack
+        // and calls into the Rust dispatcher; see `arch::x86_64::syscall`.
+        unsafe {
+            use x86_64::PrivilegeLevel;
+            use crate::arch::x86_64::syscall::{syscall_interrupt_handler, SYSCALL_VECTOR};
+            let handler_addr = syscall_interrupt_handler as usize;
+            idt[SYSCALL_VECTOR as usize]
+                .set_handler_addr(x86_64::VirtAddr::new(handler_addr as u64))
+                .set_privilege_level(PrivilegeLevel::Ring3);
+        }
 
         idt
     };
@@ -204,6 +250,19 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let addr = accessed_addr.as_u64();
 
+    // Ring-3 page faults are lifecycle events for the user process — never
+    // auto-map them, even when the address falls in the kernel heap/stack
+    // range. Route to cleanup_user_process instead.
+    if frame_is_user(stack_frame.code_segment as u64) {
+        debug_error!("EXCEPTION: PAGE FAULT (ring 3)");
+        cleanup_user_process(AbnormalExit {
+            vector: 14,
+            error_code: Some(error_code.bits()),
+            fault_addr: Some(accessed_addr),
+            fault_rip: stack_frame.instruction_pointer,
+        });
+    }
+
     if (addr >= HEAP_START && addr < HEAP_END) ||
        (addr >= STACK_REGION_START && addr < STACK_REGION_END) {
         // This is a heap or stack access - allocate and map a page
@@ -220,14 +279,14 @@ extern "x86-interrupt" fn page_fault_handler(
             return;
         }
     }
-    
+
     // Not a heap fault or couldn't handle it - panic
     debug_error!("EXCEPTION: PAGE FAULT");
     debug_error!("Accessed Address: {:?}", accessed_addr);
     debug_error!("Error Code: {:?}", error_code);
     debug_error!("Instruction Pointer: {:?}", stack_frame.instruction_pointer);
     debug_error!("{:#?}", stack_frame);
-    
+
     panic!("Unhandled page fault");
 }
 
@@ -237,8 +296,13 @@ extern "x86-interrupt" fn double_fault_handler(
 ) {
     debug_error!("EXCEPTION: DOUBLE FAULT");
     debug_error!("{:#?}", stack_frame);
-    
-    loop {}
+
+    // Diverging handlers in `extern "x86-interrupt"` are not expressible as
+    // `-> !` on this nightly, so we register the address directly and keep
+    // the function from returning by halting forever.
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
@@ -248,57 +312,42 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     debug_error!("EXCEPTION: GENERAL PROTECTION FAULT");
     debug_error!("Error Code: {}", error_code);
     debug_error!("{:#?}", stack_frame);
-    
-    println!();
-    println!("EXCEPTION: GENERAL PROTECTION FAULT");
-    println!("Error Code: {}", error_code);
-    println!("{:#?}", stack_frame);
-    
-    panic!("General protection fault");
+
+    route_user_fault_or_panic(
+        &stack_frame,
+        13,
+        Some(error_code),
+        None,
+        "General protection fault",
+    );
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     debug_error!("EXCEPTION: INVALID OPCODE");
     debug_error!("{:#?}", stack_frame);
-    
-    println!();
-    println!("EXCEPTION: INVALID OPCODE");
-    println!("{:#?}", stack_frame);
-    
-    panic!("Invalid opcode");
+
+    route_user_fault_or_panic(&stack_frame, 6, None, None, "Invalid opcode");
 }
 
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
     debug_error!("EXCEPTION: DIVIDE ERROR");
     debug_error!("{:#?}", stack_frame);
-    
-    println!();
-    println!("EXCEPTION: DIVIDE ERROR");
-    println!("{:#?}", stack_frame);
-    
-    panic!("Divide error");
+
+    route_user_fault_or_panic(&stack_frame, 0, None, None, "Divide error");
 }
 
 extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
     debug_error!("EXCEPTION: OVERFLOW");
     debug_error!("{:#?}", stack_frame);
-    
-    println!();
-    println!("EXCEPTION: OVERFLOW");
-    println!("{:#?}", stack_frame);
-    
-    panic!("Overflow");
+
+    route_user_fault_or_panic(&stack_frame, 4, None, None, "Overflow");
 }
 
 extern "x86-interrupt" fn bound_range_exceeded_handler(stack_frame: InterruptStackFrame) {
     debug_error!("EXCEPTION: BOUND RANGE EXCEEDED");
     debug_error!("{:#?}", stack_frame);
-    
-    println!();
-    println!("EXCEPTION: BOUND RANGE EXCEEDED");
-    println!("{:#?}", stack_frame);
-    
-    panic!("Bound range exceeded");
+
+    route_user_fault_or_panic(&stack_frame, 5, None, None, "Bound range exceeded");
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(
@@ -340,13 +389,14 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     debug_error!("EXCEPTION: STACK SEGMENT FAULT");
     debug_error!("Error Code: {}", error_code);
     debug_error!("{:#?}", stack_frame);
-    
-    println!();
-    println!("EXCEPTION: STACK SEGMENT FAULT");
-    println!("Error Code: {}", error_code);
-    println!("{:#?}", stack_frame);
-    
-    panic!("Stack segment fault");
+
+    route_user_fault_or_panic(
+        &stack_frame,
+        12,
+        Some(error_code),
+        None,
+        "Stack segment fault",
+    );
 }
 
 extern "x86-interrupt" fn alignment_check_handler(
@@ -356,13 +406,14 @@ extern "x86-interrupt" fn alignment_check_handler(
     debug_error!("EXCEPTION: ALIGNMENT CHECK");
     debug_error!("Error Code: {}", error_code);
     debug_error!("{:#?}", stack_frame);
-    
-    println!();
-    println!("EXCEPTION: ALIGNMENT CHECK");
-    println!("Error Code: {}", error_code);
-    println!("{:#?}", stack_frame);
-    
-    panic!("Alignment check");
+
+    route_user_fault_or_panic(
+        &stack_frame,
+        17,
+        Some(error_code),
+        None,
+        "Alignment check",
+    );
 }
 
 // Hardware Interrupt Handlers

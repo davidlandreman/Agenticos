@@ -13,6 +13,10 @@ pub mod arc;
 #[cfg(feature = "test")]
 pub mod filesystem;
 #[cfg(feature = "test")]
+pub mod userland;
+#[cfg(feature = "test")]
+pub mod userland_fixtures;
+#[cfg(feature = "test")]
 pub mod fonts;
 #[cfg(feature = "test")]
 pub mod window_clipping;
@@ -25,9 +29,9 @@ pub mod desktop_window;
 pub fn run_tests() {
     use crate::{debug_info};
     use crate::lib::test_utils::{Testable, exit_qemu_success};
-    
+
     debug_info!("=== Running Kernel Tests ===");
-    
+
     // Collect all tests from modules
     let basic_tests = basic::get_tests();
     let memory_tests = memory::get_tests();
@@ -36,13 +40,14 @@ pub fn run_tests() {
     let heap_tests = heap::get_tests();
     let arc_tests = arc::get_tests();
     let filesystem_tests = filesystem::get_tests();
+    let userland_tests = userland::get_tests();
     let fonts_tests = fonts::get_tests();
     let window_clipping_tests = window_clipping::get_tests();
     let graphics_device_image_tests = graphics_device_image::get_tests();
     let desktop_window_tests = desktop_window::get_tests();
 
     let mut total_tests = 0;
-    
+
     // Run basic tests
     debug_info!("\n[Basic Tests]");
     debug_info!("Running {} tests", basic_tests.len());
@@ -50,7 +55,7 @@ pub fn run_tests() {
         test.run();
         total_tests += 1;
     }
-    
+
     // Run memory tests
     debug_info!("\n[Memory Tests]");
     debug_info!("Running {} tests", memory_tests.len());
@@ -58,7 +63,7 @@ pub fn run_tests() {
         test.run();
         total_tests += 1;
     }
-    
+
     // Run display tests
     debug_info!("\n[Display Tests]");
     debug_info!("Running {} tests", display_tests.len());
@@ -66,7 +71,7 @@ pub fn run_tests() {
         test.run();
         total_tests += 1;
     }
-    
+
     // Run interrupt tests
     debug_info!("\n[Interrupt Tests]");
     debug_info!("Running {} tests", interrupts_tests.len());
@@ -74,7 +79,7 @@ pub fn run_tests() {
         test.run();
         total_tests += 1;
     }
-    
+
     // Run heap tests
     debug_info!("\n[Heap Tests]");
     debug_info!("Running {} tests", heap_tests.len());
@@ -82,7 +87,7 @@ pub fn run_tests() {
         test.run();
         total_tests += 1;
     }
-    
+
     // Run Arc tests
     debug_info!("\n[Arc Tests]");
     debug_info!("Running {} tests", arc_tests.len());
@@ -90,11 +95,19 @@ pub fn run_tests() {
         test.run();
         total_tests += 1;
     }
-    
+
     // Run Filesystem tests
     debug_info!("\n[Filesystem Tests]");
     debug_info!("Running {} tests", filesystem_tests.len());
     for test in filesystem_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Userland tests
+    debug_info!("\n[Userland Tests]");
+    debug_info!("Running {} tests", userland_tests.len());
+    for test in userland_tests {
         test.run();
         total_tests += 1;
     }

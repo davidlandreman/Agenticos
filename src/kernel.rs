@@ -1,7 +1,7 @@
 use bootloader_api::BootInfo;
 use crate::lib::debug::{self, DebugLevel};
 use crate::{debug_info, debug_debug, debug_warn};
-use crate::arch::x86_64::interrupts;
+use crate::arch::x86_64::{gdt, interrupts};
 use crate::mm::memory;
 use crate::drivers::display::display;
 use crate::drivers::ps2_controller;
@@ -16,6 +16,12 @@ pub fn init(boot_info: &'static mut BootInfo) {
     debug_info!("=== AgenticOS Kernel Starting ===");
     debug_info!("Kernel entry point reached successfully!");
     debug_debug!("Boot info address: {:p}", boot_info);
+
+    // Install GDT + TSS before the IDT — exception handlers that reference
+    // IST entries (e.g., #DF) consult the TSS at fault time, so it must be in
+    // TR before any such fault can fire.
+    gdt::init();
+    debug_info!("GDT and TSS installed");
 
     // Initialize interrupt descriptor table
     interrupts::init_idt();
@@ -46,6 +52,13 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize the process scheduler
     crate::process::init_scheduler();
     debug_info!("Process scheduler initialized!");
+
+    // Register the first-class syscalls (`print`, `exit`) so they have stable
+    // numeric IDs before any user app loads. The trampoline page is built
+    // lazily in U7 when the first user app runs; registration here only
+    // populates SYSCALL_TABLE.
+    crate::userland::syscalls::register_first_class_syscalls();
+    debug_info!("Userland syscalls registered");
 
     // Initialize IDE controller and detect drives
     debug_info!("Initializing IDE controller...");
@@ -391,7 +404,8 @@ pub fn run() -> ! {
     crate::process::register_command("calc", crate::commands::calc::create_calc_process);
     crate::process::register_command("notepad", crate::commands::notepad::create_notepad_process);
     crate::process::register_command("tasks", crate::commands::tasks::create_tasks_process);
-    debug_info!("All {} commands registered successfully.", 16);
+    crate::process::register_command("run", crate::commands::run::create_run_process);
+    debug_info!("All {} commands registered successfully.", 17);
 
     // Force an initial render to display the desktop
     window::render_frame();

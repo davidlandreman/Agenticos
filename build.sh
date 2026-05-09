@@ -54,6 +54,31 @@ if [ "$CLEAN" = true ]; then
     echo "🧹 Cleaning build artifacts..."
     cargo clean
     rm -rf target/bootloader
+    cargo clean --manifest-path userland/Cargo.toml 2>/dev/null || true
+fi
+
+# Stage userland apps into host_share/ so the guest can `run /HOST/<NAME>.ELF`.
+# Done before the kernel build so a stale staged file never lingers when the
+# userland build fails. Failure here is a warning — kernel tests use embedded
+# fixtures, so they don't strictly need host_share/HELLO.ELF, and we still
+# want the kernel build to proceed for iteration.
+echo "🛠  Building userland (release)..."
+HOST_SHARE_STAGE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
+mkdir -p "$HOST_SHARE_STAGE"
+if cargo build --release --manifest-path userland/Cargo.toml; then
+    USER_HELLO="userland/target/x86_64-unknown-none/release/hello"
+    if [ -f "$USER_HELLO" ]; then
+        STAGED="$HOST_SHARE_STAGE/HELLO.ELF"
+        TMP="$HOST_SHARE_STAGE/.HELLO.ELF.tmp.$$"
+        cp "$USER_HELLO" "$TMP"
+        mv -f "$TMP" "$STAGED"
+        SIZE=$(wc -c < "$STAGED" | tr -d ' ')
+        echo "📦 Staged $STAGED ($SIZE bytes)"
+    else
+        echo "⚠️  Userland build succeeded but $USER_HELLO not found; skipping stage"
+    fi
+else
+    echo "⚠️  Userland build failed; continuing without HELLO.ELF (kernel tests use embedded fixtures)"
 fi
 
 # Determine build flags
