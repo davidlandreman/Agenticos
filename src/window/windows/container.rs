@@ -17,7 +17,7 @@ impl ContainerWindow {
     pub fn new(bounds: Rect) -> Self {
         ContainerWindow {
             base: WindowBase::new(bounds),
-            background_color: Color::new(240, 240, 240), // Light gray
+            background_color: crate::window::PALETTE_CONTENT_BG,
         }
     }
 
@@ -25,7 +25,7 @@ impl ContainerWindow {
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
         ContainerWindow {
             base: WindowBase::new_with_id(id, bounds),
-            background_color: Color::new(240, 240, 240), // Light gray
+            background_color: crate::window::PALETTE_CONTENT_BG,
         }
     }
     

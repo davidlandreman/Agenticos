@@ -93,12 +93,14 @@ impl MultiColumnList {
             row_height: 16,
             on_select: None,
             on_right_click: None,
-            bg_color: Color::WHITE,
-            text_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
+            // Header is slightly distinct from the row body so the
+            // header row reads as a separate band; LIGHT_GRAY is kept.
             header_bg_color: Color::LIGHT_GRAY,
-            header_text_color: Color::BLACK,
-            selected_bg_color: Color::BLUE,
-            selected_text_color: Color::WHITE,
+            header_text_color: crate::window::PALETTE_TEXT,
+            selected_bg_color: crate::window::PALETTE_HIGHLIGHT_BG,
+            selected_text_color: crate::window::PALETTE_HIGHLIGHT_TEXT,
         }
     }
 

@@ -69,9 +69,9 @@ impl TextEditor {
             modified: false,
             char_width,
             char_height,
-            bg_color: Color::WHITE,
-            text_color: Color::BLACK,
-            cursor_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
+            cursor_color: crate::window::PALETTE_TEXT,
             pending_ensure_visible: None,
         }
     }

@@ -104,10 +104,10 @@ impl TreeView {
             selection_mode: SelectionMode::Single,
             row_height: 16,
             on_activate: None,
-            bg_color: Color::WHITE,
-            text_color: Color::BLACK,
-            selected_bg_color: Color::BLUE,
-            selected_text_color: Color::WHITE,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
+            selected_bg_color: crate::window::PALETTE_HIGHLIGHT_BG,
+            selected_text_color: crate::window::PALETTE_HIGHLIGHT_TEXT,
         }
     }
 

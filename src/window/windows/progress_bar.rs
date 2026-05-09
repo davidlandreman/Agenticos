@@ -56,11 +56,10 @@ impl ProgressBar {
             current: 0,
             total: 0,
             label: None,
-            bg_color: Color::WHITE,
-            // Selection-blue, matches the U15 highlight palette.
-            fill_color: Color::new(0, 120, 215),
-            border_color: Color::GRAY,
-            text_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            fill_color: crate::window::PALETTE_PROGRESS_FILL,
+            border_color: crate::window::PALETTE_BORDER,
+            text_color: crate::window::PALETTE_TEXT,
         }
     }
 

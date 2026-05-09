@@ -34,7 +34,7 @@ impl Label {
         Label {
             base: WindowBase::new_with_id(id, bounds),
             text: String::from(text),
-            color: Color::BLACK,
+            color: crate::window::PALETTE_TEXT,
             background: None,
             align: TextAlign::Left,
         }

@@ -139,8 +139,11 @@ impl MenuBar {
             open_menu_index: None,
             hover_index: None,
             on_select: None,
-            bg_color: Color::new(240, 240, 240),
-            text_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
+            // Subtle grey hover (kept distinct from PALETTE_HIGHLIGHT_BG)
+            // — the menu-bar title strip uses a lighter highlight than
+            // its dropdown so the click affordance reads correctly.
             hover_bg_color: Color::new(200, 200, 200),
             popup_window_id: None,
             pending_popup: None,

@@ -43,10 +43,10 @@ impl TextInput {
             text: String::new(),
             max_length: None,
             on_change: None,
-            bg_color: Color::WHITE,
-            text_color: Color::BLACK,
-            border_color: Color::GRAY,
-            focus_border_color: Color::BLUE,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
+            border_color: crate::window::PALETTE_BORDER,
+            focus_border_color: crate::window::PALETTE_CHROME_ACTIVE,
         }
     }
 

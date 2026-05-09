@@ -77,7 +77,7 @@ impl ScrollView {
             h_scroll_enabled: false,
             v_scroll_enabled: true,
             thumb_grab: None,
-            bg_color: Color::WHITE,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
         }
     }
 

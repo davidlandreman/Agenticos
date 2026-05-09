@@ -43,15 +43,13 @@ where
 /// Default status bar height.
 pub const STATUS_BAR_HEIGHT: u32 = 20;
 
-/// Default section background color (light grey).
-const DEFAULT_BG: Color = Color {
-    red: 240,
-    green: 240,
-    blue: 240,
-};
+/// Default section background color — shared content background from
+/// the U15 palette so a default status bar sits flush against a default
+/// container or toolbar.
+const DEFAULT_BG: Color = crate::window::PALETTE_CONTENT_BG;
 
-/// Default text color.
-const DEFAULT_FG: Color = Color::BLACK;
+/// Default text color — shared with the U15 palette.
+const DEFAULT_FG: Color = crate::window::PALETTE_TEXT;
 
 /// Bottom-anchored horizontal strip of `Label` sections.
 pub struct StatusBar {

@@ -55,9 +55,9 @@ impl FrameWindow {
 
     fn draw_title_bar(&self, device: &mut dyn GraphicsDevice) {
         let title_bar_color = if self.active {
-            Color::new(0, 100, 200)  // Blue when active
+            crate::window::PALETTE_CHROME_ACTIVE
         } else {
-            Color::new(100, 100, 100)  // Grey when inactive
+            crate::window::PALETTE_CHROME_INACTIVE
         };
 
         // Draw title bar background
@@ -194,9 +194,12 @@ impl FrameWindow {
 
     fn draw_borders(&self, device: &mut dyn GraphicsDevice) {
         let border_color = if self.active {
-            Color::new(0, 100, 200)  // Blue when active
+            crate::window::PALETTE_CHROME_ACTIVE
         } else {
-            Color::new(150, 150, 150)  // Light grey when inactive
+            // Borders use a slightly lighter grey than the title-bar
+            // chrome inactive color so the inactive frame still shows
+            // some edge definition. Kept distinct from PALETTE_BORDER.
+            Color::new(150, 150, 150)
         };
 
         let bounds = self.base.bounds();

@@ -39,8 +39,8 @@ impl Button {
             label: String::from(label),
             pressed: false,
             on_click: None,
-            bg_color: Color::LIGHT_GRAY,
-            text_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
             enabled: true,
         }
     }

@@ -60,10 +60,10 @@ impl MenuWindow {
             items: Vec::new(),
             hover_index: None,
             on_select: None,
-            bg_color: Color::new(240, 240, 240),
-            border_color: Color::new(100, 100, 100),
-            text_color: Color::BLACK,
-            hover_bg_color: Color::new(0, 120, 215),
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            border_color: crate::window::PALETTE_BORDER,
+            text_color: crate::window::PALETTE_TEXT,
+            hover_bg_color: crate::window::PALETTE_HIGHLIGHT_BG,
         }
     }
 
@@ -183,7 +183,7 @@ impl Window for MenuWindow {
             let text_y = item_y + (item_height as i32 - char_height) / 2;
 
             let text_color = if self.hover_index == Some(i) {
-                Color::WHITE
+                crate::window::PALETTE_HIGHLIGHT_TEXT
             } else {
                 self.text_color
             };

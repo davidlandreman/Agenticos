@@ -58,7 +58,7 @@ impl TaskbarWindow {
 
         TaskbarWindow {
             base: WindowBase::new_with_id(id, bounds),
-            bg_color: Color::new(192, 192, 192),
+            bg_color: crate::window::PALETTE_CONTENT_BG,
             start_button_id: None,
             window_buttons: Vec::new(),
             active_frame_id: None,

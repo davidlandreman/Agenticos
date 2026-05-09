@@ -40,8 +40,8 @@ impl MenuBarPopup {
             items,
             hover_index: None,
             menu_bar_id,
-            bg_color: Color::new(240, 240, 240),
-            text_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
             pending_selection: None,
         }
     }
@@ -118,7 +118,7 @@ impl Window for MenuBarPopup {
         device.fill_rect(x, y, width, height, self.bg_color);
 
         // Border
-        device.draw_rect(x, y, width, height, Color::new(100, 100, 100));
+        device.draw_rect(x, y, width, height, crate::window::PALETTE_BORDER);
 
         // Draw items
         let mut item_y: i32 = y + 2;
@@ -134,13 +134,13 @@ impl Window for MenuBarPopup {
                             item_y,
                             width - 4,
                             item_height,
-                            Color::new(0, 120, 215),
+                            crate::window::PALETTE_HIGHLIGHT_BG,
                         );
                     }
 
                     // Draw label
                     let text_color = if self.hover_index == Some(i) {
-                        Color::WHITE
+                        crate::window::PALETTE_HIGHLIGHT_TEXT
                     } else {
                         self.text_color
                     };

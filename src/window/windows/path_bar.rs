@@ -89,10 +89,12 @@ impl PathBar {
             visible_layout: Vec::new(),
             hover_index: None,
             on_segment_click: None,
-            bg_color: Color::new(240, 240, 240),
-            text_color: Color::BLACK,
+            bg_color: crate::window::PALETTE_CONTENT_BG,
+            text_color: crate::window::PALETTE_TEXT,
+            // Subtle grey hover (kept distinct from PALETTE_HIGHLIGHT_BG)
+            // — breadcrumb hover shouldn't read as a selection state.
             hover_bg_color: Color::new(200, 200, 200),
-            separator_color: Color::GRAY,
+            separator_color: crate::window::PALETTE_BORDER,
         }
     }
 

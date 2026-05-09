@@ -65,12 +65,10 @@ const BUTTON_HORIZONTAL_PADDING: u32 = 16;
 /// Width of a separator slot (a thin gap with a 1-pixel rule).
 const SEPARATOR_WIDTH: u32 = 8;
 
-/// Background color for the toolbar strip.
-const DEFAULT_BG: Color = Color {
-    red: 240,
-    green: 240,
-    blue: 240,
-};
+/// Background color for the toolbar strip — shared content background
+/// from the U15 palette so a default toolbar sits flush against a
+/// default container or status bar.
+const DEFAULT_BG: Color = crate::window::PALETTE_CONTENT_BG;
 
 /// Color used for vertical separator rules.
 const SEPARATOR_COLOR: Color = Color {
