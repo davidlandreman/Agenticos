@@ -680,6 +680,18 @@ impl WindowManager {
             .compositor
             .update_cursor(mouse_x.max(0) as usize, mouse_y.max(0) as usize);
 
+        // Per-frame preparation pass — run BEFORE cascade and dirty
+        // marking so any window that needs to drain external buffers
+        // (e.g. `TerminalWindow` consuming pending shell output) can
+        // populate its internal dirty tracking, which `dirty_rect_hint`
+        // then reports accurately. Without this, a window that just
+        // received output would see an empty dirty hint, the compositor
+        // would mark its full bounds dirty, and the desktop's per-region
+        // wallpaper blit would overwrite the rest of the window — only
+        // for the window's incremental paint to redraw the freshly-
+        // arrived cells, leaving older content as wallpaper.
+        self.prepare_windows_for_render();
+
         // Cascade invalidation across the z-order so that any window in
         // front of a dirty one (and overlapping it) repaints too. Without
         // this, a dirty inner widget (e.g. an editor in the inactive
@@ -687,7 +699,8 @@ impl WindowManager {
         // it's clean, leaving the front frame's title bar overdrawn.
         self.cascade_invalidation();
 
-        // Mark every invalidated window's absolute bounds dirty. See
+        // Mark every invalidated window's absolute bounds dirty (or its
+        // narrowed `dirty_rect_hint` when one is supplied). See
         // `mark_dirty_for_invalidated_windows` for why this walks render
         // order rather than the flat registry.
         self.mark_dirty_for_invalidated_windows();
@@ -719,10 +732,21 @@ impl WindowManager {
             }
         }
 
-        // Render the active screen's windows
+        // Render the active screen's windows once per dirty region.
+        //
+        // Per-region rendering avoids the bounding-box clip leak: with two
+        // disjoint dirty rects, the bounding box covers the corridor
+        // between them, and any window whose bounds intersect the bbox
+        // (notably the full-screen desktop) would blit across the gap,
+        // overwriting valid pixels of unrelated windows. Iterating each
+        // region with `clip = region ∩ bounds` keeps paint confined to
+        // actually-dirty pixels.
+        let regions: alloc::vec::Vec<Rect> = self.compositor.dirty.dirty_regions().collect();
         if let Some(screen) = self.get_active_screen() {
             if let Some(root_id) = screen.root_window {
-                self.render_window_tree(root_id);
+                for region in &regions {
+                    self.render_window_tree_in_region(root_id, *region, 0, 0);
+                }
             }
         }
 
@@ -742,22 +766,56 @@ impl WindowManager {
     /// bounds; iterating the flat registry would mark dirty using each
     /// window's *local* bounds, which silently aliases unrelated screen
     /// regions for any window whose parent is at a non-zero offset.
+    /// Call `prepare_for_render` on every window in the registry. Runs
+    /// before cascade + dirty marking so windows that drain external
+    /// buffers (terminal output, console output) update their internal
+    /// dirty state in time for `dirty_rect_hint` and the cascade walk
+    /// to read it.
+    fn prepare_windows_for_render(&mut self) {
+        let ids: Vec<WindowId> = self.window_registry.keys().copied().collect();
+        for id in ids {
+            // Pull the window out so its `prepare_for_render` can route
+            // through `with_active_manager` if it ever needs to (matches
+            // the borrowing pattern in `render_window_tree_in_region`).
+            if let Some(mut window) = self.window_registry.remove(&id) {
+                let self_ptr = self as *mut WindowManager;
+                let prev = ACTIVE_MANAGER.swap(self_ptr, Ordering::SeqCst);
+                window.prepare_for_render();
+                ACTIVE_MANAGER.store(prev, Ordering::SeqCst);
+                self.window_registry.insert(id, window);
+            }
+        }
+    }
+
     fn mark_dirty_for_invalidated_windows(&mut self) {
         let order = self.collect_render_order();
         for (window_id, abs_bounds) in &order {
-            let needs_repaint = self
+            let (needs_repaint, hint) = self
                 .window_registry
                 .get(window_id)
-                .map(|w| w.needs_repaint())
-                .unwrap_or(false);
-            if needs_repaint {
-                self.compositor.dirty.mark_dirty(*abs_bounds);
-                crate::debug_trace!(
-                    "Window {:?} needs repaint, marking dirty: {:?}",
-                    window_id,
-                    abs_bounds
-                );
+                .map(|w| (w.needs_repaint(), w.dirty_rect_hint()))
+                .unwrap_or((false, None));
+            if !needs_repaint {
+                continue;
             }
+            // Translate the window-local hint to absolute coordinates
+            // by adding the window's absolute origin. Falling back to
+            // the full bounds is always correct (just less narrow).
+            let dirty_rect = match hint {
+                Some(local) => Rect::new(
+                    abs_bounds.x + local.x,
+                    abs_bounds.y + local.y,
+                    local.width,
+                    local.height,
+                ),
+                None => *abs_bounds,
+            };
+            self.compositor.dirty.mark_dirty(dirty_rect);
+            crate::debug_trace!(
+                "Window {:?} needs repaint, marking dirty: {:?}",
+                window_id,
+                dirty_rect
+            );
         }
     }
 
@@ -852,117 +910,103 @@ impl WindowManager {
         self.compositor.dirty.mark_full_repaint();
     }
 
-    /// Recursively render a window and its children
-    fn render_window_tree(&mut self, window_id: WindowId) {
-        self.render_window_tree_with_offset(window_id, 0, 0);
-    }
-    
-    /// Recursively render a window and its children with parent offset.
+    /// Render the entire window tree against a single clip region.
     ///
-    /// Decides per-window whether to paint based on the dirty union (computed
-    /// from the compositor's tracked rects). A window paints when it is
-    /// `needs_repaint()` OR its absolute bounds intersect the dirty union; the
-    /// active clip is set to the intersection of bounds with the dirty union
-    /// so paint() only writes the freshly-dirty subset of the window. Windows
-    /// that meet neither criterion are skipped entirely — that is the
-    /// dividend dirty tracking has been waiting on.
+    /// Each window paints when its absolute bounds intersect `region`, with
+    /// `clip = region ∩ bounds`. The compositor calls this once per dirty
+    /// region (see `render`), so a window whose bounds intersect multiple
+    /// disjoint regions paints once per region — each pass writes only the
+    /// pixels actually dirtied in that region, never the corridor between.
     ///
-    /// Children are *not* force-invalidated when their parent paints. Each
-    /// window's clip is `bounds ∩ dirty_union`, so the parent's paint never
-    /// touches pixels outside the dirty union. Any child whose own bounds
-    /// intersect the dirty union picks up `should_paint = true` via
-    /// `intersects_dirty` and repaints itself; a child outside the dirty
-    /// union has no pixels overdrawn and can stay clean. (Forcing children
-    /// to invalidate here was a regression — TextWindow's incremental-cells
-    /// path requires `needs_repaint == false` to skip the full-grid redraw.)
-    fn render_window_tree_with_offset(&mut self, window_id: WindowId, parent_x: i32, parent_y: i32) {
-        crate::debug_trace!("render_window_tree: {:?}, offset=({}, {})", window_id, parent_x, parent_y);
+    /// `paint()` impls must follow the contract on `Window::paint` and
+    /// produce correct pixels for the clip on every call regardless of
+    /// internal `needs_repaint` state. (See the trait doc; Phase A removed
+    /// the early-return-on-`!needs_repaint` from every paint impl.)
+    ///
+    /// `wants_backing_store` windows skip per-region rasterization: the
+    /// rasterization gate (`needs_repaint || backing_store.is_none()`)
+    /// runs on the first region pass and the backing store is reused for
+    /// subsequent passes — `paint_into_backing_store` clears
+    /// `needs_repaint`, so the gate naturally short-circuits.
+    fn render_window_tree_in_region(
+        &mut self,
+        window_id: WindowId,
+        region: Rect,
+        parent_x: i32,
+        parent_y: i32,
+    ) {
+        crate::debug_trace!(
+            "render_window_tree_in_region: {:?}, region={:?}, offset=({}, {})",
+            window_id, region, parent_x, parent_y
+        );
 
-        // Read once per recursive frame; the dirty manager isn't mutated
-        // during the walk so this is safe and cheap.
-        let dirty_bbox = self.compositor.dirty.bounding_box();
+        let Some(mut window) = self.window_registry.remove(&window_id) else { return };
 
-        // We need to temporarily take the window out to avoid borrowing issues
-        if let Some(mut window) = self.window_registry.remove(&window_id) {
-            // Get window properties before painting
-            let mut bounds = window.bounds();
-            let visible = window.visible();
-            let children = window.children().to_vec();
+        let mut bounds = window.bounds();
+        let visible = window.visible();
+        let children = window.children().to_vec();
 
-            // Adjust bounds by parent offset
-            bounds.x += parent_x;
-            bounds.y += parent_y;
+        bounds.x += parent_x;
+        bounds.y += parent_y;
 
-            crate::debug_trace!("Window {:?}: absolute_bounds={:?}, visible={}", window_id, bounds, visible);
+        if !visible {
+            self.window_registry.insert(window_id, window);
+            return;
+        }
 
-            if visible {
-                let intersects_dirty = dirty_bbox.map_or(false, |b| bounds.intersects(&b));
-                let should_paint = window.needs_repaint() || intersects_dirty;
+        let clip = bounds.intersection(&region);
 
-                if should_paint {
-                    let original_bounds = window.bounds();
-                    window.set_bounds_no_invalidate(bounds);
+        if let Some(clip) = clip {
+            let original_bounds = window.bounds();
+            window.set_bounds_no_invalidate(bounds);
 
-                    // Clip to (bounds ∩ dirty union) so paint() / blit
-                    // targets only the freshly-dirty pixels. With no dirty
-                    // bbox (full-repaint path) fall back to the window's
-                    // own bounds.
-                    let clip = match dirty_bbox {
-                        Some(db) => bounds.intersection(&db).unwrap_or(bounds),
-                        None => bounds,
-                    };
-                    self.graphics_device.set_clip_rect(Some(clip));
+            self.graphics_device.set_clip_rect(Some(clip));
 
-                    if window.wants_backing_store() {
-                        // Opt-in path: rasterize into the cached buffer
-                        // only when content actually changed; otherwise
-                        // (cursor-only ticks, drag of an unrelated frame
-                        // over us) just blit the existing pixels. This is
-                        // where the desktop wallpaper stops paying
-                        // re-rasterization cost on every render pass.
-                        if window.needs_repaint() || window.backing_store().is_none() {
-                            crate::debug_trace!(
-                                "Rasterizing backing store for {:?}", window_id
-                            );
-                            window.paint_into_backing_store(&*self.graphics_device);
-                        }
-                        if let Some(buf) = window.backing_store() {
-                            self.graphics_device.blit_buffer(bounds.x, bounds.y, buf);
-                        } else {
-                            // Pathological — paint_into_backing_store
-                            // didn't produce a buffer. Fall back to direct
-                            // paint() so the window doesn't disappear.
-                            crate::debug_warn!(
-                                "Window {:?} wants_backing_store but produced no \
-                                 buffer; falling back to direct paint",
-                                window_id
-                            );
-                            window.paint(&mut *self.graphics_device);
-                        }
-                    } else {
-                        crate::debug_trace!("Calling paint on window {:?}", window_id);
-                        window.paint(&mut *self.graphics_device);
-                    }
-
-                    window.set_bounds_no_invalidate(original_bounds);
-                    self.graphics_device.set_clip_rect(None);
+            if window.wants_backing_store() {
+                if window.needs_repaint() || window.backing_store().is_none() {
+                    crate::debug_trace!("Rasterizing backing store for {:?}", window_id);
+                    window.paint_into_backing_store(&*self.graphics_device);
+                }
+                if let Some(buf) = window.backing_store() {
+                    self.graphics_device.blit_buffer(bounds.x, bounds.y, buf);
                 } else {
-                    crate::debug_trace!(
-                        "Skipping paint for {:?}: clean and outside dirty union",
+                    crate::debug_warn!(
+                        "Window {:?} wants_backing_store but produced no buffer; \
+                         falling back to direct paint",
                         window_id
                     );
-                }
-
-                // Put the window back before recursing into children.
-                self.window_registry.insert(window_id, window);
-
-                for child_id in children {
-                    self.render_window_tree_with_offset(child_id, bounds.x, bounds.y);
+                    window.paint(&mut *self.graphics_device);
                 }
             } else {
-                // Put the window back even if not visible
-                self.window_registry.insert(window_id, window);
+                window.paint(&mut *self.graphics_device);
             }
+
+            window.set_bounds_no_invalidate(original_bounds);
+            self.graphics_device.set_clip_rect(None);
+        }
+        // If the window doesn't intersect `region` we still recurse so a
+        // child whose bounds extend outside the parent's bounds (rare but
+        // possible — e.g. tooltips) gets a chance to be visited. This
+        // mirrors the prior tree walk's recursion-unconditional shape.
+
+        self.window_registry.insert(window_id, window);
+
+        for child_id in children {
+            self.render_window_tree_in_region(child_id, region, bounds.x, bounds.y);
+        }
+    }
+
+    /// Test-only: render the active screen's tree once per current dirty
+    /// region — mirrors what `render()` does after the per-region rewrite,
+    /// minus the cursor and dirty-marking phases. When no rects are dirty
+    /// (e.g. the test set up a clean baseline and didn't mark anything),
+    /// nothing paints — the same way a no-op frame skips rendering in
+    /// production.
+    #[cfg(feature = "test")]
+    fn render_window_tree(&mut self, window_id: WindowId) {
+        let regions: alloc::vec::Vec<Rect> = self.compositor.dirty.dirty_regions().collect();
+        for region in &regions {
+            self.render_window_tree_in_region(window_id, *region, 0, 0);
         }
     }
 

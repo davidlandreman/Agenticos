@@ -403,9 +403,6 @@ impl Window for IconView {
         if !self.base.visible() {
             return;
         }
-        if !self.base.needs_repaint() {
-            return;
-        }
 
         let bounds = self.base.bounds();
         let tpr = self.tiles_per_row();

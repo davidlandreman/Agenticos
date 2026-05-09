@@ -218,16 +218,33 @@ impl Window for TerminalWindow {
         self.text_window.set_bounds_no_invalidate(bounds);
     }
 
-    fn paint(&mut self, device: &mut dyn GraphicsDevice) {
-        crate::debug_trace!("TerminalWindow::paint called");
+    /// Forward TextWindow's narrow per-cell hint so the compositor's
+    /// dirty-rect tracker only marks the changed cells (plus the cursor
+    /// cell), not the entire terminal-content bounds. Without this, the
+    /// desktop's per-region wallpaper blit covers the whole TextWindow
+    /// area and TextWindow's incremental paint can't restore it — typed
+    /// characters would appear alone on wallpaper.
+    fn dirty_rect_hint(&self) -> Option<Rect> {
+        self.text_window.dirty_rect_hint()
+    }
 
-        // Process any pending per-terminal output first
+    /// Drain pending output buffers BEFORE the compositor consults dirty
+    /// state. If we deferred this work to `paint()` (as the pre-Phase-B
+    /// code did), `mark_dirty_for_invalidated_windows` would call
+    /// `dirty_rect_hint` against an empty `dirty_cells`, mark the full
+    /// terminal bounds dirty, and the desktop's per-region wallpaper
+    /// blit would overwrite the rest of the terminal — leaving older
+    /// output as wallpaper after the incremental paint redrew only the
+    /// freshly-arrived cells.
+    fn prepare_for_render(&mut self) {
         self.process_terminal_output();
-
-        // Process any pending console output (for backwards compatibility)
         if self.text_window.needs_repaint() {
             self.text_window.process_console_output();
         }
+    }
+
+    fn paint(&mut self, device: &mut dyn GraphicsDevice) {
+        crate::debug_trace!("TerminalWindow::paint called");
 
         // Paint the text window
         self.text_window.paint(device);

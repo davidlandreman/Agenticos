@@ -284,9 +284,6 @@ impl Window for List {
         if !self.base.visible() {
             return;
         }
-        if !self.base.needs_repaint() {
-            return;
-        }
 
         let bounds = self.base.bounds();
         let x = bounds.x;

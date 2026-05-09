@@ -340,9 +340,6 @@ impl Window for ScrollView {
         if !self.visible() {
             return;
         }
-        if !self.base.needs_repaint() {
-            return;
-        }
 
         let bounds = self.base.bounds();
         let (viewport_w, viewport_h) = self.viewport_size();

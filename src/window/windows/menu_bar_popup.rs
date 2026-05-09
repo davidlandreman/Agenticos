@@ -101,9 +101,6 @@ impl Window for MenuBarPopup {
         if !self.visible() {
             return;
         }
-        if !self.base.needs_repaint() {
-            return;
-        }
 
         let bounds = self.bounds();
         let font = get_default_font();

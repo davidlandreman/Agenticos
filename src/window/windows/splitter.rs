@@ -341,9 +341,6 @@ impl Window for Splitter {
         if !self.base.visible() {
             return;
         }
-        if !self.base.needs_repaint() {
-            return;
-        }
 
         // Paint only the divider strip — the two panes draw themselves.
         let strip = self.divider_strip_bounds();

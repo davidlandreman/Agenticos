@@ -109,7 +109,12 @@ impl TextWindow {
             char_width,
             char_height,
             dirty_cells: Vec::new(),
-            incremental_updates: true,
+            // Start in full-repaint mode so the first paint fills the
+            // dark-grey terminal background across the whole bounds, not
+            // just the cells of any startup text the caller writes
+            // before the first frame. Once the full repaint runs once,
+            // it flips this to true and incremental updates take over.
+            incremental_updates: false,
             suppress_invalidation: false,
         }
     }
@@ -348,63 +353,116 @@ impl Window for TextWindow {
         crate::debug_trace!("TextWindow paint: incremental_updates={}, dirty_cells={}, needs_repaint={}",
             self.incremental_updates, self.dirty_cells.len(), self.base.needs_repaint());
 
-        // Determine paint mode
-        // IMPORTANT: If needs_repaint() is true, we MUST do a full repaint
-        // (e.g., after screen was cleared). Only do incremental if we just
-        // have dirty cells but no full repaint is needed.
-        if self.incremental_updates && !self.base.needs_repaint() {
-            if self.dirty_cells.is_empty() {
-                // Nothing to paint - skip entirely
-                crate::debug_trace!("TextWindow: No dirty cells and no repaint needed, skipping");
-                return;
-            }
+        // Choose paint mode. The Window::paint contract requires us to
+        // produce correct pixels for everything in the device's clip.
+        //
+        // Incremental is only safe when the compositor's clip equals
+        // (or is a subset of) our own bounds — i.e. the only reason
+        // we're being painted is because *we* invalidated. We use
+        // `needs_repaint` as a proxy: if it's set, the dirty rect
+        // includes our bounds (mark_dirty_for_invalidated_windows added
+        // it), and the per-region compositor pass for that rect produces
+        // a clip ⊇ all our dirty_cells. If `needs_repaint` is false, the
+        // compositor is calling us because some *other* dirty rect
+        // intersects our bounds (e.g. a drag passed over us); the clip
+        // there can be narrower than our bounds and contain pixels that
+        // were just overwritten by the desktop, so only a full repaint
+        // produces correct output.
+        let can_incremental = self.incremental_updates
+            && self.base.needs_repaint()
+            && !self.dirty_cells.is_empty();
 
-            // Incremental update - only when no full repaint is needed
+        if can_incremental {
             crate::debug_info!("TextWindow: Incremental update for {} dirty cells", self.dirty_cells.len());
 
-            // Only update the dirty cells
-            for &(col, row) in &self.dirty_cells {
-                let x = bounds.x + (col * self.char_width) as i32;
-                let y = bounds.y + (row * self.char_height) as i32;
-                let cell = &self.buffer[row][col];
-
-                // Clear the cell area first
-                device.fill_rect(
-                    x,
-                    y,
-                    self.char_width as u32,
-                    self.char_height as u32,
-                    cell.bg_color,
-                );
-
-                // Draw character if not space
-                if cell.ch != ' ' {
-                    device.draw_text(x, y, &cell.ch.to_string(), font.as_font(), cell.fg_color);
-                }
+            // Compute the bounding cell range covered by the changes
+            // (and the cursor cell when focused). This is the same range
+            // `dirty_rect_hint` published to the compositor; the desktop
+            // has already blitted wallpaper over it during this frame's
+            // per-region pass, so EVERY cell inside the range — not just
+            // the ones in `dirty_cells` — needs to be redrawn or the
+            // wallpaper will bleed through any unchanged-but-in-rect
+            // cells (e.g. the empty area to the right of a short prompt
+            // when the previous line had a longer message).
+            let (mut min_col, mut min_row, mut max_col_excl, mut max_row_excl) =
+                (usize::MAX, usize::MAX, 0usize, 0usize);
+            for &(cx, cy) in &self.dirty_cells {
+                min_col = min_col.min(cx);
+                min_row = min_row.min(cy);
+                max_col_excl = max_col_excl.max(cx + 1);
+                max_row_excl = max_row_excl.max(cy + 1);
             }
-
-            // Clear the dirty cells list
-            self.dirty_cells.clear();
-
-            // Draw cursor if focused (always redraw cursor)
             if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
-                let cursor_x = bounds.x + (self.cursor_x * self.char_width) as i32;
-                let cursor_y = bounds.y + (self.cursor_y * self.char_height) as i32;
-
-                // Draw cursor as a filled rectangle
-                device.fill_rect(
-                    cursor_x,
-                    cursor_y + self.char_height as i32 - 2,
-                    self.char_width as u32,
-                    2,
-                    Color::WHITE,
-                );
+                min_col = min_col.min(self.cursor_x);
+                min_row = min_row.min(self.cursor_y);
+                max_col_excl = max_col_excl.max(self.cursor_x + 1);
+                max_row_excl = max_row_excl.max(self.cursor_y + 1);
             }
 
-            return;
+            // Defensive — `can_incremental` already guarantees a non-empty
+            // dirty_cells, so the range is non-empty too. Bail to the full
+            // path on any pathological input rather than divide-by-zero.
+            if max_col_excl <= min_col || max_row_excl <= min_row {
+                self.dirty_cells.clear();
+            } else {
+                // Repaint the bounding rect background first so any
+                // unchanged-cells whose pixels were just clobbered by
+                // wallpaper get the dark-grey terminal background back.
+                let fill_x = bounds.x + (min_col * self.char_width) as i32;
+                let fill_y = bounds.y + (min_row * self.char_height) as i32;
+                let fill_w = ((max_col_excl - min_col) * self.char_width) as u32;
+                let fill_h = ((max_row_excl - min_row) * self.char_height) as u32;
+                device.fill_rect(fill_x, fill_y, fill_w, fill_h, Color::new(32, 32, 32));
+
+                for row in min_row..max_row_excl {
+                    for col in min_col..max_col_excl {
+                        let x = bounds.x + (col * self.char_width) as i32;
+                        let y = bounds.y + (row * self.char_height) as i32;
+                        let cell = &self.buffer[row][col];
+
+                        // Cells with bg == BLACK use the default
+                        // terminal grey from the bounding-rect fill
+                        // above; only paint a per-cell bg when the
+                        // cell explicitly overrides it.
+                        if cell.bg_color != Color::BLACK {
+                            device.fill_rect(
+                                x,
+                                y,
+                                self.char_width as u32,
+                                self.char_height as u32,
+                                cell.bg_color,
+                            );
+                        }
+
+                        if cell.ch != ' ' {
+                            device.draw_text(x, y, &cell.ch.to_string(), font.as_font(), cell.fg_color);
+                        }
+                    }
+                }
+
+                self.dirty_cells.clear();
+
+                if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
+                    let cursor_x = bounds.x + (self.cursor_x * self.char_width) as i32;
+                    let cursor_y = bounds.y + (self.cursor_y * self.char_height) as i32;
+
+                    device.fill_rect(
+                        cursor_x,
+                        cursor_y + self.char_height as i32 - 2,
+                        self.char_width as u32,
+                        2,
+                        Color::WHITE,
+                    );
+                }
+
+                self.base.clear_needs_repaint();
+                return;
+            }
         }
 
-        // Full repaint (either not incremental, or needs_repaint was true)
+        // Full repaint — either we have no internal dirty state to
+        // optimize, or we were called for an external reason and must
+        // redraw everything in clip.
         crate::debug_info!("TextWindow: Full repaint");
 
         // Clear dirty cells since we're doing a full repaint
@@ -473,6 +531,52 @@ impl Window for TextWindow {
 
         self.base.clear_needs_repaint();
         crate::debug_trace!("TextWindow paint complete, needs_repaint cleared");
+    }
+
+    /// Narrow dirty hint when only a few cells changed (typing): the
+    /// bounding box of `dirty_cells`, expanded to cover the cursor cell
+    /// when focused (so the cursor's old / new positions both fall inside
+    /// the dirty region the compositor publishes — otherwise the desktop's
+    /// per-region wallpaper blit covers the whole TextWindow bounds and
+    /// our incremental paint can't restore the surrounding cells).
+    ///
+    /// Returns `None` when the incremental path is disabled or there are
+    /// no per-cell dirty marks, falling back to the full-bounds default.
+    fn dirty_rect_hint(&self) -> Option<Rect> {
+        if !self.incremental_updates || self.dirty_cells.is_empty() {
+            return None;
+        }
+
+        // Bounding cell range of dirty_cells, plus the cursor cell when
+        // focused. (cursor_x, cursor_y) may equal an existing dirty cell
+        // — that just collapses into the same range.
+        let mut min_col = usize::MAX;
+        let mut min_row = usize::MAX;
+        let mut max_col_excl = 0usize;
+        let mut max_row_excl = 0usize;
+        for &(cx, cy) in &self.dirty_cells {
+            min_col = min_col.min(cx);
+            min_row = min_row.min(cy);
+            max_col_excl = max_col_excl.max(cx + 1);
+            max_row_excl = max_row_excl.max(cy + 1);
+        }
+        if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
+            min_col = min_col.min(self.cursor_x);
+            min_row = min_row.min(self.cursor_y);
+            max_col_excl = max_col_excl.max(self.cursor_x + 1);
+            max_row_excl = max_row_excl.max(self.cursor_y + 1);
+        }
+
+        if max_col_excl <= min_col || max_row_excl <= min_row {
+            return None;
+        }
+
+        Some(Rect::new(
+            (min_col * self.char_width) as i32,
+            (min_row * self.char_height) as i32,
+            ((max_col_excl - min_col) * self.char_width) as u32,
+            ((max_row_excl - min_row) * self.char_height) as u32,
+        ))
     }
 
     fn handle_event(&mut self, event: Event) -> EventResult {
