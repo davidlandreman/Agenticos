@@ -13,7 +13,8 @@ use crate::window::windows::dialog::{
     set_dialog_state, DialogResult,
 };
 use crate::window::windows::{
-    Button, Column, ContainerWindow, FrameWindow, Label, MultiColumnList, TextInput,
+    Button, Column, ContainerWindow, FrameWindow, HBox, Label, MultiColumnList, Padding, SizeHint,
+    Spacer, TextInput, VBox,
 };
 use crate::window::{with_window_manager, Rect, Window, WindowId};
 
@@ -57,95 +58,92 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
 
         let content_area = frame.content_area();
 
-        // Create container for content
+        // Create container for content (sits inside the frame at content_area).
         let container_id = wm.create_window(Some(frame_id));
-        let mut container = ContainerWindow::new_with_id(
-            container_id,
-            Rect::new(
-                content_area.x,
-                content_area.y,
-                content_area.width,
-                content_area.height,
-            ),
-        );
+        let mut container = ContainerWindow::new_with_id(container_id, content_area);
         container.set_parent(Some(frame_id));
         container.set_background_color(Color::new(240, 240, 240));
 
-        // Path label
-        let path_label_id = wm.create_window(Some(container_id));
-        let path_label_bounds =
-            Rect::new(content_area.x + 10, content_area.y + 10, content_area.width - 20, 20);
-        let mut path_label = Label::new_with_id(path_label_id, path_label_bounds, "Save in: /");
-        path_label.set_parent(Some(container_id));
-
-        // File list
-        let list_id = wm.create_window(Some(container_id));
-        let list_bounds = Rect::new(
-            content_area.x + 10,
-            content_area.y + 40,
-            content_area.width - 20,
-            content_area.height - 150,
+        // Padding wraps the root VBox; insets give breathing room.
+        let padding_id = wm.create_window(Some(container_id));
+        let mut padding = Padding::new_with_id(
+            padding_id,
+            Rect::new(0, 0, content_area.width, content_area.height),
+            10,
+            10,
+            10,
+            10,
         );
+        padding.set_parent(Some(container_id));
+
+        // Root VBox stacks: path label, file list, filename row, button row.
+        let vbox_id = wm.create_window(Some(padding_id));
+        let mut vbox = VBox::new_with_id(vbox_id, Rect::new(0, 0, 0, 0));
+        vbox.set_parent(Some(padding_id));
+
+        // Path label
+        let path_label_id = wm.create_window(Some(vbox_id));
+        let mut path_label =
+            Label::new_with_id(path_label_id, Rect::new(0, 0, 0, 0), "Save in: /");
+        path_label.set_parent(Some(vbox_id));
+
+        let spacer_after_path_id = wm.create_window(Some(vbox_id));
+        let mut spacer_after_path =
+            Spacer::new_with_id(spacer_after_path_id, Rect::new(0, 0, 0, 0));
+        spacer_after_path.set_parent(Some(vbox_id));
+
+        // File list (fills remaining vertical space).
+        let list_id = wm.create_window(Some(vbox_id));
         let columns = alloc::vec![
             Column::new("Name", 250),
             Column::new("Size", 80),
             Column::new("Type", 100),
         ];
-        let mut file_list = MultiColumnList::new_with_id(list_id, list_bounds, columns);
-        file_list.set_parent(Some(container_id));
+        let mut file_list = MultiColumnList::new_with_id(list_id, Rect::new(0, 0, 0, 0), columns);
+        file_list.set_parent(Some(vbox_id));
 
         // Populate list with files
         for (name, size, file_type) in &files {
             file_list.add_row(alloc::vec![name.clone(), size.clone(), file_type.clone()]);
         }
 
-        // Filename label
-        let fn_label_id = wm.create_window(Some(container_id));
-        let fn_label_bounds = Rect::new(
-            content_area.x + 10,
-            content_area.y + content_area.height as i32 - 90,
-            80,
-            20,
-        );
-        let mut fn_label = Label::new_with_id(fn_label_id, fn_label_bounds, "File name:");
-        fn_label.set_parent(Some(container_id));
+        let spacer_after_list_id = wm.create_window(Some(vbox_id));
+        let mut spacer_after_list =
+            Spacer::new_with_id(spacer_after_list_id, Rect::new(0, 0, 0, 0));
+        spacer_after_list.set_parent(Some(vbox_id));
 
-        // Filename input
-        let filename_input_id = wm.create_window(Some(container_id));
-        let fn_input_bounds = Rect::new(
-            content_area.x + 90,
-            content_area.y + content_area.height as i32 - 92,
-            content_area.width - 110,
-            24,
-        );
-        let mut filename_input = TextInput::new_with_id(filename_input_id, fn_input_bounds);
+        // Filename row HBox: [label "File name:" Fixed(80)] [input Fill(1)]
+        let fn_row_id = wm.create_window(Some(vbox_id));
+        let mut fn_row = HBox::new_with_id(fn_row_id, Rect::new(0, 0, 0, 0));
+        fn_row.set_parent(Some(vbox_id));
+
+        let fn_label_id = wm.create_window(Some(fn_row_id));
+        let mut fn_label = Label::new_with_id(fn_label_id, Rect::new(0, 0, 0, 0), "File name:");
+        fn_label.set_parent(Some(fn_row_id));
+
+        let filename_input_id = wm.create_window(Some(fn_row_id));
+        let mut filename_input =
+            TextInput::new_with_id(filename_input_id, Rect::new(0, 0, 0, 0));
         filename_input.set_text(default_name);
-        filename_input.set_parent(Some(container_id));
+        filename_input.set_parent(Some(fn_row_id));
 
-        // Cancel button
-        let cancel_button_id = wm.create_window(Some(container_id));
-        let cancel_bounds = Rect::new(
-            content_area.x + content_area.width as i32 - 100,
-            content_area.y + content_area.height as i32 - 45,
-            80,
-            30,
-        );
-        let mut cancel_button = Button::new_with_id(cancel_button_id, cancel_bounds, "Cancel");
-        cancel_button.set_parent(Some(container_id));
-        cancel_button.on_click(|| {
-            close_dialog_with_result(DialogResult::Cancel);
-        });
+        let spacer_after_fn_id = wm.create_window(Some(vbox_id));
+        let mut spacer_after_fn = Spacer::new_with_id(spacer_after_fn_id, Rect::new(0, 0, 0, 0));
+        spacer_after_fn.set_parent(Some(vbox_id));
+
+        // Button row HBox: [Spacer Fill(1)] [Save Fixed(80)] [Spacer Fixed(8)] [Cancel Fixed(80)]
+        let button_row_id = wm.create_window(Some(vbox_id));
+        let mut button_row = HBox::new_with_id(button_row_id, Rect::new(0, 0, 0, 0));
+        button_row.set_parent(Some(vbox_id));
+
+        let left_spacer_id = wm.create_window(Some(button_row_id));
+        let mut left_spacer = Spacer::new_with_id(left_spacer_id, Rect::new(0, 0, 0, 0));
+        left_spacer.set_parent(Some(button_row_id));
 
         // Save button
-        let save_button_id = wm.create_window(Some(container_id));
-        let save_bounds = Rect::new(
-            content_area.x + content_area.width as i32 - 190,
-            content_area.y + content_area.height as i32 - 45,
-            80,
-            30,
-        );
-        let mut save_button = Button::new_with_id(save_button_id, save_bounds, "Save");
-        save_button.set_parent(Some(container_id));
+        let save_button_id = wm.create_window(Some(button_row_id));
+        let mut save_button = Button::new_with_id(save_button_id, Rect::new(0, 0, 0, 0), "Save");
+        save_button.set_parent(Some(button_row_id));
         save_button.set_bg_color(Color::new(0, 120, 215));
         save_button.set_text_color(Color::WHITE);
         let _input_id_for_save = filename_input_id;
@@ -155,17 +153,63 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
             close_dialog_with_result(DialogResult::Custom(1)); // 1 = save attempted
         });
 
+        let mid_spacer_id = wm.create_window(Some(button_row_id));
+        let mut mid_spacer = Spacer::new_with_id(mid_spacer_id, Rect::new(0, 0, 0, 0));
+        mid_spacer.set_parent(Some(button_row_id));
+
+        // Cancel button
+        let cancel_button_id = wm.create_window(Some(button_row_id));
+        let mut cancel_button =
+            Button::new_with_id(cancel_button_id, Rect::new(0, 0, 0, 0), "Cancel");
+        cancel_button.set_parent(Some(button_row_id));
+        cancel_button.on_click(|| {
+            close_dialog_with_result(DialogResult::Cancel);
+        });
+
+        // Wire up layout-container children with sizing hints. The
+        // initial relayouts are no-ops (children aren't in the registry
+        // yet); the final cascade fires below via `with_window_mut`.
+        button_row.add_child(left_spacer_id, SizeHint::Fill(1));
+        button_row.add_child(save_button_id, SizeHint::Fixed(80));
+        button_row.add_child(mid_spacer_id, SizeHint::Fixed(8));
+        button_row.add_child(cancel_button_id, SizeHint::Fixed(80));
+
+        fn_row.add_child(fn_label_id, SizeHint::Fixed(80));
+        fn_row.add_child(filename_input_id, SizeHint::Fill(1));
+
+        vbox.add_child(path_label_id, SizeHint::Fixed(20));
+        vbox.add_child(spacer_after_path_id, SizeHint::Fixed(10));
+        vbox.add_child(list_id, SizeHint::Fill(1));
+        vbox.add_child(spacer_after_list_id, SizeHint::Fixed(10));
+        vbox.add_child(fn_row_id, SizeHint::Fixed(24));
+        vbox.add_child(spacer_after_fn_id, SizeHint::Fixed(10));
+        vbox.add_child(button_row_id, SizeHint::Fixed(30));
+
+        padding.set_child(vbox_id);
+
         // Register windows (set_window_impl automatically adds to z-order)
         wm.set_window_impl(frame_id, Box::new(frame));
         wm.set_window_impl(container_id, Box::new(container));
         wm.set_window_impl(path_label_id, Box::new(path_label));
+        wm.set_window_impl(spacer_after_path_id, Box::new(spacer_after_path));
         wm.set_window_impl(list_id, Box::new(file_list));
+        wm.set_window_impl(spacer_after_list_id, Box::new(spacer_after_list));
         wm.set_window_impl(fn_label_id, Box::new(fn_label));
         wm.set_window_impl(filename_input_id, Box::new(filename_input));
-        wm.set_window_impl(cancel_button_id, Box::new(cancel_button));
+        wm.set_window_impl(fn_row_id, Box::new(fn_row));
+        wm.set_window_impl(spacer_after_fn_id, Box::new(spacer_after_fn));
+        wm.set_window_impl(left_spacer_id, Box::new(left_spacer));
         wm.set_window_impl(save_button_id, Box::new(save_button));
+        wm.set_window_impl(mid_spacer_id, Box::new(mid_spacer));
+        wm.set_window_impl(cancel_button_id, Box::new(cancel_button));
+        wm.set_window_impl(button_row_id, Box::new(button_row));
+        wm.set_window_impl(vbox_id, Box::new(vbox));
+        wm.set_window_impl(padding_id, Box::new(padding));
 
-        // Add children
+        // Wire the parent-child registry edges from the desktop down to
+        // the layout root. Layout containers track their own children
+        // via `WindowBase`, so we only need the chain above the layout:
+        //   desktop -> frame -> container -> padding (-> vbox -> ...)
         if let Some(desktop) = wm.window_registry.get_mut(&desktop_id) {
             desktop.add_child(frame_id);
         }
@@ -173,13 +217,14 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
             frame.add_child(container_id);
         }
         if let Some(container) = wm.window_registry.get_mut(&container_id) {
-            container.add_child(path_label_id);
-            container.add_child(list_id);
-            container.add_child(fn_label_id);
-            container.add_child(filename_input_id);
-            container.add_child(cancel_button_id);
-            container.add_child(save_button_id);
+            container.add_child(padding_id);
         }
+
+        // Trigger the layout cascade by setting the Padding's bounds
+        // through the active manager.
+        wm.with_window_mut(padding_id, |w| {
+            w.set_bounds(Rect::new(0, 0, content_area.width, content_area.height));
+        });
 
         // Set as modal dialog
         wm.set_modal_dialog(Some(frame_id));
