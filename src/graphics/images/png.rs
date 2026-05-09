@@ -103,7 +103,7 @@ impl PngImage {
             return Err(PngError::InsufficientData);
         }
         
-        let chunk_length = u32::from_be_bytes([
+        let _chunk_length = u32::from_be_bytes([
             data[offset], data[offset + 1], data[offset + 2], data[offset + 3]
         ]);
         let chunk_type = &data[offset + 4..offset + 8];

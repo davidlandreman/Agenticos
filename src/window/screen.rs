@@ -1,7 +1,6 @@
 //! Screen abstraction for virtual displays
 
-use alloc::boxed::Box;
-use super::{Window, WindowId, ScreenId};
+use super::{WindowId, ScreenId};
 
 /// Mode of operation for a screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

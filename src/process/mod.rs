@@ -16,7 +16,6 @@ pub use scheduler::{SCHEDULER, ProcessInfo};
 
 use alloc::boxed::Box;
 use alloc::string::String;
-use spin::Mutex;
 use crate::window::WindowId;
 
 /// Flag indicating whether we're currently running a spawned process
@@ -416,7 +415,7 @@ pub fn try_run_scheduled_processes() {
 
             // Save kernel context to global for timer handler to use
             // The switch_context_full_restore will save our current state here
-            let kernel_ctx_ptr = unsafe { &mut KERNEL_CONTEXT as *mut CpuContext };
+            let kernel_ctx_ptr = &raw mut KERNEL_CONTEXT;
 
             crate::debug_info!("try_run: About to switch_context_full_restore");
 

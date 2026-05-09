@@ -42,7 +42,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
     let files = get_file_list("/");
 
     // Create dialog structure
-    let (frame_id, filename_input_id) = with_window_manager(|wm| {
+    let (frame_id, _filename_input_id) = with_window_manager(|wm| {
         // Get desktop for parenting
         let desktop_id = wm
             .get_active_screen()
@@ -148,7 +148,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
         save_button.set_parent(Some(container_id));
         save_button.set_bg_color(Color::new(0, 120, 215));
         save_button.set_text_color(Color::WHITE);
-        let input_id_for_save = filename_input_id;
+        let _input_id_for_save = filename_input_id;
         save_button.on_click(move || {
             // For now, just close with cancel since save isn't implemented
             // The actual implementation would get the filename and try to save

@@ -41,7 +41,7 @@ pub trait GraphicsDevice: Send {
     fn draw_text(&mut self, x: usize, y: usize, text: &str, font: &dyn Font, color: Color);
     
     /// Draw an image (for future use)
-    fn draw_image(&mut self, x: usize, y: usize, data: &[u8], width: usize, height: usize) {
+    fn draw_image(&mut self, _x: usize, _y: usize, _data: &[u8], _width: usize, _height: usize) {
         // Default implementation for now
         // TODO: Implement proper image drawing
     }

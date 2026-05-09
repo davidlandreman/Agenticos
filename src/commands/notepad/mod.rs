@@ -13,9 +13,9 @@ use spin::Mutex;
 use crate::fs::File;
 use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
 use crate::window::dialogs::{show_error, show_info, show_save_dialog};
-use crate::window::dialogs::{open_file_dialog, poll_file_dialog, is_file_dialog_open};
+use crate::window::dialogs::{open_file_dialog, poll_file_dialog};
 use crate::window::windows::{
-    ContainerWindow, FrameWindow, MenuBar, MenuItemDef, TextEditor, MENU_BAR_HEIGHT,
+    FrameWindow, MenuBar, MenuItemDef, TextEditor, MENU_BAR_HEIGHT,
 };
 use crate::window::{with_window_manager, Rect, Window, WindowId};
 
@@ -372,7 +372,7 @@ fn handle_new(notepad_id: usize) {
     if let Some(editor_id) = editor_id {
         // Clear editor
         with_window_manager(|wm| {
-            if let Some(window) = wm.window_registry.get_mut(&editor_id) {
+            if let Some(_window) = wm.window_registry.get_mut(&editor_id) {
                 // Downcast to TextEditor - for now just clear via invalidate
                 // In practice, we'd need a better way to access the TextEditor
             }
@@ -516,7 +516,7 @@ fn update_title(notepad_id: usize, filename: &str) {
     };
 
     if let Some(frame_id) = frame_id {
-        let new_title = format!("{} - Notepad", filename);
+        let _new_title = format!("{} - Notepad", filename);
         with_window_manager(|wm| {
             if let Some(window) = wm.window_registry.get_mut(&frame_id) {
                 // FrameWindow has set_title method

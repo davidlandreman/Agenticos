@@ -362,7 +362,7 @@ impl RunnableProcess for CalcProcess {
             Some((frame_id, content_id, display_id, button_ids))
         });
 
-        let (frame_id, content_id, display_id, _button_ids) = match result {
+        let (_frame_id, content_id, display_id, _button_ids) = match result {
             Some(Some(r)) => r,
             _ => {
                 crate::println!("Failed to create calculator window");

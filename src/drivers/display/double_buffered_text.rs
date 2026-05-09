@@ -19,7 +19,7 @@ static mut BACK_BUFFER: [u8; MAX_BUFFER_SIZE] = [0; MAX_BUFFER_SIZE];
 /// This function is unsafe because it returns a mutable reference to a static buffer.
 /// The caller must ensure no other code is accessing this buffer.
 pub unsafe fn get_static_back_buffer() -> &'static mut [u8] {
-    &mut BACK_BUFFER
+    &mut *(&raw mut BACK_BUFFER)
 }
 
 pub struct DoubleBufferedText {

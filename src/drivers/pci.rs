@@ -65,7 +65,7 @@ impl PciDevice {
                 2 => {
                     // 64-bit BAR
                     let high = self.read_config(offset + 4) as u64;
-                    ((high << 32) | (bar_value & 0xFFFFFFF0) as u64)
+                    (high << 32) | (bar_value & 0xFFFFFFF0) as u64
                 }
                 _ => return None,
             };

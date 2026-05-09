@@ -160,7 +160,7 @@ static mut STATIC_MEMORY_REGIONS: Option<&'static MemoryRegions> = None;
 
 pub fn init(memory_regions: &'static MemoryRegions, phys_mem_offset: Option<u64>) {
     unsafe {
-        MEMORY_MANAGER.init(memory_regions, phys_mem_offset);
+        (*&raw mut MEMORY_MANAGER).init(memory_regions, phys_mem_offset);
         STATIC_MEMORY_REGIONS = Some(memory_regions);
     }
 }
@@ -180,9 +180,9 @@ pub fn init_heap(phys_mem_offset: u64) {
         ));
         
         // Store pointer globally for page fault handling
-        if let Some(mapper) = &mut STATIC_MAPPER {
+        if let Some(mapper) = &mut *(&raw mut STATIC_MAPPER) {
             crate::mm::paging::MAPPER = Some(mapper as *mut _);
-            
+
             // Initialize heap
             crate::mm::heap::init_heap(mapper)
                 .expect("Failed to initialize heap");
@@ -192,27 +192,27 @@ pub fn init_heap(phys_mem_offset: u64) {
 
 pub fn print_memory_info() {
     unsafe {
-        MEMORY_MANAGER.print_memory_map();
+        (*&raw const MEMORY_MANAGER).print_memory_map();
     }
 }
 
 pub fn get_memory_stats() -> MemoryStats {
     unsafe {
-        MEMORY_MANAGER.get_stats()
+        (*&raw const MEMORY_MANAGER).get_stats()
     }
 }
 
 /// Get the physical memory offset for virtual address translation
 pub fn get_physical_memory_offset() -> Option<u64> {
     unsafe {
-        MEMORY_MANAGER.get_physical_memory_offset()
+        (*&raw const MEMORY_MANAGER).get_physical_memory_offset()
     }
 }
 
 /// Convert a physical address to a virtual address using the bootloader's mapping
 pub fn phys_to_virt(phys_addr: u64) -> Option<u64> {
     unsafe {
-        MEMORY_MANAGER.phys_to_virt(phys_addr)
+        (*&raw const MEMORY_MANAGER).phys_to_virt(phys_addr)
     }
 }
 

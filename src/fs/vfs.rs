@@ -112,7 +112,7 @@ static mut VFS: VirtualFilesystem = VirtualFilesystem::new();
 
 /// Get the global VFS instance
 pub fn get_vfs() -> &'static mut VirtualFilesystem {
-    unsafe { &mut VFS }
+    unsafe { &mut *(&raw mut VFS) }
 }
 
 /// Auto-mount a block device by detecting its filesystem type
@@ -135,7 +135,7 @@ pub fn auto_mount(device: &'static dyn BlockDevice, mount_path: &'static str) ->
                         MOUNTED_FAT_WRAPPER = Some(wrapper);
                         
                         // Mount using VFS
-                        if let Some(wrapper_ref) = MOUNTED_FAT_WRAPPER.as_ref() {
+                        if let Some(wrapper_ref) = (*&raw const MOUNTED_FAT_WRAPPER).as_ref() {
                                 let vfs = get_vfs();
                                 match vfs.mount(mount_path, wrapper_ref as &dyn Filesystem, device) {
                                     Ok(_) => {
@@ -185,7 +185,7 @@ pub fn vfs_open(path: &str, mode: crate::fs::filesystem::FileMode) -> Result<cra
     }
 }
 
-pub fn vfs_read_dir(path: &str) -> Result<crate::fs::filesystem::DirectoryIterator, FilesystemError> {
+pub fn vfs_read_dir(path: &str) -> Result<crate::fs::filesystem::DirectoryIterator<'_>, FilesystemError> {
     let vfs = get_vfs();
     if let Some((fs, rel_path)) = vfs.find_filesystem(path) {
         fs.read_dir(rel_path)

@@ -8,10 +8,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use super::pcb::{ProcessControlBlock, ProcessState, BlockReason, WakeEvents, SignalFlags};
+use super::pcb::{ProcessControlBlock, ProcessState, BlockReason, WakeEvents};
 use super::process::ProcessId;
 use super::context::CpuContext;
-use super::stack::{allocate_stack, free_stack};
+use super::stack::free_stack;
 
 /// Default time slice in timer ticks
 /// With 100 Hz timer (10ms per tick), 2 ticks = 20ms per time slice

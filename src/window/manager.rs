@@ -9,7 +9,7 @@ use super::cursor::CursorRenderer;
 use super::{
     Window, WindowId, Screen, ScreenId, ScreenMode, GraphicsDevice,
     Event, EventResult, KeyboardEvent, MouseEvent, MouseEventType,
-    Point, Rect, keyboard::{scancode_to_keycode, is_break_code, KeyboardState},
+    Point, Rect, keyboard::{scancode_to_keycode, KeyboardState},
 };
 use super::types::{InteractionState, HitTestResult, ResizeEdge, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT};
 use super::console::take_pending_invalidations;
@@ -115,7 +115,7 @@ impl WindowManager {
     // Window management
     
     /// Create a new window with optional parent
-    pub fn create_window(&mut self, parent: Option<WindowId>) -> WindowId {
+    pub fn create_window(&mut self, _parent: Option<WindowId>) -> WindowId {
         // Generate a new window ID
         let window_id = WindowId::new();
         
@@ -126,7 +126,7 @@ impl WindowManager {
     }
     
     /// Set the implementation for a window
-    pub fn set_window_impl(&mut self, id: WindowId, mut window: Box<dyn Window>) {
+    pub fn set_window_impl(&mut self, id: WindowId, window: Box<dyn Window>) {
         // Check if this window should have a parent based on how it was created
         // For now, we'll rely on the window having its parent set before calling this
         let parent_id = window.parent();
@@ -140,7 +140,7 @@ impl WindowManager {
         }
         
         // If the window has a parent, update the parent's children list
-        if let Some(parent_id) = parent_id {
+        if let Some(_parent_id) = parent_id {
             // We need to add this window to its parent's children
             // However, the current Window trait doesn't have add_child method
             // This is a design limitation we need to work around
@@ -158,12 +158,12 @@ impl WindowManager {
     }
     
     /// Move a window to a new position
-    pub fn move_window(&mut self, id: WindowId, x: i32, y: i32) {
+    pub fn move_window(&mut self, _id: WindowId, _x: i32, _y: i32) {
         // TODO: Implement window movement
     }
-    
+
     /// Resize a window
-    pub fn resize_window(&mut self, id: WindowId, width: u32, height: u32) {
+    pub fn resize_window(&mut self, _id: WindowId, _width: u32, _height: u32) {
         // TODO: Implement window resizing
     }
     
@@ -207,9 +207,7 @@ impl WindowManager {
     }
     
     /// Write text to a specific window (if it's a TextWindow)
-    pub fn write_to_window(&mut self, window_id: WindowId, text: &str) {
-        use crate::window::windows::TextWindow;
-        
+    pub fn write_to_window(&mut self, window_id: WindowId, _text: &str) {
         // We need to temporarily remove the window to get mutable access
         if let Some(window) = self.window_registry.remove(&window_id) {
             // Try to downcast to TextWindow and write

@@ -3,7 +3,6 @@
 //! Supports multiple terminal windows with per-terminal output routing.
 
 use spin::Mutex;
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;

@@ -5,7 +5,7 @@
 //! additional terminals.
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 

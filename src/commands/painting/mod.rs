@@ -119,7 +119,7 @@ impl RunnableProcess for PaintingProcess {
             Some((frame_id, content_id, content_bounds))
         });
 
-        let (frame_id, content_id, content_bounds) = match result {
+        let (_frame_id, content_id, content_bounds) = match result {
             Some(Some(r)) => r,
             _ => {
                 crate::println!("Failed to create painting window");
@@ -131,7 +131,6 @@ impl RunnableProcess for PaintingProcess {
 
         // Animation loop
         let mut running = true;
-        let mut frame_count = 0u64;
 
         while running {
             // Update shape positions
@@ -153,8 +152,7 @@ impl RunnableProcess for PaintingProcess {
             // Draw directly to screen
             window::with_window_manager(|wm| {
                 // Get content window's absolute position
-                if let Some(content) = wm.window_registry.get(&content_id) {
-                    let abs_bounds = content.bounds();
+                if let Some(_content) = wm.window_registry.get(&content_id) {
 
                     // Calculate absolute position by traversing parent chain
                     let (abs_x, abs_y) = get_absolute_position(wm, content_id);
@@ -196,8 +194,6 @@ impl RunnableProcess for PaintingProcess {
             running = window::with_window_manager(|wm| {
                 wm.window_registry.contains_key(&content_id)
             }).unwrap_or(false);
-
-            frame_count += 1;
         }
 
         crate::println!("Painting stopped.");

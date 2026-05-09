@@ -70,8 +70,8 @@ pub struct File {
 impl File {
     /// Open a file at the given path with the specified mode
     pub fn open(path: &str, mode: FileMode) -> FileResult<Arc<File>> {
-        let vfs = get_vfs();
-        
+        let _vfs = get_vfs();
+
         // Use VFS to open the file
         let fs_handle = crate::fs::vfs::vfs_open(path, mode)
             .map_err(|e| FileError::FilesystemError(e))?;
@@ -416,7 +416,7 @@ impl Directory {
         // For root directory of FAT filesystem, we can use direct VFS access
         if path == "/" {
             // Get VFS and try to access the FAT filesystem directly
-            let vfs = crate::fs::vfs::get_vfs();
+            let _vfs = crate::fs::vfs::get_vfs();
             
             // Try to access mounted filesystems - for now we'll check if we can find files
             // by trying some common patterns and using the stat method

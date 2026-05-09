@@ -1,6 +1,5 @@
 //! Event system for the window manager
 
-use alloc::boxed::Box;
 use super::types::{WindowId, Point};
 
 /// Key codes for keyboard events

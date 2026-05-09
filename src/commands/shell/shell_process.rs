@@ -11,7 +11,6 @@ use alloc::collections::BTreeMap;
 use spin::Mutex;
 use crate::window::WindowId;
 use crate::process::ProcessId;
-use crate::{print, println};
 
 /// Shell instance state
 pub struct ShellInstance {
