@@ -335,7 +335,7 @@ impl Window for List {
                         }
                         EventResult::Handled
                     }
-                    MouseEventType::Scroll => {
+                    MouseEventType::Scroll { delta_x: _, delta_y: _ } => {
                         // Handle scroll wheel if implemented
                         EventResult::Ignored
                     }

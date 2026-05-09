@@ -26,6 +26,8 @@ pub mod window_clipping;
 pub mod graphics_device_image;
 #[cfg(feature = "test")]
 pub mod desktop_window;
+#[cfg(feature = "test")]
+pub mod mouse_event_extension_tests;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -48,6 +50,7 @@ pub fn run_tests() {
     let window_clipping_tests = window_clipping::get_tests();
     let graphics_device_image_tests = graphics_device_image::get_tests();
     let desktop_window_tests = desktop_window::get_tests();
+    let mouse_event_extension_tests = mouse_event_extension_tests::get_tests();
 
     let mut total_tests = 0;
 
@@ -151,6 +154,14 @@ pub fn run_tests() {
     debug_info!("\n[DesktopWindow Tests]");
     debug_info!("Running {} tests", desktop_window_tests.len());
     for test in desktop_window_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run MouseEvent extension tests (U16)
+    debug_info!("\n[MouseEvent Extension Tests]");
+    debug_info!("Running {} tests", mouse_event_extension_tests.len());
+    for test in mouse_event_extension_tests {
         test.run();
         total_tests += 1;
     }

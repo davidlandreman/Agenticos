@@ -1,6 +1,6 @@
 //! Event system for the window manager
 
-use super::types::{WindowId, Point};
+use super::types::{WindowId, Point, Rect};
 
 /// Key codes for keyboard events
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +51,10 @@ pub enum Event {
     Close(CloseEvent),
     /// Focus change event
     Focus(FocusEvent),
+    /// Request that an ancestor (typically a `ScrollView`) bring the given
+    /// rectangle into view. The `Rect` is in the emitting child's local
+    /// coordinate space; ancestors translate it as it propagates up.
+    EnsureVisible(Rect),
 }
 
 /// Keyboard event data
@@ -84,6 +88,10 @@ pub struct MouseEvent {
     pub global_position: Point,
     /// Mouse button state
     pub buttons: MouseButtons,
+    /// Keyboard modifier state at the time of the event (Shift / Ctrl / Alt /
+    /// Meta). Fused in by the input pipeline so widgets can react to e.g.
+    /// Shift-click without consulting global keyboard state.
+    pub modifiers: KeyModifiers,
 }
 
 /// Types of mouse events
@@ -92,7 +100,10 @@ pub enum MouseEventType {
     Move,
     ButtonDown,
     ButtonUp,
-    Scroll,
+    /// Scroll wheel event. `delta_x` is horizontal scroll (positive = right),
+    /// `delta_y` is vertical scroll (positive = down). Units match the scroll
+    /// source — for now, "lines" of text per tick.
+    Scroll { delta_x: i32, delta_y: i32 },
 }
 
 /// Mouse button state
