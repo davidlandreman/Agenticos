@@ -118,6 +118,15 @@ pub trait Window: Send {
 
     /// Close popup menu (used by MenuBar)
     fn close_popup_menu(&mut self) {}
+
+    /// Discriminator used by the manager when routing `MouseEventType::Scroll`
+    /// events. Returns `true` for `ScrollView`; default `false` for every
+    /// other window type. The manager-side downcast performed when this
+    /// returns `true` lets new scrollable wrappers be added without
+    /// requiring every widget to opt into a typed accessor.
+    fn is_scroll_view(&self) -> bool {
+        false
+    }
 }
 
 /// Global window manager instance

@@ -18,6 +18,7 @@ pub mod menu_bar;
 pub mod menu_bar_popup;
 pub mod dialog;
 pub mod layout;
+pub mod scroll_view;
 
 pub use container::ContainerWindow;
 pub use terminal::TerminalWindow;
@@ -33,3 +34,4 @@ pub use text_editor::TextEditor;
 pub use menu_bar::{MenuBar, MenuItemDef, PendingPopup, MENU_BAR_HEIGHT};
 pub use menu_bar_popup::MenuBarPopup;
 pub use layout::{HBox, Padding, SizeHint, Spacer, VBox};
+pub use scroll_view::ScrollView;
