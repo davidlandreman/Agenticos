@@ -105,10 +105,17 @@ AgenticOS is a **modular monolithic kernel** - all code runs in kernel space (ri
 - **Lock-free input**: SPSC queue prevents interrupt handler blocking
 - **VirtIO first**: Uses VirtIO tablet for seamless QEMU mouse, falls back to PS/2
 
+## Parallel Development with Conductor
+
+This repo is wired up for [conductor.build](https://www.conductor.build) so you can run multiple branches in parallel without build artifacts or QEMU instances colliding. The compound-engineering plugin (`/ce-plan`, `/ce-work`, `/ce-code-review`, …) is enabled in every workspace by default.
+
+See [`docs/conductor-workflow.md`](docs/conductor-workflow.md) for setup, isolation guarantees, and how to extend the configuration.
+
 ## Documentation
 
 - [`CLAUDE.md`](CLAUDE.md) - Detailed development guide
 - [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) - Development roadmap
+- [`docs/conductor-workflow.md`](docs/conductor-workflow.md) - Parallel development with Conductor
 - [`docs/window_system_design.md`](docs/window_system_design.md) - Window system architecture
 - [`docs/shell_window_integration.md`](docs/shell_window_integration.md) - Shell integration design
 
