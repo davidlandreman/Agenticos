@@ -390,15 +390,15 @@ pub fn try_run_scheduled_processes() {
 
             drop(sched);
 
-            crate::debug_info!("try_run: Switching to process {:?} '{}'", next_pid, process_name);
-            crate::debug_info!("try_run:   Target RIP: {:#x}", ctx_copy.rip);
-            crate::debug_info!("try_run:   Target RSP: {:#x}", ctx_copy.rsp);
+            crate::debug_trace!("try_run: Switching to process {:?} '{}'", next_pid, process_name);
+            crate::debug_trace!("try_run:   Target RIP: {:#x}", ctx_copy.rip);
+            crate::debug_trace!("try_run:   Target RSP: {:#x}", ctx_copy.rsp);
 
             // Pre-map the stack pages before switching context
             // This is critical because if we page fault with an unmapped stack,
             // the CPU can't push the exception frame and we get a triple fault
             let stack_top = ctx_copy.rsp;
-            crate::debug_info!("try_run: Pre-mapping stack pages near {:#x}", stack_top);
+            crate::debug_trace!("try_run: Pre-mapping stack pages near {:#x}", stack_top);
             unsafe {
                 // Touch a few pages at the top of the stack to ensure they're mapped
                 let page_size = 4096u64;
@@ -408,7 +408,7 @@ pub fn try_run_scheduled_processes() {
                     core::ptr::read_volatile(addr as *const u8);
                 }
             }
-            crate::debug_info!("try_run: Stack pages pre-mapped successfully");
+            crate::debug_trace!("try_run: Stack pages pre-mapped successfully");
 
             // Mark that we're entering a spawned process
             IN_SPAWNED_PROCESS.store(true, Ordering::Release);
@@ -417,7 +417,7 @@ pub fn try_run_scheduled_processes() {
             // The switch_context_full_restore will save our current state here
             let kernel_ctx_ptr = &raw mut KERNEL_CONTEXT;
 
-            crate::debug_info!("try_run: About to switch_context_full_restore");
+            crate::debug_trace!("try_run: About to switch_context_full_restore");
 
             // Switch to the process using full context restore
             // This saves kernel's callee-saved regs and restores ALL process regs
