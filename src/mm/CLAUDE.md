@@ -17,6 +17,30 @@ Physical and virtual memory management: frame allocation, virtual paging with de
 - Provides `#[global_allocator]`, which enables `alloc::*` collections (`Vec`, `String`, etc.) — see `.claude/rules/no-std.md`.
 - Heap pages are mapped on demand: pages get backing frames only when first accessed.
 
+## Virtual address partition
+
+The kernel address space is partitioned into disjoint regions, each owned by exactly one subsystem:
+
+| Range | Owner | Notes |
+|---|---|---|
+| `0x0040_0000` – `0x0080_0000` | userland binary + stack | User load base (D3) and user stack top (`USER_STACK_TOP = 0x0080_0000`); stack grows down. |
+| `0x0090_0000` – `0x0090_1000` | userland trampoline page | Single 4 KiB page, R+X+USER. Set up in U5. |
+| `0x_4444_4444_0000` + 100 MiB | kernel heap | Demand-mapped on page fault. |
+| `0x_5555_0000_0000` + N stacks | process stacks | `src/process/stack.rs`. |
+
+`USER_VA_RANGE_START` / `USER_VA_RANGE_END` constants in `paging.rs` bracket the union of the userland slices; `map_user_region` rejects anything outside them.
+
+## User mapping API
+
+`MemoryMapper::map_user_region(virt_start, num_pages, perms)` and `unmap_user_region` are the only blessed paths into the user-VA partition. They:
+
+- Use `Mapper::map_to_with_table_flags(parent_flags = PRESENT | WRITABLE | USER_ACCESSIBLE)` so the U bit is propagated to every parent table entry on the path, including pre-existing kernel-installed parents (D11). Without this, the first ring-3 access page-faults on the parent walk and the kernel triple-faults if the U2 fault routing isn't perfect.
+- Return `Err(UserMapError::PageAlreadyMapped)` rather than swallow a clash; the user range must be empty when load begins.
+- Zero-fill freshly allocated frames before mapping so user code never sees stale kernel data.
+- Do **not** go through `handle_page_fault`. The page-fault handler short-circuits on CPL=3 in U2; user faults are lifecycle events, not lazy mappings.
+
+`UserPerms` (R-X, R, R-W) bakes in NX/WX hygiene per D11 — `EFER.NXE` is documentary today, but the bits are correct so a future flip is a one-line change.
+
 ## Page-fault flow
 
 When code accesses an unmapped heap page:
