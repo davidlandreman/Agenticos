@@ -239,16 +239,16 @@ impl Window for TaskbarWindow {
         }
 
         let bounds = self.base.bounds();
-        let x = bounds.x as usize;
-        let y = bounds.y as usize;
-        let width = bounds.width as usize;
-        let height = bounds.height as usize;
+        let x = bounds.x;
+        let y = bounds.y;
+        let width = bounds.width;
+        let height = bounds.height;
 
         // Draw taskbar background
         device.fill_rect(x, y, width, height, self.bg_color);
 
         // Draw top border (highlight)
-        device.draw_line(x, y, x + width - 1, y, Color::WHITE);
+        device.draw_line(x, y, x + width as i32 - 1, y, Color::WHITE);
 
         // Note: Child buttons will paint themselves
 

@@ -612,14 +612,16 @@ impl WindowManager {
 
         // Check if mouse moved
         let (mouse_x, mouse_y, buttons) = mouse::get_state();
-        let mouse_x = mouse_x.max(0) as usize;
-        let mouse_y = mouse_y.max(0) as usize;
 
         // Handle window dragging
-        self.handle_dragging(mouse_x as i32, mouse_y as i32, buttons);
+        self.handle_dragging(mouse_x, mouse_y, buttons);
 
-        // Update cursor position in compositor (this marks dirty regions)
-        let mouse_moved = self.compositor.update_cursor(mouse_x, mouse_y);
+        // Update cursor position in compositor (this marks dirty regions).
+        // The compositor still works in unsigned screen coordinates; clamp
+        // the mouse position to the device for that path only.
+        let mouse_moved = self
+            .compositor
+            .update_cursor(mouse_x.max(0) as usize, mouse_y.max(0) as usize);
 
         // Cascade invalidation across the z-order so that any window in
         // front of a dirty one (and overlapping it) repaints too. Without
