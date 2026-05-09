@@ -99,8 +99,11 @@ impl DirtyRectManager {
 
     /// Get an iterator over dirty regions.
     ///
-    /// If full repaint is needed, returns a single region covering the screen.
-    pub fn dirty_regions(&self) -> impl Iterator<Item = &Rect> {
+    /// If full repaint is needed, yields a single rect covering the screen
+    /// and then ends. Otherwise yields each tracked dirty rect once. The
+    /// iterator yields owned `Rect` values (cheap — `Rect` is `Copy`) so
+    /// callers can hold the iterator across borrows of the manager.
+    pub fn dirty_regions(&self) -> impl Iterator<Item = Rect> + '_ {
         DirtyRegionIter {
             manager: self,
             index: 0,
@@ -184,7 +187,7 @@ struct DirtyRegionIter<'a> {
 }
 
 impl<'a> Iterator for DirtyRegionIter<'a> {
-    type Item = &'a Rect;
+    type Item = Rect;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.manager.force_full_repaint {
@@ -192,12 +195,15 @@ impl<'a> Iterator for DirtyRegionIter<'a> {
                 None
             } else {
                 self.returned_full = true;
-                // Return a static full-screen rect
-                // This is a bit hacky but avoids allocation
-                None // We'll handle this differently in practice
+                Some(Rect::new(
+                    0,
+                    0,
+                    self.manager.screen_width,
+                    self.manager.screen_height,
+                ))
             }
         } else if self.index < self.manager.regions.len() {
-            let rect = &self.manager.regions[self.index];
+            let rect = self.manager.regions[self.index];
             self.index += 1;
             Some(rect)
         } else {

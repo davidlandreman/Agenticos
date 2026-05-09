@@ -56,6 +56,8 @@ pub mod text_editor_migration_tests;
 pub mod explorer_dir_model_tests;
 #[cfg(feature = "test")]
 pub mod explorer_dispatch_tests;
+#[cfg(feature = "test")]
+pub mod compositor;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -93,6 +95,7 @@ pub fn run_tests() {
     let text_editor_migration_tests = text_editor_migration_tests::get_tests();
     let explorer_dir_model_tests = explorer_dir_model_tests::get_tests();
     let explorer_dispatch_tests = explorer_dispatch_tests::get_tests();
+    let compositor_tests = compositor::get_tests();
 
     let mut total_tests = 0;
 
@@ -316,6 +319,14 @@ pub fn run_tests() {
     debug_info!("\n[Explorer dispatch Tests]");
     debug_info!("Running {} tests", explorer_dispatch_tests.len());
     for test in explorer_dispatch_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Compositor tests
+    debug_info!("\n[Compositor Tests]");
+    debug_info!("Running {} tests", compositor_tests.len());
+    for test in compositor_tests {
         test.run();
         total_tests += 1;
     }
