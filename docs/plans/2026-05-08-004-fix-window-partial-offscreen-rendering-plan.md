@@ -1,7 +1,7 @@
 ---
 title: "fix: Render windows correctly when partially off-screen"
 type: fix
-status: active
+status: completed
 created: 2026-05-08
 ---
 
