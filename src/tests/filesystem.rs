@@ -128,6 +128,83 @@ fn test_file_read_full_arial() {
     }
 }
 
+// --- Host folder mount tests (vvfat-backed /host) -----------------------
+//
+// These rely on:
+//   - U2 wiring the vvfat -drive into build.sh / test.sh
+//   - U1 staging host_share/HELLO.TXT as the addressable seed fixture
+//   - U4 detecting Primary Slave and mounting at /host
+//
+// HELLO.TXT is uppercase 8.3 by construction so the FAT driver can address
+// it by exact name without relying on vvfat's LFN-alias heuristics.
+
+fn test_host_mount_present() {
+    debug_info!("Testing /host mount is present in VFS mount list...");
+
+    let vfs = crate::fs::vfs::get_vfs();
+    let mut found = false;
+    for mount in vfs.list_mounts() {
+        debug_info!("  mount: {} ({})", mount.path, mount.filesystem.name());
+        if mount.path == "/host" {
+            found = true;
+        }
+    }
+
+    assert!(found, "/host mount should be present in vfs.list_mounts()");
+    debug_info!("/host mount present test passed!");
+}
+
+fn test_host_mount_can_open_seed_file() {
+    debug_info!("Testing read of /host/HELLO.TXT seed file...");
+    // The seed fixture must be uppercase 8.3 (the kernel's FAT driver does
+    // not parse VFAT long-filename entries). If AGENTICOS_HOST_SHARE is
+    // overridden to a folder without HELLO.TXT this test fails loudly so a
+    // misconfigured CI surface is obvious.
+
+    match crate::fs::File::open_read("/host/HELLO.TXT") {
+        Ok(file) => {
+            debug_info!("Opened /host/HELLO.TXT, size = {} bytes", file.size());
+            assert!(file.size() > 0, "/host/HELLO.TXT should be non-empty");
+
+            match file.read_to_string() {
+                Ok(content) => {
+                    debug_info!("/host/HELLO.TXT content: {:?}", content);
+                    assert!(!content.is_empty(), "Seed file content should not be empty");
+                }
+                Err(e) => {
+                    debug_error!("Failed to read /host/HELLO.TXT: {:?}", e);
+                    panic!("Should be able to read /host/HELLO.TXT as string");
+                }
+            }
+        }
+        Err(e) => {
+            debug_error!("Failed to open /host/HELLO.TXT: {:?}", e);
+            panic!("Should be able to open /host/HELLO.TXT (vvfat-backed seed fixture)");
+        }
+    }
+    debug_info!("Host seed-file open test passed!");
+}
+
+fn test_host_mount_does_not_break_root() {
+    debug_info!("Testing root mount still works after host mount is wired...");
+    // Regression check for the U3 multi-mount refactor: reading a known root
+    // file must still succeed once a second FAT mount is in the slot array.
+
+    assert!(crate::fs::exists("/arial.ttf"), "/arial.ttf should still exist on root");
+
+    match crate::fs::File::open_read("/arial.ttf") {
+        Ok(file) => {
+            assert!(file.size() > 0, "/arial.ttf should still have non-zero size");
+            debug_info!("/arial.ttf still readable from root mount");
+        }
+        Err(e) => {
+            debug_error!("Failed to open /arial.ttf after host mount: {:?}", e);
+            panic!("Root mount regression: /arial.ttf should still open");
+        }
+    }
+    debug_info!("Root-mount regression test passed!");
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_filesystem_basic_exists,
@@ -135,5 +212,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_file_open_arial,
         &test_file_read_arial_header,
         &test_file_read_full_arial,
+        &test_host_mount_present,
+        &test_host_mount_can_open_seed_file,
+        &test_host_mount_does_not_break_root,
     ]
 }

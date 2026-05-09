@@ -11,4 +11,5 @@ pub use file_handle::{File, Directory};
 
 // Convenience functions
 pub use fs_manager::exists;
+pub use fs_manager::metadata;
 pub use fs_manager::create_file;

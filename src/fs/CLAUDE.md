@@ -40,11 +40,15 @@ Cleanup is automatic when the last `Arc` reference drops.
 ## Current limitations
 
 - **Read-only.** No write support is implemented anywhere in the stack.
-- **8.3 filenames only.** No long filename support.
+- **8.3 filenames only.** No long filename support. This applies to both the bundled BIOS image *and* any host folder mounted via the `/host` development mount — files staged from the Mac side must be uppercase 8.3 (e.g. `HELLO.TXT`, not `hello.txt` or `notes.markdown`) to be visible.
 - **FAT only.** No other filesystem implementation.
 - **No subdirectory traversal yet** in the higher-level API.
 
 These are scope decisions, not bugs — write support is a future track.
+
+## Multiple FAT mounts
+
+`auto_mount` (in `vfs.rs`) supports up to `MAX_FAT_MOUNTS` (4) simultaneous FAT filesystems via a static array of wrappers. The root filesystem takes the first slot at boot; the host-folder mount at `/host` (when present) takes the second. Bumping the limit is a one-line change to `MAX_FAT_MOUNTS` plus extending the `[None; 4]` initializer.
 
 ## Gotchas
 

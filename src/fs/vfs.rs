@@ -3,10 +3,13 @@ use crate::fs::fat::FatFilesystem;
 use crate::drivers::block::BlockDevice;
 use crate::{debug_info, debug_error};
 
-// Static storage for mounted filesystems
-// In a real OS, these would be dynamically allocated
-static mut MOUNTED_FAT_FS: Option<FatFilesystem<'static>> = None;
-static mut MOUNTED_FAT_WRAPPER: Option<crate::fs::fat::fat_filesystem::FatFilesystemWrapper<'static>> = None;
+// Static storage for mounted FAT filesystem wrappers. The wrapper owns the
+// inner FatFilesystem, so we only need one array. Slot count matches the
+// kernel's other static-slot conventions (cf. PARTITION_DEVICES). Bumping
+// this is cheap if more than two simultaneous FAT mounts ever land.
+const MAX_FAT_MOUNTS: usize = 4;
+static mut MOUNTED_FAT_WRAPPERS: [Option<crate::fs::fat::fat_filesystem::FatFilesystemWrapper<'static>>; MAX_FAT_MOUNTS] =
+    [None, None, None, None];
 
 /// Mount point information
 #[derive(Clone, Copy)]
@@ -124,31 +127,43 @@ pub fn auto_mount(device: &'static dyn BlockDevice, mount_path: &'static str) ->
     match fs_type {
         FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
             unsafe {
+                // Find the first free slot in the static wrapper array.
+                let wrappers_ptr = &raw mut MOUNTED_FAT_WRAPPERS;
+                let slot = (0..MAX_FAT_MOUNTS).find(|&i| (*wrappers_ptr)[i].is_none());
+                let slot = match slot {
+                    Some(i) => i,
+                    None => {
+                        debug_error!("No free FAT mount slots (max {})", MAX_FAT_MOUNTS);
+                        return Err(FilesystemError::DiskFull);
+                    }
+                };
+
                 // Try to create FAT filesystem with 'static lifetime
                 match FatFilesystem::new(device) {
                     Ok(fat_fs) => {
-                        // Transmute to 'static lifetime - this is safe because the device is 'static
+                        // Transmute to 'static lifetime - safe because the device is 'static
                         let fat_fs_static: FatFilesystem<'static> = core::mem::transmute(fat_fs);
-                        
-                        // Create the wrapper
                         let wrapper = crate::fs::fat::fat_filesystem::FatFilesystemWrapper::new(fat_fs_static);
-                        MOUNTED_FAT_WRAPPER = Some(wrapper);
-                        
-                        // Mount using VFS
-                        if let Some(wrapper_ref) = (*&raw const MOUNTED_FAT_WRAPPER).as_ref() {
-                                let vfs = get_vfs();
-                                match vfs.mount(mount_path, wrapper_ref as &dyn Filesystem, device) {
-                                    Ok(_) => {
-                                        debug_info!("Successfully mounted FAT filesystem at {}", mount_path);
-                                        Ok(fs_type)
-                                    }
-                                    Err(e) => {
-                                        debug_error!("Failed to mount FAT filesystem: {:?}", e);
-                                        Err(e)
-                                    }
+                        (*wrappers_ptr)[slot] = Some(wrapper);
+
+                        // Take a 'static reference to the wrapper now living in the slot.
+                        if let Some(wrapper_ref) = (*&raw const MOUNTED_FAT_WRAPPERS)[slot].as_ref() {
+                            let vfs = get_vfs();
+                            match vfs.mount(mount_path, wrapper_ref as &dyn Filesystem, device) {
+                                Ok(_) => {
+                                    debug_info!("Successfully mounted FAT filesystem at {} (slot {})", mount_path, slot);
+                                    Ok(fs_type)
                                 }
+                                Err(e) => {
+                                    debug_error!("Failed to mount FAT filesystem at {}: {:?}", mount_path, e);
+                                    // Free the slot so a later attempt can reuse it.
+                                    (*wrappers_ptr)[slot] = None;
+                                    Err(e)
+                                }
+                            }
                         } else {
                             debug_error!("Failed to create wrapper reference");
+                            (*wrappers_ptr)[slot] = None;
                             Err(FilesystemError::InvalidFilesystem)
                         }
                     }

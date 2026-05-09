@@ -114,6 +114,12 @@ fn init_display(boot_info: &'static mut BootInfo) -> Option<(u32, u32)> {
 static mut PRIMARY_MASTER_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
 static mut PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] = [None, None, None, None];
 
+// Static storage for the host-share disk on Primary Slave (vvfat-backed when
+// the user runs ./build.sh; absent otherwise). Kept in a separate slot/array
+// so the host disk's partitions don't alias the root disk's PARTITION_DEVICES.
+static mut PRIMARY_SLAVE_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
+static mut HOST_PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] = [None, None, None, None];
+
 fn init_filesystems() {
     use crate::drivers::ide::{IDE_CONTROLLER, IdeChannel, IdeDrive, IdeBlockDevice};
     use crate::drivers::block::BlockDevice;
@@ -266,9 +272,96 @@ fn init_filesystems() {
         debug_info!("No IDE disk found on primary master");
     }
     
-    // TODO: Check other IDE channels if needed (primary slave, secondary master/slave)
-    
+    // Probe Primary Slave for a host-share disk (vvfat-backed when ./build.sh
+    // attaches it; absent otherwise). Failures here are non-fatal — the host
+    // mount is a developer convenience, not a boot requirement.
+    try_mount_host_disk();
+
     debug_info!("Filesystem initialization complete");
+}
+
+/// Probe Primary IDE Slave and mount the first FAT partition there at `/host`.
+///
+/// This is the partition-table flow: vvfat synthesizes a real MBR with a single
+/// FAT16 partition starting around LBA 63, so we read the boot sector, parse
+/// the MBR, then `auto_mount` the FAT partition. Any failure (no drive, no MBR
+/// signature, no FAT partition, mount error) logs and returns silently.
+fn try_mount_host_disk() {
+    use crate::drivers::ide::{IDE_CONTROLLER, IdeChannel, IdeDrive, IdeBlockDevice};
+    use crate::drivers::block::BlockDevice;
+    use crate::fs::{detect_filesystem, read_partitions, PartitionBlockDevice, FilesystemType};
+    use crate::fs::vfs::auto_mount;
+
+    let Some((model_bytes, sectors)) = IDE_CONTROLLER.get_disk_info(IdeChannel::Primary, IdeDrive::Slave) else {
+        debug_info!("No IDE disk found on primary slave (host folder not mounted)");
+        return;
+    };
+
+    let size_mb = (sectors * 512) / (1024 * 1024);
+    let model_len = model_bytes.iter().position(|&c| c == 0).unwrap_or(40);
+    let model = core::str::from_utf8(&model_bytes[..model_len]).unwrap_or("Unknown").trim();
+    debug_info!("Found host IDE disk on primary slave: {} ({} MB)", model, size_mb);
+
+    unsafe {
+        PRIMARY_SLAVE_DISK = Some(IdeBlockDevice::new(IdeChannel::Primary, IdeDrive::Slave));
+    }
+    let host_disk = unsafe { (*&raw const PRIMARY_SLAVE_DISK).as_ref().unwrap() };
+
+    let mut boot_sector = [0u8; 512];
+    if let Err(e) = host_disk.read_blocks(0, 1, &mut boot_sector) {
+        debug_warn!("Host disk: failed to read boot sector: {}", e);
+        return;
+    }
+
+    if boot_sector[510] != 0x55 || boot_sector[511] != 0xAA {
+        debug_info!("Host disk has no MBR signature; skipping host mount");
+        return;
+    }
+
+    let partitions = match read_partitions(host_disk) {
+        Ok(p) => p,
+        Err(e) => {
+            debug_warn!("Host disk: failed to read partition table: {}", e);
+            return;
+        }
+    };
+
+    for (i, partition) in partitions.iter().enumerate() {
+        let Some(part) = partition else { continue };
+        debug_info!(
+            "Host partition {}: Type={:?}, Start={}, Size={} sectors",
+            i + 1, part.partition_type, part.start_lba, part.size_sectors
+        );
+
+        unsafe {
+            HOST_PARTITION_DEVICES[i] = Some(PartitionBlockDevice::new(host_disk, part));
+        }
+        let part_device = unsafe { HOST_PARTITION_DEVICES[i].as_ref().unwrap() };
+
+        match detect_filesystem(part_device) {
+            Ok(fs_type) if matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) => {
+                debug_info!("Host partition {}: detected {:?}, mounting at /host", i + 1, fs_type);
+                match auto_mount(part_device, "/host") {
+                    Ok(_) => {
+                        debug_info!("Host folder mounted at /host");
+                        return;
+                    }
+                    Err(e) => {
+                        debug_warn!("Failed to mount host partition {} at /host: {:?}", i + 1, e);
+                        return;
+                    }
+                }
+            }
+            Ok(fs_type) => {
+                debug_info!("Host partition {}: filesystem {:?} not supported", i + 1, fs_type);
+            }
+            Err(_) => {
+                debug_info!("Host partition {}: filesystem detection failed", i + 1);
+            }
+        }
+    }
+
+    debug_info!("Host disk: no FAT partition found; /host not mounted");
 }
 
 
