@@ -2,7 +2,7 @@
 
 use alloc::{vec, vec::Vec};
 use alloc::string::ToString;
-use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice};
+use crate::window::{Window, Rect, Event, EventResult, GraphicsDevice};
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
 use super::base::WindowBase;
@@ -273,18 +273,16 @@ impl TextWindow {
 }
 
 impl Window for TextWindow {
-    fn id(&self) -> WindowId {
-        self.base.id()
+    fn base(&self) -> &WindowBase {
+        &self.base
     }
-    
-    fn bounds(&self) -> Rect {
-        self.base.bounds()
+
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base
     }
-    
-    fn visible(&self) -> bool {
-        self.base.visible()
-    }
-    
+
+    // Custom override: TextWindow recomputes its grid dimensions and
+    // reallocates the buffer when bounds change.
     fn set_bounds(&mut self, bounds: Rect) {
         self.base.set_bounds(bounds);
         // Recalculate grid dimensions when bounds change
@@ -330,35 +328,6 @@ impl Window for TextWindow {
         }
     }
 
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        // Just update bounds position for rendering, don't recalculate grid
-        self.base.set_bounds_no_invalidate(bounds);
-    }
-
-    fn set_visible(&mut self, visible: bool) {
-        self.base.set_visible(visible);
-    }
-    
-    fn parent(&self) -> Option<WindowId> {
-        self.base.parent()
-    }
-    
-    fn children(&self) -> &[WindowId] {
-        self.base.children()
-    }
-    
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.base.set_parent(parent);
-    }
-    
-    fn add_child(&mut self, child: WindowId) {
-        self.base.add_child(child);
-    }
-    
-    fn remove_child(&mut self, child: WindowId) {
-        self.base.remove_child(child);
-    }
-    
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         if !self.visible() {
             return;
@@ -505,15 +474,7 @@ impl Window for TextWindow {
         self.base.clear_needs_repaint();
         crate::debug_trace!("TextWindow paint complete, needs_repaint cleared");
     }
-    
-    fn needs_repaint(&self) -> bool {
-        self.base.needs_repaint()
-    }
-    
-    fn invalidate(&mut self) {
-        self.base.invalidate();
-    }
-    
+
     fn handle_event(&mut self, event: Event) -> EventResult {
         match event {
             Event::Keyboard(key_event) => {
@@ -527,19 +488,11 @@ impl Window for TextWindow {
             }
             _ => {}
         }
-        
+
         EventResult::Propagate
     }
-    
+
     fn can_focus(&self) -> bool {
         self.base.can_focus()
-    }
-    
-    fn has_focus(&self) -> bool {
-        self.base.has_focus()
-    }
-    
-    fn set_focus(&mut self, focused: bool) {
-        self.base.set_focus(focused);
     }
 }

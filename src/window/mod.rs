@@ -36,64 +36,107 @@ pub use self::event::{Event, EventResult};
 pub use self::graphics::GraphicsDevice;
 pub use self::selection::{Selection, SelectionMode, ClickMods};
 
-/// Core window trait that all visual elements implement
+/// Core window trait that all visual elements implement.
+///
+/// Most plumbing methods (id/bounds/visible/parent/children/needs_repaint/
+/// invalidate/has_focus/set_focus/set_bounds/set_visible/...) default to a
+/// one-line delegation through `base()` / `base_mut()`. Each widget only
+/// supplies `base()`, `base_mut()`, `paint`, `handle_event`, and any
+/// override (`can_focus`, `set_bounds` if it does extra work, etc.).
 pub trait Window: Send {
+    /// Borrow the widget's `WindowBase`. Used by the default implementations
+    /// of the plumbing methods below (id/bounds/visible/...).
+    fn base(&self) -> &windows::base::WindowBase;
+
+    /// Mutably borrow the widget's `WindowBase`. Used by the default
+    /// implementations of the plumbing methods below.
+    fn base_mut(&mut self) -> &mut windows::base::WindowBase;
+
+    /// Paint this window to the graphics device
+    fn paint(&mut self, device: &mut dyn GraphicsDevice);
+
+    /// Handle an event
+    fn handle_event(&mut self, event: Event) -> EventResult;
+
+    /// Check if this window can receive keyboard focus
+    fn can_focus(&self) -> bool {
+        false
+    }
+
     /// Get the unique identifier for this window
-    fn id(&self) -> WindowId;
-    
+    fn id(&self) -> WindowId {
+        self.base().id()
+    }
+
     /// Get the bounds of this window relative to its parent
-    fn bounds(&self) -> Rect;
-    
+    fn bounds(&self) -> Rect {
+        self.base().bounds()
+    }
+
     /// Set the bounds of this window
-    fn set_bounds(&mut self, bounds: Rect);
+    fn set_bounds(&mut self, bounds: Rect) {
+        self.base_mut().set_bounds(bounds);
+    }
 
     /// Set bounds without triggering invalidation (for render-time transforms)
     fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        // Default implementation - subclasses should override
-        self.set_bounds(bounds);
+        self.base_mut().set_bounds_no_invalidate(bounds);
     }
-    
+
     /// Check if this window is visible
-    fn visible(&self) -> bool;
-    
+    fn visible(&self) -> bool {
+        self.base().visible()
+    }
+
     /// Set the visibility of this window
-    fn set_visible(&mut self, visible: bool);
-    
+    fn set_visible(&mut self, visible: bool) {
+        self.base_mut().set_visible(visible);
+    }
+
     /// Get the parent window ID, if any
-    fn parent(&self) -> Option<WindowId>;
-    
+    fn parent(&self) -> Option<WindowId> {
+        self.base().parent()
+    }
+
     /// Get child window IDs
-    fn children(&self) -> &[WindowId];
-    
+    fn children(&self) -> &[WindowId] {
+        self.base().children()
+    }
+
     /// Set the parent of this window
-    fn set_parent(&mut self, parent: Option<WindowId>);
-    
+    fn set_parent(&mut self, parent: Option<WindowId>) {
+        self.base_mut().set_parent(parent);
+    }
+
     /// Add a child window
-    fn add_child(&mut self, child: WindowId);
-    
+    fn add_child(&mut self, child: WindowId) {
+        self.base_mut().add_child(child);
+    }
+
     /// Remove a child window
-    fn remove_child(&mut self, child: WindowId);
-    
-    /// Paint this window to the graphics device
-    fn paint(&mut self, device: &mut dyn GraphicsDevice);
-    
+    fn remove_child(&mut self, child: WindowId) {
+        self.base_mut().remove_child(child);
+    }
+
     /// Check if this window needs repainting
-    fn needs_repaint(&self) -> bool;
-    
+    fn needs_repaint(&self) -> bool {
+        self.base().needs_repaint()
+    }
+
     /// Mark this window as needing repaint
-    fn invalidate(&mut self);
-    
-    /// Handle an event
-    fn handle_event(&mut self, event: Event) -> EventResult;
-    
-    /// Check if this window can receive keyboard focus
-    fn can_focus(&self) -> bool;
-    
+    fn invalidate(&mut self) {
+        self.base_mut().invalidate();
+    }
+
     /// Check if this window currently has focus
-    fn has_focus(&self) -> bool;
-    
+    fn has_focus(&self) -> bool {
+        self.base().has_focus()
+    }
+
     /// Set the focus state of this window
-    fn set_focus(&mut self, focused: bool);
+    fn set_focus(&mut self, focused: bool) {
+        self.base_mut().set_focus(focused);
+    }
 
     /// Get the window title if this is a frame window
     /// Returns None for non-frame windows

@@ -68,41 +68,19 @@ impl VBox {
 }
 
 impl Window for VBox {
-    fn id(&self) -> WindowId {
-        self.base.id()
+    fn base(&self) -> &WindowBase {
+        &self.base
     }
 
-    fn bounds(&self) -> Rect {
-        self.base.bounds()
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base
     }
 
+    // Custom override: VBox relayouts its children when its own bounds
+    // change.
     fn set_bounds(&mut self, bounds: Rect) {
         self.base.set_bounds(bounds);
         self.relayout();
-    }
-
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        self.base.set_bounds_no_invalidate(bounds);
-    }
-
-    fn visible(&self) -> bool {
-        self.base.visible()
-    }
-
-    fn set_visible(&mut self, visible: bool) {
-        self.base.set_visible(visible);
-    }
-
-    fn parent(&self) -> Option<WindowId> {
-        self.base.parent()
-    }
-
-    fn children(&self) -> &[WindowId] {
-        self.base.children()
-    }
-
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.base.set_parent(parent);
     }
 
     fn add_child(&mut self, child: WindowId) {
@@ -127,28 +105,8 @@ impl Window for VBox {
         self.base.clear_needs_repaint();
     }
 
-    fn needs_repaint(&self) -> bool {
-        self.base.needs_repaint()
-    }
-
-    fn invalidate(&mut self) {
-        self.base.invalidate();
-    }
-
     fn handle_event(&mut self, _event: Event) -> EventResult {
         EventResult::Propagate
-    }
-
-    fn can_focus(&self) -> bool {
-        false
-    }
-
-    fn has_focus(&self) -> bool {
-        self.base.has_focus()
-    }
-
-    fn set_focus(&mut self, focused: bool) {
-        self.base.set_focus(focused);
     }
 }
 

@@ -34,6 +34,8 @@ pub mod layout_tests;
 pub mod selection_tests;
 #[cfg(feature = "test")]
 pub mod scroll_view_tests;
+#[cfg(feature = "test")]
+pub mod trait_delegation_tests;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -60,6 +62,7 @@ pub fn run_tests() {
     let layout_tests = layout_tests::get_tests();
     let selection_tests = selection_tests::get_tests();
     let scroll_view_tests = scroll_view_tests::get_tests();
+    let trait_delegation_tests = trait_delegation_tests::get_tests();
 
     let mut total_tests = 0;
 
@@ -195,6 +198,14 @@ pub fn run_tests() {
     debug_info!("\n[ScrollView Tests]");
     debug_info!("Running {} tests", scroll_view_tests.len());
     for test in scroll_view_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run trait-delegation tests (U5)
+    debug_info!("\n[Trait Delegation Tests]");
+    debug_info!("Running {} tests", trait_delegation_tests.len());
+    for test in trait_delegation_tests {
         test.run();
         total_tests += 1;
     }

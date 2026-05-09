@@ -139,43 +139,21 @@ static LAST_MOUSE: Mutex<Option<MouseEvent>> = Mutex::new(None);
 /// `route_mouse_event` preserves the new `modifiers` field through to the
 /// target window.
 struct RecordingWindow {
-    id: WindowId,
-    bounds: Rect,
-    parent: Option<WindowId>,
-    children: alloc::vec::Vec<WindowId>,
+    base: crate::window::windows::base::WindowBase,
 }
 
 impl RecordingWindow {
     fn new(id: WindowId, bounds: Rect) -> Self {
         Self {
-            id,
-            bounds,
-            parent: None,
-            children: alloc::vec::Vec::new(),
+            base: crate::window::windows::base::WindowBase::new_with_id(id, bounds),
         }
     }
 }
 
 impl Window for RecordingWindow {
-    fn id(&self) -> WindowId { self.id }
-    fn bounds(&self) -> Rect { self.bounds }
-    fn set_bounds(&mut self, bounds: Rect) { self.bounds = bounds; }
-    fn visible(&self) -> bool { true }
-    fn set_visible(&mut self, _visible: bool) {}
-    fn parent(&self) -> Option<WindowId> { self.parent }
-    fn children(&self) -> &[WindowId] { &self.children }
-    fn set_parent(&mut self, parent: Option<WindowId>) { self.parent = parent; }
-    fn add_child(&mut self, child: WindowId) {
-        if !self.children.contains(&child) {
-            self.children.push(child);
-        }
-    }
-    fn remove_child(&mut self, child: WindowId) {
-        self.children.retain(|&c| c != child);
-    }
+    fn base(&self) -> &crate::window::windows::base::WindowBase { &self.base }
+    fn base_mut(&mut self) -> &mut crate::window::windows::base::WindowBase { &mut self.base }
     fn paint(&mut self, _device: &mut dyn GraphicsDevice) {}
-    fn needs_repaint(&self) -> bool { false }
-    fn invalidate(&mut self) {}
     fn handle_event(&mut self, event: Event) -> EventResult {
         if let Event::Mouse(m) = event {
             *LAST_MOUSE.lock() = Some(m);
@@ -185,8 +163,6 @@ impl Window for RecordingWindow {
         }
     }
     fn can_focus(&self) -> bool { true }
-    fn has_focus(&self) -> bool { false }
-    fn set_focus(&mut self, _focused: bool) {}
 }
 
 fn test_route_mouse_event_preserves_modifiers() {

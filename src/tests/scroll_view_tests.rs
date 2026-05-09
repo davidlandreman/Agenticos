@@ -226,54 +226,31 @@ static LAST_RECEIVED: Mutex<Option<(WindowId, MouseEvent)>> = Mutex::new(None);
 /// handed into the global `LAST_RECEIVED` slot. `is_scroll_view()` stays
 /// at its default `false`.
 struct RecordingWindow {
-    id: WindowId,
-    bounds: Rect,
-    parent: Option<WindowId>,
-    children: alloc::vec::Vec<WindowId>,
+    base: crate::window::windows::base::WindowBase,
 }
 
 impl RecordingWindow {
     fn new(id: WindowId, bounds: Rect) -> Self {
         Self {
-            id,
-            bounds,
-            parent: None,
-            children: alloc::vec::Vec::new(),
+            base: crate::window::windows::base::WindowBase::new_with_id(id, bounds),
         }
     }
 }
 
 impl Window for RecordingWindow {
-    fn id(&self) -> WindowId { self.id }
-    fn bounds(&self) -> Rect { self.bounds }
-    fn set_bounds(&mut self, bounds: Rect) { self.bounds = bounds; }
-    fn visible(&self) -> bool { true }
-    fn set_visible(&mut self, _visible: bool) {}
-    fn parent(&self) -> Option<WindowId> { self.parent }
-    fn children(&self) -> &[WindowId] { &self.children }
-    fn set_parent(&mut self, parent: Option<WindowId>) { self.parent = parent; }
-    fn add_child(&mut self, child: WindowId) {
-        if !self.children.contains(&child) {
-            self.children.push(child);
-        }
-    }
-    fn remove_child(&mut self, child: WindowId) {
-        self.children.retain(|&c| c != child);
-    }
+    fn base(&self) -> &crate::window::windows::base::WindowBase { &self.base }
+    fn base_mut(&mut self) -> &mut crate::window::windows::base::WindowBase { &mut self.base }
     fn paint(&mut self, _device: &mut dyn GraphicsDevice) {}
-    fn needs_repaint(&self) -> bool { false }
-    fn invalidate(&mut self) {}
     fn handle_event(&mut self, event: Event) -> EventResult {
         if let Event::Mouse(m) = event {
-            *LAST_RECEIVED.lock() = Some((self.id, m));
+            let id = self.base.id();
+            *LAST_RECEIVED.lock() = Some((id, m));
             EventResult::Handled
         } else {
             EventResult::Ignored
         }
     }
     fn can_focus(&self) -> bool { true }
-    fn has_focus(&self) -> bool { false }
-    fn set_focus(&mut self, _focused: bool) {}
 }
 
 /// A recording window that *also* identifies itself as a `ScrollView`
@@ -281,54 +258,31 @@ impl Window for RecordingWindow {
 /// inspect what the scroll-view ancestor receives without needing to
 /// downcast `Box<dyn Window>` back to a concrete `ScrollView`.
 struct RecordingScrollView {
-    id: WindowId,
-    bounds: Rect,
-    parent: Option<WindowId>,
-    children: alloc::vec::Vec<WindowId>,
+    base: crate::window::windows::base::WindowBase,
 }
 
 impl RecordingScrollView {
     fn new(id: WindowId, bounds: Rect) -> Self {
         Self {
-            id,
-            bounds,
-            parent: None,
-            children: alloc::vec::Vec::new(),
+            base: crate::window::windows::base::WindowBase::new_with_id(id, bounds),
         }
     }
 }
 
 impl Window for RecordingScrollView {
-    fn id(&self) -> WindowId { self.id }
-    fn bounds(&self) -> Rect { self.bounds }
-    fn set_bounds(&mut self, bounds: Rect) { self.bounds = bounds; }
-    fn visible(&self) -> bool { true }
-    fn set_visible(&mut self, _visible: bool) {}
-    fn parent(&self) -> Option<WindowId> { self.parent }
-    fn children(&self) -> &[WindowId] { &self.children }
-    fn set_parent(&mut self, parent: Option<WindowId>) { self.parent = parent; }
-    fn add_child(&mut self, child: WindowId) {
-        if !self.children.contains(&child) {
-            self.children.push(child);
-        }
-    }
-    fn remove_child(&mut self, child: WindowId) {
-        self.children.retain(|&c| c != child);
-    }
+    fn base(&self) -> &crate::window::windows::base::WindowBase { &self.base }
+    fn base_mut(&mut self) -> &mut crate::window::windows::base::WindowBase { &mut self.base }
     fn paint(&mut self, _device: &mut dyn GraphicsDevice) {}
-    fn needs_repaint(&self) -> bool { false }
-    fn invalidate(&mut self) {}
     fn handle_event(&mut self, event: Event) -> EventResult {
         if let Event::Mouse(m) = event {
-            *LAST_RECEIVED.lock() = Some((self.id, m));
+            let id = self.base.id();
+            *LAST_RECEIVED.lock() = Some((id, m));
             EventResult::Handled
         } else {
             EventResult::Ignored
         }
     }
     fn can_focus(&self) -> bool { true }
-    fn has_focus(&self) -> bool { false }
-    fn set_focus(&mut self, _focused: bool) {}
     fn is_scroll_view(&self) -> bool { true }
 }
 

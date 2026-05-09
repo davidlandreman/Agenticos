@@ -293,48 +293,12 @@ impl MenuBar {
 }
 
 impl Window for MenuBar {
-    fn id(&self) -> WindowId {
-        self.base.id()
+    fn base(&self) -> &WindowBase {
+        &self.base
     }
 
-    fn bounds(&self) -> Rect {
-        self.base.bounds()
-    }
-
-    fn visible(&self) -> bool {
-        self.base.visible()
-    }
-
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.base.set_bounds(bounds);
-    }
-
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        self.base.set_bounds_no_invalidate(bounds);
-    }
-
-    fn set_visible(&mut self, visible: bool) {
-        self.base.set_visible(visible);
-    }
-
-    fn parent(&self) -> Option<WindowId> {
-        self.base.parent()
-    }
-
-    fn children(&self) -> &[WindowId] {
-        self.base.children()
-    }
-
-    fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.base.set_parent(parent);
-    }
-
-    fn add_child(&mut self, child: WindowId) {
-        self.base.add_child(child);
-    }
-
-    fn remove_child(&mut self, child: WindowId) {
-        self.base.remove_child(child);
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base
     }
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
@@ -459,23 +423,14 @@ impl Window for MenuBar {
         }
     }
 
-    fn can_focus(&self) -> bool {
-        false
-    }
-
+    // MenuBar has its own focus model (popups manage focus); the bar
+    // itself is never focusable. Override the defaults so a stray
+    // `set_focus(true)` does not flip `WindowBase::has_focus` underneath.
     fn has_focus(&self) -> bool {
         false
     }
 
     fn set_focus(&mut self, _focused: bool) {}
-
-    fn needs_repaint(&self) -> bool {
-        self.base.needs_repaint()
-    }
-
-    fn invalidate(&mut self) {
-        self.base.invalidate();
-    }
 
     fn poll_pending_popup(&mut self) -> Option<super::super::windows::PendingPopup> {
         let result = self.pending_popup.take();
