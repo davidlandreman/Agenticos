@@ -229,3 +229,12 @@ pub fn virt_to_phys_heap(virt_addr: u64) -> u64 {
     // Heap memory is identity mapped - virtual = physical for heap region
     virt_addr
 }
+
+/// Run a closure with mutable access to the global `MemoryMapper`. Returns
+/// `None` if `init_heap` has not run yet. Used by the userland subsystem
+/// (U6+) to wrap loader steps without each call re-resolving the global.
+pub fn with_memory_mapper<R>(
+    f: impl FnOnce(&mut crate::mm::paging::MemoryMapper) -> R,
+) -> Option<R> {
+    unsafe { crate::mm::paging::get_mapper().map(f) }
+}

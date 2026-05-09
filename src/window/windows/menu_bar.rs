@@ -75,7 +75,7 @@ impl Menu {
     /// Create a new menu
     pub fn new(title: &str, items: Vec<MenuItemDef>) -> Self {
         let font = get_default_font();
-        let char_width = font.char_width();
+        let char_width = font.cell_width() as usize;
         let width = title.len() * char_width + MENU_TITLE_PADDING * 2;
 
         Menu {
@@ -229,7 +229,7 @@ impl MenuBar {
 
         // Calculate popup dimensions
         let font = get_default_font();
-        let char_width = font.char_width();
+        let char_width = font.cell_width() as usize;
         let item_height = 24usize;
 
         let max_label_width = menu
@@ -347,7 +347,7 @@ impl Window for MenuBar {
 
         let bounds = self.bounds();
         let font = get_default_font();
-        let char_height = font.char_height();
+        let char_height = font.line_height() as usize;
 
         // Store global offset for popup positioning
         // During paint, bounds are temporarily set to absolute coordinates
@@ -355,42 +355,42 @@ impl Window for MenuBar {
 
         // Draw menu bar background
         device.fill_rect(
-            bounds.x as usize,
-            bounds.y as usize,
-            bounds.width as usize,
-            MENU_BAR_HEIGHT as usize,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            MENU_BAR_HEIGHT as u32,
             self.bg_color,
         );
 
         // Draw bottom border
         device.fill_rect(
-            bounds.x as usize,
-            (bounds.y + MENU_BAR_HEIGHT as i32 - 1) as usize,
-            bounds.width as usize,
+            bounds.x,
+            bounds.y + MENU_BAR_HEIGHT as i32 - 1,
+            bounds.width,
             1,
             Color::new(180, 180, 180),
         );
 
         // Draw menu titles
         for (i, menu) in self.menus.iter().enumerate() {
-            let x = bounds.x as usize + menu.x;
-            let text_y = bounds.y as usize + (MENU_BAR_HEIGHT as usize - char_height) / 2;
+            let x = bounds.x + menu.x as i32;
+            let text_y = bounds.y + (MENU_BAR_HEIGHT as i32 - char_height as i32) / 2;
 
             // Highlight if hovered or open
             let is_active = self.hover_index == Some(i) || self.open_menu_index == Some(i);
             if is_active {
                 device.fill_rect(
                     x,
-                    bounds.y as usize,
-                    menu.width,
-                    MENU_BAR_HEIGHT as usize,
+                    bounds.y,
+                    menu.width as u32,
+                    MENU_BAR_HEIGHT as u32,
                     self.hover_bg_color,
                 );
             }
 
             // Draw title text
             device.draw_text(
-                x + MENU_TITLE_PADDING,
+                x + MENU_TITLE_PADDING as i32,
                 text_y,
                 &menu.title,
                 font.as_font(),

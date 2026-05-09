@@ -6,6 +6,38 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub const MIN_WINDOW_WIDTH: u32 = 100;
 /// Minimum window height for resizing
 pub const MIN_WINDOW_HEIGHT: u32 = 50;
+/// Minimum horizontal strip of the title bar that must remain on screen
+/// during a drag. Keeps the window grabbable for re-dragging.
+pub const MIN_TITLEBAR_VISIBLE: i32 = 80;
+/// Title bar height assumed by the drag clamp. Matches `FrameWindow`'s
+/// constant; revisit if other frame styles are added.
+pub const DRAG_CLAMP_TITLE_BAR_HEIGHT: i32 = 24;
+
+/// Clamp a window's horizontal drag position so at least
+/// `MIN_TITLEBAR_VISIBLE` pixels of the title bar stay on screen.
+///
+/// `window_width` may be smaller than `MIN_TITLEBAR_VISIBLE` for narrow
+/// windows; in that case the entire window must remain on screen rather
+/// than the constant strip.
+pub fn clamp_drag_x(raw_x: i32, window_width: i32, screen_width: i32) -> i32 {
+    let visible = MIN_TITLEBAR_VISIBLE.min(window_width.max(0));
+    // Right-edge clamp: window's left edge cannot move past
+    // `screen_width - visible`, ensuring `visible` pixels of the title
+    // bar remain visible at the left of the screen.
+    let max_x = screen_width - visible;
+    // Left-edge clamp: window's left edge cannot be so negative that the
+    // title bar's right edge crosses `visible` from the left.
+    let min_x = visible - window_width;
+    raw_x.clamp(min_x, max_x)
+}
+
+/// Clamp a window's vertical drag position so the title bar stays on
+/// screen. The title bar is always at the top of the window, so this
+/// keeps `[0, screen_height - title_bar_height]`.
+pub fn clamp_drag_y(raw_y: i32, screen_height: i32) -> i32 {
+    let max_y = screen_height - DRAG_CLAMP_TITLE_BAR_HEIGHT;
+    raw_y.clamp(0, max_y.max(0))
+}
 
 /// Unique identifier for a window
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

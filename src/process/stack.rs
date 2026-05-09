@@ -84,6 +84,33 @@ impl StackAllocator {
             index, stack_base, stack_top
         );
 
+        // Pre-fault every page of the stack right now, so the spawned process
+        // never relies on lazy demand-paging while it runs. The kernel stack
+        // pages are auto-mapped on first access by the page-fault handler in
+        // `src/arch/x86_64/interrupts.rs::page_fault_handler`, but a function
+        // prologue that allocates >4 KiB of stack at once (e.g., a hand-rolled
+        // ELF parser, or the chain of FAT-walk → read_to_vec → loader →
+        // enter_user_mode) can step the new RSP past an unmapped page in a
+        // single `sub rsp, N`. The next memory write — including the CPU's
+        // own automatic IRET-frame push for the resulting #PF — then lands on
+        // an unmapped page and escalates straight to #DF. Rust on
+        // `x86_64-unknown-none` does not insert stack probes, so there is no
+        // compiler-side defense.
+        //
+        // Touching each page here forces the existing demand-page handler to
+        // map every page while we are still on the (already-mapped) caller
+        // stack. After this loop returns, the entire stack slot is wired and
+        // the spawned process can use any portion of it without faulting.
+        let stack_size_bytes = (stack_top - stack_base) as usize;
+        let page_size = 4096usize;
+        let pages = stack_size_bytes / page_size;
+        for i in 0..pages {
+            let addr = stack_base + (i * page_size) as u64;
+            unsafe {
+                core::ptr::read_volatile(addr as *const u8);
+            }
+        }
+
         Ok((stack_base, stack_top))
     }
 

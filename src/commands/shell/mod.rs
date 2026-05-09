@@ -173,36 +173,6 @@ impl ShellProcess {
                             let enabled = self.base.stdin().echo_enabled();
                             println!("Echo is currently {}", if enabled { "enabled" } else { "disabled" });
                         }
-                        "font arial" => {
-                            println!("Attempting to load Arial font from filesystem...");
-                            if crate::graphics::fonts::core_font::try_load_arial_font() {
-                                println!("✓ Arial font loaded successfully!");
-                                println!("  New text will use Arial font from /arial.ttf");
-                            } else {
-                                println!("✗ Failed to load Arial font from /arial.ttf");
-                                println!("  Continuing with embedded font");
-                            }
-                        }
-                        "font embedded" => {
-                            println!("Switching to embedded font...");
-                            crate::graphics::fonts::core_font::reset_to_embedded_font();
-                            println!("✓ Switched to embedded 8x8 font");
-                        }
-                        "font status" => {
-                            // We can't easily query which font is active, but we can show what's available
-                            println!("Font Status:");
-                            println!("  Available fonts:");
-                            println!("    - embedded (built-in 8x8 font)");
-                            if crate::fs::exists("/arial.ttf") {
-                                println!("    - arial (from /arial.ttf)");
-                            } else {
-                                println!("    - arial (not available - /arial.ttf not found)");
-                            }
-                            println!("  Commands:");
-                            println!("    font arial     - switch to Arial font");
-                            println!("    font embedded  - switch to embedded font");
-                            println!("    font status    - show this info");
-                        }
                         "" => {
                             // Empty command, just show prompt again
                         }

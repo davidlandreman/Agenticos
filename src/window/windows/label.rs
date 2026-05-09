@@ -137,10 +137,10 @@ impl Window for Label {
         }
 
         let bounds = self.base.bounds();
-        let x = bounds.x as usize;
-        let y = bounds.y as usize;
-        let width = bounds.width as usize;
-        let height = bounds.height as usize;
+        let x = bounds.x;
+        let y = bounds.y;
+        let width = bounds.width;
+        let height = bounds.height;
 
         // Draw background if set
         if let Some(bg) = self.background {
@@ -150,22 +150,22 @@ impl Window for Label {
         // Draw text
         if !self.text.is_empty() {
             let font = get_default_font();
-            let char_width = 8; // Default font is 8x8
-            let text_width = self.text.len() * char_width;
+            let char_width = font.cell_width();
+            let text_width = (self.text.len() as u32) * char_width;
 
             // Calculate x position based on alignment
             let text_x = match self.align {
                 TextAlign::Left => x + 2, // Small padding
                 TextAlign::Center => {
                     if text_width < width {
-                        x + (width - text_width) / 2
+                        x + ((width - text_width) / 2) as i32
                     } else {
                         x + 2
                     }
                 }
                 TextAlign::Right => {
                     if text_width < width {
-                        x + width - text_width - 2
+                        x + (width - text_width) as i32 - 2
                     } else {
                         x + 2
                     }
@@ -173,7 +173,7 @@ impl Window for Label {
             };
 
             // Center vertically
-            let text_y = y + (height.saturating_sub(8)) / 2;
+            let text_y = y + (height.saturating_sub(font.line_height()) / 2) as i32;
 
             device.draw_text(text_x, text_y, &self.text, font.as_font(), self.color);
         }

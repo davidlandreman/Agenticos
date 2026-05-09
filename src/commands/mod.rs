@@ -16,3 +16,4 @@ pub mod calc;
 pub mod guishell;
 pub mod notepad;
 pub mod tasks;
+pub mod run;

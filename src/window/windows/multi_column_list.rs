@@ -261,10 +261,12 @@ impl Window for MultiColumnList {
         }
 
         let bounds = self.base.bounds();
-        let x = bounds.x as usize;
-        let y = bounds.y as usize;
-        let width = bounds.width as usize;
-        let height = bounds.height as usize;
+        let x = bounds.x;
+        let y = bounds.y;
+        let width = bounds.width;
+        let height = bounds.height;
+        let header_h = self.header_height as i32;
+        let row_h = self.row_height as i32;
 
         // Draw background
         device.fill_rect(x, y, width, height, self.bg_color);
@@ -273,15 +275,17 @@ impl Window for MultiColumnList {
         device.draw_rect(x, y, width, height, Color::GRAY);
 
         let font = get_default_font();
-        let padding = 4;
+        let line_h = font.line_height() as i32;
+        let cell_w = font.cell_width() as usize;
+        let padding: i32 = 4;
 
         // Draw header row
-        device.fill_rect(x + 1, y + 1, width - 2, self.header_height, self.header_bg_color);
+        device.fill_rect(x + 1, y + 1, width - 2, self.header_height as u32, self.header_bg_color);
 
         let mut col_x = x + 1;
         for column in &self.columns {
             // Draw header text
-            let text_y = y + (self.header_height - 8) / 2;
+            let text_y = y + (header_h - line_h) / 2;
             device.draw_text(
                 col_x + padding,
                 text_y,
@@ -291,15 +295,15 @@ impl Window for MultiColumnList {
             );
 
             // Draw column separator
-            col_x += column.width;
-            if col_x < x + width - 1 {
-                device.draw_line(col_x, y + 1, col_x, y + self.header_height, Color::GRAY);
+            col_x += column.width as i32;
+            if col_x < x + width as i32 - 1 {
+                device.draw_line(col_x, y + 1, col_x, y + header_h, Color::GRAY);
             }
         }
 
         // Draw separator line below header
-        let header_bottom = y + self.header_height;
-        device.draw_line(x + 1, header_bottom, x + width - 2, header_bottom, Color::GRAY);
+        let header_bottom = y + header_h;
+        device.draw_line(x + 1, header_bottom, x + width as i32 - 2, header_bottom, Color::GRAY);
 
         // Draw data rows
         let visible_count = self.visible_rows();
@@ -309,7 +313,7 @@ impl Window for MultiColumnList {
                 break;
             }
 
-            let row_y = y + self.header_height + 1 + i * self.row_height;
+            let row_y = y + header_h + 1 + (i as i32) * row_h;
             let is_selected = self.selected_index == Some(row_index);
 
             // Draw row background
@@ -318,7 +322,7 @@ impl Window for MultiColumnList {
                     x + 1,
                     row_y,
                     width - 2,
-                    self.row_height,
+                    self.row_height as u32,
                     self.selected_bg_color,
                 );
             }
@@ -334,10 +338,10 @@ impl Window for MultiColumnList {
             let mut cell_x = x + 1;
             for (col_idx, column) in self.columns.iter().enumerate() {
                 let text = row_data.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-                let text_y = row_y + (self.row_height - 8) / 2;
+                let text_y = row_y + (row_h - line_h) / 2;
 
                 // Truncate text if it doesn't fit
-                let max_chars = (column.width - padding * 2) / 8;
+                let max_chars = column.width.saturating_sub((padding as usize) * 2) / cell_w.max(1);
                 let display_text = if text.len() > max_chars {
                     &text[..max_chars]
                 } else {
@@ -352,17 +356,17 @@ impl Window for MultiColumnList {
                     text_color,
                 );
 
-                cell_x += column.width;
+                cell_x += column.width as i32;
             }
         }
 
         // Draw scrollbar if needed
         let visible = self.visible_rows();
         if self.rows.len() > visible && visible > 0 {
-            let scrollbar_width = 8;
-            let scrollbar_x = x + width - scrollbar_width - 1;
-            let scrollbar_y = y + self.header_height + 1;
-            let scrollbar_height = height - self.header_height - 2;
+            let scrollbar_width: u32 = 8;
+            let scrollbar_x = x + width as i32 - scrollbar_width as i32 - 1;
+            let scrollbar_y = y + header_h + 1;
+            let scrollbar_height = height.saturating_sub(self.header_height as u32 + 2);
 
             // Scrollbar track
             device.fill_rect(
@@ -374,12 +378,12 @@ impl Window for MultiColumnList {
             );
 
             // Scrollbar thumb
-            let thumb_height = (visible * scrollbar_height) / self.rows.len();
+            let thumb_height = (visible as u32 * scrollbar_height) / self.rows.len() as u32;
             let thumb_height = thumb_height.max(10);
-            let thumb_pos = (self.scroll_offset * scrollbar_height) / self.rows.len();
+            let thumb_pos = ((self.scroll_offset as u32) * scrollbar_height) / self.rows.len() as u32;
             device.fill_rect(
                 scrollbar_x,
-                scrollbar_y + thumb_pos,
+                scrollbar_y + thumb_pos as i32,
                 scrollbar_width,
                 thumb_height,
                 Color::GRAY,

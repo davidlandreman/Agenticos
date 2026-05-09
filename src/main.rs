@@ -22,6 +22,7 @@ mod process;
 mod stdlib;
 mod tests;
 mod tools;
+mod userland;
 mod window;
 
 use bootloader_api::{entry_point, BootInfo};

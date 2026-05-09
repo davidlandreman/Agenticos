@@ -1,5 +1,6 @@
 //! Adapters for existing graphics implementations
 
+pub mod clip;
 pub mod direct_framebuffer;
 pub mod double_buffered;
 

@@ -1,0 +1,504 @@
+#![allow(dead_code)]
+//! Hand-rolled ELF64 fixtures for the U6 loader tests.
+//!
+//! We build minimal `Vec<u8>` ELF binaries directly here rather than
+//! `include_bytes!` from the userland sibling project (U8). The plan's
+//! F2 finding flags U8 as a soft circular dependency for U6 tests, and the
+//! happy-path is small enough that hand-rolling keeps the loader honest.
+//!
+//! Layout (ET_EXEC, EM_X86_64, ELFCLASS64):
+//!
+//! ```
+//! +------------- 0
+//! | Elf64Ehdr (64 bytes)
+//! +------------- 64
+//! | Elf64Phdr * phnum (56 bytes each)
+//! +------------- after phdrs
+//! | (optional) section headers + dynsym/strtab/rela
+//! +------------- p_offset
+//! | PT_LOAD payload (instructions, data, bss tail)
+//! +-------------
+//! ```
+//!
+//! `p_offset == p_vaddr` so the alignment invariant `p_offset % 0x1000 ==
+//! p_vaddr % 0x1000` holds for any page-aligned `p_vaddr`. We keep
+//! `p_offset` small (just past the headers) and the segment payload short;
+//! the page mapping covers exactly the bytes used.
+
+use alloc::vec;
+use alloc::vec::Vec;
+
+pub const EI_NIDENT: usize = 16;
+pub const EHDR_SIZE: u64 = 64;
+pub const PHDR_SIZE: u64 = 56;
+pub const SHDR_SIZE: u64 = 64;
+pub const RELA_SIZE: u64 = 24;
+pub const SYM_SIZE: u64 = 24;
+
+pub const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+pub const ELFCLASS64: u8 = 2;
+pub const ELFDATA2LSB: u8 = 1;
+pub const EV_CURRENT: u8 = 1;
+
+pub const ET_REL: u16 = 1;
+pub const ET_EXEC: u16 = 2;
+pub const EM_X86_64: u16 = 62;
+pub const EM_AARCH64: u16 = 183;
+
+pub const PT_LOAD: u32 = 1;
+pub const PT_INTERP: u32 = 3;
+pub const PT_TLS: u32 = 7;
+
+pub const PF_X: u32 = 1;
+pub const PF_W: u32 = 2;
+pub const PF_R: u32 = 4;
+
+pub const SHT_PROGBITS: u32 = 1;
+pub const SHT_RELA: u32 = 4;
+pub const SHT_DYNSYM: u32 = 11;
+pub const SHT_STRTAB: u32 = 3;
+
+pub const R_X86_64_GLOB_DAT: u32 = 6;
+pub const R_X86_64_TPOFF64: u32 = 18;
+
+#[derive(Clone, Copy)]
+pub struct PhdrSpec {
+    pub p_type: u32,
+    pub p_flags: u32,
+    pub p_offset: u64,
+    pub p_vaddr: u64,
+    pub p_filesz: u64,
+    pub p_memsz: u64,
+    pub p_align: u64,
+}
+
+/// Settings for the happy-path (and most negative-path) ELF.
+pub struct Fixture {
+    pub e_type: u16,
+    pub e_machine: u16,
+    pub ei_class: u8,
+    pub ei_data: u8,
+    pub e_entry: u64,
+    pub phdrs: Vec<PhdrSpec>,
+    /// File-resident bytes per PT_LOAD. The loader copies `p_filesz` bytes
+    /// from `bytes[p_offset..]` into the user VA. We append each PT_LOAD's
+    /// payload at its `p_offset`. Zero-padding between regions is fine.
+    pub payloads: Vec<(u64 /* p_offset */, Vec<u8>)>,
+    /// Truncate the assembled output at this length. None = no truncation.
+    pub truncate_to: Option<usize>,
+}
+
+impl Fixture {
+    pub fn build(self) -> Vec<u8> {
+        let phnum = self.phdrs.len() as u16;
+
+        // Compute total length: header + phdrs + every payload range.
+        let mut total = EHDR_SIZE + phnum as u64 * PHDR_SIZE;
+        for (off, payload) in &self.payloads {
+            let end = off + payload.len() as u64;
+            if end > total {
+                total = end;
+            }
+        }
+
+        let mut out: Vec<u8> = vec![0u8; total as usize];
+
+        // Ehdr.
+        out[0..4].copy_from_slice(&ELFMAG);
+        out[4] = self.ei_class;
+        out[5] = self.ei_data;
+        out[6] = EV_CURRENT;
+        // e_ident[7..16] left zero (OSABI=0 etc).
+        write_u16(&mut out, 16, self.e_type);
+        write_u16(&mut out, 18, self.e_machine);
+        write_u32(&mut out, 20, EV_CURRENT as u32);
+        write_u64(&mut out, 24, self.e_entry);
+        write_u64(&mut out, 32, EHDR_SIZE); // e_phoff
+        write_u64(&mut out, 40, 0); // e_shoff
+        write_u32(&mut out, 48, 0); // e_flags
+        write_u16(&mut out, 52, EHDR_SIZE as u16);
+        write_u16(&mut out, 54, PHDR_SIZE as u16);
+        write_u16(&mut out, 56, phnum);
+        write_u16(&mut out, 58, SHDR_SIZE as u16);
+        write_u16(&mut out, 60, 0); // e_shnum
+        write_u16(&mut out, 62, 0); // e_shstrndx
+
+        // Phdrs.
+        for (i, ph) in self.phdrs.iter().enumerate() {
+            let off = (EHDR_SIZE + i as u64 * PHDR_SIZE) as usize;
+            write_u32(&mut out, off, ph.p_type);
+            write_u32(&mut out, off + 4, ph.p_flags);
+            write_u64(&mut out, off + 8, ph.p_offset);
+            write_u64(&mut out, off + 16, ph.p_vaddr);
+            write_u64(&mut out, off + 24, ph.p_vaddr); // p_paddr = p_vaddr
+            write_u64(&mut out, off + 32, ph.p_filesz);
+            write_u64(&mut out, off + 40, ph.p_memsz);
+            write_u64(&mut out, off + 48, ph.p_align);
+        }
+
+        // Payloads.
+        for (offset, payload) in &self.payloads {
+            let off = *offset as usize;
+            out[off..off + payload.len()].copy_from_slice(payload);
+        }
+
+        if let Some(n) = self.truncate_to {
+            out.truncate(n);
+        }
+        out
+    }
+}
+
+/// Smallest valid happy-path ELF: one PT_LOAD covering a single page at
+/// `0x40_0000` (USER_LOAD_BASE) with a tiny RX payload. e_entry points to
+/// the start of the segment. `p_filesz < p_memsz` so the loader's bss
+/// zero-fill code is exercised.
+pub fn happy_path_elf() -> Vec<u8> {
+    // Choose p_offset = 0x1000 so the file layout is:
+    //   [0..64) ehdr
+    //   [64..120) phdr
+    //   [0x1000..0x1000+0x10) payload (16 bytes of "code")
+    let payload: Vec<u8> = (0..16u8).collect();
+    let p_offset = 0x1000u64;
+    let p_vaddr = 0x40_0000u64;
+    let p_filesz = payload.len() as u64;
+    let p_memsz = 0x100u64; // bss tail of (0x100 - 0x10) zero bytes
+    let phdr = PhdrSpec {
+        p_type: PT_LOAD,
+        p_flags: PF_R | PF_X,
+        p_offset,
+        p_vaddr,
+        p_filesz,
+        p_memsz,
+        p_align: 0x1000,
+    };
+    Fixture {
+        e_type: ET_EXEC,
+        e_machine: EM_X86_64,
+        ei_class: ELFCLASS64,
+        ei_data: ELFDATA2LSB,
+        e_entry: p_vaddr,
+        phdrs: vec![phdr],
+        payloads: vec![(p_offset, payload)],
+        truncate_to: None,
+    }
+    .build()
+}
+
+// ---------- runnable fixtures (U7) ----------
+
+/// Build a single-PT_LOAD ELF whose `_start` (at 0x40_0000) is the given byte
+/// stream. The page is mapped R+X (PF_R | PF_X). `p_memsz` is rounded up to a
+/// page so the loader maps exactly one 4 KiB page covering `p_vaddr ..
+/// p_vaddr+0x1000`. Useful for hand-crafted "do one thing" test apps.
+pub fn runnable_elf_rx(code: &[u8]) -> Vec<u8> {
+    let payload = code.to_vec();
+    let p_offset = 0x1000u64;
+    let p_vaddr = 0x40_0000u64;
+    let p_filesz = payload.len() as u64;
+    let p_memsz = 0x1000u64; // full page
+    let phdr = PhdrSpec {
+        p_type: PT_LOAD,
+        p_flags: PF_R | PF_X,
+        p_offset,
+        p_vaddr,
+        p_filesz,
+        p_memsz,
+        p_align: 0x1000,
+    };
+    Fixture {
+        e_type: ET_EXEC,
+        e_machine: EM_X86_64,
+        ei_class: ELFCLASS64,
+        ei_data: ELFDATA2LSB,
+        e_entry: p_vaddr,
+        phdrs: vec![phdr],
+        payloads: vec![(p_offset, payload)],
+        truncate_to: None,
+    }
+    .build()
+}
+
+/// Hand-assembled "hello + exit(0)" app. Layout in the single R+X page:
+///
+/// ```
+/// 0x40_0000:  mov rax, 0       ; B8 00 00 00 00
+/// 0x40_0005:  mov rdi, 0x400080 ; 48 BF 80 00 40 00 00 00 00 00
+/// 0x40_000F:  mov rsi, 6       ; BE 06 00 00 00
+/// 0x40_0014:  int 0x80         ; CD 80         (print)
+/// 0x40_0016:  mov rax, 1       ; B8 01 00 00 00
+/// 0x40_001B:  mov rdi, 0       ; BF 00 00 00 00
+/// 0x40_0020:  int 0x80         ; CD 80         (exit)
+/// 0x40_0022:  hlt              ; F4            (safety)
+/// ...
+/// 0x40_0080:  "hello\n"
+/// ```
+///
+/// The user app runs straight through with no GOT/relocations — it issues
+/// `int 0x80` directly, with the syscall ID baked into RAX. This shortcuts
+/// the userland-side trampoline page (which is still mapped, but unused by
+/// this fixture) and lets us prove the ring-3 entry + syscall + long-jump
+/// path without depending on the U6 relocation walker, U8 userlib, or any
+/// linker tooling.
+pub fn hello_exit0_elf() -> Vec<u8> {
+    build_print_exit_elf(b"hello\n", 0)
+}
+
+/// Same shape as `hello_exit0_elf` but with a custom message and exit code.
+pub fn build_print_exit_elf(msg: &[u8], exit_code: u32) -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov eax, 0  (print syscall id)
+    code.extend_from_slice(&[0xB8, 0x00, 0x00, 0x00, 0x00]);
+    // mov rdi, 0x40_0080 (msg ptr) — REX.W + B8+rd id 0xBF
+    code.extend_from_slice(&[0x48, 0xBF, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    // mov esi, msg.len()
+    let len = msg.len() as u32;
+    code.push(0xBE);
+    code.extend_from_slice(&len.to_le_bytes());
+    // int 0x80
+    code.extend_from_slice(&[0xCD, 0x80]);
+    // mov eax, 1 (exit syscall id)
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+    // mov edi, exit_code
+    code.push(0xBF);
+    code.extend_from_slice(&exit_code.to_le_bytes());
+    // int 0x80
+    code.extend_from_slice(&[0xCD, 0x80]);
+    // hlt (safety; reached only if exit returns, which it does not)
+    code.push(0xF4);
+
+    // Pad to 0x80 then append message.
+    while code.len() < 0x80 {
+        code.push(0x90); // NOP padding
+    }
+    code.extend_from_slice(msg);
+    runnable_elf_rx(&code)
+}
+
+/// Fixture: first instruction is UD2 (`0F 0B`). Triggers #UD on entry.
+pub fn fault_ud_elf() -> Vec<u8> {
+    runnable_elf_rx(&[0x0F, 0x0B])
+}
+
+/// Fixture: dereferences `0x10_0000_0000` (canonical, unmapped) for a read.
+/// Triggers #PF (a non-canonical address would trigger #GP instead).
+pub fn fault_pf_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov rax, 0x10_0000_0000 ; 48 B8 imm64
+    code.extend_from_slice(&[0x48, 0xB8]);
+    code.extend_from_slice(&0x10_0000_0000u64.to_le_bytes());
+    // mov rax, [rax]            ; 48 8B 00
+    code.extend_from_slice(&[0x48, 0x8B, 0x00]);
+    // hlt (unreachable — should fault first)
+    code.push(0xF4);
+    runnable_elf_rx(&code)
+}
+
+/// Fixture: executes `cli` (0xFA), a privileged instruction. Triggers #GP.
+pub fn fault_gp_elf() -> Vec<u8> {
+    runnable_elf_rx(&[0xFA, 0xF4])
+}
+
+/// Fixture: calls `print` with a kernel-range pointer. The syscall returns
+/// EFAULT (negative); the app then does `exit(rax_low_byte)`. Demonstrates
+/// pointer-validation defense without crashing the kernel.
+pub fn print_kernel_ptr_then_exit_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov rax, 0 (print)
+    code.extend_from_slice(&[0xB8, 0x00, 0x00, 0x00, 0x00]);
+    // mov rdi, 0xFFFF_8000_0000_0000 (kernel-range)
+    code.extend_from_slice(&[0x48, 0xBF]);
+    code.extend_from_slice(&0xFFFF_8000_0000_0000u64.to_le_bytes());
+    // mov esi, 5
+    code.extend_from_slice(&[0xBE, 0x05, 0x00, 0x00, 0x00]);
+    // int 0x80     (returns EFAULT in RAX)
+    code.extend_from_slice(&[0xCD, 0x80]);
+    // mov rdi, rax (exit code = whatever print returned)
+    code.extend_from_slice(&[0x48, 0x89, 0xC7]);
+    // mov eax, 1 (exit)
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+    // int 0x80
+    code.extend_from_slice(&[0xCD, 0x80]);
+    code.push(0xF4);
+    runnable_elf_rx(&code)
+}
+
+// ---------- low-level writers ----------
+
+pub fn write_u16(buf: &mut [u8], at: usize, v: u16) {
+    buf[at..at + 2].copy_from_slice(&v.to_le_bytes());
+}
+pub fn write_u32(buf: &mut [u8], at: usize, v: u32) {
+    buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+pub fn write_u64(buf: &mut [u8], at: usize, v: u64) {
+    buf[at..at + 8].copy_from_slice(&v.to_le_bytes());
+}
+pub fn write_i64(buf: &mut [u8], at: usize, v: i64) {
+    buf[at..at + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+// ---------- ELF with section headers + relocations ----------
+
+/// Build an ELF that includes section headers, a dynsym, a strtab, and one
+/// SHT_RELA section with a single Rela entry of the requested type referencing
+/// the requested symbol name. `rela_offset` is the `r_offset` field of the
+/// rela; for the happy "patch a GOT slot" case point it inside the writable
+/// segment; for the BadRelocOffset test point it outside.
+///
+/// The binary has two PT_LOADs: an R-X "text" page at 0x40_0000 and an R-W
+/// "data" page at 0x40_1000 where the GOT slot lives (so the relocation walk
+/// has somewhere legal to write).
+pub fn elf_with_one_reloc(
+    sym_name: &str,
+    rela_type: u32,
+    rela_offset: u64,
+) -> Vec<u8> {
+    // Layout (file offsets):
+    //   ehdr 0
+    //   phdr 64
+    //   phdr 64+56=120
+    //   shdrs 0x800       (4 entries: NULL, .dynsym, .dynstr, .rela.dyn)
+    //   dynsym 0xA00      (2 entries: STN_UNDEF, our import)
+    //   dynstr 0xB00      ("\0<name>\0")
+    //   rela 0xC00        (1 entry)
+    //   text payload 0x1000 (16 bytes at p_vaddr=0x40_0000)
+    //   data payload 0x2000 (8 bytes at p_vaddr=0x40_1000 — the GOT slot)
+    //
+    // Sizes are generous so we never have to reflow.
+
+    let text_payload: Vec<u8> = (0..16u8).collect();
+    let data_payload: Vec<u8> = vec![0u8; 8];
+
+    let dynsym_off: u64 = 0xA00;
+    let dynstr_off: u64 = 0xB00;
+    let rela_off: u64 = 0xC00;
+    let shoff: u64 = 0x800;
+
+    let text_p_offset = 0x1000u64;
+    let text_p_vaddr = 0x40_0000u64;
+    let data_p_offset = 0x2000u64;
+    let data_p_vaddr = 0x40_1000u64;
+
+    let phdrs = vec![
+        PhdrSpec {
+            p_type: PT_LOAD,
+            p_flags: PF_R | PF_X,
+            p_offset: text_p_offset,
+            p_vaddr: text_p_vaddr,
+            p_filesz: text_payload.len() as u64,
+            p_memsz: 0x100,
+            p_align: 0x1000,
+        },
+        PhdrSpec {
+            p_type: PT_LOAD,
+            p_flags: PF_R | PF_W,
+            p_offset: data_p_offset,
+            p_vaddr: data_p_vaddr,
+            p_filesz: data_payload.len() as u64,
+            p_memsz: 0x100,
+            p_align: 0x1000,
+        },
+    ];
+
+    // Build dynstr: starts with "\0" then the symbol name + "\0".
+    let mut dynstr = Vec::new();
+    dynstr.push(0u8); // STN_UNDEF
+    let name_off = dynstr.len() as u32;
+    dynstr.extend_from_slice(sym_name.as_bytes());
+    dynstr.push(0);
+
+    // Build dynsym (2 entries: undef + the import).
+    let mut dynsym = Vec::new();
+    // Entry 0: STN_UNDEF, all zeros.
+    dynsym.extend_from_slice(&[0u8; SYM_SIZE as usize]);
+    // Entry 1: st_name = name_off, st_info=0x10 (STB_GLOBAL, STT_NOTYPE),
+    // st_shndx=0 (SHN_UNDEF), st_value=0, st_size=0.
+    let mut sym1 = vec![0u8; SYM_SIZE as usize];
+    write_u32(&mut sym1, 0, name_off);
+    sym1[4] = 0x10;
+    dynsym.extend_from_slice(&sym1);
+
+    // Build the single rela.
+    let mut rela = vec![0u8; RELA_SIZE as usize];
+    write_u64(&mut rela, 0, rela_offset);
+    let r_sym: u64 = 1; // index into dynsym for our import
+    let r_info: u64 = (r_sym << 32) | rela_type as u64;
+    write_u64(&mut rela, 8, r_info);
+    write_i64(&mut rela, 16, 0); // r_addend
+
+    // Build section headers.
+    // Indexes: 0 = NULL, 1 = .dynsym, 2 = .dynstr, 3 = .rela.dyn.
+    let mut shdrs = vec![0u8; (4 * SHDR_SIZE) as usize];
+    // Section 1: .dynsym
+    let s1 = SHDR_SIZE as usize;
+    write_u32(&mut shdrs, s1, 0); // sh_name
+    write_u32(&mut shdrs, s1 + 4, SHT_DYNSYM);
+    write_u64(&mut shdrs, s1 + 16, 0); // sh_addr
+    write_u64(&mut shdrs, s1 + 24, dynsym_off);
+    write_u64(&mut shdrs, s1 + 32, dynsym.len() as u64);
+    write_u32(&mut shdrs, s1 + 40, 2); // sh_link -> .dynstr
+    write_u64(&mut shdrs, s1 + 56, SYM_SIZE);
+    // Section 2: .dynstr
+    let s2 = (2 * SHDR_SIZE) as usize;
+    write_u32(&mut shdrs, s2 + 4, SHT_STRTAB);
+    write_u64(&mut shdrs, s2 + 24, dynstr_off);
+    write_u64(&mut shdrs, s2 + 32, dynstr.len() as u64);
+    // Section 3: .rela.dyn
+    let s3 = (3 * SHDR_SIZE) as usize;
+    write_u32(&mut shdrs, s3 + 4, SHT_RELA);
+    write_u64(&mut shdrs, s3 + 24, rela_off);
+    write_u64(&mut shdrs, s3 + 32, RELA_SIZE);
+    write_u32(&mut shdrs, s3 + 40, 1); // sh_link -> .dynsym
+    write_u64(&mut shdrs, s3 + 56, RELA_SIZE);
+
+    // Compute total file size: bytes up through the last payload.
+    let total = (data_p_offset + data_payload.len() as u64) as usize;
+    let mut out = vec![0u8; total];
+
+    // Ehdr.
+    out[0..4].copy_from_slice(&ELFMAG);
+    out[4] = ELFCLASS64;
+    out[5] = ELFDATA2LSB;
+    out[6] = EV_CURRENT;
+    write_u16(&mut out, 16, ET_EXEC);
+    write_u16(&mut out, 18, EM_X86_64);
+    write_u32(&mut out, 20, EV_CURRENT as u32);
+    write_u64(&mut out, 24, text_p_vaddr); // entry
+    write_u64(&mut out, 32, EHDR_SIZE); // e_phoff
+    write_u64(&mut out, 40, shoff); // e_shoff
+    write_u16(&mut out, 52, EHDR_SIZE as u16);
+    write_u16(&mut out, 54, PHDR_SIZE as u16);
+    write_u16(&mut out, 56, phdrs.len() as u16);
+    write_u16(&mut out, 58, SHDR_SIZE as u16);
+    write_u16(&mut out, 60, 4); // e_shnum
+    write_u16(&mut out, 62, 0); // e_shstrndx
+
+    // Phdrs.
+    for (i, ph) in phdrs.iter().enumerate() {
+        let off = (EHDR_SIZE + i as u64 * PHDR_SIZE) as usize;
+        write_u32(&mut out, off, ph.p_type);
+        write_u32(&mut out, off + 4, ph.p_flags);
+        write_u64(&mut out, off + 8, ph.p_offset);
+        write_u64(&mut out, off + 16, ph.p_vaddr);
+        write_u64(&mut out, off + 24, ph.p_vaddr);
+        write_u64(&mut out, off + 32, ph.p_filesz);
+        write_u64(&mut out, off + 40, ph.p_memsz);
+        write_u64(&mut out, off + 48, ph.p_align);
+    }
+
+    // Section headers.
+    out[shoff as usize..shoff as usize + shdrs.len()].copy_from_slice(&shdrs);
+    // dynsym.
+    out[dynsym_off as usize..dynsym_off as usize + dynsym.len()].copy_from_slice(&dynsym);
+    // dynstr.
+    out[dynstr_off as usize..dynstr_off as usize + dynstr.len()].copy_from_slice(&dynstr);
+    // rela.
+    out[rela_off as usize..rela_off as usize + rela.len()].copy_from_slice(&rela);
+    // text.
+    out[text_p_offset as usize..text_p_offset as usize + text_payload.len()]
+        .copy_from_slice(&text_payload);
+    // (data_payload is all zeros — already there)
+
+    out
+}

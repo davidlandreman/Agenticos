@@ -11,7 +11,11 @@ use super::{
     Event, EventResult, KeyboardEvent, MouseEvent, MouseEventType,
     Point, Rect, keyboard::{scancode_to_keycode, KeyboardState},
 };
-use super::types::{InteractionState, HitTestResult, ResizeEdge, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT};
+use super::types::{
+    clamp_drag_x, clamp_drag_y,
+    InteractionState, HitTestResult, ResizeEdge,
+    MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT,
+};
 use super::console::take_pending_invalidations;
 use super::windows::MenuBarPopup;
 
@@ -612,14 +616,16 @@ impl WindowManager {
 
         // Check if mouse moved
         let (mouse_x, mouse_y, buttons) = mouse::get_state();
-        let mouse_x = mouse_x.max(0) as usize;
-        let mouse_y = mouse_y.max(0) as usize;
 
         // Handle window dragging
-        self.handle_dragging(mouse_x as i32, mouse_y as i32, buttons);
+        self.handle_dragging(mouse_x, mouse_y, buttons);
 
-        // Update cursor position in compositor (this marks dirty regions)
-        let mouse_moved = self.compositor.update_cursor(mouse_x, mouse_y);
+        // Update cursor position in compositor (this marks dirty regions).
+        // The compositor still works in unsigned screen coordinates; clamp
+        // the mouse position to the device for that path only.
+        let mouse_moved = self
+            .compositor
+            .update_cursor(mouse_x.max(0) as usize, mouse_y.max(0) as usize);
 
         // Cascade invalidation across the z-order so that any window in
         // front of a dirty one (and overlapping it) repaints too. Without
@@ -791,12 +797,22 @@ impl WindowManager {
                     // Continue dragging - move the window
                     let delta_x = mouse_x - start_mouse.x;
                     let delta_y = mouse_y - start_mouse.y;
-                    let new_x = start_window.x + delta_x;
-                    let new_y = start_window.y + delta_y;
+                    let raw_x = start_window.x + delta_x;
+                    let raw_y = start_window.y + delta_y;
+
+                    let screen_w = self.graphics_device.width() as i32;
+                    let screen_h = self.graphics_device.height() as i32;
 
                     // Move the window
                     if let Some(win) = self.window_registry.get_mut(&window) {
                         let old_bounds = win.bounds();
+
+                        // Clamp so the title bar is always grabbable.
+                        // Partial off-screen drag remains supported; the
+                        // clamp only prevents the title bar from leaving
+                        // the screen.
+                        let new_x = clamp_drag_x(raw_x, old_bounds.width as i32, screen_w);
+                        let new_y = clamp_drag_y(raw_y, screen_h);
 
                         // Only update if position actually changed
                         if new_x != old_bounds.x || new_y != old_bounds.y {

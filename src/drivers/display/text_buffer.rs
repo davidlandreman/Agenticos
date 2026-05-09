@@ -1,3 +1,7 @@
+//! Single-buffered framebuffer text terminal. Used by the legacy `print!`
+//! path before the window system is up. Sizes its character grid from the
+//! current default font.
+
 use crate::graphics::color::Color;
 use bootloader_api::info::{FrameBuffer, PixelFormat};
 use core::fmt;
@@ -7,10 +11,6 @@ use crate::graphics::fonts::core_font::get_default_font;
 
 const DEFAULT_COLOR: Color = Color::WHITE;
 const BACKGROUND_COLOR: Color = Color::BLACK;
-// These should match the font dimensions
-const CHAR_WIDTH: usize = 12;  // Arial at 16px height = 12px width (3/4 ratio)
-const CHAR_HEIGHT: usize = 16; // Arial render size
-
 
 pub struct TextBuffer {
     framebuffer: &'static mut FrameBuffer,
@@ -21,6 +21,8 @@ pub struct TextBuffer {
     text_cols: usize,
     text_rows: usize,
     current_color: Color,
+    cell_width: usize,
+    line_height: usize,
 }
 
 impl TextBuffer {
@@ -28,18 +30,20 @@ impl TextBuffer {
         let info = framebuffer.info();
         let width = info.width;
         let height = info.height;
-        
-        // Get font dimensions dynamically
+
         let font = get_default_font();
-        let font_width = font.char_width();
-        let font_height = font.char_height();
-        debug_info!("Font dimensions: {}x{}", font_width, font_height);
-        
-        let text_cols = width / font_width.max(CHAR_WIDTH);
-        let text_rows = height / font_height.max(CHAR_HEIGHT);
-        
-        debug_info!("TextBuffer dimensions: {}x{} pixels, {}x{} chars", width, height, text_cols, text_rows);
-        
+        let cell_width = font.cell_width() as usize;
+        let line_height = font.line_height() as usize;
+        debug_info!("TextBuffer font cell: {}x{}", cell_width, line_height);
+
+        let text_cols = width / cell_width.max(1);
+        let text_rows = height / line_height.max(1);
+
+        debug_info!(
+            "TextBuffer dimensions: {}x{} pixels, {}x{} chars",
+            width, height, text_cols, text_rows
+        );
+
         let mut buffer = Self {
             framebuffer,
             width,
@@ -49,25 +53,25 @@ impl TextBuffer {
             text_cols,
             text_rows,
             current_color: DEFAULT_COLOR,
+            cell_width,
+            line_height,
         };
-        
+
         buffer.clear();
         buffer
     }
-    
+
     pub fn set_color(&mut self, color: Color) {
         self.current_color = color;
     }
-    
+
     fn draw_pixel(&mut self, x: usize, y: usize, color: Color) {
         if x >= self.width || y >= self.height {
             return;
         }
 
         let info = self.framebuffer.info();
-        let byte_offset = (y * info.stride + x) * info.bytes_per_pixel;
-        let pixel_offset = byte_offset;
-
+        let pixel_offset = (y * info.stride + x) * info.bytes_per_pixel;
         let pixel_buffer = self.framebuffer.buffer_mut();
 
         match info.pixel_format {
@@ -76,11 +80,6 @@ impl TextBuffer {
                 pixel_buffer[pixel_offset + 1] = color.green;
                 pixel_buffer[pixel_offset + 2] = color.blue;
             }
-            PixelFormat::Bgr => {
-                pixel_buffer[pixel_offset] = color.blue;
-                pixel_buffer[pixel_offset + 1] = color.green;
-                pixel_buffer[pixel_offset + 2] = color.red;
-            }
             _ => {
                 pixel_buffer[pixel_offset] = color.blue;
                 pixel_buffer[pixel_offset + 1] = color.green;
@@ -88,43 +87,30 @@ impl TextBuffer {
             }
         }
     }
-    
+
     fn get_pixel(&self, x: usize, y: usize) -> Color {
         if x >= self.width || y >= self.height {
             return Color::BLACK;
         }
 
         let info = self.framebuffer.info();
-        let byte_offset = (y * info.stride + x) * info.bytes_per_pixel;
-        let pixel_offset = byte_offset;
-
+        let pixel_offset = (y * info.stride + x) * info.bytes_per_pixel;
         let pixel_buffer = self.framebuffer.buffer();
 
         match info.pixel_format {
-            PixelFormat::Rgb => {
-                Color::new(
-                    pixel_buffer[pixel_offset],
-                    pixel_buffer[pixel_offset + 1],
-                    pixel_buffer[pixel_offset + 2],
-                )
-            }
-            PixelFormat::Bgr => {
-                Color::new(
-                    pixel_buffer[pixel_offset + 2],
-                    pixel_buffer[pixel_offset + 1],
-                    pixel_buffer[pixel_offset],
-                )
-            }
-            _ => {
-                Color::new(
-                    pixel_buffer[pixel_offset + 2],
-                    pixel_buffer[pixel_offset + 1],
-                    pixel_buffer[pixel_offset],
-                )
-            }
+            PixelFormat::Rgb => Color::new(
+                pixel_buffer[pixel_offset],
+                pixel_buffer[pixel_offset + 1],
+                pixel_buffer[pixel_offset + 2],
+            ),
+            _ => Color::new(
+                pixel_buffer[pixel_offset + 2],
+                pixel_buffer[pixel_offset + 1],
+                pixel_buffer[pixel_offset],
+            ),
         }
     }
-    
+
     fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: Color) {
         for dy in 0..height {
             for dx in 0..width {
@@ -132,69 +118,60 @@ impl TextBuffer {
             }
         }
     }
-    
-    fn draw_char(&mut self, ch: char, x: usize, y: usize, color: Color) {
-        // Get the default font (Arial with embedded fallback)
+
+    fn draw_char(&mut self, ch: char, cell_x_left: usize, cell_y_top: usize, color: Color) {
+        // Always paint the full cell background first so the previous char
+        // doesn't bleed through.
+        self.fill_rect(
+            cell_x_left,
+            cell_y_top,
+            self.cell_width,
+            self.line_height,
+            BACKGROUND_COLOR,
+        );
+
         let font = get_default_font();
-        
-        debug_info!("Drawing character '{}' at ({}, {}), font size: {}x{}", 
-                   ch, x, y, font.char_width(), font.char_height());
-        
-        if let Some(bitmap) = font.get_char_bitmap(ch) {
-            // Draw background
-            self.fill_rect(x, y, CHAR_WIDTH, CHAR_HEIGHT, BACKGROUND_COLOR);
-            
-            // Draw character using unified font interface
-            let width = font.char_width();
-            let height = font.char_height();
-            let bytes_per_row = font.bytes_per_row();
-            
-            for row in 0..height {
-                let row_offset = row * bytes_per_row;
-                for byte_idx in 0..bytes_per_row {
-                    if row_offset + byte_idx >= bitmap.len() {
-                        break;
-                    }
-                    let byte = bitmap[row_offset + byte_idx];
-                    let pixels_in_byte = if byte_idx == bytes_per_row - 1 && width % 8 != 0 {
-                        width % 8
-                    } else {
-                        8
-                    };
-                    
-                    for bit in 0..pixels_in_byte {
-                        if (byte >> (7 - bit)) & 1 == 1 {
-                            let px = x + byte_idx * 8 + bit;
-                            if px < x + width {
-                                self.draw_pixel(px, y + row, color);
-                            }
-                        }
-                    }
+        let Some(glyph) = font.glyph(ch) else {
+            return;
+        };
+
+        let baseline_y = cell_y_top as i32 + font.ascent() as i32;
+        let bitmap_x = cell_x_left as i32 + glyph.x_offset;
+        let bitmap_y = baseline_y + glyph.y_offset;
+        let gw = glyph.width as i32;
+        let gh = glyph.height as i32;
+
+        for row in 0..gh {
+            let dst_y = bitmap_y + row;
+            if dst_y < 0 {
+                continue;
+            }
+            for col in 0..gw {
+                let dst_x = bitmap_x + col;
+                if dst_x < 0 {
+                    continue;
                 }
-            }
-        } else {
-            // Character not found in font
-            debug_info!("Character '{}' (0x{:02X}) not found in font", ch, ch as u8);
-            // Draw a placeholder rectangle
-            self.fill_rect(x, y, CHAR_WIDTH, CHAR_HEIGHT, BACKGROUND_COLOR);
-            // Draw border to indicate missing character
-            for i in 0..CHAR_WIDTH {
-                self.draw_pixel(x + i, y, color);
-                self.draw_pixel(x + i, y + CHAR_HEIGHT - 1, color);
-            }
-            for i in 0..CHAR_HEIGHT {
-                self.draw_pixel(x, y + i, color);
-                self.draw_pixel(x + CHAR_WIDTH - 1, y + i, color);
+                let alpha = glyph.coverage[(row * gw + col) as usize];
+                if alpha == 0 {
+                    continue;
+                }
+                let dst_x = dst_x as usize;
+                let dst_y = dst_y as usize;
+                if alpha == 0xFF {
+                    self.draw_pixel(dst_x, dst_y, color);
+                } else {
+                    let bg = self.get_pixel(dst_x, dst_y);
+                    self.draw_pixel(dst_x, dst_y, bg.blend(&color, alpha));
+                }
             }
         }
     }
-    
+
     fn write_char(&mut self, ch: char) {
         match ch {
             '\n' => self.new_line(),
             '\r' => self.cursor_x = 0,
             '\t' => {
-                // Tab to next 4-character boundary
                 let spaces = 4 - (self.cursor_x % 4);
                 for _ in 0..spaces {
                     self.write_char(' ');
@@ -204,49 +181,44 @@ impl TextBuffer {
                 if self.cursor_x >= self.text_cols {
                     self.new_line();
                 }
-                
-                // Draw the character at current position
-                let x = self.cursor_x * CHAR_WIDTH;
-                let y = self.cursor_y * CHAR_HEIGHT;
-                
+
+                let x = self.cursor_x * self.cell_width;
+                let y = self.cursor_y * self.line_height;
+
                 self.draw_char(ch, x, y, self.current_color);
-                
+
                 self.cursor_x += 1;
             }
         }
     }
-    
+
     fn new_line(&mut self) {
         self.cursor_x = 0;
         self.cursor_y += 1;
-        
-        // Check if we need to scroll
+
         if self.cursor_y >= self.text_rows {
             self.scroll_up();
             self.cursor_y = self.text_rows - 1;
         }
     }
-    
+
     fn scroll_up(&mut self) {
-        // Copy each row up by one
         for row in 1..self.text_rows {
-            let src_y = row * CHAR_HEIGHT;
-            let dst_y = (row - 1) * CHAR_HEIGHT;
-            
-            // Copy row data
-            for y in 0..CHAR_HEIGHT {
+            let src_y = row * self.line_height;
+            let dst_y = (row - 1) * self.line_height;
+
+            for y in 0..self.line_height {
                 for x in 0..self.width {
                     let pixel = self.get_pixel(x, src_y + y);
                     self.draw_pixel(x, dst_y + y, pixel);
                 }
             }
         }
-        
-        // Clear the last row
-        let last_row_y = (self.text_rows - 1) * CHAR_HEIGHT;
-        self.fill_rect(0, last_row_y, self.width, CHAR_HEIGHT, BACKGROUND_COLOR);
+
+        let last_row_y = (self.text_rows - 1) * self.line_height;
+        self.fill_rect(0, last_row_y, self.width, self.line_height, BACKGROUND_COLOR);
     }
-    
+
     pub fn clear(&mut self) {
         self.fill_rect(0, 0, self.width, self.height, BACKGROUND_COLOR);
         self.cursor_x = 0;
@@ -263,7 +235,6 @@ impl fmt::Write for TextBuffer {
     }
 }
 
-// Global text buffer instance
 static TEXT_BUFFER: Mutex<Option<TextBuffer>> = Mutex::new(None);
 
 pub fn init(framebuffer: &'static mut FrameBuffer) {
@@ -273,13 +244,11 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
 
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    
+
     if let Some(ref mut buffer) = *TEXT_BUFFER.lock() {
         buffer.write_fmt(args).unwrap();
     }
 }
-
-// Macros are now exported from display.rs
 
 pub fn set_color(color: Color) {
     if let Some(ref mut buffer) = *TEXT_BUFFER.lock() {

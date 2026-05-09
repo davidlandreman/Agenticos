@@ -6,6 +6,7 @@
 
 # Rust build artifacts
 /target/
+/userland/target/
 Cargo.lock
 
 # OS development artifacts
