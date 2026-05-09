@@ -6,54 +6,124 @@
 # Tests execute automatically during kernel boot and QEMU exits with appropriate
 # status codes:
 #   - Exit code 33 (0x10 << 1 | 1) = All tests passed
-#   - Exit code 35 (0x11 << 1 | 1) = Test failure
+#   - Exit code 35 (0x11 << 1 | 1) = Test failure (or no tests matched filter)
 #
-# Usage: ./test.sh
+# Usage:
+#   ./test.sh                       # run all tests
+#   ./test.sh arc                   # run only the `arc` module
+#   ./test.sh arc heap              # run `arc` and `heap` modules
+#   ./test.sh 'arc::test_weak*'     # glob within a module
+#   ./test.sh '*scroll*'            # substring across module::fn
+#   ./test.sh -l                    # list available modules and exit
+#   ./test.sh --skip-userland       # skip the userland prebuild
+#
+# Filter syntax: comma-separated patterns, matched against `<module>` or
+# `<module>::<fn>`. Each pattern supports `*` as a leading and/or trailing
+# wildcard. Patterns are passed to QEMU via `-fw_cfg` and read at boot — no
+# rebuild required when the filter changes.
 
-# Build and run tests
+set -u
+
+usage() {
+    cat <<'EOF'
+Usage: ./test.sh [PATTERN ...] [--skip-userland] [-l|--list] [-h|--help]
+
+Run kernel tests in QEMU. With no PATTERN, runs the entire suite.
+
+Filter patterns match against `<module>` or `<module>::<fn>` and support `*`
+at the start and/or end:
+  ./test.sh arc                # the `arc` module
+  ./test.sh arc heap           # arc + heap
+  ./test.sh 'arc::test_weak*'  # glob within a module
+  ./test.sh '*scroll*'         # substring anywhere
+
+Flags:
+  --skip-userland   Skip building userland/ and hello-cpp (faster iteration
+                    when not exercising userland tests).
+  -l, --list        Print available modules and exit (no build/QEMU).
+  -h, --help        Show this help.
+EOF
+}
+
+# Argument parsing
+PATTERNS=()
+SKIP_USERLAND=0
+LIST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        -l|--list) LIST_ONLY=1; shift ;;
+        --skip-userland) SKIP_USERLAND=1; shift ;;
+        --) shift; while [ $# -gt 0 ]; do PATTERNS+=("$1"); shift; done ;;
+        -*) echo "Unknown flag: $1" >&2; usage >&2; exit 2 ;;
+        *) PATTERNS+=("$1"); shift ;;
+    esac
+done
+
+if [ "$LIST_ONLY" -eq 1 ]; then
+    echo "Available test modules (from src/tests/mod.rs MODULES registry):"
+    awk '/^static MODULES:/,/^\];$/' src/tests/mod.rs \
+        | grep -oE '\("[a-z_]+"' \
+        | tr -d '("'
+    exit 0
+fi
+
+# Build comma-separated filter
+FILTER=""
+if [ ${#PATTERNS[@]} -gt 0 ]; then
+    FILTER=$(IFS=','; echo "${PATTERNS[*]}")
+    echo "Test filter: $FILTER"
+fi
+
 echo "Building and running kernel tests..."
+
+HOST_SHARE_STAGE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
+mkdir -p "$HOST_SHARE_STAGE"
 
 # Stage userland apps into host_share/ so test boots see the same artifacts
 # as interactive boots. Failures here do not block tests (they use embedded
 # fixtures), but we want the staged file present whenever possible.
-HOST_SHARE_STAGE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
-mkdir -p "$HOST_SHARE_STAGE"
-if cargo build --release --manifest-path userland/Cargo.toml; then
-    USER_HELLO="userland/target/x86_64-unknown-none/release/hello"
-    if [ -f "$USER_HELLO" ]; then
-        STAGED="$HOST_SHARE_STAGE/HELLO.ELF"
-        TMP="$HOST_SHARE_STAGE/.HELLO.ELF.tmp.$$"
-        cp "$USER_HELLO" "$TMP"
-        mv -f "$TMP" "$STAGED"
-        echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
+if [ "$SKIP_USERLAND" -eq 0 ]; then
+    if cargo build --release --manifest-path userland/Cargo.toml; then
+        USER_HELLO="userland/target/x86_64-unknown-none/release/hello"
+        if [ -f "$USER_HELLO" ]; then
+            STAGED="$HOST_SHARE_STAGE/HELLO.ELF"
+            TMP="$HOST_SHARE_STAGE/.HELLO.ELF.tmp.$$"
+            cp "$USER_HELLO" "$TMP"
+            mv -f "$TMP" "$STAGED"
+            echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
+        fi
+    else
+        echo "Warning: userland build failed; continuing without HELLO.ELF"
     fi
-else
-    echo "Warning: userland build failed; continuing without HELLO.ELF"
-fi
 
-# C++ userland — same probe + readelf check as build.sh. Soft-fail when
-# the toolchain isn't installed so kernel tests can still run.
-MUSL_GXX="${MUSL_GXX:-x86_64-linux-musl-g++}"
-if command -v "$MUSL_GXX" >/dev/null 2>&1; then
-    if make -C userland/apps/hello-cpp MUSL_GXX="$MUSL_GXX"; then
-        CPP_BIN="userland/apps/hello-cpp/build/hello-cpp"
-        if [ -f "$CPP_BIN" ]; then
-            MUSL_READELF="${MUSL_GXX%g++}readelf"
-            command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
-            ET_TYPE=$("$MUSL_READELF" -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
-            if [ "$ET_TYPE" = "EXEC" ]; then
-                STAGED="$HOST_SHARE_STAGE/HELLOCPP.ELF"
-                TMP="$HOST_SHARE_STAGE/.HELLOCPP.ELF.tmp.$$"
-                cp "$CPP_BIN" "$TMP"
-                mv -f "$TMP" "$STAGED"
-                echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
-            else
-                echo "Warning: $CPP_BIN is $ET_TYPE, expected EXEC; skipping stage"
+    # C++ userland — same probe + readelf check as build.sh. Soft-fail when
+    # the toolchain isn't installed so kernel tests can still run.
+    MUSL_GXX="${MUSL_GXX:-x86_64-linux-musl-g++}"
+    if command -v "$MUSL_GXX" >/dev/null 2>&1; then
+        if make -C userland/apps/hello-cpp MUSL_GXX="$MUSL_GXX"; then
+            CPP_BIN="userland/apps/hello-cpp/build/hello-cpp"
+            if [ -f "$CPP_BIN" ]; then
+                MUSL_READELF="${MUSL_GXX%g++}readelf"
+                command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
+                ET_TYPE=$("$MUSL_READELF" -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
+                if [ "$ET_TYPE" = "EXEC" ]; then
+                    STAGED="$HOST_SHARE_STAGE/HELLOCPP.ELF"
+                    TMP="$HOST_SHARE_STAGE/.HELLOCPP.ELF.tmp.$$"
+                    cp "$CPP_BIN" "$TMP"
+                    mv -f "$TMP" "$STAGED"
+                    echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
+                else
+                    echo "Warning: $CPP_BIN is $ET_TYPE, expected EXEC; skipping stage"
+                fi
             fi
         fi
+    else
+        echo "Note: $MUSL_GXX not found; skipping HELLOCPP.ELF (install: brew install x86_64-linux-musl-cross)"
     fi
 else
-    echo "Note: $MUSL_GXX not found; skipping HELLOCPP.ELF (install: brew install x86_64-linux-musl-cross)"
+    echo "Skipping userland prebuild (--skip-userland)"
 fi
 
 # Cargo build must be ran twice to make sure the bootloader image is built
@@ -72,13 +142,25 @@ HOST_SHARE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
 mkdir -p "$HOST_SHARE"
 echo "Running tests against: $BIOS_IMAGE"
 echo "Host folder: $HOST_SHARE -> /host (read-only)"
-qemu-system-x86_64 \
-    -drive format=raw,file="$BIOS_IMAGE",if=ide,index=0 \
-    -drive file=fat:ro:"$HOST_SHARE",if=ide,index=1,snapshot=on \
-    -serial stdio \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    -display none \
+
+# Build QEMU args. When a filter is set, deliver it via fw_cfg — the kernel
+# reads `opt/agenticos/test_filter` at boot. Commas inside the filter must be
+# escaped as `,,` per QEMU option-parser rules; our filter syntax already uses
+# `,` as the pattern separator so we double them here.
+QEMU_ARGS=(
+    -drive "format=raw,file=$BIOS_IMAGE,if=ide,index=0"
+    -drive "file=fat:ro:$HOST_SHARE,if=ide,index=1,snapshot=on"
+    -serial stdio
+    -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
+    -display none
     -no-reboot
+)
+if [ -n "$FILTER" ]; then
+    ESCAPED_FILTER=${FILTER//,/,,}
+    QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/test_filter,string=$ESCAPED_FILTER")
+fi
+
+qemu-system-x86_64 "${QEMU_ARGS[@]}"
 
 # Check exit code
 EXIT_CODE=$?

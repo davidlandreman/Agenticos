@@ -16,6 +16,11 @@ pub fn init(boot_info: &'static mut BootInfo) {
     debug_info!("=== AgenticOS Kernel Starting ===");
     debug_debug!("Boot info address: {:p}", boot_info);
 
+    // Pull the test filter from QEMU fw_cfg before tests run. Pure port I/O,
+    // safe pre-heap, silent on real hardware. No-op outside test builds.
+    #[cfg(feature = "test")]
+    crate::tests::filter::init();
+
     // Enable SSE/SSE2 in CR0/CR4 before any code path that could end up in
     // ring 3 (loader → enter_user_mode). musl + libstdc++ binaries emit SSE2
     // in `__init_tls` before reaching `main`; without this the first SSE
