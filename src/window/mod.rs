@@ -217,8 +217,13 @@ pub trait Window: Send {
     /// allocate or resize the buffer to current bounds and write pixels
     /// in framebuffer-native format.
     ///
+    /// `device` is provided so the implementation can query
+    /// `pixel_format`, `bytes_per_pixel`, etc. at rasterization time —
+    /// the buffer's byte layout has to match the framebuffer's so the
+    /// compositor's blit stays a row `memcpy`.
+    ///
     /// Default: no-op (matches `wants_backing_store == false`).
-    fn paint_into_backing_store(&mut self) {}
+    fn paint_into_backing_store(&mut self, _device: &dyn GraphicsDevice) {}
 
     /// Borrow the window's cached backing store. Returns `None` until
     /// `paint_into_backing_store` has run at least once for the current

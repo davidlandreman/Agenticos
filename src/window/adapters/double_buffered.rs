@@ -1,6 +1,6 @@
 //! Double-buffered framebuffer adapter - provides smooth rendering with back buffer
 
-use bootloader_api::info::FrameBuffer;
+use bootloader_api::info::{FrameBuffer, PixelFormat};
 use crate::graphics::color::Color;
 use crate::graphics::images::Image;
 use crate::drivers::display::double_buffer::DoubleBufferedFrameBuffer;
@@ -250,5 +250,17 @@ impl GraphicsDevice for DoubleBufferedDevice {
             pixel_format,
             pixels,
         })
+    }
+
+    fn pixel_format(&self) -> PixelFormat {
+        self.buffer.lock().pixel_format()
+    }
+
+    fn bytes_per_pixel(&self) -> usize {
+        self.buffer.lock().bytes_per_pixel()
+    }
+
+    fn stride(&self) -> usize {
+        self.buffer.lock().stride()
     }
 }

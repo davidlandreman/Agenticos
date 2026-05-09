@@ -79,11 +79,23 @@ impl DoubleBufferedFrameBuffer {
     pub fn width(&self) -> usize {
         self.width
     }
-    
+
     pub fn height(&self) -> usize {
         self.height
     }
-    
+
+    pub fn pixel_format(&self) -> PixelFormat {
+        self.pixel_format
+    }
+
+    pub fn bytes_per_pixel(&self) -> usize {
+        self.bytes_per_pixel
+    }
+
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
     pub fn set_color(&mut self, color: Color) {
         self.color = color;
     }
