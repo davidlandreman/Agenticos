@@ -330,32 +330,58 @@ fn test_clean_window_does_not_register_dirty() {
 const ROOT_COLOR: Color = Color { red: 10, green: 10, blue: 10 };
 const CHILD0_COLOR: Color = Color { red: 100, green: 0, blue: 0 };
 
-fn test_clean_distant_window_skipped() {
+fn test_skip_paint_when_ancestor_chain_misses_dirty() {
+    // The full skip-paint benefit depends on the entire ancestor chain
+    // missing the dirty union (otherwise parent_was_repainted propagates
+    // invalidation downward). At this stage the production desktop is
+    // full-screen so this property doesn't hold for it — that gap is what
+    // U8/U9 close via the backing-store blit, which doesn't go through
+    // paint() at all.
+    //
+    // To verify the skip-paint mechanism still works where the chain DOES
+    // miss dirty, build a scene whose screen root is itself non-full-screen.
     let (mut wm, state) = make_manager(800, 600);
-    let _ = build_simple_scene(
-        &mut wm,
-        Rect::new(0, 0, 800, 600),
-        &[Rect::new(400, 400, 50, 50)], // far from cursor area
-    );
+    use crate::window::ScreenMode;
+    let screen_id = wm.create_screen(ScreenMode::Gui);
+    wm.switch_screen(screen_id);
+
+    // Non-full-screen root.
+    let root_id = wm.create_window(None);
+    let mut root = Box::new(TestWindow::new(
+        root_id, Rect::new(200, 200, 200, 200), ROOT_COLOR,
+    ));
+    root.focusable = false;
+    wm.set_window_impl(root_id, root);
+    if let Some(screen) = wm.get_active_screen_mut() {
+        screen.set_root_window(root_id);
+    }
+
+    // Child inside the non-full-screen root.
+    let child_id = wm.create_window(Some(root_id));
+    let mut child = Box::new(TestWindow::new(
+        child_id, Rect::new(50, 50, 30, 30), CHILD0_COLOR,
+    ));
+    child.set_parent(Some(root_id));
+    wm.set_window_impl(child_id, child);
+
     quiesce(&mut wm);
     state.lock().reset();
 
-    // Cursor-sized dirty rect well away from the child window.
-    wm.test_mark_dirty(Rect::new(10, 10, 22, 22));
+    // Dirty rect outside both root (200..400, 200..400) and child
+    // (absolute 250..280, 250..280).
+    wm.test_mark_dirty(Rect::new(500, 500, 22, 22));
     wm.test_render_active_screen();
 
     let s = state.lock();
     assert!(
-        s.fills_with_color(CHILD0_COLOR).is_empty(),
-        "clean window outside dirty union must be skipped; got fills {:?}",
-        s.fills_with_color(CHILD0_COLOR)
+        s.fills_with_color(ROOT_COLOR).is_empty(),
+        "root with bounds outside dirty must be skipped; got {:?}",
+        s.fills_with_color(ROOT_COLOR)
     );
-    // Root is full-screen so it always intersects any dirty rect — it should
-    // still paint (this is the AE2-residual cost the desktop opt-in resolves
-    // in U8/U9, not at this layer).
     assert!(
-        !s.fills_with_color(ROOT_COLOR).is_empty(),
-        "full-screen root should paint when dirty intersects"
+        s.fills_with_color(CHILD0_COLOR).is_empty(),
+        "child whose ancestor chain misses dirty must be skipped; got {:?}",
+        s.fills_with_color(CHILD0_COLOR)
     );
 }
 
@@ -551,7 +577,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_two_children_at_distinct_absolute_positions,
         &test_clean_window_does_not_register_dirty,
         // U4 — skip-paint + dirty-clip
-        &test_clean_distant_window_skipped,
+        &test_skip_paint_when_ancestor_chain_misses_dirty,
         &test_window_intersecting_dirty_paints_with_clipped_rect,
         &test_full_repaint_clips_to_window_bounds,
         &test_parent_painted_propagates_to_clean_non_intersecting_child,
