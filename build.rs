@@ -4,32 +4,46 @@ fn main() {
     // Detect build profile (debug or release)
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
 
-    // Tell cargo to re-run this script if the kernel binary changes
-    println!("cargo:rerun-if-changed=target/x86_64-unknown-none/{}/agenticos", profile);
-    // Also re-run if assets directory changes
-    println!("cargo:rerun-if-changed=assets");
+    // Resolve the manifest dir once; everything below is relative to it so
+    // worktrees, conductor.build workspaces, and CI all build correctly.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    // Use relative paths in the target directory
-    let target_dir = PathBuf::from("/Users/david/Projects/agenticos/target");
-    let out_dir = target_dir.join("./bootloader");
+    // Honor CARGO_TARGET_DIR if cargo set it; otherwise fall back to <manifest>/target.
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("target"));
+
+    // Tell cargo to re-run this script if the kernel binary changes
+    let kernel_rel = format!("x86_64-unknown-none/{}/agenticos", profile);
+    println!(
+        "cargo:rerun-if-changed={}",
+        target_dir.join(&kernel_rel).display()
+    );
+    // Also re-run if assets directory changes
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("assets").display()
+    );
+
+    let out_dir = target_dir.join("bootloader");
 
     // Create output directory if it doesn't exist
     std::fs::create_dir_all(&out_dir).ok();
 
     // Path to the kernel binary (debug or release based on profile)
-    let kernel = target_dir.join(format!("x86_64-unknown-none/{}/agenticos", profile));
-    
+    let kernel = target_dir.join(&kernel_rel);
+
     // Check if we're in the second pass (kernel exists)
     println!("cargo:warning=Build profile: {}", profile);
     println!("cargo:warning=Checking for Kernel Code: {}", kernel.display());
     if kernel.exists() {
         println!("cargo:warning=Creating bootloader images...");
-        
+
         // Create disk image builder with the kernel
         let mut builder = bootloader::DiskImageBuilder::new(kernel.clone());
-        
+
         // Add assets folder to the disk image
-        let assets_dir = PathBuf::from("/Users/david/Projects/agenticos/assets");
+        let assets_dir = manifest_dir.join("assets");
         if assets_dir.exists() {
             println!("cargo:warning=Adding assets to disk image...");
             

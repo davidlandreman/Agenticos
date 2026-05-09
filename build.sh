@@ -85,8 +85,9 @@ echo "✅ Build complete!"
 
 # Run in QEMU if requested
 if [ "$RUN_QEMU" = true ]; then
-    echo "🚀 Launching QEMU..."
-    qemu-system-x86_64 -drive format=raw,file=target/bootloader/bios.img \
+    BIOS_IMAGE="${AGENTICOS_BIOS_IMAGE:-target/bootloader/bios.img}"
+    echo "🚀 Launching QEMU with image: $BIOS_IMAGE"
+    qemu-system-x86_64 -drive format=raw,file="$BIOS_IMAGE" \
         -serial stdio \
         -no-reboot -no-shutdown \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
