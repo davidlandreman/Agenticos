@@ -922,20 +922,47 @@ impl WindowManager {
                     let original_bounds = window.bounds();
                     window.set_bounds_no_invalidate(bounds);
 
-                    // Clip to (bounds ∩ dirty union) so paint() targets only
-                    // the freshly-dirty pixels of this window. When the
-                    // dirty union exists but misses the window (e.g. a child
+                    // Clip to (bounds ∩ dirty union) so paint() / blit
+                    // targets only the freshly-dirty pixels. When the
+                    // dirty union exists but misses the window (a child
                     // invalidated mid-walk via parent_was_repainted), fall
-                    // back to the window's own bounds — its content has to
-                    // land somewhere.
+                    // back to the window's own bounds.
                     let clip = match dirty_bbox {
                         Some(db) => bounds.intersection(&db).unwrap_or(bounds),
                         None => bounds,
                     };
                     self.graphics_device.set_clip_rect(Some(clip));
 
-                    crate::debug_trace!("Calling paint on window {:?}", window_id);
-                    window.paint(&mut *self.graphics_device);
+                    if window.wants_backing_store() {
+                        // Opt-in path: rasterize into the cached buffer
+                        // only when content actually changed; otherwise
+                        // (cursor-only ticks, drag of an unrelated frame
+                        // over us) just blit the existing pixels. This is
+                        // where the desktop wallpaper stops paying
+                        // re-rasterization cost on every render pass.
+                        if window.needs_repaint() || window.backing_store().is_none() {
+                            crate::debug_trace!(
+                                "Rasterizing backing store for {:?}", window_id
+                            );
+                            window.paint_into_backing_store(&*self.graphics_device);
+                        }
+                        if let Some(buf) = window.backing_store() {
+                            self.graphics_device.blit_buffer(bounds.x, bounds.y, buf);
+                        } else {
+                            // Pathological — paint_into_backing_store
+                            // didn't produce a buffer. Fall back to direct
+                            // paint() so the window doesn't disappear.
+                            crate::debug_warn!(
+                                "Window {:?} wants_backing_store but produced no \
+                                 buffer; falling back to direct paint",
+                                window_id
+                            );
+                            window.paint(&mut *self.graphics_device);
+                        }
+                    } else {
+                        crate::debug_trace!("Calling paint on window {:?}", window_id);
+                        window.paint(&mut *self.graphics_device);
+                    }
 
                     window.set_bounds_no_invalidate(original_bounds);
                     self.graphics_device.set_clip_rect(None);

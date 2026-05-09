@@ -188,6 +188,29 @@ pub trait GraphicsDevice: Send {
     fn stride(&self) -> usize {
         self.width()
     }
+
+    /// Blit a `WindowBuffer` to `(x, y)`, honoring the active clip rect and
+    /// device bounds. The trait default walks every pixel through
+    /// `draw_pixel` (correct but slow); adapters that share their pixel
+    /// format with the buffer can override for a row `memcpy`.
+    ///
+    /// Used by the opt-in compositor path to render windows whose
+    /// `wants_backing_store()` returns true — see `Window::backing_store`.
+    fn blit_buffer(&mut self, x: i32, y: i32, buffer: &WindowBuffer) {
+        for by in 0..buffer.height {
+            let dst_y = y + by as i32;
+            let row_start = buffer.row_byte_offset(by);
+            for bx in 0..buffer.width {
+                let off = row_start + bx * buffer.bytes_per_pixel;
+                let bytes = &buffer.pixels[off..off + 3];
+                let color = match buffer.pixel_format {
+                    PixelFormat::Rgb => Color::new(bytes[0], bytes[1], bytes[2]),
+                    _ => Color::new(bytes[2], bytes[1], bytes[0]),
+                };
+                self.draw_pixel(x + bx as i32, dst_y, color);
+            }
+        }
+    }
 }
 
 /// Framebuffer-native pixel buffer for windows that opt into the backing-

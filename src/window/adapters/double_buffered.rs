@@ -263,4 +263,74 @@ impl GraphicsDevice for DoubleBufferedDevice {
     fn stride(&self) -> usize {
         self.buffer.lock().stride()
     }
+
+    /// Bulk row memcpy override for `WindowBuffer` blits. By construction
+    /// (DesktopWindow builds its buffer via WindowBuffer::for_device) the
+    /// buffer's pixel format and bytes-per-pixel match this adapter's, so
+    /// row-by-row `copy_from_slice` produces byte-identical output.
+    fn blit_buffer(&mut self, x: i32, y: i32, buffer: &crate::window::WindowBuffer) {
+        if buffer.width == 0 || buffer.height == 0 {
+            return;
+        }
+
+        let Some((dst_x, dst_y, dst_w, dst_h)) = clip_rect(
+            x,
+            y,
+            buffer.width as u32,
+            buffer.height as u32,
+            self.width,
+            self.height,
+            self.clip_rect.as_ref(),
+        ) else {
+            return;
+        };
+
+        // Source row offset induced by clipping when the destination origin
+        // was negative or trimmed by the clip rect.
+        let src_off_x = (dst_x as i64 - x as i64) as usize;
+        let src_off_y = (dst_y as i64 - y as i64) as usize;
+
+        // Falling back to the per-pixel default when format/bpp don't match
+        // keeps the override correct under exotic configurations the
+        // backing-store path is not expected to produce — better than
+        // silently producing garbage pixels via mismatched memcpy.
+        let mut buf = self.buffer.lock();
+        if buf.pixel_format() != buffer.pixel_format
+            || buf.bytes_per_pixel() != buffer.bytes_per_pixel
+        {
+            drop(buf);
+            // Trait-default per-pixel walk.
+            for by in 0..dst_h {
+                let row_off = buffer.row_byte_offset(src_off_y + by);
+                for bx in 0..dst_w {
+                    let off = row_off + (src_off_x + bx) * buffer.bytes_per_pixel;
+                    let bytes = &buffer.pixels[off..off + 3];
+                    let color = match buffer.pixel_format {
+                        PixelFormat::Rgb => Color::new(bytes[0], bytes[1], bytes[2]),
+                        _ => Color::new(bytes[2], bytes[1], bytes[0]),
+                    };
+                    self.draw_pixel(
+                        dst_x as i32 + bx as i32,
+                        dst_y as i32 + by as i32,
+                        color,
+                    );
+                }
+            }
+            return;
+        }
+
+        let bpp = buffer.bytes_per_pixel;
+        let copy_len = dst_w * bpp;
+        for by in 0..dst_h {
+            let src_row_start = buffer.row_byte_offset(src_off_y + by) + src_off_x * bpp;
+            let src_slice = &buffer.pixels[src_row_start..src_row_start + copy_len];
+            if let Some(dst_row) = buf.back_buffer_row_mut(dst_y + by) {
+                let dst_byte_x = dst_x * bpp;
+                let dst_slice = &mut dst_row[dst_byte_x..dst_byte_x + copy_len];
+                dst_slice.copy_from_slice(src_slice);
+            }
+        }
+        drop(buf);
+        self.dirty = true;
+    }
 }
