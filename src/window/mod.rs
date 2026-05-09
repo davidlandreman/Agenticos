@@ -6,6 +6,8 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 pub mod types;
@@ -166,20 +168,60 @@ pub fn switch_screen(screen_id: ScreenId) {
     with_window_manager(|wm| wm.switch_screen(screen_id));
 }
 
+/// Path of the bundled default wallpaper on the FAT root. The basename is
+/// 8.3-compliant — see `src/fs/CLAUDE.md` for the FAT layer's filename limit.
+pub const DEFAULT_WALLPAPER_PATH: &str = "/WALLPAPR.BMP";
+
+/// Read the default wallpaper file from the mounted filesystem and return its
+/// raw bytes. Returns `None` on any failure — file missing, read error, or an
+/// empty file. Callers fall back to a solid-color desktop when this returns
+/// `None`, so a missing wallpaper never blocks boot.
+pub fn load_default_wallpaper() -> Option<Vec<u8>> {
+    let file = match crate::fs::File::open_read(DEFAULT_WALLPAPER_PATH) {
+        Ok(f) => f,
+        Err(_) => {
+            crate::debug_info!(
+                "Wallpaper {} not found on root filesystem; using solid background",
+                DEFAULT_WALLPAPER_PATH
+            );
+            return None;
+        }
+    };
+
+    let size = file.size() as usize;
+    if size == 0 {
+        return None;
+    }
+
+    let mut bytes = vec![0u8; size];
+    match file.read(&mut bytes) {
+        Ok(_) => Some(bytes),
+        Err(_) => {
+            crate::debug_info!("Failed to read wallpaper bytes from {}", DEFAULT_WALLPAPER_PATH);
+            None
+        }
+    }
+}
+
 /// Create the default desktop environment
 pub fn create_default_desktop() {
+    let wallpaper = load_default_wallpaper();
     with_window_manager(|wm| {
         // Create GUI screen
         let screen_id = wm.create_screen(ScreenMode::Gui);
         wm.switch_screen(screen_id);
-        
+
         // Get actual screen dimensions from graphics device
         let width = wm.graphics_device.width() as u32;
         let height = wm.graphics_device.height() as u32;
-        
+
         // Create desktop background window
         let desktop_id = wm.create_window(None);
-        let desktop_window = Box::new(windows::DesktopWindow::new(desktop_id, Rect::new(0, 0, width, height)));
+        let desktop_bounds = Rect::new(0, 0, width, height);
+        let desktop_window: Box<dyn Window> = match wallpaper {
+            Some(bytes) => Box::new(windows::DesktopWindow::new_with_wallpaper(desktop_id, desktop_bounds, bytes)),
+            None => Box::new(windows::DesktopWindow::new(desktop_id, desktop_bounds)),
+        };
         wm.set_window_impl(desktop_id, desktop_window);
         
         // Set desktop as the root window for the screen
