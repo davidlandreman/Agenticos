@@ -663,6 +663,23 @@ fn test_run_initial_stack_fixture_b() {
     );
 }
 
+/// Fixture D — unhandled-syscall trap. Binary issues `syscall RAX=999`;
+/// kernel must terminate the process with `ExitKind::UnimplementedSyscall`
+/// rather than panicking, hanging, or silently returning.
+fn test_run_unhandled_syscall_fixture_d() {
+    reset_active_user();
+    let bytes = fix::syscall_999_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let result = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let _ = crate::userland::release_active_image();
+
+    use crate::userland::lifecycle::ExitKind;
+    match result.0 {
+        ExitKind::UnimplementedSyscall { nr } => assert_eq!(nr, 999),
+        other => panic!("expected UnimplementedSyscall(999), got {:?}", other),
+    }
+}
+
 /// Fixture A — SYSCALL fast-path smoke test. The smallest possible end-to-end
 /// proof of the SYSCALL transition: a `syscall` with `RAX=NR_EXIT_GROUP,
 /// RDI=42` records exit code 42 via cooperative_exit.
@@ -814,6 +831,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         // enter_user_mode lifecycle
         &test_enter_user_mode_single_user_invariant,
         &test_run_initial_stack_fixture_b,
+        &test_run_unhandled_syscall_fixture_d,
         &test_run_syscall_exit42_fixture_a,
         &test_run_happy_path_hello,
         &test_run_fault_ud,

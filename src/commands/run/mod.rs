@@ -110,6 +110,11 @@ impl RunProcess {
                 );
                 display::set_color(Color::WHITE);
             }
+            (ExitKind::UnimplementedSyscall { nr }, _) => {
+                display::set_color(Color::RED);
+                println!("[run] app issued unimplemented syscall nr={}", nr);
+                display::set_color(Color::WHITE);
+            }
             (ExitKind::None, _) => {
                 // Should not happen — `enter_user_mode` only returns after
                 // an exit was recorded. Log defensively.

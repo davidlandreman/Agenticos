@@ -33,6 +33,17 @@ pub const USER_STACK_TOP: u64 = 0x0000_0000_0080_0000;
 pub const USER_TLS_IMAGE_VA: u64 = 0x0000_0000_0100_0000;
 pub const USER_TCB_VA: u64 = 0x0000_0000_0100_1000;
 
+/// Initial brk anchor. `brk(0)` returns this; subsequent `brk(addr)` calls
+/// grow up to `addr`, mapping pages on demand. Sized so musl's mallocng
+/// initial heap fits without colliding with the mmap arena above.
+pub const USER_BRK_BASE: u64 = 0x0000_0000_0200_0000; // 32 MiB
+
+/// Base of the per-process mmap arena. Anonymous-only `mmap` calls bump
+/// upward from this address, allocating `len` rounded up to page granularity
+/// per call. Reaches `USER_VA_RANGE_END` at 1 GiB; the gap between the brk
+/// arena and here is ~16 MiB which is plenty for the milestone heap.
+pub const USER_MMAP_BASE: u64 = 0x0000_0000_0300_0000; // 48 MiB
+
 /// Inclusive lower / exclusive upper bounds of the user-VA range. Anything
 /// outside is reserved for the kernel and `map_user_region` rejects it.
 ///

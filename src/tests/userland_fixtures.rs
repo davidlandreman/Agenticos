@@ -278,6 +278,24 @@ pub fn build_print_exit_elf(msg: &[u8], exit_code: u32) -> Vec<u8> {
     runnable_elf_rx(&code)
 }
 
+/// Fixture D — unhandled-syscall trap.
+///
+/// Issues `syscall RAX=999`. The kernel dispatcher's default arm should
+/// log the number and terminate the process via the existing fault-cleanup
+/// path, recording `ExitKind::UnimplementedSyscall { nr: 999 }`. No
+/// kernel panic, no hang, no silent `-ENOSYS` return.
+pub fn syscall_999_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov eax, 999
+    code.extend_from_slice(&[0xB8, 0xE7, 0x03, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt — only reached if the dispatcher returned cleanly, which would
+    // be a bug.
+    code.push(0xF4);
+    runnable_elf_rx(&code)
+}
+
 /// Fixture A — the Risks-table mandated minimal SYSCALL transition smoke test.
 ///
 /// Single instruction: `syscall` with `RAX=231 (exit_group), RDI=42`. Verifies

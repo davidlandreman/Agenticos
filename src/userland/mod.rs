@@ -106,6 +106,8 @@ pub fn enter_user_mode(image: UserImage) -> Result<(ExitKind, i64), EnterError> 
         au.image = Some(image);
         au.exit_kind = ExitKind::None;
         au.exit_code = 0;
+        au.brk_current = crate::mm::paging::USER_BRK_BASE;
+        au.mmap_next = crate::mm::paging::USER_MMAP_BASE;
     });
     crate::userland::abi::set_user_va_bounds(bounds);
 
@@ -430,6 +432,8 @@ pub fn force_clear_active_for_test() {
         au.image = None;
         au.exit_kind = ExitKind::None;
         au.exit_code = 0;
+        au.brk_current = 0;
+        au.mmap_next = 0;
     });
     crate::userland::abi::clear_user_va_bounds();
 }

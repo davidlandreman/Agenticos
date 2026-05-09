@@ -84,6 +84,14 @@ pub struct ActiveUser {
     pub image: Option<UserImage>,
     pub exit_kind: ExitKind,
     pub exit_code: i64,
+    /// Current `brk` high-water mark. Initialized to `USER_BRK_BASE` on
+    /// `enter_user_mode`; grown by the `brk(addr)` syscall and never shrunk.
+    /// `brk(0)` returns this value.
+    pub brk_current: u64,
+    /// Next free address in the per-process mmap arena. Starts at
+    /// `USER_MMAP_BASE` and bumps upward by the page-rounded length of each
+    /// successful anonymous `mmap`. No coalescing or reuse for this milestone.
+    pub mmap_next: u64,
 }
 
 /// What ended the user process.
@@ -95,6 +103,12 @@ pub enum ExitKind {
     Cooperative,
     /// Ring-3 fault — see `AbnormalExit` for vector / fault address.
     Abnormal { vector: u8, fault_rip: u64 },
+    /// User issued a syscall the kernel does not implement. The number is
+    /// recorded so diagnostic logging can name it; the process is torn
+    /// down via the same long-jump path as a fault. Distinct from
+    /// `Abnormal` because no CPU exception fired — the failure mode is a
+    /// kernel-policy refusal, not a hardware fault.
+    UnimplementedSyscall { nr: u64 },
 }
 
 static ACTIVE_USER: Mutex<ActiveUser> = Mutex::new(ActiveUser {
@@ -102,6 +116,8 @@ static ACTIVE_USER: Mutex<ActiveUser> = Mutex::new(ActiveUser {
     image: None,
     exit_kind: ExitKind::None,
     exit_code: 0,
+    brk_current: 0,
+    mmap_next: 0,
 });
 
 /// Acquire the active-user slot for read/write. Used by the run command to
@@ -177,6 +193,24 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
 /// Same teardown as `cleanup_user_process`, with `ExitKind::Cooperative`.
 pub fn cooperative_exit(code: i64) -> ! {
     record_exit(ExitKind::Cooperative, code);
+    long_jump_to_run_or_halt();
+}
+
+/// Unimplemented-syscall path — invoked from the dispatcher's default arm
+/// when a binary issues a syscall number the kernel does not handle.
+///
+/// Records `ExitKind::UnimplementedSyscall { nr }` and long-jumps to the
+/// run command's continuation. The kernel does not panic, hang, or
+/// silently return `-ENOSYS` — the binary is terminated cleanly with a
+/// diagnostic on serial.
+pub fn unimplemented_syscall_exit(nr: u64) -> ! {
+    crate::debug_warn!("USERLAND: unimplemented syscall nr={} — terminating user process", nr);
+    let mut g = ACTIVE_USER.lock();
+    if matches!(g.exit_kind, ExitKind::None) {
+        g.exit_kind = ExitKind::UnimplementedSyscall { nr };
+        g.exit_code = -38; // ENOSYS sentinel for the run command's log
+    }
+    drop(g);
     long_jump_to_run_or_halt();
 }
 

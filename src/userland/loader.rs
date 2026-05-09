@@ -30,8 +30,8 @@ use core::mem::size_of;
 use x86_64::VirtAddr;
 
 use crate::mm::paging::{
-    UserPerms, USER_LOAD_BASE, USER_STACK_TOP, USER_TCB_VA, USER_TLS_IMAGE_VA,
-    USER_VA_RANGE_END, USER_VA_RANGE_START,
+    UserPerms, USER_BRK_BASE, USER_LOAD_BASE, USER_MMAP_BASE, USER_STACK_TOP,
+    USER_TCB_VA, USER_TLS_IMAGE_VA, USER_VA_RANGE_END, USER_VA_RANGE_START,
 };
 use crate::userland::error::LoaderError;
 use crate::userland::image::UserImage;
@@ -304,6 +304,13 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
         bounds_start = bounds_start.min(USER_TLS_IMAGE_VA);
         bounds_end = bounds_end.max(USER_TCB_VA + 0x1000);
     }
+    // Reserve brk + mmap arena VA space in the bounds so user pointers
+    // returned by `mmap` and reads from the brk region pass
+    // `validate_user_slice`. Mappings here are demand-allocated by the
+    // syscall handlers, but the bounds reflect the reachable region.
+    bounds_start = bounds_start.min(USER_BRK_BASE);
+    bounds_end = bounds_end.max(USER_VA_RANGE_END);
+    let _ = USER_MMAP_BASE;
 
     let mut image = UserImage::new(
         VirtAddr::new(ehdr.e_entry),
