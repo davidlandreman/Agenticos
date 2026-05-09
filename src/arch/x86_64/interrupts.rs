@@ -98,6 +98,20 @@ lazy_static! {
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Mouse.as_usize()].set_handler_fn(mouse_interrupt_handler);
 
+        // Userland syscall vector (D1 / U5). DPL=3 so ring-3 code may issue
+        // `int 0x80` without #GP. We use an interrupt gate (IF auto-cleared
+        // on entry) — the safer default for the first cut. The handler is
+        // a `#[naked]` stub that builds a SyscallArgs frame on the stack
+        // and calls into the Rust dispatcher; see `arch::x86_64::syscall`.
+        unsafe {
+            use x86_64::PrivilegeLevel;
+            use crate::arch::x86_64::syscall::{syscall_interrupt_handler, SYSCALL_VECTOR};
+            let handler_addr = syscall_interrupt_handler as usize;
+            idt[SYSCALL_VECTOR as usize]
+                .set_handler_addr(x86_64::VirtAddr::new(handler_addr as u64))
+                .set_privilege_level(PrivilegeLevel::Ring3);
+        }
+
         idt
     };
 }

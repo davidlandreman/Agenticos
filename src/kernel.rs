@@ -48,6 +48,13 @@ pub fn init(boot_info: &'static mut BootInfo) {
     crate::process::init_scheduler();
     debug_info!("Process scheduler initialized!");
 
+    // Register the first-class syscalls (`print`, `exit`) so they have stable
+    // numeric IDs before any user app loads. The trampoline page is built
+    // lazily in U7 when the first user app runs; registration here only
+    // populates SYSCALL_TABLE.
+    crate::userland::syscalls::register_first_class_syscalls();
+    debug_info!("Userland syscalls registered");
+
     // Initialize IDE controller and detect drives
     debug_info!("Initializing IDE controller...");
     crate::drivers::ide::IDE_CONTROLLER.initialize();
