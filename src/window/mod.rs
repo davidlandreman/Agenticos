@@ -3,8 +3,6 @@
 //! This module provides a hierarchical window-based graphics system that supports
 //! both GUI and text-based interfaces through a unified abstraction.
 
-#![no_std]
-
 extern crate alloc;
 
 use alloc::boxed::Box;
