@@ -22,6 +22,7 @@ use crate::window::{
     ColorDepth, Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowBuffer, WindowId,
     WindowManager,
 };
+use crate::window::windows::base::WindowBase;
 
 // ---- RecordingDevice ----------------------------------------------------
 
@@ -141,6 +142,7 @@ impl GraphicsDevice for RecordingDevice {
 /// the window's `paint_color` so a recording device can attribute fills
 /// back to the originating window.
 pub(super) struct TestWindow {
+    pub base_field: WindowBase,
     pub id: WindowId,
     pub bounds: Rect,
     pub parent: Option<WindowId>,
@@ -159,6 +161,7 @@ pub(super) struct TestWindow {
 impl TestWindow {
     pub fn new(id: WindowId, bounds: Rect, paint_color: Color) -> Self {
         Self {
+            base_field: WindowBase::new_with_id(id, bounds),
             id, bounds,
             parent: None,
             children: Vec::new(),
@@ -176,6 +179,8 @@ impl TestWindow {
 }
 
 impl Window for TestWindow {
+    fn base(&self) -> &WindowBase { &self.base_field }
+    fn base_mut(&mut self) -> &mut WindowBase { &mut self.base_field }
     fn id(&self) -> WindowId { self.id }
     fn bounds(&self) -> Rect { self.bounds }
     fn set_bounds(&mut self, bounds: Rect) {
@@ -526,11 +531,13 @@ fn test_full_repaint_clips_to_window_bounds() {
     assert_eq!(fills[0].clip, Some(Rect::new(50, 50, 100, 100)));
 }
 
-fn test_parent_painted_propagates_to_clean_non_intersecting_child() {
-    // The doc-review-issue regression guard for `will_repaint = should_paint`.
-    // A parent that paints because its bounds intersected the dirty union
-    // (not because of an explicit invalidate) must still mark its children
-    // dirty so they paint over the parent's overdraw.
+fn test_clean_child_outside_dirty_skips_when_parent_paints() {
+    // The render walk sets each window's clip to `bounds ∩ dirty_union`
+    // before painting, so a parent that paints because its own bounds
+    // intersected dirty cannot overdraw pixels outside the dirty union —
+    // including pixels inside a child whose bounds don't intersect dirty.
+    // Such a child must therefore stay clean (skip paint), so widgets like
+    // TextWindow can keep their incremental-cells fast path.
     let (mut wm, state) = make_manager(800, 600);
     let _ = build_simple_scene(
         &mut wm,
@@ -550,10 +557,10 @@ fn test_parent_painted_propagates_to_clean_non_intersecting_child() {
     let s = state.lock();
     assert!(!s.fills_with_color(ROOT_COLOR).is_empty(), "root should paint");
     assert!(
-        !s.fills_with_color(CHILD0_COLOR).is_empty(),
-        "child must paint after parent overdraw, even though child neither \
-         had needs_repaint=true nor intersected the dirty rect — propagation \
-         relies on will_repaint = should_paint"
+        s.fills_with_color(CHILD0_COLOR).is_empty(),
+        "child whose bounds don't intersect dirty must NOT paint — the \
+         parent's clip prevents overdraw, so propagating dirty downward \
+         was a regression that defeated TextWindow's incremental updates"
     );
 }
 
@@ -825,7 +832,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_skip_paint_when_ancestor_chain_misses_dirty,
         &test_window_intersecting_dirty_paints_with_clipped_rect,
         &test_full_repaint_clips_to_window_bounds,
-        &test_parent_painted_propagates_to_clean_non_intersecting_child,
+        &test_clean_child_outside_dirty_skips_when_parent_paints,
         // U5 — drag/resize bounds-union dirty
         &test_drag_tick_marks_bounds_union_not_full_repaint,
         &test_drag_tick_with_no_position_change_does_nothing,

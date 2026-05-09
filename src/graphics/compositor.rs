@@ -391,35 +391,24 @@ impl Compositor {
         self.dirty.mark_dirty(bounds);
     }
 
-    /// Update cursor position and mark dirty regions.
+    /// Record that the cursor has moved.
     ///
-    /// Returns true if the cursor actually moved.
+    /// Returns true if the cursor actually moved. Does **not** mark the
+    /// old/new cursor footprints dirty: `CursorRenderer` already restores
+    /// the saved-background pixels at the old position and re-saves at the
+    /// new position every frame, so the windows underneath the cursor do
+    /// not need to repaint to keep their pixels intact. Marking the
+    /// cursor's footprint dirty was a regression — it caused every mouse
+    /// motion to trigger a wallpaper-blit + child-window-repaint chain
+    /// (`TextWindow: Drew 228 non-space characters` perpetually) and, after
+    /// dropping the eager `parent_was_repainted` propagation, left
+    /// wallpaper bleeding through child windows that early-return when
+    /// their own content hasn't changed.
     pub fn update_cursor(&mut self, new_x: usize, new_y: usize) -> bool {
         if !self.cursor.has_moved(new_x, new_y) {
             return false;
         }
-
-        // Mark both old and new cursor positions as dirty
-        let (old_bounds, new_bounds) = self.cursor.move_to(new_x, new_y);
-
-        // Include some padding for cursor outline
-        let padding = 2;
-        let old_padded = Rect::new(
-            old_bounds.x - padding,
-            old_bounds.y - padding,
-            old_bounds.width + (padding * 2) as u32,
-            old_bounds.height + (padding * 2) as u32,
-        );
-        let new_padded = Rect::new(
-            new_bounds.x - padding,
-            new_bounds.y - padding,
-            new_bounds.width + (padding * 2) as u32,
-            new_bounds.height + (padding * 2) as u32,
-        );
-
-        self.dirty.mark_dirty(old_padded);
-        self.dirty.mark_dirty(new_padded);
-
+        self.cursor.move_to(new_x, new_y);
         true
     }
 

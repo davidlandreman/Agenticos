@@ -857,12 +857,7 @@ impl WindowManager {
         self.render_window_tree_with_offset(window_id, 0, 0);
     }
     
-    /// Recursively render a window and its children with parent offset
-    fn render_window_tree_with_offset(&mut self, window_id: WindowId, parent_x: i32, parent_y: i32) {
-        self.render_window_tree_with_offset_propagate(window_id, parent_x, parent_y, false);
-    }
-
-    /// Internal helper for rendering with invalidation propagation.
+    /// Recursively render a window and its children with parent offset.
     ///
     /// Decides per-window whether to paint based on the dirty union (computed
     /// from the compositor's tracked rects). A window paints when it is
@@ -872,19 +867,15 @@ impl WindowManager {
     /// that meet neither criterion are skipped entirely — that is the
     /// dividend dirty tracking has been waiting on.
     ///
-    /// `will_repaint` (propagated to children as `parent_was_repainted`) is
-    /// `should_paint`, NOT `needs_repaint()` — when a parent paints because
-    /// its bounds intersected dirty (not because its content changed), it
-    /// still overdraws children's pixel area, so children must repaint over
-    /// it. Threading the older `needs_repaint()` value here would let a
-    /// child silently keep stale pixels.
-    fn render_window_tree_with_offset_propagate(
-        &mut self,
-        window_id: WindowId,
-        parent_x: i32,
-        parent_y: i32,
-        parent_was_repainted: bool,
-    ) {
+    /// Children are *not* force-invalidated when their parent paints. Each
+    /// window's clip is `bounds ∩ dirty_union`, so the parent's paint never
+    /// touches pixels outside the dirty union. Any child whose own bounds
+    /// intersect the dirty union picks up `should_paint = true` via
+    /// `intersects_dirty` and repaints itself; a child outside the dirty
+    /// union has no pixels overdrawn and can stay clean. (Forcing children
+    /// to invalidate here was a regression — TextWindow's incremental-cells
+    /// path requires `needs_repaint == false` to skip the full-grid redraw.)
+    fn render_window_tree_with_offset(&mut self, window_id: WindowId, parent_x: i32, parent_y: i32) {
         crate::debug_trace!("render_window_tree: {:?}, offset=({}, {})", window_id, parent_x, parent_y);
 
         // Read once per recursive frame; the dirty manager isn't mutated
@@ -898,12 +889,6 @@ impl WindowManager {
             let visible = window.visible();
             let children = window.children().to_vec();
 
-            // If parent was repainted, this window must also repaint
-            // (because the parent's background covered us)
-            if parent_was_repainted && !window.needs_repaint() {
-                window.invalidate();
-            }
-
             // Adjust bounds by parent offset
             bounds.x += parent_x;
             bounds.y += parent_y;
@@ -914,19 +899,14 @@ impl WindowManager {
                 let intersects_dirty = dirty_bbox.map_or(false, |b| bounds.intersects(&b));
                 let should_paint = window.needs_repaint() || intersects_dirty;
 
-                // Propagate "I painted" to children regardless of WHY I
-                // painted. See doc comment above.
-                let will_repaint = should_paint;
-
                 if should_paint {
                     let original_bounds = window.bounds();
                     window.set_bounds_no_invalidate(bounds);
 
                     // Clip to (bounds ∩ dirty union) so paint() / blit
-                    // targets only the freshly-dirty pixels. When the
-                    // dirty union exists but misses the window (a child
-                    // invalidated mid-walk via parent_was_repainted), fall
-                    // back to the window's own bounds.
+                    // targets only the freshly-dirty pixels. With no dirty
+                    // bbox (full-repaint path) fall back to the window's
+                    // own bounds.
                     let clip = match dirty_bbox {
                         Some(db) => bounds.intersection(&db).unwrap_or(bounds),
                         None => bounds,
@@ -977,9 +957,7 @@ impl WindowManager {
                 self.window_registry.insert(window_id, window);
 
                 for child_id in children {
-                    self.render_window_tree_with_offset_propagate(
-                        child_id, bounds.x, bounds.y, will_repaint,
-                    );
+                    self.render_window_tree_with_offset(child_id, bounds.x, bounds.y);
                 }
             } else {
                 // Put the window back even if not visible
