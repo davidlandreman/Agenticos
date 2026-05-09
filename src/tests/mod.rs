@@ -1,4 +1,7 @@
 #[cfg(feature = "test")]
+pub mod filter;
+
+#[cfg(feature = "test")]
 pub mod basic;
 #[cfg(feature = "test")]
 pub mod memory;
@@ -66,304 +69,173 @@ pub mod window_buffer;
 pub mod desktop_backing_store;
 
 #[cfg(feature = "test")]
+type GetTestsFn = fn() -> &'static [&'static dyn crate::lib::test_utils::Testable];
+
+/// Registry of test modules. Adding a new module = one line here.
+///
+/// Names are used as the `<module>` half of `<module>::<fn>` filter matching
+/// (see `filter.rs`). Keep them short and lowercase.
+#[cfg(feature = "test")]
+static MODULES: &[(&str, GetTestsFn)] = &[
+    ("basic", basic::get_tests),
+    ("memory", memory::get_tests),
+    ("display", display::get_tests),
+    ("interrupts", interrupts::get_tests),
+    ("heap", heap::get_tests),
+    ("arc", arc::get_tests),
+    ("filesystem", filesystem::get_tests),
+    ("tools", tools::get_tests),
+    ("userland", userland::get_tests),
+    ("fonts", fonts::get_tests),
+    ("window_clipping", window_clipping::get_tests),
+    ("graphics_device_image", graphics_device_image::get_tests),
+    ("desktop_window", desktop_window::get_tests),
+    ("mouse_event_extension", mouse_event_extension_tests::get_tests),
+    ("layout", layout_tests::get_tests),
+    ("selection", selection_tests::get_tests),
+    ("scroll_view", scroll_view_tests::get_tests),
+    ("trait_delegation", trait_delegation_tests::get_tests),
+    ("list_migration", list_migration_tests::get_tests),
+    ("tree_view", tree_view_tests::get_tests),
+    ("splitter", splitter_tests::get_tests),
+    ("toolbar_status", toolbar_status_tests::get_tests),
+    ("path_bar", path_bar_tests::get_tests),
+    ("icon_view", icon_view_tests::get_tests),
+    ("progress_bar", progress_bar_tests::get_tests),
+    ("text_editor_migration", text_editor_migration_tests::get_tests),
+    ("explorer_dir_model", explorer_dir_model_tests::get_tests),
+    ("explorer_dispatch", explorer_dispatch_tests::get_tests),
+    ("compositor", compositor::get_tests),
+    ("window_manager_render", window_manager_render::get_tests),
+    ("window_buffer", window_buffer::get_tests),
+    ("desktop_backing_store", desktop_backing_store::get_tests),
+    ("filter", filter::get_tests),
+];
+
+/// Strip the `agenticos::tests::<topic>::` prefix from a test's `type_name`,
+/// yielding `<module>::<fn>` (matching the registry's module name).
+///
+/// Falls back to the original name when the prefix is absent (e.g. tests
+/// declared outside `crate::tests`).
+#[cfg(feature = "test")]
+fn short_name<'a>(module: &str, full: &'a str) -> &'a str {
+    // type_name typically returns "agenticos::tests::<topic>::<fn>".
+    // Trim down to "<module>::<fn>" — using the registry's `module` name
+    // rather than the topic file name keeps filter strings stable even when
+    // a file is renamed.
+    if let Some(idx) = full.rfind("::") {
+        let fn_name = &full[idx + 2..];
+        // Caller's module name + fn name, joined with "::". Returning a
+        // subslice of `full` would be wrong here because module may differ
+        // from the topic; we cheat by storing nothing and asking the matcher
+        // to take both pieces. But Testable::name returns &'static str, so
+        // we can't allocate. Instead, the matcher gets `module` separately
+        // and only needs `<fn>` from us — return that.
+        let _ = module;
+        return fn_name;
+    }
+    full
+}
+
+#[cfg(feature = "test")]
 pub fn run_tests() {
-    use crate::{debug_info};
-    use crate::lib::test_utils::{Testable, exit_qemu_success};
+    use crate::debug_info;
+    use crate::lib::test_utils::{exit_qemu_failed, exit_qemu_success};
 
     debug_info!("=== Running Kernel Tests ===");
-
-    // Collect all tests from modules
-    let basic_tests = basic::get_tests();
-    let memory_tests = memory::get_tests();
-    let display_tests = display::get_tests();
-    let interrupts_tests = interrupts::get_tests();
-    let heap_tests = heap::get_tests();
-    let arc_tests = arc::get_tests();
-    let filesystem_tests = filesystem::get_tests();
-    let tools_tests = tools::get_tests();
-    let userland_tests = userland::get_tests();
-    let fonts_tests = fonts::get_tests();
-    let window_clipping_tests = window_clipping::get_tests();
-    let graphics_device_image_tests = graphics_device_image::get_tests();
-    let desktop_window_tests = desktop_window::get_tests();
-    let mouse_event_extension_tests = mouse_event_extension_tests::get_tests();
-    let layout_tests = layout_tests::get_tests();
-    let selection_tests = selection_tests::get_tests();
-    let scroll_view_tests = scroll_view_tests::get_tests();
-    let trait_delegation_tests = trait_delegation_tests::get_tests();
-    let list_migration_tests = list_migration_tests::get_tests();
-    let tree_view_tests = tree_view_tests::get_tests();
-    let splitter_tests = splitter_tests::get_tests();
-    let toolbar_status_tests = toolbar_status_tests::get_tests();
-    let path_bar_tests = path_bar_tests::get_tests();
-    let icon_view_tests = icon_view_tests::get_tests();
-    let progress_bar_tests = progress_bar_tests::get_tests();
-    let text_editor_migration_tests = text_editor_migration_tests::get_tests();
-    let explorer_dir_model_tests = explorer_dir_model_tests::get_tests();
-    let explorer_dispatch_tests = explorer_dispatch_tests::get_tests();
-    let compositor_tests = compositor::get_tests();
-    let window_manager_render_tests = window_manager_render::get_tests();
-    let window_buffer_tests = window_buffer::get_tests();
-    let desktop_backing_store_tests = desktop_backing_store::get_tests();
-
-    let mut total_tests = 0;
-
-    // Run basic tests
-    debug_info!("\n[Basic Tests]");
-    debug_info!("Running {} tests", basic_tests.len());
-    for test in basic_tests {
-        test.run();
-        total_tests += 1;
+    if let Some(f) = filter::filter_str() {
+        debug_info!("Filter: {:?}", f);
     }
 
-    // Run memory tests
-    debug_info!("\n[Memory Tests]");
-    debug_info!("Running {} tests", memory_tests.len());
-    for test in memory_tests {
-        test.run();
-        total_tests += 1;
+    let mut total_run = 0usize;
+    let mut total_skipped = 0usize;
+    let mut modules_with_matches = 0usize;
+
+    for (module_name, get) in MODULES {
+        let tests = get();
+
+        // Count matches for this module so we can print "N of M".
+        let mut matched = 0usize;
+        for t in tests.iter() {
+            let fn_name = short_name(module_name, t.name());
+            if filter_matches(module_name, fn_name) {
+                matched += 1;
+            }
+        }
+
+        if matched == 0 {
+            total_skipped += tests.len();
+            continue;
+        }
+        modules_with_matches += 1;
+
+        if matched == tests.len() {
+            debug_info!("\n[{}] Running {} tests", module_name, matched);
+        } else {
+            debug_info!(
+                "\n[{}] Running {} of {} tests",
+                module_name,
+                matched,
+                tests.len()
+            );
+            total_skipped += tests.len() - matched;
+        }
+
+        for t in tests.iter() {
+            let fn_name = short_name(module_name, t.name());
+            if !filter_matches(module_name, fn_name) {
+                continue;
+            }
+            t.run();
+            total_run += 1;
+        }
     }
 
-    // Run display tests
-    debug_info!("\n[Display Tests]");
-    debug_info!("Running {} tests", display_tests.len());
-    for test in display_tests {
-        test.run();
-        total_tests += 1;
+    if total_run == 0 {
+        crate::debug_error!(
+            "No tests matched filter {:?}",
+            filter::filter_str().unwrap_or("")
+        );
+        exit_qemu_failed();
+        return;
     }
 
-    // Run interrupt tests
-    debug_info!("\n[Interrupt Tests]");
-    debug_info!("Running {} tests", interrupts_tests.len());
-    for test in interrupts_tests {
-        test.run();
-        total_tests += 1;
+    if filter::is_empty() {
+        debug_info!("\n=== All {} tests passed! ===", total_run);
+    } else {
+        debug_info!(
+            "\n=== {} tests passed across {} module(s) ({} skipped by filter) ===",
+            total_run,
+            modules_with_matches,
+            total_skipped
+        );
     }
-
-    // Run heap tests
-    debug_info!("\n[Heap Tests]");
-    debug_info!("Running {} tests", heap_tests.len());
-    for test in heap_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Arc tests
-    debug_info!("\n[Arc Tests]");
-    debug_info!("Running {} tests", arc_tests.len());
-    for test in arc_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Filesystem tests
-    debug_info!("\n[Filesystem Tests]");
-    debug_info!("Running {} tests", filesystem_tests.len());
-    for test in filesystem_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Tools (registry) tests
-    debug_info!("\n[Tools Tests]");
-    debug_info!("Running {} tests", tools_tests.len());
-    for test in tools_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Userland tests
-    debug_info!("\n[Userland Tests]");
-    debug_info!("Running {} tests", userland_tests.len());
-    for test in userland_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Font tests
-    debug_info!("\n[Font Tests]");
-    debug_info!("Running {} tests", fonts_tests.len());
-    for test in fonts_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run window clipping tests
-    debug_info!("\n[Window Clipping Tests]");
-    debug_info!("Running {} tests", window_clipping_tests.len());
-    for test in window_clipping_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run GraphicsDevice image tests
-    debug_info!("\n[GraphicsDevice Image Tests]");
-    debug_info!("Running {} tests", graphics_device_image_tests.len());
-    for test in graphics_device_image_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run DesktopWindow tests
-    debug_info!("\n[DesktopWindow Tests]");
-    debug_info!("Running {} tests", desktop_window_tests.len());
-    for test in desktop_window_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run MouseEvent extension tests (U16)
-    debug_info!("\n[MouseEvent Extension Tests]");
-    debug_info!("Running {} tests", mouse_event_extension_tests.len());
-    for test in mouse_event_extension_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Layout tests (U2)
-    debug_info!("\n[Layout Tests]");
-    debug_info!("Running {} tests", layout_tests.len());
-    for test in layout_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Selection tests (U1)
-    debug_info!("\n[Selection Tests]");
-    debug_info!("Running {} tests", selection_tests.len());
-    for test in selection_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run ScrollView tests (U3)
-    debug_info!("\n[ScrollView Tests]");
-    debug_info!("Running {} tests", scroll_view_tests.len());
-    for test in scroll_view_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run trait-delegation tests (U5)
-    debug_info!("\n[Trait Delegation Tests]");
-    debug_info!("Running {} tests", trait_delegation_tests.len());
-    for test in trait_delegation_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run List/MultiColumnList migration tests (U6)
-    debug_info!("\n[List Migration Tests]");
-    debug_info!("Running {} tests", list_migration_tests.len());
-    for test in list_migration_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run TreeView tests (U9)
-    debug_info!("\n[TreeView Tests]");
-    debug_info!("Running {} tests", tree_view_tests.len());
-    for test in tree_view_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Splitter tests (U10)
-    debug_info!("\n[Splitter Tests]");
-    debug_info!("Running {} tests", splitter_tests.len());
-    for test in splitter_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Toolbar/StatusBar tests (U11)
-    debug_info!("\n[Toolbar/StatusBar Tests]");
-    debug_info!("Running {} tests", toolbar_status_tests.len());
-    for test in toolbar_status_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run PathBar tests (U12)
-    debug_info!("\n[PathBar Tests]");
-    debug_info!("Running {} tests", path_bar_tests.len());
-    for test in path_bar_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run IconView tests (U13)
-    debug_info!("\n[IconView Tests]");
-    debug_info!("Running {} tests", icon_view_tests.len());
-    for test in icon_view_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run ProgressBar tests (U14)
-    debug_info!("\n[ProgressBar Tests]");
-    debug_info!("Running {} tests", progress_bar_tests.len());
-    for test in progress_bar_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run TextEditor migration tests (U7)
-    debug_info!("\n[TextEditor Migration Tests]");
-    debug_info!("Running {} tests", text_editor_migration_tests.len());
-    for test in text_editor_migration_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run File Explorer dir_model tests
-    debug_info!("\n[Explorer dir_model Tests]");
-    debug_info!("Running {} tests", explorer_dir_model_tests.len());
-    for test in explorer_dir_model_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run File Explorer dispatch tests
-    debug_info!("\n[Explorer dispatch Tests]");
-    debug_info!("Running {} tests", explorer_dispatch_tests.len());
-    for test in explorer_dispatch_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Compositor tests
-    debug_info!("\n[Compositor Tests]");
-    debug_info!("Running {} tests", compositor_tests.len());
-    for test in compositor_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run WindowManager render tests
-    debug_info!("\n[WindowManager Render Tests]");
-    debug_info!("Running {} tests", window_manager_render_tests.len());
-    for test in window_manager_render_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run WindowBuffer tests
-    debug_info!("\n[WindowBuffer Tests]");
-    debug_info!("Running {} tests", window_buffer_tests.len());
-    for test in window_buffer_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    // Run Desktop backing-store tests
-    debug_info!("\n[Desktop Backing Store Tests]");
-    debug_info!("Running {} tests", desktop_backing_store_tests.len());
-    for test in desktop_backing_store_tests {
-        test.run();
-        total_tests += 1;
-    }
-
-    debug_info!("\n=== All {} tests passed! ===", total_tests);
     exit_qemu_success();
+}
+
+/// Build `<module>::<fn>` on the stack (no alloc) and run filter matching
+/// against it. `filter::matches` already tries each pattern against both
+/// `module` and the joined name.
+#[cfg(feature = "test")]
+fn filter_matches(module: &str, fn_name: &str) -> bool {
+    if filter::is_empty() {
+        return true;
+    }
+    let mut buf = [0u8; 128];
+    let m = module.as_bytes();
+    let f = fn_name.as_bytes();
+    let total = m.len() + 2 + f.len();
+    if total > buf.len() {
+        // Pathological name — fall back to module-only check.
+        return filter::matches(module, module);
+    }
+    buf[..m.len()].copy_from_slice(m);
+    buf[m.len()] = b':';
+    buf[m.len() + 1] = b':';
+    buf[m.len() + 2..total].copy_from_slice(f);
+    let joined = match core::str::from_utf8(&buf[..total]) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    filter::matches(module, joined)
 }

@@ -30,6 +30,10 @@ pub fn exit_qemu_failed() {
 }
 
 pub trait Testable {
+    /// Fully-qualified path of the test function, e.g.
+    /// `"agenticos::tests::arc::test_weak_basic"`. Used for filtering and the
+    /// per-test boot log. Default impl works for any `Fn()` test.
+    fn name(&self) -> &'static str;
     fn run(&self) -> ();
 }
 
@@ -37,8 +41,11 @@ impl<T> Testable for T
 where
     T: Fn(),
 {
+    fn name(&self) -> &'static str {
+        core::any::type_name::<T>()
+    }
     fn run(&self) {
-        debug_info!("{}...\t", core::any::type_name::<T>());
+        debug_info!("{}...\t", self.name());
         self();
         debug_debug!("[ok]");
     }

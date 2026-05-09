@@ -32,10 +32,14 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 **QEMU Configuration**: 128 MiB RAM, serial output, VirtIO tablet for seamless mouse, `isa-debug-exit` for test integration.
 
 ### Testing
-- `./test.sh` — Run kernel tests in QEMU with automatic exit
+- `./test.sh` — Run all kernel tests in QEMU with automatic exit
+- `./test.sh arc heap` — Run only the listed test modules
+- `./test.sh 'arc::test_weak*'` — Glob within a module
+- `./test.sh -l` — List available modules and exit
+- `./test.sh --skip-userland` — Skip the userland prebuild (faster iteration)
 - `cargo build --features test` — Build kernel with test features enabled
 
-Tests run automatically on kernel boot when built with the test feature. QEMU exits with success/failure codes via `isa-debug-exit`. See `.claude/rules/testing-flow.md` for exit-code semantics, and `src/tests/CLAUDE.md` for how to add a new test.
+Tests run automatically on kernel boot when built with the test feature. QEMU exits with success/failure codes via `isa-debug-exit`. The filter is delivered at runtime via QEMU `fw_cfg`, so changing it does not trigger a kernel rebuild. See `.claude/rules/testing-flow.md` for exit-code semantics and filter syntax, and `src/tests/CLAUDE.md` for how to add a new test or topic module.
 
 ### Code Quality
 - `cargo fmt` — Format code
