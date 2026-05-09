@@ -1,0 +1,13 @@
+[build]
+target = "x86_64-unknown-none"
+
+[build-dependencies]
+kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
+
+[target.'cfg(target_os = "none")']
+runner = ["qemu-system-x86_64", "-drive", "format=raw,file=target/bootloader/bios.img","-serial","stdio"]
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+bindeps = true

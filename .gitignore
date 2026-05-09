@@ -1,5 +1,8 @@
-.cargo
-.claude
+# Personal Claude Code permissions (shared settings.json IS tracked)
+.claude/settings.local.json
+
+# Conductor per-workspace overrides
+.conductor/run.local.sh
 
 # Rust build artifacts
 /target/
