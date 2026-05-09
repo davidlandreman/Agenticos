@@ -404,6 +404,67 @@ impl WindowManager {
         Some((id, abs))
     }
 
+    /// Walk the active screen's tree in render order (depth-first, children
+    /// in declaration order — same order `render_window_tree` paints in)
+    /// and return each window's id and absolute bounds.
+    fn collect_render_order(&self) -> Vec<(WindowId, Rect)> {
+        let mut out = Vec::new();
+        if let Some(root_id) = self.get_active_screen().and_then(|s| s.root_window) {
+            self.collect_render_order_recursive(root_id, 0, 0, &mut out);
+        }
+        out
+    }
+
+    fn collect_render_order_recursive(
+        &self,
+        id: WindowId,
+        parent_x: i32,
+        parent_y: i32,
+        out: &mut Vec<(WindowId, Rect)>,
+    ) {
+        let window = match self.window_registry.get(&id) {
+            Some(w) => w,
+            None => return,
+        };
+        if !window.visible() {
+            return;
+        }
+        let local = window.bounds();
+        let abs = Rect::new(local.x + parent_x, local.y + parent_y, local.width, local.height);
+        out.push((id, abs));
+        for &child_id in window.children() {
+            self.collect_render_order_recursive(child_id, abs.x, abs.y, out);
+        }
+    }
+
+    /// For each dirty window, mark every later (above-in-z-order) window
+    /// whose absolute bounds overlap as also dirty. This propagates in a
+    /// single forward pass: by the time the loop reaches an index, any
+    /// earlier overlapping dirty window has already invalidated it.
+    fn cascade_invalidation(&mut self) {
+        let order = self.collect_render_order();
+        for i in 0..order.len() {
+            let (id_i, bounds_i) = order[i];
+            let dirty_i = self.window_registry
+                .get(&id_i)
+                .map(|w| w.needs_repaint())
+                .unwrap_or(false);
+            if !dirty_i {
+                continue;
+            }
+            for j in (i + 1)..order.len() {
+                let (id_j, bounds_j) = order[j];
+                if bounds_i.intersects(&bounds_j) {
+                    if let Some(w) = self.window_registry.get_mut(&id_j) {
+                        if !w.needs_repaint() {
+                            w.invalidate();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Route an event to a specific window
     fn route_event_to_window(&mut self, window_id: WindowId, event: Event) {
         crate::debug_trace!("route_event_to_window: window={:?}, event={:?}", window_id, event);
@@ -559,6 +620,13 @@ impl WindowManager {
 
         // Update cursor position in compositor (this marks dirty regions)
         let mouse_moved = self.compositor.update_cursor(mouse_x, mouse_y);
+
+        // Cascade invalidation across the z-order so that any window in
+        // front of a dirty one (and overlapping it) repaints too. Without
+        // this, a dirty inner widget (e.g. an editor in the inactive
+        // notepad) paints over the chrome of a later sibling that thinks
+        // it's clean, leaving the front frame's title bar overdrawn.
+        self.cascade_invalidation();
 
         // Check if any windows need repaint and mark their regions dirty
         for (window_id, window) in &self.window_registry {
