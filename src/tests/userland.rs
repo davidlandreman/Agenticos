@@ -436,7 +436,40 @@ fn test_loader_alignment_bad() {
     assert_eq!(load_elf(&bytes).unwrap_err(), LoaderError::AlignmentBad);
 }
 
-fn test_loader_pt_tls_rejected() {
+/// PT_TLS is now supported. The image loads, the TCB self-pointer is
+/// initialized to USER_TCB_VA, and the FS_BASE accessor on UserImage
+/// reflects the TCB address.
+fn test_loader_pt_tls_loads() {
+    use crate::mm::paging::{USER_TCB_VA, USER_TLS_IMAGE_VA};
+    let bytes = fix::tls_smoke_elf();
+    let image = load_elf(&bytes).expect("load_elf with PT_TLS");
+
+    assert_eq!(image.tls_fs_base, Some(VirtAddr::new(USER_TCB_VA)));
+
+    // tdata bytes (the four 0x55 bytes the fixture put at p_offset) landed
+    // at the TLS image VA.
+    unsafe {
+        let p = USER_TLS_IMAGE_VA as *const u8;
+        for i in 0..4 {
+            assert_eq!(*p.add(i), 0x55, "tdata[{}] not copied", i);
+        }
+        // tbss is zero-filled by the fresh mapping.
+        for i in 4..0x100 {
+            assert_eq!(*p.add(i), 0, "tbss[{}] not zero", i);
+        }
+        // TCB self-pointer at offset 0.
+        let tcb = USER_TCB_VA as *const u64;
+        assert_eq!(core::ptr::read_unaligned(tcb), USER_TCB_VA);
+        // dtv slot at offset 8 is zero.
+        assert_eq!(core::ptr::read_unaligned(tcb.add(1)), 0);
+    }
+
+    drop(image);
+}
+
+/// Oversized PT_TLS (>4 KiB image) is rejected with `TlsUnsupported` so
+/// the milestone's single-page TLS limit is honored.
+fn test_loader_pt_tls_oversized_rejected() {
     let p_offset = 0x1000u64;
     let bytes = fix::Fixture {
         e_type: fix::ET_EXEC,
@@ -458,10 +491,11 @@ fn test_loader_pt_tls_rejected() {
                 p_type: fix::PT_TLS,
                 p_flags: fix::PF_R,
                 p_offset,
-                p_vaddr: 0x40_2000,
+                p_vaddr: 0,
                 p_filesz: 4,
-                p_memsz: 4,
-                p_align: 0x1000,
+                // 5 KiB image — over the milestone cap.
+                p_memsz: 0x1400,
+                p_align: 0x10,
             },
         ],
         payloads: vec![(p_offset, vec![1u8; 4])],
@@ -747,7 +781,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_loader_overlapping_pt_load,
         &test_loader_entry_not_mapped,
         &test_loader_alignment_bad,
-        &test_loader_pt_tls_rejected,
+        &test_loader_pt_tls_loads,
+        &test_loader_pt_tls_oversized_rejected,
         &test_loader_pt_interp_rejected,
         &test_loader_segment_overflow,
         &test_loader_unsupported_reloc,

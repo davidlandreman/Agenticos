@@ -17,6 +17,22 @@ pub const USER_LOAD_BASE: u64 = 0x0000_0000_0040_0000;
 /// Top of the user stack (exclusive). The stack grows down from here.
 pub const USER_STACK_TOP: u64 = 0x0000_0000_0080_0000;
 
+/// Base virtual address of the per-process TLS region.
+///
+/// Layout (x86-64 TLS variant II):
+/// - `[USER_TLS_IMAGE_VA, USER_TLS_IMAGE_VA + 0x1000)` — TLS image (tdata + tbss)
+/// - `[USER_TCB_VA, USER_TCB_VA + 0x1000)` — TCB. FS_BASE points at this page;
+///   `%fs:0` returns the self-pointer recorded at offset 0.
+///
+/// Sized at 1 page each for the milestone — libstdc++'s static TLS image
+/// (errno + `__cxa_eh_globals` slots, etc.) is well under 4 KiB. The
+/// loader rejects with `TlsUnsupported` if `p_memsz` exceeds this.
+///
+/// Sits above the user stack (top 0x80_0000) and well below USER_VA_RANGE_END
+/// at 0x4000_0000, leaving room above for future brk and mmap arenas.
+pub const USER_TLS_IMAGE_VA: u64 = 0x0000_0000_0100_0000;
+pub const USER_TCB_VA: u64 = 0x0000_0000_0100_1000;
+
 /// Inclusive lower / exclusive upper bounds of the user-VA range. Anything
 /// outside is reserved for the kernel and `map_user_region` rejects it.
 ///

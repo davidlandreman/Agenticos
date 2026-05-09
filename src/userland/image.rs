@@ -53,11 +53,17 @@ pub struct UserImage {
     /// `extern "C"` and that convention applies).
     pub stack_top: VirtAddr,
     /// Inclusive-lower / exclusive-upper user-VA bounds covering every PT_LOAD
-    /// segment plus the user stack. Used by U7 to populate the syscall
-    /// pointer-validation bounds. Excludes the trampoline page (which is
-    /// shared and not specific to one image).
+    /// segment plus the user stack and (when present) the TLS region. Used
+    /// to populate the syscall pointer-validation bounds before entering
+    /// ring 3.
     pub bounds_start: u64,
     pub bounds_end: u64,
+    /// FS_BASE for `arch_prctl(ARCH_SET_FS)` — the address of the TCB the
+    /// loader allocated when the binary has a `PT_TLS` segment. `None`
+    /// when the binary has no TLS image. Consumers (the initial-stack
+    /// builder in U8 and the `arch_prctl` handler in U9) read this field
+    /// to install the per-process FS_BASE.
+    pub tls_fs_base: Option<VirtAddr>,
     /// Every region the loader mapped, in mapping order.
     mappings: Vec<MappingRange>,
     /// Set to `false` by the destructor to make Drop idempotent in case a
@@ -77,9 +83,16 @@ impl UserImage {
             stack_top,
             bounds_start,
             bounds_end,
+            tls_fs_base: None,
             mappings: Vec::new(),
             dropped: false,
         }
+    }
+
+    /// Record the FS_BASE address for the TCB the loader allocated. Called
+    /// from the loader when a `PT_TLS` segment is present.
+    pub fn set_tls_fs_base(&mut self, fs_base: VirtAddr) {
+        self.tls_fs_base = Some(fs_base);
     }
 
     /// Record a mapping that has just been installed via `map_user_region`.

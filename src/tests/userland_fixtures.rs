@@ -298,6 +298,67 @@ pub fn syscall_exit42_elf() -> Vec<u8> {
     runnable_elf_rx(&code)
 }
 
+/// Fixture C — PT_TLS smoke test.
+///
+/// One PT_LOAD with `syscall RAX=231 (exit_group), RDI=0` plus one PT_TLS
+/// segment carrying 4 bytes of `0x55` tdata followed by zero tbss padding.
+/// The binary itself doesn't access TLS — Fixture C only verifies that the
+/// loader accepts PT_TLS, copies tdata correctly, and initializes the TCB
+/// self-pointer. End-to-end TLS access via `arch_prctl(ARCH_SET_FS)` lands
+/// in U9.
+pub fn tls_smoke_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+    // mov eax, 231  (NR_EXIT_GROUP)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // mov edi, 0
+    code.extend_from_slice(&[0xBF, 0x00, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.push(0xF4); // hlt safety
+
+    // Fixture builder layout:
+    //   p_offset 0x1000: PT_LOAD payload (the code above, padded to a page)
+    //   p_offset 0x2000: PT_TLS payload (4 bytes of 0x55 + zero tbss tail)
+    let mut load_payload = code;
+    while load_payload.len() < 0x100 {
+        load_payload.push(0x90);
+    }
+    let tls_payload = vec![0x55u8, 0x55, 0x55, 0x55];
+
+    let phdr_load = PhdrSpec {
+        p_type: PT_LOAD,
+        p_flags: PF_R | PF_X,
+        p_offset: 0x1000,
+        p_vaddr: 0x40_0000,
+        p_filesz: load_payload.len() as u64,
+        p_memsz: 0x1000,
+        p_align: 0x1000,
+    };
+    let phdr_tls = PhdrSpec {
+        p_type: PT_TLS,
+        p_flags: PF_R,
+        p_offset: 0x2000,
+        p_vaddr: 0,
+        p_filesz: tls_payload.len() as u64,
+        // 0x100 bytes total = 4 bytes of tdata + 252 bytes of tbss.
+        p_memsz: 0x100,
+        // Word alignment is enough for this fixture.
+        p_align: 8,
+    };
+
+    Fixture {
+        e_type: ET_EXEC,
+        e_machine: EM_X86_64,
+        ei_class: ELFCLASS64,
+        ei_data: ELFDATA2LSB,
+        e_entry: 0x40_0000,
+        phdrs: vec![phdr_load, phdr_tls],
+        payloads: vec![(0x1000, load_payload), (0x2000, tls_payload)],
+        truncate_to: None,
+    }
+    .build()
+}
+
 /// Fixture: first instruction is UD2 (`0F 0B`). Triggers #UD on entry.
 pub fn fault_ud_elf() -> Vec<u8> {
     runnable_elf_rx(&[0x0F, 0x0B])
