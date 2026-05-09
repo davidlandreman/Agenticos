@@ -31,9 +31,15 @@ else
     echo "Warning: userland build failed; continuing without HELLO.ELF"
 fi
 
-# Cargo build must be ran twice to make sure image file is built
-cargo build --features test
-cargo build --features test
+# Cargo build must be ran twice to make sure the bootloader image is built
+# from the freshly-compiled kernel binary (the second pass invokes the
+# bootloader-linker build script).
+#
+# `--release` matches build.sh: the dev profile produces a much larger kernel
+# binary, which the BIOS-stage bootloader can fail to load silently in some
+# configurations. Tests run faster against an optimized kernel anyway.
+cargo build --release --features test
+cargo build --release --features test
 
 # Run with QEMU configured for testing
 BIOS_IMAGE="${AGENTICOS_BIOS_IMAGE:-target/bootloader/bios.img}"
