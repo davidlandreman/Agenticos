@@ -37,8 +37,51 @@ pub trait GraphicsDevice: Send {
     /// Fill a rectangle with a color
     fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: Color);
     
-    /// Draw text at a position
-    fn draw_text(&mut self, x: usize, y: usize, text: &str, font: &dyn Font, color: Color);
+    /// Draw text at a position. `(x, y)` is the top-left of the text cell;
+    /// the baseline is `y + font.ascent()`.
+    ///
+    /// The default implementation walks `text` glyph-by-glyph, blending 8bpp
+    /// coverage against existing framebuffer contents via `read_pixel` /
+    /// `draw_pixel`. Adapters that can do faster bulk blits may override.
+    fn draw_text(&mut self, x: usize, y: usize, text: &str, font: &dyn Font, color: Color) {
+        let baseline = y as i32 + font.ascent() as i32;
+        let mut pen_x = x as i32;
+        for ch in text.chars() {
+            if ch == '\n' {
+                break;
+            }
+            let Some(glyph) = font.glyph(ch) else { continue };
+            let glyph_x = pen_x + glyph.x_offset;
+            let glyph_y = baseline + glyph.y_offset;
+            let width = glyph.width as i32;
+            let height = glyph.height as i32;
+            for row in 0..height {
+                let dst_y = glyph_y + row;
+                if dst_y < 0 {
+                    continue;
+                }
+                for col in 0..width {
+                    let dst_x = glyph_x + col;
+                    if dst_x < 0 {
+                        continue;
+                    }
+                    let alpha = glyph.coverage[(row * width + col) as usize];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let dst_x = dst_x as usize;
+                    let dst_y = dst_y as usize;
+                    if alpha == 0xFF {
+                        self.draw_pixel(dst_x, dst_y, color);
+                    } else {
+                        let bg = self.read_pixel(dst_x, dst_y);
+                        self.draw_pixel(dst_x, dst_y, bg.blend(&color, alpha));
+                    }
+                }
+            }
+            pen_x += glyph.advance as i32;
+        }
+    }
     
     /// Draw an image (for future use)
     fn draw_image(&mut self, _x: usize, _y: usize, _data: &[u8], _width: usize, _height: usize) {

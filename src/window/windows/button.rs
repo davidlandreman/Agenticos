@@ -181,8 +181,8 @@ impl Window for Button {
         // Draw label centered
         if !self.label.is_empty() {
             let font = get_default_font();
-            let char_width = 8; // Default font is 8x8
-            let char_height = 8;
+            let char_width = font.cell_width() as usize;
+            let char_height = font.line_height() as usize;
             let text_width = self.label.len() * char_width;
 
             // Center text in button

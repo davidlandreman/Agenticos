@@ -48,8 +48,8 @@ impl TextEditor {
     /// Create a new text editor with a specific ID
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
         let font = get_default_font();
-        let char_width = font.char_width();
-        let char_height = font.char_height();
+        let char_width = font.cell_width() as usize;
+        let char_height = font.line_height() as usize;
 
         let visible_cols = (bounds.width as usize) / char_width;
         let visible_rows = (bounds.height as usize) / char_height;

@@ -7,7 +7,7 @@
 //! - Clipping support
 
 use crate::graphics::color::Color;
-use crate::graphics::fonts::core_font::Font;
+use crate::graphics::fonts::core_font::{Font, Glyph};
 use crate::window::types::Rect;
 
 /// A target surface that can be rendered to.
@@ -107,41 +107,54 @@ pub trait RenderTarget {
         self.fill_rect(0, 0, width, height, color);
     }
 
-    /// Draw text at a position using the specified font.
-    fn draw_text(&mut self, x: usize, y: usize, text: &str, font: &dyn Font, color: Color) {
-        let char_width = font.char_width();
-        let char_height = font.char_height();
-        let bytes_per_row = font.bytes_per_row();
-
-        let mut current_x = x;
-        for ch in text.chars() {
-            // Handle special characters
-            if ch == '\n' || ch == '\r' {
-                continue; // Skip newlines in single-line text rendering
+    /// Blit an 8bpp coverage glyph onto this target at `(x, y)` (bitmap
+    /// top-left). This trait has no `read_pixel`, so partial alpha is
+    /// thresholded at 128 — adequate for the legacy text path that uses it.
+    fn blit_glyph(&mut self, x: i32, y: i32, glyph: &Glyph, color: Color) {
+        if glyph.coverage.is_empty() || glyph.width == 0 || glyph.height == 0 {
+            return;
+        }
+        let width = glyph.width as i32;
+        let height = glyph.height as i32;
+        for row in 0..height {
+            let dst_y = y + row;
+            if dst_y < 0 {
+                continue;
             }
-
-            if let Some(bitmap) = font.get_char_bitmap(ch) {
-                // Draw character bitmap
-                for row in 0..char_height {
-                    for col in 0..char_width {
-                        let byte_index = row * bytes_per_row + col / 8;
-                        let bit_index = 7 - (col % 8);
-
-                        if byte_index < bitmap.len() && (bitmap[byte_index] & (1 << bit_index)) != 0 {
-                            let px = current_x + col;
-                            let py = y + row;
-                            if px < self.width() && py < self.height() {
-                                self.draw_pixel(px, py, color);
-                            }
-                        }
-                    }
+            for col in 0..width {
+                let dst_x = x + col;
+                if dst_x < 0 {
+                    continue;
+                }
+                let alpha = glyph.coverage[(row * width + col) as usize];
+                if alpha < 128 {
+                    continue;
+                }
+                let dst_x = dst_x as usize;
+                let dst_y = dst_y as usize;
+                if dst_x < self.width() && dst_y < self.height() {
+                    self.draw_pixel(dst_x, dst_y, color);
                 }
             }
-            current_x += char_width;
         }
     }
 
-    /// Draw text with background color (more efficient for terminal rendering).
+    /// Draw text at a position using the specified font. `(x, y)` is the
+    /// top-left of the text cell; the baseline is `y + font.ascent()`.
+    fn draw_text(&mut self, x: usize, y: usize, text: &str, font: &dyn Font, color: Color) {
+        let baseline = y as i32 + font.ascent() as i32;
+        let mut pen_x = x as i32;
+        for ch in text.chars() {
+            if ch == '\n' || ch == '\r' {
+                continue;
+            }
+            let Some(glyph) = font.glyph(ch) else { continue };
+            self.blit_glyph(pen_x + glyph.x_offset, baseline + glyph.y_offset, &glyph, color);
+            pen_x += glyph.advance as i32;
+        }
+    }
+
+    /// Draw text with background color (fills each cell first).
     fn draw_text_with_bg(
         &mut self,
         x: usize,
@@ -151,37 +164,21 @@ pub trait RenderTarget {
         fg_color: Color,
         bg_color: Color,
     ) {
-        let char_width = font.char_width();
-        let char_height = font.char_height();
-        let bytes_per_row = font.bytes_per_row();
-
-        let mut current_x = x;
+        let cell_width = font.cell_width() as usize;
+        let line_height = font.line_height() as usize;
+        let baseline = y as i32 + font.ascent() as i32;
+        let mut pen_x = x as i32;
         for ch in text.chars() {
             if ch == '\n' || ch == '\r' {
                 continue;
             }
-
-            // Fill background first
-            self.fill_rect(current_x, y, char_width, char_height, bg_color);
-
-            if let Some(bitmap) = font.get_char_bitmap(ch) {
-                // Draw foreground pixels
-                for row in 0..char_height {
-                    for col in 0..char_width {
-                        let byte_index = row * bytes_per_row + col / 8;
-                        let bit_index = 7 - (col % 8);
-
-                        if byte_index < bitmap.len() && (bitmap[byte_index] & (1 << bit_index)) != 0 {
-                            let px = current_x + col;
-                            let py = y + row;
-                            if px < self.width() && py < self.height() {
-                                self.draw_pixel(px, py, fg_color);
-                            }
-                        }
-                    }
-                }
-            }
-            current_x += char_width;
+            self.fill_rect(pen_x.max(0) as usize, y, cell_width, line_height, bg_color);
+            let Some(glyph) = font.glyph(ch) else {
+                pen_x += cell_width as i32;
+                continue;
+            };
+            self.blit_glyph(pen_x + glyph.x_offset, baseline + glyph.y_offset, &glyph, fg_color);
+            pen_x += glyph.advance as i32;
         }
     }
 

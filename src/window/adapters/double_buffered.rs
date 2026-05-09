@@ -2,7 +2,6 @@
 
 use bootloader_api::info::FrameBuffer;
 use crate::graphics::color::Color;
-use crate::graphics::fonts::core_font::Font;
 use crate::drivers::display::double_buffer::DoubleBufferedFrameBuffer;
 use crate::window::{GraphicsDevice, Rect, ColorDepth};
 use spin::Mutex;
@@ -147,35 +146,6 @@ impl GraphicsDevice for DoubleBufferedDevice {
         buffer.fill_rect(x, y, width, height, color);
         drop(buffer);
         self.dirty = true;
-    }
-    
-    fn draw_text(&mut self, x: usize, y: usize, text: &str, font: &dyn Font, color: Color) {
-        // Render text character by character
-        let char_width = font.char_width();
-        let char_height = font.char_height();
-        let bytes_per_row = font.bytes_per_row();
-        
-        let mut current_x = x;
-        for ch in text.chars() {
-            if let Some(bitmap) = font.get_char_bitmap(ch) {
-                // Draw character bitmap
-                for row in 0..char_height {
-                    for col in 0..char_width {
-                        let byte_index = row * bytes_per_row + col / 8;
-                        let bit_index = 7 - (col % 8);
-                        
-                        if byte_index < bitmap.len() && (bitmap[byte_index] & (1 << bit_index)) != 0 {
-                            let px = current_x + col;
-                            let py = y + row;
-                            if !self.is_clipped(px, py) {
-                                self.draw_pixel(px, py, color);
-                            }
-                        }
-                    }
-                }
-            }
-            current_x += char_width;
-        }
     }
     
     fn set_clip_rect(&mut self, rect: Option<Rect>) {

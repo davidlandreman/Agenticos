@@ -253,6 +253,7 @@ impl Window for List {
 
         // Draw items
         let font = get_default_font();
+        let line_h = font.line_height() as usize;
         let visible_count = self.visible_items();
         let padding = 4;
 
@@ -277,7 +278,7 @@ impl Window for List {
                 self.text_color
             };
 
-            let text_y = item_y + (self.item_height - 8) / 2; // Center vertically
+            let text_y = item_y + self.item_height.saturating_sub(line_h) / 2; // Center vertically
             device.draw_text(
                 x + padding,
                 text_y,

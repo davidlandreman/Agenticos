@@ -150,7 +150,7 @@ impl Window for Label {
         // Draw text
         if !self.text.is_empty() {
             let font = get_default_font();
-            let char_width = 8; // Default font is 8x8
+            let char_width = font.cell_width() as usize;
             let text_width = self.text.len() * char_width;
 
             // Calculate x position based on alignment

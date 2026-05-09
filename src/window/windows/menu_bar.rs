@@ -75,7 +75,7 @@ impl Menu {
     /// Create a new menu
     pub fn new(title: &str, items: Vec<MenuItemDef>) -> Self {
         let font = get_default_font();
-        let char_width = font.char_width();
+        let char_width = font.cell_width() as usize;
         let width = title.len() * char_width + MENU_TITLE_PADDING * 2;
 
         Menu {
@@ -229,7 +229,7 @@ impl MenuBar {
 
         // Calculate popup dimensions
         let font = get_default_font();
-        let char_width = font.char_width();
+        let char_width = font.cell_width() as usize;
         let item_height = 24usize;
 
         let max_label_width = menu
@@ -347,7 +347,7 @@ impl Window for MenuBar {
 
         let bounds = self.bounds();
         let font = get_default_font();
-        let char_height = font.char_height();
+        let char_height = font.line_height() as usize;
 
         // Store global offset for popup positioning
         // During paint, bounds are temporarily set to absolute coordinates
