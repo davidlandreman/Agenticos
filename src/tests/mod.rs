@@ -38,6 +38,12 @@ pub mod scroll_view_tests;
 pub mod trait_delegation_tests;
 #[cfg(feature = "test")]
 pub mod list_migration_tests;
+#[cfg(feature = "test")]
+pub mod tree_view_tests;
+#[cfg(feature = "test")]
+pub mod splitter_tests;
+#[cfg(feature = "test")]
+pub mod toolbar_status_tests;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -66,6 +72,9 @@ pub fn run_tests() {
     let scroll_view_tests = scroll_view_tests::get_tests();
     let trait_delegation_tests = trait_delegation_tests::get_tests();
     let list_migration_tests = list_migration_tests::get_tests();
+    let tree_view_tests = tree_view_tests::get_tests();
+    let splitter_tests = splitter_tests::get_tests();
+    let toolbar_status_tests = toolbar_status_tests::get_tests();
 
     let mut total_tests = 0;
 
@@ -217,6 +226,30 @@ pub fn run_tests() {
     debug_info!("\n[List Migration Tests]");
     debug_info!("Running {} tests", list_migration_tests.len());
     for test in list_migration_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run TreeView tests (U9)
+    debug_info!("\n[TreeView Tests]");
+    debug_info!("Running {} tests", tree_view_tests.len());
+    for test in tree_view_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Splitter tests (U10)
+    debug_info!("\n[Splitter Tests]");
+    debug_info!("Running {} tests", splitter_tests.len());
+    for test in splitter_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run Toolbar/StatusBar tests (U11)
+    debug_info!("\n[Toolbar/StatusBar Tests]");
+    debug_info!("Running {} tests", toolbar_status_tests.len());
+    for test in toolbar_status_tests {
         test.run();
         total_tests += 1;
     }

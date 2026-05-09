@@ -145,6 +145,10 @@ impl Window for Label {
         self.base.clear_needs_repaint();
     }
 
+    fn as_label_mut(&mut self) -> Option<&mut Label> {
+        Some(self)
+    }
+
     fn handle_event(&mut self, _event: Event) -> EventResult {
         // Labels don't handle events
         EventResult::Ignored

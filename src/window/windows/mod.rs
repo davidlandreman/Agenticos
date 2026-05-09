@@ -19,6 +19,10 @@ pub mod menu_bar_popup;
 pub mod dialog;
 pub mod layout;
 pub mod scroll_view;
+pub mod tree_view;
+pub mod splitter;
+pub mod toolbar;
+pub mod status_bar;
 
 pub use container::ContainerWindow;
 pub use terminal::TerminalWindow;
@@ -35,3 +39,7 @@ pub use menu_bar::{MenuBar, MenuItemDef, PendingPopup, MENU_BAR_HEIGHT};
 pub use menu_bar_popup::MenuBarPopup;
 pub use layout::{HBox, Padding, SizeHint, Spacer, VBox};
 pub use scroll_view::ScrollView;
+pub use tree_view::{TreeView, TreeNode, NodeId};
+pub use splitter::{Splitter, SplitterOrientation};
+pub use toolbar::Toolbar;
+pub use status_bar::StatusBar;

@@ -170,6 +170,22 @@ pub trait Window: Send {
     fn is_scroll_view(&self) -> bool {
         false
     }
+
+    /// Typed accessor used by `Toolbar` to toggle a button's enabled
+    /// state through the manager. Returns `None` by default; `Button`
+    /// overrides it to return `Some(self)`. Following the same opt-in
+    /// pattern as `is_scroll_view`, this avoids a generic downcast
+    /// machinery while keeping the trait small.
+    fn as_button_mut(&mut self) -> Option<&mut windows::button::Button> {
+        None
+    }
+
+    /// Typed accessor used by `StatusBar` to update a section's text
+    /// through the manager. Returns `None` by default; `Label`
+    /// overrides it to return `Some(self)`.
+    fn as_label_mut(&mut self) -> Option<&mut windows::label::Label> {
+        None
+    }
 }
 
 /// Global window manager instance
