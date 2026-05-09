@@ -2,6 +2,7 @@
 
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::Font;
+use crate::graphics::images::Image;
 use super::types::{Rect, ColorDepth};
 
 /// Abstract interface for graphics rendering.
@@ -86,10 +87,53 @@ pub trait GraphicsDevice: Send {
     }
 
 
-    /// Draw an image (for future use)
-    fn draw_image(&mut self, _x: i32, _y: i32, _data: &[u8], _width: u32, _height: u32) {
-        // Default implementation for now
-        // TODO: Implement proper image drawing
+    /// Blit a parsed image at `(x, y)` at its native resolution.
+    ///
+    /// The default implementation walks every source pixel and forwards it to
+    /// `draw_pixel`, which clips against the device bounds and the active clip
+    /// rect. Adapters that can do bulk row blits may override.
+    fn draw_image(&mut self, x: i32, y: i32, image: &dyn Image) {
+        let height = image.height();
+        let width = image.width();
+        for img_y in 0..height {
+            let dst_y = y + img_y as i32;
+            for img_x in 0..width {
+                if let Some(color) = image.get_pixel(img_x, img_y) {
+                    self.draw_pixel(x + img_x as i32, dst_y, color);
+                }
+            }
+        }
+    }
+
+    /// Blit a parsed image at `(x, y)` scaled to `width × height` using
+    /// nearest-neighbor sampling. Coordinates and clipping follow the same
+    /// contract as `draw_pixel`.
+    fn draw_image_scaled(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        image: &dyn Image,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let src_w = image.width();
+        let src_h = image.height();
+        if src_w == 0 || src_h == 0 {
+            return;
+        }
+        for dy in 0..height {
+            let sy = (dy as usize * src_h) / height as usize;
+            let dst_y = y + dy as i32;
+            for dx in 0..width {
+                let sx = (dx as usize * src_w) / width as usize;
+                if let Some(color) = image.get_pixel(sx, sy) {
+                    self.draw_pixel(x + dx as i32, dst_y, color);
+                }
+            }
+        }
     }
 
     /// Set the clipping rectangle for drawing operations

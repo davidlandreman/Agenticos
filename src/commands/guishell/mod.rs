@@ -86,6 +86,11 @@ pub fn init_guishell() {
         return;
     }
 
+    // Load the bundled wallpaper outside the window-manager lock so the file
+    // read can't deadlock against any window state. Falling back to None
+    // yields the legacy solid-blue desktop.
+    let wallpaper = window::load_default_wallpaper();
+
     window::with_window_manager(|wm| {
         // Get screen dimensions
         let width = wm.graphics_device.width() as u32;
@@ -95,9 +100,14 @@ pub fn init_guishell() {
         let screen_id = wm.create_screen(window::ScreenMode::Gui);
         wm.switch_screen(screen_id);
 
-        // Create desktop background window
+        // Create desktop background window — with wallpaper bytes when the
+        // bundled BMP loaded successfully, otherwise the solid-color fallback.
         let desktop_id = wm.create_window(None);
-        let desktop_window = Box::new(DesktopWindow::new(desktop_id, Rect::new(0, 0, width, height)));
+        let desktop_bounds = Rect::new(0, 0, width, height);
+        let desktop_window: Box<dyn window::Window> = match wallpaper {
+            Some(bytes) => Box::new(DesktopWindow::new_with_wallpaper(desktop_id, desktop_bounds, bytes)),
+            None => Box::new(DesktopWindow::new(desktop_id, desktop_bounds)),
+        };
         wm.set_window_impl(desktop_id, desktop_window);
 
         // Set desktop as the root window for the screen
