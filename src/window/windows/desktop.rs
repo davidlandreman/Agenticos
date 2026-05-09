@@ -57,10 +57,10 @@ impl Window for DesktopWindow {
         // Fill the entire desktop with the background color
         let bounds = self.base.bounds();
         device.fill_rect(
-            bounds.x as usize,
-            bounds.y as usize,
-            bounds.width as usize,
-            bounds.height as usize,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
             self.background_color,
         );
 

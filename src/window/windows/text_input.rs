@@ -205,10 +205,12 @@ impl Window for TextInput {
         }
 
         let bounds = self.base.bounds();
-        let x = bounds.x as usize;
-        let y = bounds.y as usize;
-        let width = bounds.width as usize;
-        let height = bounds.height as usize;
+        let x = bounds.x;
+        let y = bounds.y;
+        let width = bounds.width;
+        let height = bounds.height;
+        let right = x + width as i32 - 1;
+        let bottom = y + height as i32 - 1;
 
         // Draw background
         device.fill_rect(x, y, width, height, self.bg_color);
@@ -220,24 +222,20 @@ impl Window for TextInput {
             self.border_color
         };
 
-        // Top
-        device.draw_line(x, y, x + width - 1, y, border_color);
-        // Left
-        device.draw_line(x, y, x, y + height - 1, border_color);
-        // Bottom
-        device.draw_line(x, y + height - 1, x + width - 1, y + height - 1, border_color);
-        // Right
-        device.draw_line(x + width - 1, y, x + width - 1, y + height - 1, border_color);
+        device.draw_line(x, y, right, y, border_color);
+        device.draw_line(x, y, x, bottom, border_color);
+        device.draw_line(x, bottom, right, bottom, border_color);
+        device.draw_line(right, y, right, bottom, border_color);
 
         // Draw text with padding
-        let padding = 4;
+        let padding: i32 = 4;
         let font = get_default_font();
-        let char_width = 8;
-        let char_height = 8;
+        let char_width: i32 = 8;
+        let char_height: i32 = 8;
 
         // Calculate text position (vertically centered)
         let text_x = x + padding;
-        let text_y = y + (height.saturating_sub(char_height)) / 2;
+        let text_y = y + (height.saturating_sub(char_height as u32) / 2) as i32;
 
         // Draw text
         if !self.text.is_empty() {
@@ -246,9 +244,9 @@ impl Window for TextInput {
 
         // Draw cursor when focused
         if self.base.has_focus() {
-            let cursor_x = text_x + self.text.len() * char_width;
+            let cursor_x = text_x + self.text.len() as i32 * char_width;
             // Draw a vertical line as cursor
-            if cursor_x < x + width - padding {
+            if cursor_x < x + width as i32 - padding {
                 let cursor_color = self.text_color;
                 device.draw_line(cursor_x, text_y, cursor_x, text_y + char_height - 1, cursor_color);
             }

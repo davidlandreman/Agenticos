@@ -145,10 +145,10 @@ impl Window for MenuBarPopup {
         let font = get_default_font();
         let char_height = font.char_height();
 
-        let x = bounds.x as usize;
-        let y = bounds.y as usize;
-        let width = bounds.width as usize;
-        let height = bounds.height as usize;
+        let x = bounds.x;
+        let y = bounds.y;
+        let width = bounds.width;
+        let height = bounds.height;
 
         // Background
         device.fill_rect(x, y, width, height, self.bg_color);
@@ -157,11 +157,11 @@ impl Window for MenuBarPopup {
         device.draw_rect(x, y, width, height, Color::new(100, 100, 100));
 
         // Draw items
-        let mut item_y = y + 2;
+        let mut item_y: i32 = y + 2;
         for (i, item) in self.items.iter().enumerate() {
             match item {
                 MenuItemDef::Item { label, shortcut, .. } => {
-                    let item_height = 24;
+                    let item_height: u32 = 24;
 
                     // Highlight if hovered
                     if self.hover_index == Some(i) {
@@ -183,7 +183,7 @@ impl Window for MenuBarPopup {
 
                     device.draw_text(
                         x + 8,
-                        item_y + (item_height - char_height) / 2,
+                        item_y + (item_height as i32 - char_height as i32) / 2,
                         label,
                         font.as_font(),
                         text_color,
@@ -196,17 +196,18 @@ impl Window for MenuBarPopup {
                         } else {
                             Color::new(128, 128, 128)
                         };
-                        let shortcut_x = x + width - 8 - shortcut.len() * font.char_width();
+                        let shortcut_x = x + width as i32 - 8
+                            - (shortcut.len() * font.char_width()) as i32;
                         device.draw_text(
                             shortcut_x,
-                            item_y + (item_height - char_height) / 2,
+                            item_y + (item_height as i32 - char_height as i32) / 2,
                             shortcut,
                             font.as_font(),
                             shortcut_color,
                         );
                     }
 
-                    item_y += item_height;
+                    item_y += item_height as i32;
                 }
                 MenuItemDef::Separator => {
                     item_y += 4;

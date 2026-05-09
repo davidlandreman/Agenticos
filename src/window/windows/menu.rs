@@ -184,10 +184,10 @@ impl Window for MenuWindow {
         }
 
         let bounds = self.base.bounds();
-        let x = bounds.x as usize;
-        let y = bounds.y as usize;
-        let width = bounds.width as usize;
-        let height = bounds.height as usize;
+        let x = bounds.x;
+        let y = bounds.y;
+        let width = bounds.width;
+        let height = bounds.height;
 
         // Draw background
         device.fill_rect(x, y, width, height, self.bg_color);
@@ -197,11 +197,11 @@ impl Window for MenuWindow {
 
         // Draw items
         let font = get_default_font();
-        let char_height = 8;
+        let char_height: i32 = 8;
+        let item_height: u32 = MENU_ITEM_HEIGHT as u32;
 
         for (i, item) in self.items.iter().enumerate() {
-            let item_y = y + 2 + i * MENU_ITEM_HEIGHT as usize;
-            let item_height = MENU_ITEM_HEIGHT as usize;
+            let item_y = y + 2 + (i as i32) * item_height as i32;
 
             // Draw hover background if this item is hovered
             if self.hover_index == Some(i) {
@@ -215,8 +215,8 @@ impl Window for MenuWindow {
             }
 
             // Draw item text
-            let text_x = x + MENU_ITEM_PADDING as usize;
-            let text_y = item_y + (item_height - char_height) / 2;
+            let text_x = x + MENU_ITEM_PADDING as i32;
+            let text_y = item_y + (item_height as i32 - char_height) / 2;
 
             let text_color = if self.hover_index == Some(i) {
                 Color::WHITE
