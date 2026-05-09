@@ -14,6 +14,7 @@ use crate::fs::File;
 use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
 use crate::window::dialogs::{show_error, show_info, show_save_dialog};
 use crate::window::dialogs::{open_file_dialog, poll_file_dialog};
+use crate::window::windows::scroll_view::ScrollView;
 use crate::window::windows::{
     FrameWindow, MenuBar, MenuItemDef, TextEditor, MENU_BAR_HEIGHT,
 };
@@ -202,20 +203,39 @@ impl RunnableProcess for NotepadProcess {
                 set_pending_action(np_id, item_id);
             });
 
-            // Create text editor (below menu bar)
-            let editor_id = wm.create_window(Some(frame_id));
-            let editor_bounds = Rect::new(
+            // Create scroll-view viewport (below menu bar) wrapping the
+            // text editor. Per U7, the editor paints its full content
+            // rect and the ScrollView handles viewport math + cursor
+            // EnsureVisible plumbing.
+            let viewport_bounds = Rect::new(
                 content_area.x,
                 content_area.y + MENU_BAR_HEIGHT as i32,
                 content_area.width,
                 content_area.height - MENU_BAR_HEIGHT,
             );
-            let mut editor = TextEditor::new_with_id(editor_id, editor_bounds);
-            editor.set_parent(Some(frame_id));
+            let scroll_id = wm.create_window(Some(frame_id));
+            let mut scroll_view = ScrollView::new_with_id(scroll_id, viewport_bounds);
+            scroll_view.set_parent(Some(frame_id));
+            scroll_view.set_horizontal_enabled(true);
+
+            // Editor's local bounds (parent = the ScrollView) start at
+            // the viewport origin; the ScrollView will rewrite this to
+            // the full content rect during paint.
+            let editor_id = wm.create_window(Some(scroll_id));
+            let editor_local_bounds = Rect::new(0, 0, viewport_bounds.width, viewport_bounds.height);
+            let mut editor = TextEditor::new_with_id(editor_id, editor_local_bounds);
+            editor.set_parent(Some(scroll_id));
+            // Seed the ScrollView's content size with the editor's
+            // current content extent (a single empty line until text is
+            // loaded). The size is refreshed elsewhere as content
+            // changes (set_text / load_file).
+            let (cw, ch) = editor.content_size();
+            scroll_view.set_content_size(cw, ch);
 
             // Register windows (set_window_impl automatically adds to z-order)
             wm.set_window_impl(frame_id, Box::new(frame));
             wm.set_window_impl(menu_bar_id, Box::new(menu_bar));
+            wm.set_window_impl(scroll_id, Box::new(scroll_view));
             wm.set_window_impl(editor_id, Box::new(editor));
 
             // Add children
@@ -224,7 +244,10 @@ impl RunnableProcess for NotepadProcess {
             }
             if let Some(frame) = wm.window_registry.get_mut(&frame_id) {
                 frame.add_child(menu_bar_id);
-                frame.add_child(editor_id);
+                frame.add_child(scroll_id);
+            }
+            if let Some(scroll) = wm.window_registry.get_mut(&scroll_id) {
+                scroll.add_child(editor_id);
             }
 
             // Focus editor

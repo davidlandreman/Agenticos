@@ -171,6 +171,19 @@ pub trait Window: Send {
         false
     }
 
+    /// Drain a pending `Event::EnsureVisible(rect)` payload, if any. The
+    /// window manager calls this immediately after dispatching an event
+    /// to a window; if the return value is `Some(rect)`, the manager
+    /// forwards an `Event::EnsureVisible(rect)` to the nearest enclosing
+    /// `ScrollView` ancestor so the rect is scrolled into view.
+    ///
+    /// The default returns `None`. Widgets like `TextEditor` (cursor
+    /// move) override this to plumb cursor-into-view requests upward
+    /// without needing a typed reference to their parent `ScrollView`.
+    fn take_pending_ensure_visible(&mut self) -> Option<Rect> {
+        None
+    }
+
     /// Typed accessor used by `Toolbar` to toggle a button's enabled
     /// state through the manager. Returns `None` by default; `Button`
     /// overrides it to return `Some(self)`. Following the same opt-in

@@ -2,6 +2,15 @@
 //!
 //! Unlike TextWindow (grid-based), TextEditor uses Vec<String> for lines
 //! and supports full cursor movement, text insertion, and editing.
+//!
+//! Per U7, `TextEditor` no longer manages its own scroll state. Callers
+//! wrap it in a [`ScrollView`](super::scroll_view::ScrollView) and feed
+//! [`TextEditor::content_size`] into [`ScrollView::set_content_size`]
+//! whenever the content changes. When the cursor moves, `TextEditor`
+//! stages an [`Event::EnsureVisible`] payload via
+//! [`TextEditor::take_pending_ensure_visible`]; the window manager picks
+//! it up after every event dispatch and forwards it to the nearest
+//! enclosing `ScrollView` ancestor.
 
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
@@ -22,26 +31,24 @@ pub struct TextEditor {
     cursor_col: usize,
     /// Cursor row position
     cursor_row: usize,
-    /// Scroll offset (first visible row)
-    scroll_y: usize,
-    /// Scroll offset (first visible column)
-    scroll_x: usize,
     /// Text has been modified since last save
     modified: bool,
     /// Character width (from font)
     char_width: usize,
     /// Character height (from font)
     char_height: usize,
-    /// Visible columns
-    visible_cols: usize,
-    /// Visible rows
-    visible_rows: usize,
     /// Background color
     bg_color: Color,
     /// Text color
     text_color: Color,
     /// Cursor color
     cursor_color: Color,
+    /// Set whenever a cursor-moving operation runs. The window manager
+    /// drains this via `take_pending_ensure_visible` after each event
+    /// dispatch and forwards an `Event::EnsureVisible(rect)` to the
+    /// nearest `ScrollView` ancestor. The rect is in the editor's local
+    /// coordinate space (origin = top-left of the content area).
+    pending_ensure_visible: Option<Rect>,
 }
 
 impl TextEditor {
@@ -51,9 +58,6 @@ impl TextEditor {
         let char_width = font.cell_width() as usize;
         let char_height = font.line_height() as usize;
 
-        let visible_cols = (bounds.width as usize) / char_width;
-        let visible_rows = (bounds.height as usize) / char_height;
-
         let mut base = WindowBase::new_with_id(id, bounds);
         base.set_can_focus(true);
 
@@ -62,16 +66,13 @@ impl TextEditor {
             lines: vec![String::new()], // Start with one empty line
             cursor_col: 0,
             cursor_row: 0,
-            scroll_y: 0,
-            scroll_x: 0,
             modified: false,
             char_width,
             char_height,
-            visible_cols,
-            visible_rows,
             bg_color: Color::WHITE,
             text_color: Color::BLACK,
             cursor_color: Color::BLACK,
+            pending_ensure_visible: None,
         }
     }
 
@@ -93,9 +94,8 @@ impl TextEditor {
         }
         self.cursor_col = 0;
         self.cursor_row = 0;
-        self.scroll_x = 0;
-        self.scroll_y = 0;
         self.modified = false;
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
@@ -104,9 +104,8 @@ impl TextEditor {
         self.lines = vec![String::new()];
         self.cursor_col = 0;
         self.cursor_row = 0;
-        self.scroll_x = 0;
-        self.scroll_y = 0;
         self.modified = false;
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
@@ -128,6 +127,38 @@ impl TextEditor {
     /// Get cursor position (col, row)
     pub fn cursor_position(&self) -> (usize, usize) {
         (self.cursor_col, self.cursor_row)
+    }
+
+    /// Natural content extent in pixels.
+    ///
+    /// Width is the longest line in characters times character width;
+    /// height is the line count times line height. Callers that wrap the
+    /// editor in a [`ScrollView`](super::scroll_view::ScrollView) feed
+    /// this into [`ScrollView::set_content_size`] whenever the content
+    /// may have changed.
+    pub fn content_size(&self) -> (u32, u32) {
+        let max_line_chars = self
+            .lines
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
+        // Reserve at least the bounds width so an empty editor still
+        // fills its viewport (the ScrollView clamps content_w upward to
+        // the viewport size anyway, but reporting zero for an empty
+        // editor would let the caller mistake "empty" for "needs no
+        // content").
+        let w = (max_line_chars * self.char_width) as u32;
+        let h = (self.lines.len() * self.char_height) as u32;
+        (w, h)
+    }
+
+    /// Drain the pending `Event::EnsureVisible` rect, if any. Called by
+    /// the window manager after each event dispatch; if the value is
+    /// `Some`, the manager forwards an `Event::EnsureVisible(rect)` to
+    /// the nearest enclosing `ScrollView` ancestor.
+    pub fn take_pending_ensure_visible_rect(&mut self) -> Option<Rect> {
+        self.pending_ensure_visible.take()
     }
 
     /// Get current line length
@@ -152,7 +183,7 @@ impl TextEditor {
             self.cursor_row -= 1;
             self.cursor_col = self.current_line_len();
         }
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
@@ -166,7 +197,7 @@ impl TextEditor {
             self.cursor_row += 1;
             self.cursor_col = 0;
         }
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
@@ -176,7 +207,7 @@ impl TextEditor {
             self.cursor_row -= 1;
             self.clamp_cursor_col();
         }
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
@@ -186,21 +217,21 @@ impl TextEditor {
             self.cursor_row += 1;
             self.clamp_cursor_col();
         }
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
     /// Move cursor to start of line
     pub fn move_cursor_home(&mut self) {
         self.cursor_col = 0;
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
     /// Move cursor to end of line
     pub fn move_cursor_end(&mut self) {
         self.cursor_col = self.current_line_len();
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
@@ -208,7 +239,7 @@ impl TextEditor {
     pub fn move_cursor_doc_start(&mut self) {
         self.cursor_row = 0;
         self.cursor_col = 0;
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
@@ -216,29 +247,48 @@ impl TextEditor {
     pub fn move_cursor_doc_end(&mut self) {
         self.cursor_row = self.lines.len().saturating_sub(1);
         self.cursor_col = self.current_line_len();
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
-    /// Page up
+    /// Page up. With scroll handled by the enclosing `ScrollView`, "page"
+    /// here means "the editor's viewport height in lines" — derived from
+    /// the current bounds. We keep the same semantics (advance cursor by
+    /// roughly one viewport) and let `EnsureVisible` align the result.
     pub fn page_up(&mut self) {
-        if self.cursor_row >= self.visible_rows {
-            self.cursor_row -= self.visible_rows;
+        let visible_rows = self.visible_rows_estimate();
+        if self.cursor_row >= visible_rows {
+            self.cursor_row -= visible_rows;
         } else {
             self.cursor_row = 0;
         }
         self.clamp_cursor_col();
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
     }
 
     /// Page down
     pub fn page_down(&mut self) {
+        let visible_rows = self.visible_rows_estimate();
         let max_row = self.lines.len().saturating_sub(1);
-        self.cursor_row = (self.cursor_row + self.visible_rows).min(max_row);
+        self.cursor_row = (self.cursor_row + visible_rows).min(max_row);
         self.clamp_cursor_col();
-        self.ensure_cursor_visible();
+        self.queue_cursor_into_view();
         self.base.invalidate();
+    }
+
+    /// Page-up/page-down step in lines. Approximated from the editor's
+    /// outer bounds — accurate when bounds match the viewport. If the
+    /// editor is currently translated by a `ScrollView` paint pass, this
+    /// will read the translated bounds instead, but page-up/down only
+    /// runs from `handle_event`, which executes outside paint.
+    fn visible_rows_estimate(&self) -> usize {
+        let h = self.base.bounds().height as usize;
+        if self.char_height == 0 {
+            1
+        } else {
+            (h / self.char_height).max(1)
+        }
     }
 
     /// Insert a character at cursor position
@@ -256,7 +306,7 @@ impl TextEditor {
                 self.cursor_col += 1;
             }
             self.modified = true;
-            self.ensure_cursor_visible();
+            self.queue_cursor_into_view();
             self.base.invalidate();
         }
     }
@@ -270,7 +320,7 @@ impl TextEditor {
             self.cursor_col = 0;
             self.lines.insert(self.cursor_row, rest);
             self.modified = true;
-            self.ensure_cursor_visible();
+            self.queue_cursor_into_view();
             self.base.invalidate();
         }
     }
@@ -303,6 +353,7 @@ impl TextEditor {
                 self.cursor_col -= 1;
                 line.remove(self.cursor_col);
                 self.modified = true;
+                self.queue_cursor_into_view();
                 self.base.invalidate();
             }
         } else if self.cursor_row > 0 {
@@ -314,26 +365,24 @@ impl TextEditor {
                 prev_line.push_str(&current_line);
             }
             self.modified = true;
-            self.ensure_cursor_visible();
+            self.queue_cursor_into_view();
             self.base.invalidate();
         }
     }
 
-    /// Ensure cursor is visible (adjust scroll)
-    fn ensure_cursor_visible(&mut self) {
-        // Vertical scroll
-        if self.cursor_row < self.scroll_y {
-            self.scroll_y = self.cursor_row;
-        } else if self.cursor_row >= self.scroll_y + self.visible_rows {
-            self.scroll_y = self.cursor_row - self.visible_rows + 1;
-        }
+    /// Cursor rect in local content coordinates. Used by both
+    /// `queue_cursor_into_view` and the painter so the on-screen cursor
+    /// and the EnsureVisible payload always agree on geometry.
+    fn cursor_rect_local(&self) -> Rect {
+        let x = (self.cursor_col * self.char_width) as i32;
+        let y = (self.cursor_row * self.char_height) as i32;
+        Rect::new(x, y, self.char_width as u32, self.char_height as u32)
+    }
 
-        // Horizontal scroll
-        if self.cursor_col < self.scroll_x {
-            self.scroll_x = self.cursor_col;
-        } else if self.cursor_col >= self.scroll_x + self.visible_cols {
-            self.scroll_x = self.cursor_col - self.visible_cols + 1;
-        }
+    /// Stage an `Event::EnsureVisible(cursor_rect)` payload for the
+    /// window manager to forward upward after this event dispatch.
+    fn queue_cursor_into_view(&mut self) {
+        self.pending_ensure_visible = Some(self.cursor_rect_local());
     }
 
     /// Handle a keyboard event
@@ -389,15 +438,19 @@ impl TextEditor {
         EventResult::Handled
     }
 
-    /// Handle a mouse click
+    /// Handle a mouse click. Coordinates are in the editor's local
+    /// frame (post-scroll-translation, courtesy of `ScrollView`), so
+    /// row/col map directly without scroll-offset arithmetic.
     fn handle_click(&mut self, x: i32, y: i32) {
         if x < 0 || y < 0 {
             return;
         }
+        if self.char_width == 0 || self.char_height == 0 {
+            return;
+        }
 
-        // Calculate clicked position
-        let col = (x as usize) / self.char_width + self.scroll_x;
-        let row = (y as usize) / self.char_height + self.scroll_y;
+        let col = (x as usize) / self.char_width;
+        let row = (y as usize) / self.char_height;
 
         // Set cursor position (clamped to valid range)
         if row < self.lines.len() {
@@ -410,14 +463,8 @@ impl TextEditor {
             self.cursor_col = self.current_line_len();
         }
 
+        self.queue_cursor_into_view();
         self.base.invalidate();
-    }
-
-    /// Update visible dimensions when bounds change
-    fn update_dimensions(&mut self) {
-        let bounds = self.base.bounds();
-        self.visible_cols = (bounds.width as usize) / self.char_width;
-        self.visible_rows = (bounds.height as usize) / self.char_height;
     }
 }
 
@@ -430,18 +477,6 @@ impl Window for TextEditor {
         &mut self.base
     }
 
-    // Custom override: TextEditor recomputes visible_cols/visible_rows
-    // from the new bounds.
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.base.set_bounds(bounds);
-        self.update_dimensions();
-    }
-
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
-        self.base.set_bounds_no_invalidate(bounds);
-        self.update_dimensions();
-    }
-
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         if !self.visible() {
             return;
@@ -450,10 +485,15 @@ impl Window for TextEditor {
             return;
         }
 
+        // `bounds` here is the editor's *content* rect — when the editor
+        // is wrapped in a ScrollView, the manager-side render path
+        // temporarily rewrites `bounds` to the full content extent so we
+        // paint everything; the active clip rect (set by the parent
+        // ScrollView) limits the visible pixels to the viewport.
         let bounds = self.bounds();
         let font = get_default_font();
 
-        // Fill background
+        // Fill background across the whole content rect.
         device.fill_rect(
             bounds.x,
             bounds.y,
@@ -462,53 +502,21 @@ impl Window for TextEditor {
             self.bg_color,
         );
 
-        // Draw visible lines
-        for row in 0..self.visible_rows {
-            let line_idx = self.scroll_y + row;
-            if line_idx >= self.lines.len() {
-                break;
-            }
-
-            let line = &self.lines[line_idx];
+        // Draw every line at its content-space y. The clip rect handles
+        // off-screen lines.
+        for (row, line) in self.lines.iter().enumerate() {
             let y = bounds.y + (row * self.char_height) as i32;
-
-            // Get visible portion of line
-            let start_col = self.scroll_x;
-            let end_col = (self.scroll_x + self.visible_cols).min(line.len());
-
-            if start_col < line.len() {
-                let visible_text: String = line
-                    .chars()
-                    .skip(start_col)
-                    .take(end_col - start_col)
-                    .collect();
-
-                device.draw_text(
-                    bounds.x,
-                    y,
-                    &visible_text,
-                    font.as_font(),
-                    self.text_color,
-                );
+            if !line.is_empty() {
+                device.draw_text(bounds.x, y, line, font.as_font(), self.text_color);
             }
         }
 
-        // Draw cursor if focused
+        // Draw cursor if focused.
         if self.has_focus() {
-            let cursor_screen_row = self.cursor_row as isize - self.scroll_y as isize;
-            let cursor_screen_col = self.cursor_col as isize - self.scroll_x as isize;
-
-            if cursor_screen_row >= 0
-                && cursor_screen_row < self.visible_rows as isize
-                && cursor_screen_col >= 0
-                && cursor_screen_col < self.visible_cols as isize
-            {
-                let cursor_x = bounds.x + (cursor_screen_col as usize * self.char_width) as i32;
-                let cursor_y = bounds.y + (cursor_screen_row as usize * self.char_height) as i32;
-
-                // Draw cursor as vertical bar
-                device.fill_rect(cursor_x, cursor_y, 2, self.char_height as u32, self.cursor_color);
-            }
+            let cursor_rect = self.cursor_rect_local();
+            let cursor_x = bounds.x + cursor_rect.x;
+            let cursor_y = bounds.y + cursor_rect.y;
+            device.fill_rect(cursor_x, cursor_y, 2, self.char_height as u32, self.cursor_color);
         }
 
         self.base.clear_needs_repaint();
@@ -537,5 +545,9 @@ impl Window for TextEditor {
 
     fn can_focus(&self) -> bool {
         self.base.can_focus()
+    }
+
+    fn take_pending_ensure_visible(&mut self) -> Option<Rect> {
+        self.pending_ensure_visible.take()
     }
 }

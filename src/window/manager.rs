@@ -507,7 +507,7 @@ impl WindowManager {
     /// Route an event to a specific window
     fn route_event_to_window(&mut self, window_id: WindowId, event: Event) {
         crate::debug_trace!("route_event_to_window: window={:?}, event={:?}", window_id, event);
-        
+
         let result = if let Some(window) = self.window_registry.get_mut(&window_id) {
             crate::debug_trace!("Calling handle_event on window");
             let result = window.handle_event(event.clone());
@@ -517,7 +517,25 @@ impl WindowManager {
             crate::debug_trace!("Window not found in registry!");
             EventResult::Ignored
         };
-        
+
+        // After dispatching, drain any staged `EnsureVisible` rect from
+        // the target widget (e.g. `TextEditor` after a cursor move) and
+        // forward it to the nearest enclosing `ScrollView` ancestor.
+        // This keeps cursor-into-view automatic for any widget that
+        // overrides `take_pending_ensure_visible` without requiring it
+        // to hold a typed reference to its parent.
+        let pending_rect = self
+            .window_registry
+            .get_mut(&window_id)
+            .and_then(|w| w.take_pending_ensure_visible());
+        if let Some(rect) = pending_rect {
+            if let Some(sv_id) = self.nearest_scroll_view_ancestor(window_id) {
+                if sv_id != window_id {
+                    self.route_event_to_window(sv_id, Event::EnsureVisible(rect));
+                }
+            }
+        }
+
         // Handle propagation
         if result == EventResult::Propagate {
             if let Some(window) = self.window_registry.get(&window_id) {

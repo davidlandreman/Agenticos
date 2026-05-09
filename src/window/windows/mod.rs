@@ -23,6 +23,9 @@ pub mod tree_view;
 pub mod splitter;
 pub mod toolbar;
 pub mod status_bar;
+pub mod path_bar;
+pub mod icon_view;
+pub mod progress_bar;
 
 pub use container::ContainerWindow;
 pub use terminal::TerminalWindow;
@@ -43,3 +46,6 @@ pub use tree_view::{TreeView, TreeNode, NodeId};
 pub use splitter::{Splitter, SplitterOrientation};
 pub use toolbar::Toolbar;
 pub use status_bar::StatusBar;
+pub use path_bar::PathBar;
+pub use icon_view::{IconView, Tile};
+pub use progress_bar::ProgressBar;

@@ -44,6 +44,14 @@ pub mod tree_view_tests;
 pub mod splitter_tests;
 #[cfg(feature = "test")]
 pub mod toolbar_status_tests;
+#[cfg(feature = "test")]
+pub mod path_bar_tests;
+#[cfg(feature = "test")]
+pub mod icon_view_tests;
+#[cfg(feature = "test")]
+pub mod progress_bar_tests;
+#[cfg(feature = "test")]
+pub mod text_editor_migration_tests;
 
 #[cfg(feature = "test")]
 pub fn run_tests() {
@@ -75,6 +83,10 @@ pub fn run_tests() {
     let tree_view_tests = tree_view_tests::get_tests();
     let splitter_tests = splitter_tests::get_tests();
     let toolbar_status_tests = toolbar_status_tests::get_tests();
+    let path_bar_tests = path_bar_tests::get_tests();
+    let icon_view_tests = icon_view_tests::get_tests();
+    let progress_bar_tests = progress_bar_tests::get_tests();
+    let text_editor_migration_tests = text_editor_migration_tests::get_tests();
 
     let mut total_tests = 0;
 
@@ -250,6 +262,38 @@ pub fn run_tests() {
     debug_info!("\n[Toolbar/StatusBar Tests]");
     debug_info!("Running {} tests", toolbar_status_tests.len());
     for test in toolbar_status_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run PathBar tests (U12)
+    debug_info!("\n[PathBar Tests]");
+    debug_info!("Running {} tests", path_bar_tests.len());
+    for test in path_bar_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run IconView tests (U13)
+    debug_info!("\n[IconView Tests]");
+    debug_info!("Running {} tests", icon_view_tests.len());
+    for test in icon_view_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run ProgressBar tests (U14)
+    debug_info!("\n[ProgressBar Tests]");
+    debug_info!("Running {} tests", progress_bar_tests.len());
+    for test in progress_bar_tests {
+        test.run();
+        total_tests += 1;
+    }
+
+    // Run TextEditor migration tests (U7)
+    debug_info!("\n[TextEditor Migration Tests]");
+    debug_info!("Running {} tests", text_editor_migration_tests.len());
+    for test in text_editor_migration_tests {
         test.run();
         total_tests += 1;
     }
