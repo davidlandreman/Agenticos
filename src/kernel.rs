@@ -1,7 +1,7 @@
 use bootloader_api::BootInfo;
 use crate::lib::debug::{self, DebugLevel};
 use crate::{debug_info, debug_debug, debug_warn};
-use crate::arch::x86_64::interrupts;
+use crate::arch::x86_64::{gdt, interrupts};
 use crate::mm::memory;
 use crate::drivers::display::display;
 use crate::drivers::ps2_controller;
@@ -16,6 +16,12 @@ pub fn init(boot_info: &'static mut BootInfo) {
     debug_info!("=== AgenticOS Kernel Starting ===");
     debug_info!("Kernel entry point reached successfully!");
     debug_debug!("Boot info address: {:p}", boot_info);
+
+    // Install GDT + TSS before the IDT — exception handlers that reference
+    // IST entries (e.g., #DF) consult the TSS at fault time, so it must be in
+    // TR before any such fault can fire.
+    gdt::init();
+    debug_info!("GDT and TSS installed");
 
     // Initialize interrupt descriptor table
     interrupts::init_idt();

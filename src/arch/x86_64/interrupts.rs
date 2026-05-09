@@ -44,6 +44,16 @@ lazy_static! {
         // Set up exception handlers
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
+        // Wire #DF to the IST stack so a kernel-stack overflow during user-mode
+        // work cannot triple-fault the machine. Same `set_handler_addr` workaround
+        // as the timer handler — the diverging-handler trait shape is not
+        // expressible on this nightly.
+        unsafe {
+            let handler_addr = double_fault_handler as usize;
+            idt.double_fault
+                .set_handler_addr(x86_64::VirtAddr::new(handler_addr as u64))
+                .set_stack_index(crate::arch::x86_64::gdt::DOUBLE_FAULT_IST_INDEX);
+        }
         idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
         idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
         idt.divide_error.set_handler_fn(divide_error_handler);
@@ -237,8 +247,13 @@ extern "x86-interrupt" fn double_fault_handler(
 ) {
     debug_error!("EXCEPTION: DOUBLE FAULT");
     debug_error!("{:#?}", stack_frame);
-    
-    loop {}
+
+    // Diverging handlers in `extern "x86-interrupt"` are not expressible as
+    // `-> !` on this nightly, so we register the address directly and keep
+    // the function from returning by halting forever.
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
