@@ -22,10 +22,14 @@ pub fn init(boot_info: &'static mut BootInfo) {
     debug_info!("[boot] gdt+idt");
     gdt::init();
     // Per-CPU SYSCALL scratch struct + GS_BASE/KERNEL_GS_BASE programming.
-    // No SYSCALL stub is installed yet (U3 lands that), but pointing both GS
-    // bases at PERCPU now means the first swapgs on SYSCALL entry will be
+    // Both GS bases point at PERCPU so the first swapgs on SYSCALL entry is
     // a no-op regardless of MSR ordering.
     crate::arch::x86_64::syscall::init_percpu();
+    // Program EFER.SCE + STAR/LSTAR/FMASK so user-mode `syscall` lands at
+    // `syscall_fastpath_entry`. Must run after gdt::init() (so STAR sees
+    // the right selectors) and after init_percpu() (so the first swapgs
+    // hits a valid kernel GS).
+    crate::arch::x86_64::syscall::init_syscall_msrs();
     interrupts::init_idt();
     ps2_controller::init();
 
@@ -52,11 +56,9 @@ pub fn init(boot_info: &'static mut BootInfo) {
     debug_info!("[boot] scheduler");
     crate::process::init_scheduler();
 
-    // Register the first-class syscalls (`print`, `exit`) so they have stable
-    // numeric IDs before any user app loads. The trampoline page is built
-    // lazily in U7 when the first user app runs; registration here only
-    // populates SYSCALL_TABLE.
-    crate::userland::syscalls::register_first_class_syscalls();
+    // Linux ABI syscall surface (write/exit_group, plus the broader set in
+    // U9) is dispatched directly from `userland::abi::syscall_dispatch` —
+    // no per-syscall registration needed.
 
     debug_info!("[boot] ide+fs");
     crate::drivers::ide::IDE_CONTROLLER.initialize();

@@ -9,7 +9,6 @@ pub mod image;
 pub mod lifecycle;
 pub mod loader;
 pub mod syscalls;
-pub mod trampoline;
 
 use core::arch::naked_asm;
 
@@ -26,8 +25,6 @@ use crate::userland::lifecycle::{
 pub enum EnterError {
     /// A user app is already active. Single-app-synchronous (D5).
     AlreadyActive,
-    /// The trampoline page failed to map.
-    TrampolineMapFailed,
 }
 
 /// Enter ring 3 with `image` as the live user binary.
@@ -62,12 +59,6 @@ pub fn enter_user_mode(image: UserImage) -> Result<(ExitKind, i64), EnterError> 
         }
         Ok(())
     })?;
-
-    // Lazy-map the trampoline (idempotent after the first call). The loader
-    // already calls this, but `enter_user_mode` may be invoked directly from
-    // tests, so guard here too.
-    crate::userland::trampoline::build_and_map_trampoline_page()
-        .map_err(|_| EnterError::TrampolineMapFailed)?;
 
     // Stamp the syscall pointer-validation bounds, install the image, clear
     // any prior exit. Single critical section.

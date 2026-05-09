@@ -33,10 +33,8 @@ use crate::mm::paging::{
     UserPerms, USER_LOAD_BASE, USER_STACK_TOP, USER_VA_RANGE_END,
     USER_VA_RANGE_START,
 };
-use crate::userland::abi::syscall_id;
 use crate::userland::error::LoaderError;
 use crate::userland::image::UserImage;
-use crate::userland::trampoline::{build_and_map_trampoline_page, resolve as resolve_trampoline};
 
 // ---------- ELF64 constants ----------
 
@@ -257,10 +255,6 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
     check_entry_in_pt_load(ehdr.e_entry, &pt_loads)?;
 
     // ---- Phase 2: allocate + copy ----
-
-    // Make sure the trampoline page is built and mapped — the relocation
-    // walk needs trampoline VAs. Idempotent after the first call.
-    build_and_map_trampoline_page().map_err(LoaderError::from)?;
 
     // bounds: union over PT_LOADs and the stack range. Stack top is fixed
     // at USER_STACK_TOP per D4/U4.
@@ -568,38 +562,26 @@ fn apply_relocations(
                 other => return Err(LoaderError::UnsupportedReloc(other)),
             }
 
-            // Resolve symbol name.
-            let sym_off = (r_sym as u64)
-                .checked_mul(size_of::<Elf64Sym>() as u64)
-                .ok_or(LoaderError::Truncated)?;
-            let sym_total = dynsym
-                .sh_offset
-                .checked_add(sym_off)
-                .ok_or(LoaderError::Truncated)?;
-            // Bounds-check the symbol against the dynsym section.
-            if sym_off + size_of::<Elf64Sym>() as u64 > dynsym.sh_size {
-                return Err(LoaderError::Truncated);
-            }
-            let sym: Elf64Sym = read_at(bytes, sym_total)?;
-            let name = cstr_at(strtab, sym.st_name);
-
-            // Reject empty or unknown names. We only resolve names against
-            // SYSCALL_TABLE; static-non-PIE never references locals via
-            // GLOB_DAT/JUMP_SLOT.
-            if name.is_empty() || syscall_id(name).is_none() {
-                return Err(LoaderError::UnresolvedImport);
-            }
-            let trampoline_va = resolve_trampoline(name).ok_or(LoaderError::UnresolvedImport)?;
-
-            // S1: r_offset must lie inside a writable PT_LOAD segment. A
-            // crafted ELF could otherwise direct the kernel-mode write to
-            // arbitrary memory.
-            validate_reloc_offset(rela.r_offset, loads)?;
-
-            // Patch *(r_offset) = trampoline_va. r_offset for ET_EXEC is an
-            // absolute VA (no load slide). Write through the kernel alias
-            // of the page so the leaf flags do not matter.
-            patch_user_qword(rela.r_offset, trampoline_va)?;
+            // The legacy name-keyed trampoline-resolution path is gone with
+            // the SYSCALL transition. Static-no-pie ET_EXEC binaries from
+            // musl-cross-make do not emit GLOB_DAT/JUMP_SLOT against
+            // undefined externals, so this branch is unreachable in
+            // practice. If a binary does arrive with such relocations,
+            // there is no longer a kernel-side resolver — fail loudly with
+            // UnresolvedImport so the developer sees the toolchain
+            // mismatch immediately.
+            //
+            // The unused `r_sym` and section bookkeeping above is left in
+            // place because the same walker will be extended for the
+            // reloc types libstdc++ static binaries actually emit
+            // (R_X86_64_RELATIVE, R_X86_64_64, R_X86_64_TPOFF64) when U7
+            // and U9 land. Fixing the symbol-table lookup details here
+            // now would be guessing without a real test binary.
+            let _unused_sym_idx = r_sym;
+            let _unused_dynsym = dynsym;
+            let _unused_strtab = strtab;
+            let _unused_loads = loads;
+            return Err(LoaderError::UnresolvedImport);
         }
     }
     Ok(())

@@ -17,14 +17,17 @@ pub const USER_LOAD_BASE: u64 = 0x0000_0000_0040_0000;
 /// Top of the user stack (exclusive). The stack grows down from here.
 pub const USER_STACK_TOP: u64 = 0x0000_0000_0080_0000;
 
-/// Fixed virtual address of the user trampoline page (4 KiB, R+X+USER, NX off).
-/// Set up in U5; U4 only reserves the address.
-pub const USER_TRAMPOLINE_VA: u64 = 0x0000_0000_0090_0000;
-
 /// Inclusive lower / exclusive upper bounds of the user-VA range. Anything
 /// outside is reserved for the kernel and `map_user_region` rejects it.
+///
+/// Sized to host a multi-MiB libstdc++ static binary plus its TLS block,
+/// brk arena, mmap arena, and stack. The 1 GiB ceiling at 0x4000_0000 is
+/// the U4+U5 expansion from the original ~9 MiB window — well below any
+/// kernel-side VA region. Sub-region constants for the TLS block, brk
+/// anchor, and mmap arena are introduced by U7 / U9 as those features
+/// land; for now only the load base and stack top are pinned.
 pub const USER_VA_RANGE_START: u64 = USER_LOAD_BASE;
-pub const USER_VA_RANGE_END: u64 = USER_TRAMPOLINE_VA + 0x1000;
+pub const USER_VA_RANGE_END: u64 = 0x0000_0000_4000_0000;
 
 /// Permission profile applied to a user-mode mapping. Values are explicit
 /// rather than packed flags so the loader cannot accidentally hand `WRITABLE`

@@ -1,49 +1,52 @@
-//! Userland runtime: minimal shims for ring-3 apps.
+//! Userland runtime: minimal Linux x86-64 ABI shims for ring-3 apps.
 //!
-//! Ships the two syscall stubs (`print`, `exit`) as concrete bodies that
-//! issue `int 0x80` directly with the kernel-assigned syscall IDs. This is
-//! the **numeric-stub** path described as the U8 fallback in plan
-//! `2026-05-08-004` — chosen as the actual primary because a static `-no-pie`
-//! link in `lld` will not emit `R_X86_64_GLOB_DAT` / `R_X86_64_JUMP_SLOT`
-//! relocations against undefined externals; those become hard link errors.
+//! Issues the `syscall` instruction directly with Linux numbers. The kernel
+//! (in `src/arch/x86_64/syscall.rs::syscall_fastpath_entry`) handles the
+//! ABI: arguments in RDI/RSI/RDX/R10/R8/R9, syscall number in RAX, return
+//! value in RAX, errors as `-errno` in RAX, RCX/R11 clobbered by the
+//! `syscall` instruction itself.
 //!
-//! The U6 loader's relocation walk is happy with this — it simply finds no
-//! relocations to resolve. The kernel-mapped user-trampoline page (U5) still
-//! exists at `0x0090_0000` and is safe to leave unused; future apps that DO
-//! want symbol-keyed resolution (e.g., dynamically linked or built with a
-//! different toolchain) can rely on it.
+//! Two stubs are exposed:
 //!
-//! Syscall IDs come from the kernel's `crate::userland::abi` registry order:
-//!   id 0 -> `print(ptr, len) -> i64`
-//!   id 1 -> `exit(code) -> !`
+//! - `print(ptr, len)` — wraps `write(1, ptr, len)`. Returns the byte
+//!   count on success, a negative errno on failure.
+//! - `exit(code)` — wraps `exit_group(code)`. Diverges; never returns.
 //!
-//! Calling convention (mirrors the kernel's `SyscallArgs`):
-//!   - rax = syscall id
-//!   - rdi = arg0
-//!   - rsi = arg1
-//!   - return value lands in rax
+//! Linux syscall numbers are stable: `write = 1`, `exit_group = 231`. The
+//! kernel side mirrors these constants in `src/userland/abi.rs::nr`.
 
 #![no_std]
 
-/// Print `len` bytes starting at `ptr` to the active terminal.
+const NR_WRITE: u64 = 1;
+const NR_EXIT_GROUP: u64 = 231;
+
+const STDOUT_FD: i64 = 1;
+
+/// Print `len` bytes starting at `ptr` to stdout (the active terminal).
 ///
-/// Returns 0 on success or a negative errno-style value (e.g., `-14` /
-/// `EFAULT`) on failure. Callers must include any trailing newline; the
-/// kernel does not append one.
+/// Returns `len` on success or a negative `-errno` value on failure
+/// (e.g., `-14` / `EFAULT` for a bad pointer, `-9` / `EBADF` for a
+/// closed fd — though stdout is always considered open).
 ///
 /// # Safety
 ///
 /// `ptr` must point to at least `len` valid, mapped, user-accessible bytes.
-/// Passing a kernel-range pointer is rejected by the kernel without
-/// dereferencing it.
+/// A kernel-range pointer is rejected by the kernel without dereferencing
+/// it.
 #[inline]
 pub unsafe fn print(ptr: *const u8, len: usize) -> i64 {
     let ret: i64;
     core::arch::asm!(
-        "int 0x80",
-        inout("rax") 0u64 => ret,
-        in("rdi") ptr,
-        in("rsi") len,
+        "syscall",
+        inout("rax") NR_WRITE => ret,
+        in("rdi") STDOUT_FD,
+        in("rsi") ptr,
+        in("rdx") len,
+        // The `syscall` instruction always clobbers RCX (return RIP) and
+        // R11 (return RFLAGS); the kernel additionally treats them as
+        // caller-saved.
+        out("rcx") _,
+        out("r11") _,
         options(nostack, preserves_flags),
     );
     ret
@@ -56,9 +59,11 @@ pub unsafe fn print(ptr: *const u8, len: usize) -> i64 {
 #[inline]
 pub unsafe fn exit(code: i64) -> ! {
     core::arch::asm!(
-        "int 0x80",
-        in("rax") 1u64,
+        "syscall",
+        in("rax") NR_EXIT_GROUP,
         in("rdi") code,
+        // Doesn't return, but list the syscall-clobbered regs anyway for
+        // documentation; `noreturn` makes the listed-clobber set advisory.
         options(nostack, noreturn),
     );
 }
