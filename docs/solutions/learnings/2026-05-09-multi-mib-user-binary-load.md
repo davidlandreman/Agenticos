@@ -86,7 +86,7 @@ This document is the post-mortem so the next time someone wants to load a multi-
 
 ## Open follow-ups
 
-- **SS-restore in `restore_continuation`** — the abnormal-exit long-jump path doesn't restore the kernel SS selector after a ring-3 fault; SS stays NULL, which breaks any subsequent code that reads SS. Cooperative exits go through SYSCALL which preserves SS via STAR, so this only bites the fault path. Caught by the in-kernel `test_gdt_kernel_selectors` after my end-to-end run test ran a binary that took a `#UD`.
+- ~~**SS-restore in `restore_continuation`**~~ — **Resolved 2026-05-09 in U6** (commit `3204502`). Fix inserts `mov ax, 0x10; mov ss, ax` in `restore_continuation`'s naked asm; new regression test `test_kernel_ss_after_user_fault` triggers a #UD then asserts SS == 0x10. Original symptom: the abnormal-exit long-jump path didn't restore the kernel SS selector after a ring-3 fault; SS stayed NULL, breaking any subsequent code that read SS. Cooperative SYSCALL exits preserved SS via STAR, so this only bit the fault path.
 - **FAT cluster-walk caching** — `fat_table.rs` re-reads the FAT entry from disk for every cluster in the chain. Acceptable for current sizes; revisit if multi-MiB binaries become common. Already noted in `src/fs/CLAUDE.md`.
 - **Switching IDE off PIO** — DMA or virtio-blk would remove both the `wait_drq` polling and the IRQ-disabled atomicity requirement.
 
