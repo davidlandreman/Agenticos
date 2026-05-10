@@ -105,6 +105,20 @@ pub fn init_percpu() {
     msr::init_gs_base(percpu_addr);
 }
 
+/// Update the SYSCALL stub's `gs:[0]` slot to a new kernel-rsp top.
+/// Phase 5 PR-C1: each user process has its own kernel stack; this
+/// is called whenever the active process changes (entry, fork into
+/// child, return to parent, exit) so the next SYSCALL lands on the
+/// right buffer.
+///
+/// SAFETY: `top` must be the high end of an aligned, kernel-mapped
+/// stack buffer. This *only* updates `gs:[0]`; callers also need to
+/// keep TSS.rsp0 in sync via `gdt::set_kernel_rsp0` for interrupt
+/// gates to land on the same stack.
+pub unsafe fn set_percpu_kernel_rsp_top(top: u64) {
+    PERCPU.0.kernel_rsp_top = top;
+}
+
 /// Program the SYSCALL fast-path MSRs.
 ///
 /// Must run after `init_percpu()` and after `gdt::init()`. After this

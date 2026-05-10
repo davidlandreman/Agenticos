@@ -121,6 +121,64 @@ pub unsafe fn get_mapper() -> Option<&'static mut MemoryMapper> {
     MAPPER.map(|ptr| &mut *ptr)
 }
 
+/// Frame holding the kernel's L4 (PML4). Captured once at boot so user
+/// processes can switch back to it on exit.
+///
+/// Phase 4 PR-B: each user process runs on its own L4 with the kernel
+/// half (PML4 indices 1..512) shared by reference. When the user
+/// process exits, we must switch CR3 back here before dropping the
+/// per-process L4 frame.
+pub static mut KERNEL_L4_FRAME: Option<PhysFrame<Size4KiB>> = None;
+
+/// Capture the active CR3 value as the kernel's permanent L4. Called
+/// exactly once at boot, after `MemoryMapper::new` has been built.
+pub fn capture_kernel_l4() {
+    use x86_64::registers::control::Cr3;
+    let (frame, _) = Cr3::read();
+    unsafe { KERNEL_L4_FRAME = Some(frame); }
+    debug_info!("captured kernel L4 frame: {:?}", frame);
+}
+
+/// Read-only accessor for the captured kernel L4 frame. Returns `None`
+/// if `capture_kernel_l4` has not run.
+pub fn kernel_l4_frame() -> Option<PhysFrame<Size4KiB>> {
+    unsafe { KERNEL_L4_FRAME }
+}
+
+/// Switch CR3 to the kernel L4. Used after the user process exits and
+/// before its per-process L4 frame is dropped.
+///
+/// SAFETY: `capture_kernel_l4` must have run, and CR3 must currently
+/// point at a valid L4 sharing the kernel half with this one (so the
+/// kernel-side code path that issues the write itself stays mapped
+/// across the switch). All process L4s built by `AddressSpace::new`
+/// satisfy that.
+pub unsafe fn activate_kernel_l4() {
+    use x86_64::registers::control::{Cr3, Cr3Flags};
+    let frame = kernel_l4_frame().expect("kernel L4 not captured at boot");
+    Cr3::write(frame, Cr3Flags::empty());
+}
+
+/// Build a fresh `OffsetPageTable` over whatever L4 is currently
+/// active (per CR3). Used by `map_user_region` and `unmap_user_region`
+/// so that, after a user process activates its `AddressSpace`,
+/// mappings land in that process's per-process L4 instead of the
+/// boot-time kernel L4 captured by the global `MemoryMapper`.
+///
+/// SAFETY: the caller must hold mutable access to the live page-table
+/// state (i.e. they're the sole owner of the `MemoryMapper` borrow)
+/// and the bootloader's physical-memory offset must already be set up
+/// so the L4 frame is reachable through it.
+pub unsafe fn active_offset_page_table(
+    phys_offset: VirtAddr,
+) -> OffsetPageTable<'static> {
+    use x86_64::registers::control::Cr3;
+    let (frame, _) = Cr3::read();
+    let l4_va = phys_offset.as_u64() + frame.start_address().as_u64();
+    let l4: &'static mut PageTable = &mut *(l4_va as *mut PageTable);
+    OffsetPageTable::new(l4, phys_offset)
+}
+
 /// Translate a virtual address to a physical address
 /// Returns None if the address is not mapped
 pub fn translate_virt_to_phys(virt_addr: u64) -> Option<u64> {
@@ -158,7 +216,27 @@ impl MemoryMapper {
 
 
     pub fn translate_addr(&self, addr: VirtAddr) -> Option<PhysAddr> {
-        self.mapper.translate_addr(addr)
+        // Phase 4 PR-B: walk whatever L4 is active. The boot-time
+        // `self.mapper` is bound to the kernel L4, but after a process
+        // activates its `AddressSpace` user mappings live elsewhere —
+        // and `translate_addr` is the lookup the loader uses to copy
+        // file bytes into freshly-mapped user pages.
+        let phys_offset = self.physical_memory_offset;
+        let active_mapper = unsafe { active_offset_page_table(phys_offset) };
+        active_mapper.translate_addr(addr)
+    }
+
+    /// Allocate a single physical frame from the boot-time pool. Used by
+    /// `AddressSpace::new` to claim a fresh L4 frame for a user process.
+    pub fn allocate_one_frame(&mut self) -> Option<PhysFrame> {
+        self.frame_allocator.allocate_frame()
+    }
+
+    /// Read-only accessor for the bootloader's physical-memory offset.
+    /// Used when mapping a freshly-allocated frame through the
+    /// kernel-visible alias to zero or copy into it.
+    pub fn physical_memory_offset(&self) -> VirtAddr {
+        self.physical_memory_offset
     }
 
     /// Test-only: allocate one physical frame from the live frame
@@ -207,6 +285,13 @@ impl MemoryMapper {
         let phys_offset = self.physical_memory_offset;
         let mut frames: Vec<PhysFrame> = Vec::with_capacity(num_pages as usize);
 
+        // Phase 4 PR-B: build the OffsetPageTable from the *current* CR3
+        // for each call so that after a process activates its
+        // AddressSpace, mappings land in that process's L4 rather than
+        // the boot-time kernel L4 the global mapper was constructed
+        // with.
+        let mut active_mapper = unsafe { active_offset_page_table(phys_offset) };
+
         for i in 0..num_pages {
             let page_addr = VirtAddr::new(virt_start.as_u64() + i * 0x1000);
             let page = Page::<Size4KiB>::containing_address(page_addr);
@@ -225,7 +310,7 @@ impl MemoryMapper {
             }
 
             unsafe {
-                self.mapper
+                active_mapper
                     .map_to_with_table_flags(
                         page,
                         frame,
@@ -259,12 +344,19 @@ impl MemoryMapper {
     ) -> Result<Vec<PhysFrame>, UserMapError> {
         validate_user_range(virt_start, num_pages)?;
 
+        let phys_offset = self.physical_memory_offset;
         let mut frames: Vec<PhysFrame> = Vec::with_capacity(num_pages as usize);
+
+        // Phase 4 PR-B: same dance as `map_user_region` — operate on
+        // whatever L4 is currently active, which is the per-process
+        // address space during ring-3 lifetime.
+        let mut active_mapper = unsafe { active_offset_page_table(phys_offset) };
+
         for i in 0..num_pages {
             let page_addr = VirtAddr::new(virt_start.as_u64() + i * 0x1000);
             let page = Page::<Size4KiB>::containing_address(page_addr);
 
-            match self.mapper.unmap(page) {
+            match active_mapper.unmap(page) {
                 Ok((frame, flush)) => {
                     flush.flush();
                     frames.push(frame);

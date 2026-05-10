@@ -187,6 +187,10 @@ pub fn init_heap(phys_mem_offset: u64) {
             crate::mm::heap::init_heap(mapper)
                 .expect("Failed to initialize heap");
         }
+
+        // Phase 4 PR-B: capture the bootloader's CR3 as the kernel L4
+        // so per-process address spaces can switch back to it on exit.
+        crate::mm::paging::capture_kernel_l4();
     }
 }
 

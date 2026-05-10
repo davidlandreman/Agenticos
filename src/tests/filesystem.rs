@@ -403,9 +403,13 @@ fn test_run_hellocpp_end_to_end() {
     }
 
     let t0 = get_timer_ticks();
-    let mut p = crate::commands::run::RunProcess::new_with_args(
-        alloc::vec![alloc::string::String::from(path)],
-    );
+    // Pass `--noecho` so HELLOCPP.ELF skips its stdin-read loop. There's
+    // no terminal under test mode to feed bytes; the binary would otherwise
+    // block forever inside `read(0, …)`.
+    let mut p = crate::commands::run::RunProcess::new_with_args(alloc::vec![
+        alloc::string::String::from(path),
+        alloc::string::String::from("--noecho"),
+    ]);
     p.run();
     let t1 = get_timer_ticks();
     let elapsed = t1.saturating_sub(t0);
