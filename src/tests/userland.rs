@@ -39,6 +39,23 @@ fn test_gdt_user_selectors() {
     assert_eq!(sel.user_code.rpl(), PrivilegeLevel::Ring3);
 }
 
+/// U6: SSE/SSE2 must be enabled in CR0/CR4 before any ring-3
+/// transition can fire. musl + libstdc++ binaries (everything from
+/// HELLOCPP through ZSH.ELF) emit SSE2 in `__init_tls` before reaching
+/// `main`; if `enable_sse()` is removed from `kernel::init()` or
+/// reordered after a ring-3-reachable path, the first SSE instruction
+/// `#UD`s and the binary appears to hang under interactive load.
+/// Catching this at test time (rather than as "zsh doesn't boot") is
+/// the whole point of having the regression.
+fn test_sse_enabled_before_ring3() {
+    assert!(
+        crate::arch::x86_64::fpu::sse_enabled(),
+        "SSE/SSE2 not enabled — enable_sse() must run early in kernel::init() \
+         before any path that could enter ring 3 (loader → enter_user_mode). \
+         Without it, musl __init_tls #UDs on its first SSE2 instruction.",
+    );
+}
+
 /// `ltr` must have run — TR is non-zero after `gdt::init()`.
 fn test_tss_loaded() {
     let tr: u16;
@@ -1110,6 +1127,34 @@ fn test_run_fault_ud() {
         ExitKind::Abnormal { vector, .. } => assert_eq!(vector, 6),
         other => panic!("expected Abnormal(#UD), got {:?}", other),
     }
+}
+
+/// U6: regression for the SS-restore latent bug flagged by the
+/// multi-MiB-load learning. After a ring-3 fault the CPU's SS is
+/// clobbered (NULL on the return-from-exception path); our long-jump
+/// in `restore_continuation` historically didn't restore it. Cooperative
+/// SYSCALL exits preserve SS via STAR, so this only bit the fault path.
+///
+/// Sequence: trigger a #UD in ring 3, return to kernel via the fault →
+/// restore_continuation long-jump path, then assert SS is still 0x10
+/// (kernel data selector). Without the U6 fix to restore_continuation,
+/// SS reads back as 0 and this test fails.
+fn test_kernel_ss_after_user_fault() {
+    use x86_64::instructions::segmentation::{Segment, SS};
+    reset_active_user();
+    let bytes = fix::fault_ud_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let _ = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let _ = crate::userland::release_active_image();
+    // The long-jump back through restore_continuation must have left
+    // SS at the kernel data selector. Without the U6 fix this reads 0.
+    let ss = SS::get_reg();
+    assert_eq!(
+        ss.0, 0x10,
+        "kernel SS not restored after ring-3 fault (was {:#x}); \
+         restore_continuation should reload the kernel data selector",
+        ss.0
+    );
 }
 
 fn test_run_fault_pf() {
@@ -2680,6 +2725,7 @@ fn test_run_leak_loop_fault() {
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_gdt_kernel_selectors,
+        &test_sse_enabled_before_ring3,
         &test_gdt_user_selectors,
         &test_tss_loaded,
         &test_map_user_region_kernel_can_read,
@@ -2742,6 +2788,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_run_syscall_exit42_fixture_a,
         &test_run_happy_path_hello,
         &test_run_fault_ud,
+        &test_kernel_ss_after_user_fault,
         &test_run_fault_pf,
         &test_run_fault_gp,
         &test_run_bad_pointer_syscall,

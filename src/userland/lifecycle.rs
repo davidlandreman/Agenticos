@@ -526,6 +526,15 @@ fn long_jump_to_run_or_halt() -> ! {
 /// This function is `-> !` — control flow continues at `cont.rip` with the
 /// run command's saved registers restored. The caller must not expect to
 /// retain any live values across the jump.
+///
+/// U6: this path also restores SS to the kernel data selector (0x10).
+/// Long-mode CPU semantics on a fault from ring 3 leave SS NULL on
+/// the kernel-side handler frame; long mode permits NULL SS for the
+/// `push`/`ret` we use here, but any later code that explicitly reads
+/// SS (e.g., `test_gdt_kernel_selectors`) would see 0 and fail. The
+/// cooperative SYSCALL exit path doesn't trigger this because STAR
+/// programs SS automatically. See the multi-MiB-load learning's
+/// "SS-restore in restore_continuation" follow-up note.
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn restore_continuation(cont: *const KernelContinuation) -> ! {
@@ -546,6 +555,15 @@ pub unsafe extern "C" fn restore_continuation(cont: *const KernelContinuation) -
         "mov r14, [rdi + 32]",
         "mov r15, [rdi + 40]",
         "mov rsp, [rdi + 48]",
+        // U6: restore kernel SS before any push. After a ring-3 fault
+        // the CPU loads SS from the new privilege-level descriptor
+        // (often NULL in our setup since we don't update an SS slot in
+        // the IDT-pushed frame). Reload the kernel data selector so
+        // SS::get_reg() round-trips correctly post-longjmp. Literal
+        // 0x10 matches GDT slot 2 (kernel_data) — see
+        // src/arch/x86_64/CLAUDE.md's "GDT layout" section.
+        "mov ax, 0x10",
+        "mov ss, ax",
         // Push the saved RIP and RET. Equivalent to `jmp [rdi+56]`, but using
         // the call/ret protocol leaves the stack pre-aligned for the C ABI
         // expectation that `ret` lands at a 16-byte-aligned-after-call

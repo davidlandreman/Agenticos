@@ -49,3 +49,17 @@ pub fn enable_sse() {
         Cr4::write(cr4);
     }
 }
+
+/// True when CR0/CR4 are configured for ring-3 SSE/SSE2 execution —
+/// `CR0.EM = 0`, `CR0.MP = 1`, `CR4.OSFXSR = 1`, `CR4.OSXMMEXCPT = 1`.
+/// Used by the in-kernel test that proves `enable_sse()` ran before
+/// any ring-3 transition could fire (a regression here makes
+/// musl/libstdc++ binaries `#UD` silently inside `__init_tls`).
+pub fn sse_enabled() -> bool {
+    let cr0 = Cr0::read();
+    let cr4 = Cr4::read();
+    !cr0.contains(Cr0Flags::EMULATE_COPROCESSOR)
+        && cr0.contains(Cr0Flags::MONITOR_COPROCESSOR)
+        && cr4.contains(Cr4Flags::OSFXSR)
+        && cr4.contains(Cr4Flags::OSXMMEXCPT_ENABLE)
+}
