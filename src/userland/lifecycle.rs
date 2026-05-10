@@ -139,6 +139,12 @@ pub struct Process {
     /// gets its own buffer so parent + child syscall handlers don't
     /// share a single rsp0 area.
     pub kernel_stack: Option<KernelStack>,
+    /// U3: launch path of the binary running in this process. Set by
+    /// `enter_user_mode_with_aspace` from `argv[0]` when the run
+    /// command (or `execve`) provides one; left `None` for synthetic
+    /// in-kernel test launches that bypass argv. `readlink` reads
+    /// this for `/proc/self/exe` (see `readlink_handler`).
+    pub exe_path: Option<String>,
 }
 
 /// Compatibility alias retained for the long tail of callsites using
@@ -200,6 +206,7 @@ static CURRENT_PROCESS: Mutex<Process> = Mutex::new(Process {
     address_space: None,
     signal_state: SignalState::new(),
     kernel_stack: None,
+    exe_path: None,
 });
 
 /// Acquire the current process slot for read/write. Used by syscall
@@ -264,6 +271,7 @@ pub fn install_new_process_opt(
         p.address_space = address_space;
         p.signal_state = SignalState::new();
         p.kernel_stack = Some(KernelStack::new());
+        p.exe_path = None;
     });
     pid
 }

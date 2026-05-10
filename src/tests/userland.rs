@@ -266,6 +266,288 @@ fn test_unknown_syscall_trace_mode_capacity_overflow() {
     set_trace_mode(false);
 }
 
+// ---------- U3: musl-init / zsh-startup syscalls ----------
+
+/// `poll` on three valid stream fds with POLLIN|POLLOUT requested
+/// reports all three ready (revents = requested bits) and returns 3.
+fn test_dispatch_poll_streams_ready() {
+    install_streams_for_dispatcher_test();
+    // Three pollfd entries on stdin/stdout/stderr asking for read+write.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PollFd { fd: i32, events: i16, revents: i16 }
+    let mut fds = [
+        PollFd { fd: 0, events: 0x0001 | 0x0004, revents: 0 },
+        PollFd { fd: 1, events: 0x0001 | 0x0004, revents: 0 },
+        PollFd { fd: 2, events: 0x0001 | 0x0004, revents: 0 },
+    ];
+    let ptr = fds.as_mut_ptr() as u64;
+    let bytes = (fds.len() * core::mem::size_of::<PollFd>()) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr,
+        end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::POLL;
+    args.rdi = ptr;
+    args.rsi = fds.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 3);
+    for entry in fds.iter() {
+        assert_eq!(entry.revents, 0x0001 | 0x0004);
+    }
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `poll` on an unknown fd reports POLLNVAL and counts toward the result.
+fn test_dispatch_poll_unknown_fd_returns_pollnval() {
+    install_streams_for_dispatcher_test();
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PollFd { fd: i32, events: i16, revents: i16 }
+    let mut fds = [PollFd { fd: 999, events: 0x0001, revents: 0 }];
+    let ptr = fds.as_mut_ptr() as u64;
+    let bytes = (fds.len() * core::mem::size_of::<PollFd>()) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr,
+        end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::POLL;
+    args.rdi = ptr;
+    args.rsi = fds.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 1);
+    assert_eq!(fds[0].revents, 0x0020); // POLLNVAL
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `poll` with nfds=0 returns 0 immediately without touching the buffer.
+fn test_dispatch_poll_zero_nfds_returns_zero() {
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::POLL;
+    args.rdi = 0; // null pointer is fine when nfds=0
+    args.rsi = 0;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 0);
+}
+
+/// `poll` with nfds beyond the cap returns -EINVAL — defends against
+/// integer-overflow attacks on `nfds * sizeof(pollfd)`.
+fn test_dispatch_poll_nfds_over_cap_returns_einval() {
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::POLL;
+    args.rdi = 0xdead_beef;
+    args.rsi = 1024; // > POLL_MAX_NFDS = 64
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, EINVAL);
+}
+
+/// `readlink("/proc/self/exe", ...)` returns the active binary's path
+/// when one is set, EBADF/ENOENT otherwise.
+fn test_dispatch_readlink_proc_self_exe() {
+    use crate::userland::lifecycle::with_active_user;
+    use alloc::string::String;
+    with_active_user(|p| {
+        p.exe_path = Some(String::from("/HOST/ZSH.ELF"));
+    });
+    let path = b"/proc/self/exe\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    // VA bounds need to cover both the path string and the output buffer.
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path_len, buf_ptr + buf_len);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf_len;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, b"/HOST/ZSH.ELF".len() as i64);
+    assert_eq!(&buf[..ret as usize], b"/HOST/ZSH.ELF");
+    crate::userland::abi::clear_user_va_bounds();
+    with_active_user(|p| { p.exe_path = None; });
+}
+
+/// `readlink("/proc/self/fd/0", ...)` returns "/dev/tty" when stdin is
+/// the standard stream slot.
+fn test_dispatch_readlink_proc_self_fd_stdin() {
+    install_streams_for_dispatcher_test();
+    let path = b"/proc/self/fd/0\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + buf.len() as u64);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, b"/dev/tty".len() as i64);
+    assert_eq!(&buf[..ret as usize], b"/dev/tty");
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `readlink("/proc/self/fd/-1", ...)` returns -ENOENT — the bounded
+/// integer parse rejects negative input.
+fn test_dispatch_readlink_proc_self_fd_negative_rejected() {
+    install_streams_for_dispatcher_test();
+    let path = b"/proc/self/fd/-1\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + buf.len() as u64);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOENT);
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `readlink("/proc/self/fd/99999999999999999999", ...)` returns -ENOENT
+/// — the bounded u32 parse rejects overflow.
+fn test_dispatch_readlink_proc_self_fd_overflow_rejected() {
+    install_streams_for_dispatcher_test();
+    let path = b"/proc/self/fd/99999999999999999999\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + buf.len() as u64);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOENT);
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `readlink("/etc/nonexistent", ...)` returns -ENOENT — non-procfs
+/// paths are not symlinks here.
+fn test_dispatch_readlink_other_returns_enoent() {
+    let path = b"/etc/nonexistent\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + buf.len() as u64);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOENT);
+    crate::userland::abi::clear_user_va_bounds();
+}
+
+/// `getrlimit(RLIMIT_NOFILE, &out)` writes RLIM_INFINITY into both
+/// rlim_cur and rlim_max and returns 0.
+fn test_dispatch_getrlimit_returns_infinity() {
+    let mut out = [0u64; 2];
+    let ptr = out.as_mut_ptr() as u64;
+    let bytes = (out.len() * 8) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr, end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::GETRLIMIT;
+    args.rdi = 7; // RLIMIT_NOFILE
+    args.rsi = ptr;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 0);
+    assert_eq!(out[0], u64::MAX);
+    assert_eq!(out[1], u64::MAX);
+    crate::userland::abi::clear_user_va_bounds();
+}
+
+/// `prlimit64(0, RLIMIT_STACK, NULL, &old)` writes RLIM_INFINITY into
+/// the old buffer; with NULL old it just returns 0.
+fn test_dispatch_prlimit64_old_value_writes_infinity() {
+    let mut out = [0u64; 2];
+    let ptr = out.as_mut_ptr() as u64;
+    let bytes = (out.len() * 8) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr, end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::PRLIMIT64;
+    args.rdi = 0;
+    args.rsi = 3; // RLIMIT_STACK
+    args.rdx = 0; // new_limit NULL
+    args.r10 = ptr; // old_limit
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 0);
+    assert_eq!(out[0], u64::MAX);
+    assert_eq!(out[1], u64::MAX);
+    crate::userland::abi::clear_user_va_bounds();
+}
+
+/// `prlimit64(..., NULL, NULL)` returns 0 without touching memory.
+fn test_dispatch_prlimit64_null_old_returns_zero() {
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::PRLIMIT64;
+    args.rdi = 0;
+    args.rsi = 3;
+    args.rdx = 0;
+    args.r10 = 0;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 0);
+}
+
+/// `setitimer(ITIMER_REAL, &new, NULL)` and `nanosleep(&req, NULL)`
+/// both return 0 without touching unspecified memory (the stub paths).
+fn test_dispatch_setitimer_and_nanosleep_stubs_return_zero() {
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::SETITIMER;
+    args.rdi = 0;
+    args.rsi = 0xdead_beef; // pointer not validated when no old buffer
+    args.rdx = 0;           // old_value NULL → no validation
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::NANOSLEEP;
+    args.rdi = 0xdead_beef;
+    args.rsi = 0; // rem NULL
+    assert_eq!(syscall_dispatch(&mut args), 0);
+}
+
 /// `write(1, valid_ptr, len)` succeeds and returns `len`. The active
 /// user-VA bounds bracket the kernel buffer for the duration of the call —
 /// the dispatcher does not care where the bytes come from, only that the
@@ -2308,6 +2590,20 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_unknown_syscall_trace_mode_marks_only_once,
         &test_unknown_syscall_trace_mode_off_does_not_mark,
         &test_unknown_syscall_trace_mode_capacity_overflow,
+        // U3: musl-init / zsh-startup syscalls
+        &test_dispatch_poll_streams_ready,
+        &test_dispatch_poll_unknown_fd_returns_pollnval,
+        &test_dispatch_poll_zero_nfds_returns_zero,
+        &test_dispatch_poll_nfds_over_cap_returns_einval,
+        &test_dispatch_readlink_proc_self_exe,
+        &test_dispatch_readlink_proc_self_fd_stdin,
+        &test_dispatch_readlink_proc_self_fd_negative_rejected,
+        &test_dispatch_readlink_proc_self_fd_overflow_rejected,
+        &test_dispatch_readlink_other_returns_enoent,
+        &test_dispatch_getrlimit_returns_infinity,
+        &test_dispatch_prlimit64_old_value_writes_infinity,
+        &test_dispatch_prlimit64_null_old_returns_zero,
+        &test_dispatch_setitimer_and_nanosleep_stubs_return_zero,
         &test_write_handler_valid_slice,
         &test_write_handler_rejects_unknown_fd,
         &test_write_handler_rejects_kernel_pointer,

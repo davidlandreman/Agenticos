@@ -168,6 +168,7 @@ pub mod nr {
     pub const STAT: u64 = 4;
     pub const FSTAT: u64 = 5;
     pub const LSTAT: u64 = 6;
+    pub const POLL: u64 = 7;
     pub const LSEEK: u64 = 8;
     pub const MMAP: u64 = 9;
     pub const MPROTECT: u64 = 10;
@@ -177,6 +178,8 @@ pub mod nr {
     pub const RT_SIGPROCMASK: u64 = 14;
     pub const IOCTL: u64 = 16;
     pub const WRITEV: u64 = 20;
+    pub const NANOSLEEP: u64 = 35;
+    pub const SETITIMER: u64 = 38;
     pub const ACCESS: u64 = 21;
     pub const DUP: u64 = 32;
     pub const DUP2: u64 = 33;
@@ -194,13 +197,19 @@ pub mod nr {
     pub const GETEGID: u64 = 108;
     pub const GETPPID: u64 = 110;
     pub const GETTIMEOFDAY: u64 = 96;
+    pub const GETRLIMIT: u64 = 97;
+    pub const READLINK: u64 = 89;
     pub const SET_TID_ADDRESS: u64 = 218;
     pub const CLOCK_GETTIME: u64 = 228;
     pub const EXIT_GROUP: u64 = 231;
     pub const OPENAT: u64 = 257;
     pub const NEWFSTATAT: u64 = 262;
+    pub const READLINKAT: u64 = 267;
     pub const FACCESSAT: u64 = 269;
+    pub const PSELECT6: u64 = 270;
+    pub const PPOLL: u64 = 271;
     pub const SET_ROBUST_LIST: u64 = 273;
+    pub const PRLIMIT64: u64 = 302;
     pub const GETDENTS64: u64 = 217;
     pub const GETRANDOM: u64 = 318;
     // Phase 4 PR-C: process management
@@ -255,6 +264,16 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::RT_SIGACTION => syscalls::rt_sigaction_handler(args),
         nr::RT_SIGPROCMASK => syscalls::rt_sigprocmask_handler(args),
         nr::IOCTL => syscalls::ioctl_handler(args),
+        // U3: musl-init / zsh-startup surface
+        nr::POLL => syscalls::poll_handler(args),
+        nr::PPOLL => syscalls::ppoll_handler(args),
+        nr::PSELECT6 => syscalls::pselect6_handler(args),
+        nr::READLINK => syscalls::readlink_handler(args),
+        nr::READLINKAT => syscalls::readlinkat_handler(args),
+        nr::GETRLIMIT => syscalls::getrlimit_handler(args),
+        nr::PRLIMIT64 => syscalls::prlimit64_handler(args),
+        nr::SETITIMER => syscalls::setitimer_handler(args),
+        nr::NANOSLEEP => syscalls::nanosleep_handler(args),
         nr::ARCH_PRCTL => syscalls::arch_prctl_handler(args),
         nr::SET_TID_ADDRESS => syscalls::set_tid_address_handler(args),
         nr::SET_ROBUST_LIST => syscalls::set_robust_list_handler(args),
