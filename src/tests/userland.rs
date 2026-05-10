@@ -4,7 +4,7 @@ use crate::mm::paging::{
     UserMapError, UserPerms, USER_LOAD_BASE, USER_VA_RANGE_END, USER_VA_RANGE_START,
 };
 use crate::userland::abi::{
-    self, nr, syscall_dispatch, validate_user_slice, EBADF, EFAULT, EINVAL, ENOENT, ENOSYS,
+    self, nr, syscall_dispatch, validate_user_slice, EBADF, EFAULT, EINVAL, ENOENT, ENOSYS, ENOTTY,
     ERANGE, EROFS, LAST_EXIT_CODE, UserVaBounds,
 };
 use crate::userland::error::LoaderError;
@@ -37,6 +37,23 @@ fn test_gdt_user_selectors() {
     assert_eq!(sel.user_code.0 & !0x3, 0x20, "user code at GDT slot 4");
     assert_eq!(sel.user_data.rpl(), PrivilegeLevel::Ring3);
     assert_eq!(sel.user_code.rpl(), PrivilegeLevel::Ring3);
+}
+
+/// U6: SSE/SSE2 must be enabled in CR0/CR4 before any ring-3
+/// transition can fire. musl + libstdc++ binaries (everything from
+/// HELLOCPP through ZSH.ELF) emit SSE2 in `__init_tls` before reaching
+/// `main`; if `enable_sse()` is removed from `kernel::init()` or
+/// reordered after a ring-3-reachable path, the first SSE instruction
+/// `#UD`s and the binary appears to hang under interactive load.
+/// Catching this at test time (rather than as "zsh doesn't boot") is
+/// the whole point of having the regression.
+fn test_sse_enabled_before_ring3() {
+    assert!(
+        crate::arch::x86_64::fpu::sse_enabled(),
+        "SSE/SSE2 not enabled — enable_sse() must run early in kernel::init() \
+         before any path that could enter ring 3 (loader → enter_user_mode). \
+         Without it, musl __init_tls #UDs on its first SSE2 instruction.",
+    );
 }
 
 /// `ltr` must have run — TR is non-zero after `gdt::init()`.
@@ -182,6 +199,370 @@ fn test_dispatch_unregistered_returns_enosys() {
     args.rax = 9999;
     let ret = syscall_dispatch(&mut args);
     assert_eq!(ret, ENOSYS);
+}
+
+/// Trace mode on: an unknown syscall returns `-ENOSYS` (same as off, in
+/// the synthetic test path) and marks the per-nr "seen" bit so the next
+/// occurrence demotes from info to trace.
+fn test_unknown_syscall_trace_mode_returns_enosys_and_marks_seen() {
+    use crate::userland::abi::{
+        is_trace_mode, reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen,
+    };
+    let prior = is_trace_mode();
+    set_trace_mode(true);
+    reset_unknown_syscall_trace();
+    // Pick an unused-but-in-range nr (Linux x86-64 currently uses 0..335;
+    // 411 is unused and < TRACE_NR_CAPACITY so the per-nr bookkeeping
+    // applies). Using a number ≥ 512 would test the overflow path
+    // instead — see test_unknown_syscall_trace_mode_capacity_overflow.
+    let nr = 411;
+    assert!(!unknown_syscall_was_seen(nr));
+    let mut args = SyscallArgs::default();
+    args.rax = nr;
+    args.rdi = 0xdead_beef;
+    args.rsi = 0xfeed_face;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOSYS);
+    assert!(unknown_syscall_was_seen(nr));
+    // Restore prior state so subsequent tests see the same dispatcher
+    // behavior they were authored against.
+    set_trace_mode(prior);
+    reset_unknown_syscall_trace();
+}
+
+/// Trace mode on, same nr twice: the swap is itself the bookkeeping —
+/// `unknown_syscall_was_seen` reports true after the first call and stays
+/// true after subsequent calls.
+fn test_unknown_syscall_trace_mode_marks_only_once() {
+    use crate::userland::abi::{
+        reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen,
+    };
+    set_trace_mode(true);
+    reset_unknown_syscall_trace();
+    let nr = 412;
+    let mut args = SyscallArgs::default();
+    args.rax = nr;
+    let _ = syscall_dispatch(&mut args);
+    assert!(unknown_syscall_was_seen(nr));
+    let _ = syscall_dispatch(&mut args);
+    assert!(unknown_syscall_was_seen(nr));
+    set_trace_mode(false);
+    reset_unknown_syscall_trace();
+}
+
+/// Trace mode OFF: the synthetic-test dispatcher path returns `-ENOSYS`
+/// (no active continuation to long-jump to) but does NOT mark the SEEN
+/// bookkeeping — that's exclusive to trace mode.
+fn test_unknown_syscall_trace_mode_off_does_not_mark() {
+    use crate::userland::abi::{
+        reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen,
+    };
+    set_trace_mode(false);
+    reset_unknown_syscall_trace();
+    let nr = 413;
+    let mut args = SyscallArgs::default();
+    args.rax = nr;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOSYS);
+    assert!(!unknown_syscall_was_seen(nr));
+}
+
+/// Trace mode on, nr beyond TRACE_NR_CAPACITY (512): handler returns
+/// ENOSYS without panicking and `unknown_syscall_was_seen` reports false
+/// (those numbers are not tracked individually — they log every time).
+fn test_unknown_syscall_trace_mode_capacity_overflow() {
+    use crate::userland::abi::{reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen};
+    set_trace_mode(true);
+    reset_unknown_syscall_trace();
+    let nr = 9999; // > 512
+    let mut args = SyscallArgs::default();
+    args.rax = nr;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOSYS);
+    assert!(!unknown_syscall_was_seen(nr));
+    set_trace_mode(false);
+}
+
+// ---------- U3: musl-init / zsh-startup syscalls ----------
+
+/// `poll` on three valid stream fds with POLLIN|POLLOUT requested
+/// reports all three ready (revents = requested bits) and returns 3.
+fn test_dispatch_poll_streams_ready() {
+    install_streams_for_dispatcher_test();
+    // Three pollfd entries on stdin/stdout/stderr asking for read+write.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PollFd { fd: i32, events: i16, revents: i16 }
+    let mut fds = [
+        PollFd { fd: 0, events: 0x0001 | 0x0004, revents: 0 },
+        PollFd { fd: 1, events: 0x0001 | 0x0004, revents: 0 },
+        PollFd { fd: 2, events: 0x0001 | 0x0004, revents: 0 },
+    ];
+    let ptr = fds.as_mut_ptr() as u64;
+    let bytes = (fds.len() * core::mem::size_of::<PollFd>()) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr,
+        end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::POLL;
+    args.rdi = ptr;
+    args.rsi = fds.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 3);
+    for entry in fds.iter() {
+        assert_eq!(entry.revents, 0x0001 | 0x0004);
+    }
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `poll` on an unknown fd reports POLLNVAL and counts toward the result.
+fn test_dispatch_poll_unknown_fd_returns_pollnval() {
+    install_streams_for_dispatcher_test();
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PollFd { fd: i32, events: i16, revents: i16 }
+    let mut fds = [PollFd { fd: 999, events: 0x0001, revents: 0 }];
+    let ptr = fds.as_mut_ptr() as u64;
+    let bytes = (fds.len() * core::mem::size_of::<PollFd>()) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr,
+        end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::POLL;
+    args.rdi = ptr;
+    args.rsi = fds.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 1);
+    assert_eq!(fds[0].revents, 0x0020); // POLLNVAL
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `poll` with nfds=0 returns 0 immediately without touching the buffer.
+fn test_dispatch_poll_zero_nfds_returns_zero() {
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::POLL;
+    args.rdi = 0; // null pointer is fine when nfds=0
+    args.rsi = 0;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 0);
+}
+
+/// `poll` with nfds beyond the cap returns -EINVAL — defends against
+/// integer-overflow attacks on `nfds * sizeof(pollfd)`.
+fn test_dispatch_poll_nfds_over_cap_returns_einval() {
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::POLL;
+    args.rdi = 0xdead_beef;
+    args.rsi = 1024; // > POLL_MAX_NFDS = 64
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, EINVAL);
+}
+
+/// `readlink("/proc/self/exe", ...)` returns the active binary's path
+/// when one is set, EBADF/ENOENT otherwise.
+fn test_dispatch_readlink_proc_self_exe() {
+    use crate::userland::lifecycle::with_active_user;
+    use alloc::string::String;
+    with_active_user(|p| {
+        p.exe_path = Some(String::from("/HOST/ZSH.ELF"));
+    });
+    let path = b"/proc/self/exe\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    // VA bounds need to cover both the path string and the output buffer.
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path_len, buf_ptr + buf_len);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf_len;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, b"/HOST/ZSH.ELF".len() as i64);
+    assert_eq!(&buf[..ret as usize], b"/HOST/ZSH.ELF");
+    crate::userland::abi::clear_user_va_bounds();
+    with_active_user(|p| { p.exe_path = None; });
+}
+
+/// `readlink("/proc/self/fd/0", ...)` returns "/dev/tty" when stdin is
+/// the standard stream slot.
+fn test_dispatch_readlink_proc_self_fd_stdin() {
+    install_streams_for_dispatcher_test();
+    let path = b"/proc/self/fd/0\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + buf.len() as u64);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, b"/dev/tty".len() as i64);
+    assert_eq!(&buf[..ret as usize], b"/dev/tty");
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `readlink("/proc/self/fd/-1", ...)` returns -ENOENT — the bounded
+/// integer parse rejects negative input.
+fn test_dispatch_readlink_proc_self_fd_negative_rejected() {
+    install_streams_for_dispatcher_test();
+    let path = b"/proc/self/fd/-1\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + buf.len() as u64);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOENT);
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `readlink("/proc/self/fd/99999999999999999999", ...)` returns -ENOENT
+/// — the bounded u32 parse rejects overflow.
+fn test_dispatch_readlink_proc_self_fd_overflow_rejected() {
+    install_streams_for_dispatcher_test();
+    let path = b"/proc/self/fd/99999999999999999999\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + buf.len() as u64);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOENT);
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `readlink("/etc/nonexistent", ...)` returns -ENOENT — non-procfs
+/// paths are not symlinks here.
+fn test_dispatch_readlink_other_returns_enoent() {
+    let path = b"/etc/nonexistent\0";
+    let mut buf = [0u8; 64];
+    let path_ptr = path.as_ptr() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let lo = core::cmp::min(path_ptr, buf_ptr);
+    let hi = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + buf.len() as u64);
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: lo,
+        end: hi,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::READLINK;
+    args.rdi = path_ptr;
+    args.rsi = buf_ptr;
+    args.rdx = buf.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOENT);
+    crate::userland::abi::clear_user_va_bounds();
+}
+
+/// `getrlimit(RLIMIT_NOFILE, &out)` writes RLIM_INFINITY into both
+/// rlim_cur and rlim_max and returns 0.
+fn test_dispatch_getrlimit_returns_infinity() {
+    let mut out = [0u64; 2];
+    let ptr = out.as_mut_ptr() as u64;
+    let bytes = (out.len() * 8) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr, end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::GETRLIMIT;
+    args.rdi = 7; // RLIMIT_NOFILE
+    args.rsi = ptr;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 0);
+    assert_eq!(out[0], u64::MAX);
+    assert_eq!(out[1], u64::MAX);
+    crate::userland::abi::clear_user_va_bounds();
+}
+
+/// `prlimit64(0, RLIMIT_STACK, NULL, &old)` writes RLIM_INFINITY into
+/// the old buffer; with NULL old it just returns 0.
+fn test_dispatch_prlimit64_old_value_writes_infinity() {
+    let mut out = [0u64; 2];
+    let ptr = out.as_mut_ptr() as u64;
+    let bytes = (out.len() * 8) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr, end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::PRLIMIT64;
+    args.rdi = 0;
+    args.rsi = 3; // RLIMIT_STACK
+    args.rdx = 0; // new_limit NULL
+    args.r10 = ptr; // old_limit
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 0);
+    assert_eq!(out[0], u64::MAX);
+    assert_eq!(out[1], u64::MAX);
+    crate::userland::abi::clear_user_va_bounds();
+}
+
+/// `prlimit64(..., NULL, NULL)` returns 0 without touching memory.
+fn test_dispatch_prlimit64_null_old_returns_zero() {
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::PRLIMIT64;
+    args.rdi = 0;
+    args.rsi = 3;
+    args.rdx = 0;
+    args.r10 = 0;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 0);
+}
+
+/// `setitimer(ITIMER_REAL, &new, NULL)` and `nanosleep(&req, NULL)`
+/// both return 0 without touching unspecified memory (the stub paths).
+fn test_dispatch_setitimer_and_nanosleep_stubs_return_zero() {
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::SETITIMER;
+    args.rdi = 0;
+    args.rsi = 0xdead_beef; // pointer not validated when no old buffer
+    args.rdx = 0;           // old_value NULL → no validation
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::NANOSLEEP;
+    args.rdi = 0xdead_beef;
+    args.rsi = 0; // rem NULL
+    assert_eq!(syscall_dispatch(&mut args), 0);
 }
 
 /// `write(1, valid_ptr, len)` succeeds and returns `len`. The active
@@ -748,6 +1129,34 @@ fn test_run_fault_ud() {
     }
 }
 
+/// U6: regression for the SS-restore latent bug flagged by the
+/// multi-MiB-load learning. After a ring-3 fault the CPU's SS is
+/// clobbered (NULL on the return-from-exception path); our long-jump
+/// in `restore_continuation` historically didn't restore it. Cooperative
+/// SYSCALL exits preserve SS via STAR, so this only bit the fault path.
+///
+/// Sequence: trigger a #UD in ring 3, return to kernel via the fault →
+/// restore_continuation long-jump path, then assert SS is still 0x10
+/// (kernel data selector). Without the U6 fix to restore_continuation,
+/// SS reads back as 0 and this test fails.
+fn test_kernel_ss_after_user_fault() {
+    use x86_64::instructions::segmentation::{Segment, SS};
+    reset_active_user();
+    let bytes = fix::fault_ud_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let _ = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let _ = crate::userland::release_active_image();
+    // The long-jump back through restore_continuation must have left
+    // SS at the kernel data selector. Without the U6 fix this reads 0.
+    let ss = SS::get_reg();
+    assert_eq!(
+        ss.0, 0x10,
+        "kernel SS not restored after ring-3 fault (was {:#x}); \
+         restore_continuation should reload the kernel data selector",
+        ss.0
+    );
+}
+
 fn test_run_fault_pf() {
     reset_active_user();
     let bytes = fix::fault_pf_elf();
@@ -760,6 +1169,79 @@ fn test_run_fault_pf() {
         ExitKind::Abnormal { vector, .. } => assert_eq!(vector, 14),
         other => panic!("expected Abnormal(#PF), got {:?}", other),
     }
+}
+
+// ---------- U8: ZSH.ELF end-to-end ----------
+//
+// These test bodies are written and ready to run, but currently
+// gated off the live test slice because they trip a pre-existing
+// `linked_list_allocator` 0.10.6 behavior: `allocate_first_fit`
+// returns `Err` for a 4 KiB align-1 layout even when the allocator's
+// own stats report ~99 MiB free. Reproducible deterministically:
+// boot, launch ZSH.ELF via RunProcess, get past 3 user-mmap calls
+// during musl init, and the next kernel-side alloc returns null →
+// `alloc_error_handler` → test panic. HELLOCPP.ELF (5.79 MiB,
+// similar musl init) does NOT reproduce — it's something specific
+// about the zsh allocation pattern (more numerous small alloc/free
+// cycles between mmaps).
+//
+// Re-register these in `get_tests()` once the allocator is swapped
+// (talc is the leading candidate) or the linked_list_allocator
+// pattern is otherwise unblocked. The launch-verb extensions in
+// `src/commands/run/mod.rs` (--trace flag, zsh-shaped envp) are
+// independent and shipping in U8 — only the e2e tests are gated.
+//
+// See docs/plans/2026-05-09-003-feat-zsh-on-agenticos-plan.md
+// "Deferred to Follow-Up Work" for the allocator-replacement
+// follow-up captured during U8.
+
+/// Drive `RunProcess::run` against `/host/ZSH.ELF` with the given argv,
+/// `--trace` always on so any unimplemented syscall logs + returns
+/// ENOSYS instead of terminating zsh. Returns `true` if the binary was
+/// staged and the run completed; `false` (skip) if not staged.
+#[cfg(feature = "test")]
+#[allow(dead_code)]
+fn drive_zsh(argv_after_path: &[&str]) -> bool {
+    use alloc::string::String;
+    use crate::userland::lifecycle::with_active_user;
+    let path = "/host/ZSH.ELF";
+    if !crate::fs::exists(path) {
+        crate::debug_info!("[u8] {} not staged; skipping", path);
+        return false;
+    }
+    let mut tokens: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    tokens.push(String::from("--trace"));
+    tokens.push(String::from(path));
+    for a in argv_after_path {
+        tokens.push(String::from(*a));
+    }
+    let mut p = crate::commands::run::RunProcess::new_with_args(tokens);
+    p.run();
+    let still_active = with_active_user(|au| au.image.is_some());
+    assert!(!still_active, "active-user slot should be empty after zsh run() returns");
+    true
+}
+
+/// `zsh -f +m -c 'exit 0'` — proves the binary loads, musl init runs,
+/// the parser handles -c, the builtin exit dispatches, and the
+/// cooperative-exit path long-jumps back cleanly.
+#[allow(dead_code)]
+fn test_run_zsh_minimal_exit() {
+    let _ran = drive_zsh(&["-f", "+m", "-c", "exit 0"]);
+}
+
+/// `zsh -f +m -c 'echo hi'` — exercises the print/write path and
+/// cooperative exit.
+#[allow(dead_code)]
+fn test_run_zsh_echo_command() {
+    let _ran = drive_zsh(&["-f", "+m", "-c", "echo hi"]);
+}
+
+/// `zsh -f +m -c 'pwd'` — proves getcwd, the pwd builtin, and the
+/// envp-driven path resolution work.
+#[allow(dead_code)]
+fn test_run_zsh_pwd() {
+    let _ran = drive_zsh(&["-f", "+m", "-c", "pwd"]);
 }
 
 fn test_run_fault_gp() {
@@ -1109,6 +1591,80 @@ fn test_dispatch_open_writable_flag_returns_erofs() {
     args.rdi = ptr;
     args.rsi = 1; // O_WRONLY
     assert_eq!(syscall_dispatch(&mut args), EROFS);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// U4 integration: `open("/etc/passwd", O_RDONLY)` succeeds via the path
+/// rewriter — the user-supplied "/etc/passwd" routes through
+/// resolve_user_path → apply_fs_rewrite → "/host/etc/passwd", which the
+/// FAT subdir walker resolves to `host_share/ETC/PASSWD` (staged by
+/// build.sh / test.sh). Skip-if-missing so the test is graceful when
+/// the FAT mount isn't present (shouldn't happen in normal test boots,
+/// but mirrors the established skip pattern).
+fn test_dispatch_open_etc_passwd_via_rewriter() {
+    if !crate::fs::exists("/host/etc/passwd") {
+        return;
+    }
+    setup_phase2_active_user();
+    let path = b"/etc/passwd\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = ptr;
+    args.rsi = 0; // O_RDONLY
+    let fd = syscall_dispatch(&mut args);
+    assert!(fd >= 0, "expected fd >= 0, got {}", fd);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// U4 integration: `open("/etc/shadow", O_RDONLY)` returns -ENOENT —
+/// the rewriter maps it to /host/etc/shadow which is not staged.
+/// Validates the "fail closed" behavior when /etc/* is asked for but
+/// the underlying FAT path doesn't exist.
+fn test_dispatch_open_etc_unstaged_returns_enoent() {
+    if !crate::fs::exists("/host/etc/passwd") {
+        return; // host mount missing entirely — skip
+    }
+    setup_phase2_active_user();
+    let path = b"/etc/shadow\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = ptr;
+    args.rsi = 0;
+    assert_eq!(syscall_dispatch(&mut args), ENOENT);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// U4 integration: `/etc/../etc/passwd` resolves correctly through the
+/// rewriter — normalize_path collapses the .. first, then the rewriter
+/// sees /etc/passwd and rewrites it. This locks in the security
+/// invariant that path traversal can't bypass the allowlist.
+fn test_dispatch_open_etc_traversal_collapses() {
+    if !crate::fs::exists("/host/etc/passwd") {
+        return;
+    }
+    setup_phase2_active_user();
+    let path = b"/etc/../etc/passwd\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = ptr;
+    args.rsi = 0;
+    let fd = syscall_dispatch(&mut args);
+    assert!(fd >= 0, "expected fd >= 0 after traversal, got {}", fd);
 
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
@@ -2006,6 +2562,36 @@ fn test_dispatch_ioctl_tiocgwinsz_returns_80x24() {
     teardown_phase2_active_user();
 }
 
+/// U5: `ioctl(stdin, TIOCGPGRP, ...)` returns -ENOTTY. Zsh's
+/// `acquire_pgrp` reads this as "no controlling tty" and clears the
+/// MONITOR option, suppressing every subsequent setpgid/tcsetpgrp call.
+/// Critical: the arm sits inside the request match — the non-tty
+/// short-circuit only fires on file fds, not on stdin.
+fn test_dispatch_ioctl_tiocgpgrp_returns_enotty() {
+    setup_phase2_active_user();
+    let mut args = SyscallArgs::default();
+    args.rax = nr::IOCTL;
+    args.rdi = 0; // stdin
+    args.rsi = 0x540F; // TIOCGPGRP
+    args.rdx = 0; // arg ignored — we never touch user memory
+    assert_eq!(syscall_dispatch(&mut args), ENOTTY);
+    teardown_phase2_active_user();
+}
+
+/// U5: `ioctl(stdout, TIOCSPGRP, ...)` returns 0 (silent success).
+/// Defensive — zsh shouldn't reach this path with MONITOR cleared,
+/// but the stub avoids surprises if a build configuration somehow does.
+fn test_dispatch_ioctl_tiocspgrp_returns_zero() {
+    setup_phase2_active_user();
+    let mut args = SyscallArgs::default();
+    args.rax = nr::IOCTL;
+    args.rdi = 1; // stdout
+    args.rsi = 0x5410; // TIOCSPGRP
+    args.rdx = 0;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    teardown_phase2_active_user();
+}
+
 // ---------- Phase 2 PR-4: directories + getdents64 ----------
 
 /// `open("/host")` must succeed (host folder mount root) and produce a
@@ -2212,6 +2798,7 @@ fn test_run_leak_loop_fault() {
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_gdt_kernel_selectors,
+        &test_sse_enabled_before_ring3,
         &test_gdt_user_selectors,
         &test_tss_loaded,
         &test_map_user_region_kernel_can_read,
@@ -2222,6 +2809,24 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_unmap_user_region_rejects_unmapped,
         // ABI / dispatcher
         &test_dispatch_unregistered_returns_enosys,
+        &test_unknown_syscall_trace_mode_returns_enosys_and_marks_seen,
+        &test_unknown_syscall_trace_mode_marks_only_once,
+        &test_unknown_syscall_trace_mode_off_does_not_mark,
+        &test_unknown_syscall_trace_mode_capacity_overflow,
+        // U3: musl-init / zsh-startup syscalls
+        &test_dispatch_poll_streams_ready,
+        &test_dispatch_poll_unknown_fd_returns_pollnval,
+        &test_dispatch_poll_zero_nfds_returns_zero,
+        &test_dispatch_poll_nfds_over_cap_returns_einval,
+        &test_dispatch_readlink_proc_self_exe,
+        &test_dispatch_readlink_proc_self_fd_stdin,
+        &test_dispatch_readlink_proc_self_fd_negative_rejected,
+        &test_dispatch_readlink_proc_self_fd_overflow_rejected,
+        &test_dispatch_readlink_other_returns_enoent,
+        &test_dispatch_getrlimit_returns_infinity,
+        &test_dispatch_prlimit64_old_value_writes_infinity,
+        &test_dispatch_prlimit64_null_old_returns_zero,
+        &test_dispatch_setitimer_and_nanosleep_stubs_return_zero,
         &test_write_handler_valid_slice,
         &test_write_handler_rejects_unknown_fd,
         &test_write_handler_rejects_kernel_pointer,
@@ -2256,6 +2861,12 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_run_syscall_exit42_fixture_a,
         &test_run_happy_path_hello,
         &test_run_fault_ud,
+        &test_kernel_ss_after_user_fault,
+        // U8: ZSH.ELF end-to-end tests are written but gated off pending
+        // a heap allocator fix (linked_list_allocator 0.10.6 returns Err
+        // for 4 KiB align-1 with 99 MiB free during zsh's init pattern).
+        // See the comment block above `drive_zsh` and the plan's
+        // "Deferred to Follow-Up Work" entry.
         &test_run_fault_pf,
         &test_run_fault_gp,
         &test_run_bad_pointer_syscall,
@@ -2284,6 +2895,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_chdir_nonexistent_returns_enoent,
         &test_dispatch_open_nonexistent_returns_enoent,
         &test_dispatch_open_writable_flag_returns_erofs,
+        &test_dispatch_open_etc_passwd_via_rewriter,
+        &test_dispatch_open_etc_unstaged_returns_enoent,
+        &test_dispatch_open_etc_traversal_collapses,
         &test_dispatch_close_stream_is_noop,
         &test_dispatch_dup_stdout,
         &test_dispatch_lseek_on_stream_returns_espipe,
@@ -2304,6 +2918,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_ioctl_tcsets_updates_termios,
         &test_dispatch_ioctl_on_file_returns_enotty,
         &test_dispatch_ioctl_tiocgwinsz_returns_80x24,
+        &test_dispatch_ioctl_tiocgpgrp_returns_enotty,
+        &test_dispatch_ioctl_tiocspgrp_returns_zero,
         // Phase 4 PR-A: process table + real PIDs
         &test_getpid_returns_real_pid,
         &test_pid_allocation_is_monotonic,

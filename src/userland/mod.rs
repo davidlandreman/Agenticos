@@ -154,6 +154,16 @@ pub fn enter_user_mode_with_aspace(
         crate::mm::paging::USER_MMAP_BASE,
         address_space,
     );
+    // U3: stash the launch path so `readlink("/proc/self/exe")` and
+    // tools like zsh's `$ZSH_ARGZERO` resolution can recover it. We use
+    // argv[0] as the canonical exe path — the run command and execve
+    // both pass the FAT path there. Synthetic test launches that pass an
+    // empty argv get the placeholder DEFAULT_ARGV0; that's fine because
+    // those paths don't exercise readlink anyway.
+    let exe_path = alloc::string::String::from(argv_slice[0]);
+    crate::userland::lifecycle::with_active_user(|p| {
+        p.exe_path = Some(exe_path);
+    });
     // Phase 5 PR-B2 test hook: lets tests pre-install a signal action
     // before the user process starts running. Production launches
     // never set this; release builds compile it out.

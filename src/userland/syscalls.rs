@@ -38,7 +38,7 @@ use crate::userland::abi::{
     ENOSYS, ENOTDIR, ENOTTY, ERANGE, EROFS, ESPIPE, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
-use crate::userland::path::{copy_user_cstr, normalize_path};
+use crate::userland::path::{apply_fs_rewrite, copy_user_cstr, normalize_path};
 use alloc::string::String;
 use alloc::vec;
 use x86_64::VirtAddr;
@@ -52,8 +52,11 @@ const WRITEV_MAX_IOV: usize = 16;
 const WRITEV_MAX_TOTAL: u64 = 16 * 1024;
 /// Maximum mmap allocation in bytes.
 const MMAP_MAX_LEN: u64 = 8 * 1024 * 1024;
-/// Maximum brk growth from the initial anchor in bytes.
-const BRK_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Maximum brk growth from the initial anchor in bytes. Bumped from
+/// 8 MiB to 32 MiB in U3 to give static-musl zsh's mallocng comfortable
+/// headroom for transient startup spikes (parsing rc files, building
+/// the keymap table, command-line history if enabled).
+const BRK_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 // ---------- Linux constants ----------
 
@@ -71,6 +74,8 @@ const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
 const TCSETSW: u64 = 0x5403;
 const TCSETSF: u64 = 0x5404;
+const TIOCGPGRP: u64 = 0x540F;
+const TIOCSPGRP: u64 = 0x5410;
 const TIOCGWINSZ: u64 = 0x5413;
 
 // ---------- write / writev / read ----------
@@ -493,10 +498,28 @@ pub fn arch_prctl_handler(args: &mut SyscallArgs) -> i64 {
 ///   drain — so all three are equivalent.
 /// - `TIOCGWINSZ`: copy the synthesized winsize (80x24) into the user
 ///   buffer. zsh's `zle` consults this to decide where to wrap.
+/// - `TIOCGPGRP`: U5 — return `-ENOTTY`. zsh's `acquire_pgrp`
+///   (`Src/init.c`) treats this as "no controlling tty" and clears
+///   `opts[MONITOR]`, which disables the entire job-control surface
+///   (setpgid/setsid/tcsetpgrp). This is the cleanest path to
+///   no-job-control: no `+m` argv hack required, no build-time
+///   `--without-tcsetpgrp` reliance. The `--without-tcsetpgrp`
+///   configure flag is also passed by U1's Makefile as
+///   belt-and-suspenders.
+/// - `TIOCSPGRP`: U5 — return `0`. Defensive stub; zsh shouldn't
+///   reach this path with MONITOR cleared, but a silent success
+///   avoids surprises if a configuration somehow does.
 ///
 /// Calls on non-tty fds (anything other than stdin/stdout/stderr)
 /// return `-ENOTTY`; libc relies on this to detect "this fd is a file"
 /// and disable line buffering.
+///
+/// Per the feasibility doc-review finding, the new TIOCGPGRP arm sits
+/// inside the request match alongside TCGETS — NOT relying on the
+/// non-tty fd short-circuit above. Today's tty-fd unknown-request
+/// default is `-ENOSYS`; without an explicit arm, TIOCGPGRP on stdin
+/// would return ENOSYS (not ENOTTY), and zsh's MONITOR-clearing path
+/// is gated specifically on ENOTTY.
 pub fn ioctl_handler(args: &mut SyscallArgs) -> i64 {
     let fd = args.rdi as i32;
     let request = args.rsi;
@@ -557,6 +580,8 @@ pub fn ioctl_handler(args: &mut SyscallArgs) -> i64 {
             }
             0
         }
+        TIOCGPGRP => ENOTTY,
+        TIOCSPGRP => 0,
         _ => ENOSYS,
     }
 }
@@ -816,6 +841,9 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         // stack so its SYSCALL handlers don't share rsp0 with the
         // parent's suspended fork() handler.
         kernel_stack: Some(crate::userland::kernel_stack::KernelStack::new()),
+        // U3: child shares parent's exe path (fork doesn't change the
+        // running binary; execve replaces it).
+        exe_path: parent.exe_path.clone(),
     });
 
     // 8. Stash the parent's Process and install the child as current.
@@ -961,10 +989,16 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let resolved_path =
-        crate::userland::lifecycle::with_current_process(|p| {
+    let resolved_path = {
+        let normalized = crate::userland::lifecycle::with_current_process(|p| {
             crate::userland::path::normalize_path(&p.cwd, &raw_path)
         });
+        // U4: same `/etc/...` rewrite that resolve_user_path applies — if
+        // someone ever does `execve("/etc/something")` it lands at the
+        // FAT-staged location. Cosmetic for execve in practice (zsh
+        // execs binaries under /HOST/, not /etc/), but consistent.
+        crate::userland::path::apply_fs_rewrite(&normalized)
+    };
     let argv_strings: Vec<String> = match copy_user_cstr_array(argv_ptr) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1071,6 +1105,9 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         p.mmap_next = USER_MMAP_BASE;
         p.exit_kind = crate::userland::lifecycle::ExitKind::None;
         p.exit_code = 0;
+        // U3: exec replaces the running binary, so /proc/self/exe now
+        // points at the new program. argv[0] is the canonical name.
+        p.exe_path = Some(String::from(argv_refs[0]));
         // Phase 5 PR-B: POSIX semantics — exec resets signal
         // dispositions but preserves the blocked mask. Pending
         // signals are also preserved across exec.
@@ -1588,11 +1625,15 @@ fn map_fs_err(err: &crate::fs::fs_manager::FsError) -> i64 {
 }
 
 /// Resolve a user path string against the active CWD into a normalized
-/// kernel-side string. Caps at `PATH_MAX` and validates the user pointer.
+/// kernel-side string, then apply the U4 `/etc/...` rewrite so musl's
+/// `getpwuid_r` and friends find files staged under `host_share/ETC/`.
+/// The rewrite runs AFTER `normalize_path` per the security finding —
+/// `..` segments must be collapsed before the prefix check or
+/// `/etc/../etc/shadow` could bypass the allowlist.
 fn resolve_user_path(ptr: u64) -> Result<String, i64> {
     let raw = copy_user_cstr(ptr)?;
-    let resolved = with_cwd(|cwd| normalize_path(cwd, &raw));
-    Ok(resolved)
+    let normalized = with_cwd(|cwd| normalize_path(cwd, &raw));
+    Ok(apply_fs_rewrite(&normalized))
 }
 
 /// Coarse monotonic clock — `timer_ticks * 10ms`. Wall-clock equivalence
@@ -2317,6 +2358,313 @@ pub fn uname_handler(args: &mut SyscallArgs) -> i64 {
         core::ptr::copy_nonoverlapping(
             &u as *const LinuxUtsname as *const u8,
             out_ptr as *mut u8,
+            size as usize,
+        );
+    }
+    0
+}
+
+// ---------- U3: musl-init / zsh-startup syscalls ----------
+
+// poll/ppoll constants. POLLNVAL is the only one we generate when an
+// fd isn't valid; the others are just bit copies from `events` to
+// `revents` for valid stream fds.
+const POLLIN: i16 = 0x0001;
+const POLLOUT: i16 = 0x0004;
+const POLLNVAL: i16 = 0x0020;
+
+/// Linux `struct pollfd` — 8 bytes, packed naturally on x86-64.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+/// Maximum pollfd array length we'll process. zsh's ZLE polls one or
+/// two fds; musl's `__init_libc` polls three (stdin/stdout/stderr).
+/// Capping at 64 defends against integer-overflow attacks on
+/// `nfds * sizeof(pollfd)` and against pathological user input
+/// without restricting any realistic caller.
+const POLL_MAX_NFDS: u64 = 64;
+
+/// `poll(fds: *mut pollfd, nfds: nfds_t, timeout: int) -> int`
+///
+/// Real-shaped: validate the user pollfd array (with checked
+/// multiplication of `nfds * size_of::<PollFd>()` to defeat overflow),
+/// then for each entry mark `revents` according to the fd's class:
+/// stdin/stdout/stderr report whatever events the caller asked for as
+/// "ready" (we have no real I/O wait — the subsequent read/write call
+/// is what blocks); valid open files and pipes report POLLIN/POLLOUT
+/// likewise; unknown fds get POLLNVAL set. Returns the count of pollfd
+/// entries with non-zero `revents`.
+///
+/// Timeout is ignored — every poll call returns immediately. zsh's ZLE
+/// uses poll for keytimeout disambiguation; without a real timer the
+/// best we can do is "always ready," which makes ZLE call read() and
+/// block there.
+pub fn poll_handler(args: &mut SyscallArgs) -> i64 {
+    poll_common(args.rdi, args.rsi)
+}
+
+/// `ppoll(fds, nfds, *timeout, *sigmask, sigsetsize) -> int`
+///
+/// Linux-x86-64 ppoll. We ignore the timespec, sigmask, and sigsetsize;
+/// shape is identical to `poll` for our purposes.
+pub fn ppoll_handler(args: &mut SyscallArgs) -> i64 {
+    poll_common(args.rdi, args.rsi)
+}
+
+fn poll_common(fds_ptr: u64, nfds: u64) -> i64 {
+    if nfds == 0 {
+        return 0;
+    }
+    if nfds > POLL_MAX_NFDS {
+        return EINVAL;
+    }
+    // Checked multiplication — `nfds * sizeof(PollFd)` must not overflow.
+    // A user passing nfds = u64::MAX would otherwise wrap to a small
+    // length and `validate_user_slice` would happily approve a tiny
+    // window while we read 8 * u64::MAX bytes. The cap above already
+    // forecloses this in practice; the checked_mul is belt-and-suspenders.
+    let bytes = match nfds.checked_mul(core::mem::size_of::<PollFd>() as u64) {
+        Some(b) => b,
+        None => return EINVAL,
+    };
+    if let Err(e) = validate_user_slice(fds_ptr, bytes) {
+        return e;
+    }
+    let n = nfds as usize;
+    let slice = unsafe {
+        core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, n)
+    };
+    let mut ready = 0i64;
+    for entry in slice.iter_mut() {
+        let want = entry.events;
+        let revents = match with_fd_slot(entry.fd) {
+            Some(_) => want & (POLLIN | POLLOUT), // mirror requested bits as ready
+            None => POLLNVAL,
+        };
+        entry.revents = revents;
+        if revents != 0 {
+            ready += 1;
+        }
+    }
+    ready
+}
+
+/// `pselect6(nfds, *readfds, *writefds, *exceptfds, *timeout, *sigmask) -> int`
+///
+/// Stubbed `-ENOSYS` for now. The trace mode in U2 will surface a real
+/// pselect6 call from zsh if its build calls it (most don't — `poll`
+/// covers ZLE's needs in the common configuration).
+pub fn pselect6_handler(_args: &mut SyscallArgs) -> i64 {
+    ENOSYS
+}
+
+/// Maximum bytes we'll write into a user readlink buffer.
+const READLINK_MAX_BUF: u64 = 4096;
+/// Maximum cstring length we'll copy from user space when looking up
+/// a readlink target.
+const READLINK_MAX_PATH: usize = 256;
+
+/// `readlink(path: *const c_char, buf: *mut c_char, bufsiz: size_t) -> ssize_t`
+///
+/// Inline procfs synthesis covers the two paths zsh actually opens:
+///   - `/proc/self/exe` → the launch path of the current process
+///     (set by `enter_user_mode_with_aspace` from argv[0]; updated by
+///     execve). Used by zsh to resolve `$ZSH_ARGZERO`.
+///   - `/proc/self/fd/<N>` → a synthetic name for fd N: `/dev/tty` for
+///     the standard streams, the backing file path for opened files,
+///     `pipe:[<n>]` for pipe ends. Used by `ttyname()`.
+///
+/// Other paths return `-ENOENT` (no real symlinks on the FAT mount).
+/// The result is NOT null-terminated; we return the byte count written.
+pub fn readlink_handler(args: &mut SyscallArgs) -> i64 {
+    readlink_common(args.rdi, args.rsi, args.rdx)
+}
+
+/// `readlinkat(dirfd: i32, path: *const c_char, buf: *mut c_char, bufsiz: size_t) -> ssize_t`
+///
+/// Only supports `dirfd == AT_FDCWD`. Other dirfds return `-ENOSYS`.
+/// musl prefers readlinkat over readlink in newer versions.
+pub fn readlinkat_handler(args: &mut SyscallArgs) -> i64 {
+    const AT_FDCWD: i32 = -100;
+    let dirfd = args.rdi as i32;
+    if dirfd != AT_FDCWD {
+        return ENOSYS;
+    }
+    readlink_common(args.rsi, args.rdx, args.r10)
+}
+
+fn readlink_common(path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> i64 {
+    if bufsiz == 0 {
+        return EINVAL;
+    }
+    if bufsiz > READLINK_MAX_BUF {
+        return EINVAL;
+    }
+    if let Err(e) = validate_user_slice(buf_ptr, bufsiz) {
+        return e;
+    }
+    let path = match copy_user_cstr(path_ptr) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if path.len() > READLINK_MAX_PATH {
+        return ERANGE;
+    }
+    let target = match resolve_proc_link(&path) {
+        Some(t) => t,
+        None => return ENOENT,
+    };
+    let bytes = target.as_bytes();
+    let n = core::cmp::min(bytes.len(), bufsiz as usize);
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr as *mut u8, n);
+    }
+    n as i64
+}
+
+/// Inline minimal procfs: resolve `/proc/self/exe` and `/proc/self/fd/N`
+/// to a synthetic target string, or `None` for any other path. Lives
+/// here (not in a separate module) per scope-guardian: we only need
+/// these two paths and putting them inline keeps the readlink handler
+/// self-contained.
+fn resolve_proc_link(path: &str) -> Option<String> {
+    if path == "/proc/self/exe" {
+        return crate::userland::lifecycle::with_active_user(|p| p.exe_path.clone());
+    }
+    let fd_prefix = "/proc/self/fd/";
+    if let Some(rest) = path.strip_prefix(fd_prefix) {
+        // Bounded integer parse — defends against `/proc/self/fd/-1`,
+        // `/proc/self/fd/99999999999999999999`, leading zeros, trailing
+        // garbage. `u32::from_str` rejects all of those.
+        let fd: u32 = rest.parse().ok()?;
+        return resolve_proc_self_fd(fd as i32);
+    }
+    None
+}
+
+fn resolve_proc_self_fd(fd: i32) -> Option<String> {
+    let slot = with_fd_slot(fd)?;
+    Some(match slot {
+        FdSlot::Stdin | FdSlot::Stdout | FdSlot::Stderr => String::from("/dev/tty"),
+        FdSlot::File { handle, .. } => handle.path(),
+        FdSlot::Directory { handle, .. } => handle.path(),
+        FdSlot::PipeRead(_, _) | FdSlot::PipeWrite(_, _) => String::from("pipe:[0]"),
+    })
+}
+
+/// Linux `struct rlimit` (16 bytes on 64-bit).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxRlimit {
+    rlim_cur: u64,
+    rlim_max: u64,
+}
+
+const RLIM_INFINITY: u64 = u64::MAX;
+
+/// `getrlimit(resource: i32, *rlim: *mut rlimit) -> int`
+///
+/// Stub: every resource reports `RLIM_INFINITY` for both `cur` and `max`.
+/// Sufficient for zsh's startup queries on `RLIMIT_STACK`, `RLIMIT_NOFILE`,
+/// `RLIMIT_DATA`, `RLIMIT_AS`. Real per-process limits are out of scope.
+pub fn getrlimit_handler(args: &mut SyscallArgs) -> i64 {
+    let out_ptr = args.rsi;
+    write_rlim_infinity(out_ptr)
+}
+
+/// `prlimit64(pid, resource, *new_limit, *old_limit) -> int`
+///
+/// Stub: ignore `pid` (we have one process from the user's perspective)
+/// and `new_limit` (no enforcement); if `old_limit` is non-null, write
+/// `RLIM_INFINITY` into it. Returns 0.
+pub fn prlimit64_handler(args: &mut SyscallArgs) -> i64 {
+    let old_ptr = args.r10;
+    if old_ptr == 0 {
+        return 0;
+    }
+    write_rlim_infinity(old_ptr)
+}
+
+fn write_rlim_infinity(out_ptr: u64) -> i64 {
+    let size = core::mem::size_of::<LinuxRlimit>() as u64;
+    if let Err(e) = validate_user_slice(out_ptr, size) {
+        return e;
+    }
+    let r = LinuxRlimit { rlim_cur: RLIM_INFINITY, rlim_max: RLIM_INFINITY };
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &r as *const LinuxRlimit as *const u8,
+            out_ptr as *mut u8,
+            size as usize,
+        );
+    }
+    0
+}
+
+/// Linux `struct itimerval` (matches musl's layout: two `timeval` pairs,
+/// each `{ tv_sec: i64, tv_usec: i64 }` on x86-64 = 32 bytes total).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct LinuxItimerval {
+    it_interval_sec: i64,
+    it_interval_usec: i64,
+    it_value_sec: i64,
+    it_value_usec: i64,
+}
+
+/// `setitimer(which: i32, *new_value, *old_value) -> int`
+///
+/// Stub: returns 0, no real timer wired. zsh installs SIGALRM handlers
+/// for KEYTIMEOUT and TMOUT; without the timer firing those features are
+/// effectively no-op (acceptable for `--no-rcs`-style usage). If
+/// `old_value` is non-null, write zeroed itimerval (no prior timer was
+/// active).
+pub fn setitimer_handler(args: &mut SyscallArgs) -> i64 {
+    let old_ptr = args.rdx;
+    if old_ptr == 0 {
+        return 0;
+    }
+    let size = core::mem::size_of::<LinuxItimerval>() as u64;
+    if let Err(e) = validate_user_slice(old_ptr, size) {
+        return e;
+    }
+    let zero = LinuxItimerval::default();
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &zero as *const LinuxItimerval as *const u8,
+            old_ptr as *mut u8,
+            size as usize,
+        );
+    }
+    0
+}
+
+/// `nanosleep(*req: *const timespec, *rem: *mut timespec) -> int`
+///
+/// Stub: returns 0 immediately, ignoring the requested duration. zsh's
+/// `sleep` builtin and `zselect` are the main consumers; neither is
+/// exercised in our minimum interactive test path. If `rem` is non-null,
+/// write a zeroed timespec (no remaining time, since we "slept" the full
+/// duration in zero wall-clock).
+pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
+    let rem_ptr = args.rsi;
+    if rem_ptr == 0 {
+        return 0;
+    }
+    let size = core::mem::size_of::<LinuxTimespec>() as u64;
+    if let Err(e) = validate_user_slice(rem_ptr, size) {
+        return e;
+    }
+    let zero = LinuxTimespec::default();
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &zero as *const LinuxTimespec as *const u8,
+            rem_ptr as *mut u8,
             size as usize,
         );
     }

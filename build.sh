@@ -65,6 +65,16 @@ fi
 echo "🛠  Building userland (release)..."
 HOST_SHARE_STAGE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
 mkdir -p "$HOST_SHARE_STAGE"
+
+# U4: stage minimal /etc/{passwd,group} so musl's getpwuid_r returns the
+# root entry zsh needs for $HOME/$USER/$SHELL. The kernel-side path
+# rewriter in src/userland/path.rs::apply_fs_rewrite maps
+# /etc/passwd -> /host/etc/passwd; FAT's case-insensitive subdir walker
+# resolves that to host_share/ETC/PASSWD. Single-line root entry is the
+# musl-getpwuid_r minimum (seven colon-delimited fields).
+mkdir -p "$HOST_SHARE_STAGE/ETC"
+printf 'root:x:0:0::/root:/bin/zsh\n' > "$HOST_SHARE_STAGE/ETC/PASSWD"
+printf 'root:x:0:\n'                  > "$HOST_SHARE_STAGE/ETC/GROUP"
 if cargo build --release --manifest-path userland/Cargo.toml; then
     USER_HELLO="userland/target/x86_64-unknown-none/release/hello"
     if [ -f "$USER_HELLO" ]; then
@@ -123,6 +133,44 @@ else
     echo "⚠️  $MUSL_GXX not found on PATH — skipping HELLOCPP.ELF."
     echo "   Install hint (macOS): brew install x86_64-linux-musl-cross"
     echo "   Override the binary name: MUSL_GXX=<path-to-musl-g++> ./build.sh"
+fi
+
+# zsh — first real userland shell. Built statically against musl + a
+# vendored ncurses-widec by userland/apps/zsh/Makefile. Same probe +
+# readelf hard-fail pattern as HELLOCPP. The Makefile fetches sources
+# from upstream on first build and caches them under
+# userland/apps/zsh/build/tarballs/, so subsequent builds are offline.
+echo "🛠  Building zsh userland (ZSH)..."
+MUSL_CC="${MUSL_CC:-x86_64-linux-musl-gcc}"
+if command -v "$MUSL_CC" >/dev/null 2>&1; then
+    if make -C userland/apps/zsh MUSL_CC="$MUSL_CC"; then
+        ZSH_BIN="userland/apps/zsh/build/zsh"
+        if [ -f "$ZSH_BIN" ]; then
+            MUSL_READELF="${MUSL_CC%gcc}readelf"
+            command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
+            ET_TYPE=$("$MUSL_READELF" -h "$ZSH_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
+            if [ "$ET_TYPE" != "EXEC" ]; then
+                echo "❌ $ZSH_BIN is $ET_TYPE, expected EXEC. Toolchain likely defaults to PIE."
+                echo "   Try: $MUSL_CC -static -no-pie -fno-pie ..."
+                exit 1
+            fi
+            STAGED="$HOST_SHARE_STAGE/ZSH.ELF"
+            TMP="$HOST_SHARE_STAGE/.ZSH.ELF.tmp.$$"
+            cp "$ZSH_BIN" "$TMP"
+            mv -f "$TMP" "$STAGED"
+            SIZE=$(wc -c < "$STAGED" | tr -d ' ')
+            echo "📦 Staged $STAGED ($SIZE bytes)"
+        else
+            echo "⚠️  zsh build succeeded but $ZSH_BIN not found; skipping stage"
+        fi
+    else
+        echo "❌ zsh userland build failed."
+        exit 1
+    fi
+else
+    echo "⚠️  $MUSL_CC not found on PATH — skipping ZSH.ELF."
+    echo "   Install hint (macOS): brew install x86_64-linux-musl-cross"
+    echo "   Override the binary name: MUSL_CC=<path-to-musl-gcc> ./build.sh"
 fi
 
 # Determine build flags
