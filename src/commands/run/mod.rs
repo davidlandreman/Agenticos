@@ -96,6 +96,13 @@ impl RunProcess {
             return Err(String::from("another user app is already running"));
         }
 
+        // Each launch gets a fresh "seen syscalls" table so trace mode's
+        // first-occurrence logging is meaningful per-binary, not stale
+        // from a previous run. The reset is cheap (512 atomic stores)
+        // and runs unconditionally — if trace mode is off, nothing reads
+        // SEEN_NRS anyway.
+        crate::userland::abi::reset_unknown_syscall_trace();
+
         // Phase 4 PR-B: each user process runs on its own L4 page-
         // table root. Build it now (kernel-half entries are shared by
         // copying their PML4 entries; PML4[0] is empty), activate it,

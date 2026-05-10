@@ -24,6 +24,7 @@
 //! window, and the `LAST_EXIT_CODE` mirror that lets in-kernel tests
 //! observe `exit_group(code)` without setting up a full ring-3 process.
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use x86_64::VirtAddr;
 
@@ -73,6 +74,56 @@ static USER_VA_BOUNDS: Mutex<Option<UserVaBounds>> = Mutex::new(None);
 /// dispatcher directly without an active continuation, falls back to
 /// recording here, and returns to the caller.
 pub static LAST_EXIT_CODE: Mutex<Option<i64>> = Mutex::new(None);
+
+/// When true, `unhandled_syscall` returns `-ENOSYS` to the caller and
+/// logs the first occurrence of each syscall number at info, subsequent
+/// occurrences at trace, instead of terminating the process. Off by
+/// default in production builds; tests and discovery boots flip it on
+/// via `set_trace_mode` so a static-musl binary can survive past
+/// unimplemented syscalls and reveal its full surface.
+static TRACE_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Once-per-syscall-number bookkeeping for trace mode. `SEEN_NRS[n]`
+/// flips false → true on the first unhandled occurrence of nr `n`. Linux
+/// x86-64 has ~330 numbers; 512 is a safe ceiling that keeps the
+/// indexing branchless and avoids a heap-backed map on the dispatcher
+/// hot path. Numbers ≥ 512 are not tracked individually but still log +
+/// return `-ENOSYS` (with the first-occurrence fast-path effectively
+/// inverted: every call logs at info because we never set a sticky bit).
+const TRACE_NR_CAPACITY: usize = 512;
+static SEEN_NRS: [AtomicBool; TRACE_NR_CAPACITY] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; TRACE_NR_CAPACITY]
+};
+
+pub fn set_trace_mode(enabled: bool) {
+    TRACE_MODE.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_trace_mode() -> bool {
+    TRACE_MODE.load(Ordering::Relaxed)
+}
+
+/// Clear the per-syscall-number "already logged" bookkeeping. Called by
+/// the run command before launching a user binary so each launch starts
+/// the discovery loop fresh.
+pub fn reset_unknown_syscall_trace() {
+    for slot in SEEN_NRS.iter() {
+        slot.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Test-visible probe: did the trace machinery record a first-occurrence
+/// log for this number since the last `reset_unknown_syscall_trace`?
+/// Returns false for numbers ≥ `TRACE_NR_CAPACITY` (those are logged on
+/// every occurrence rather than tracked individually).
+pub fn unknown_syscall_was_seen(nr: u64) -> bool {
+    let idx = nr as usize;
+    if idx >= TRACE_NR_CAPACITY {
+        return false;
+    }
+    SEEN_NRS[idx].load(Ordering::Relaxed)
+}
 
 pub fn set_user_va_bounds(bounds: UserVaBounds) {
     *USER_VA_BOUNDS.lock() = Some(bounds);
@@ -257,7 +308,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::TKILL => syscalls::tkill_handler(args),
         nr::TGKILL => syscalls::tgkill_handler(args),
         nr::RT_SIGRETURN => syscalls::rt_sigreturn_handler(args),
-        unknown => unhandled_syscall(unknown),
+        _ => unhandled_syscall(args),
     };
 
     // Phase 5 PR-B2: deliver a pending signal if one is queued. This
@@ -268,12 +319,42 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
     result
 }
 
-/// Default arm for `syscall_dispatch`. Routes to a clean per-process
-/// termination via the kernel-continuation long-jump when an active user
-/// process issued the syscall; falls back to returning `-ENOSYS` for the
+/// Default arm for `syscall_dispatch`. Two behavior modes:
+///
+/// **Trace mode off** (default): routes to a clean per-process termination
+/// via the kernel-continuation long-jump when an active user process
+/// issued the syscall; falls back to returning `-ENOSYS` for the
 /// in-kernel test path that exercises the dispatcher without an
 /// `enter_user_mode`.
-fn unhandled_syscall(nr: u64) -> i64 {
+///
+/// **Trace mode on** (set via `set_trace_mode(true)`, intended for
+/// discovery boots and tests): logs the first occurrence of each
+/// syscall number at info with a full arg dump, subsequent occurrences
+/// at trace, and returns `-ENOSYS` to the caller. This lets a binary
+/// continue past unhandled syscalls so we can see the full surface it
+/// touches in one boot rather than one syscall at a time.
+fn unhandled_syscall(args: &SyscallArgs) -> i64 {
+    let nr = args.rax;
+    if is_trace_mode() {
+        // Per-nr "already logged" check is a swap so the test is itself
+        // the bookkeeping update. Numbers ≥ TRACE_NR_CAPACITY can't be
+        // tracked individually — log them every time at info to avoid
+        // silently swallowing them.
+        let already_seen = if (nr as usize) < TRACE_NR_CAPACITY {
+            SEEN_NRS[nr as usize].swap(true, Ordering::Relaxed)
+        } else {
+            false
+        };
+        if !already_seen {
+            crate::debug_info!(
+                "[strace] first unknown nr={} args=({:#x},{:#x},{:#x},{:#x},{:#x},{:#x})",
+                nr, args.rdi, args.rsi, args.rdx, args.r10, args.r8, args.r9
+            );
+        } else {
+            crate::debug_trace!("[strace] nr={}", nr);
+        }
+        return ENOSYS;
+    }
     let has_cont = crate::userland::lifecycle::with_active_user(|au| au.continuation.is_some());
     if has_cont {
         crate::userland::lifecycle::unimplemented_syscall_exit(nr);

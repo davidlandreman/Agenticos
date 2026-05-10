@@ -184,6 +184,88 @@ fn test_dispatch_unregistered_returns_enosys() {
     assert_eq!(ret, ENOSYS);
 }
 
+/// Trace mode on: an unknown syscall returns `-ENOSYS` (same as off, in
+/// the synthetic test path) and marks the per-nr "seen" bit so the next
+/// occurrence demotes from info to trace.
+fn test_unknown_syscall_trace_mode_returns_enosys_and_marks_seen() {
+    use crate::userland::abi::{
+        is_trace_mode, reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen,
+    };
+    let prior = is_trace_mode();
+    set_trace_mode(true);
+    reset_unknown_syscall_trace();
+    // Pick an unused-but-in-range nr (Linux x86-64 currently uses 0..335;
+    // 411 is unused and < TRACE_NR_CAPACITY so the per-nr bookkeeping
+    // applies). Using a number ≥ 512 would test the overflow path
+    // instead — see test_unknown_syscall_trace_mode_capacity_overflow.
+    let nr = 411;
+    assert!(!unknown_syscall_was_seen(nr));
+    let mut args = SyscallArgs::default();
+    args.rax = nr;
+    args.rdi = 0xdead_beef;
+    args.rsi = 0xfeed_face;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOSYS);
+    assert!(unknown_syscall_was_seen(nr));
+    // Restore prior state so subsequent tests see the same dispatcher
+    // behavior they were authored against.
+    set_trace_mode(prior);
+    reset_unknown_syscall_trace();
+}
+
+/// Trace mode on, same nr twice: the swap is itself the bookkeeping —
+/// `unknown_syscall_was_seen` reports true after the first call and stays
+/// true after subsequent calls.
+fn test_unknown_syscall_trace_mode_marks_only_once() {
+    use crate::userland::abi::{
+        reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen,
+    };
+    set_trace_mode(true);
+    reset_unknown_syscall_trace();
+    let nr = 412;
+    let mut args = SyscallArgs::default();
+    args.rax = nr;
+    let _ = syscall_dispatch(&mut args);
+    assert!(unknown_syscall_was_seen(nr));
+    let _ = syscall_dispatch(&mut args);
+    assert!(unknown_syscall_was_seen(nr));
+    set_trace_mode(false);
+    reset_unknown_syscall_trace();
+}
+
+/// Trace mode OFF: the synthetic-test dispatcher path returns `-ENOSYS`
+/// (no active continuation to long-jump to) but does NOT mark the SEEN
+/// bookkeeping — that's exclusive to trace mode.
+fn test_unknown_syscall_trace_mode_off_does_not_mark() {
+    use crate::userland::abi::{
+        reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen,
+    };
+    set_trace_mode(false);
+    reset_unknown_syscall_trace();
+    let nr = 413;
+    let mut args = SyscallArgs::default();
+    args.rax = nr;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOSYS);
+    assert!(!unknown_syscall_was_seen(nr));
+}
+
+/// Trace mode on, nr beyond TRACE_NR_CAPACITY (512): handler returns
+/// ENOSYS without panicking and `unknown_syscall_was_seen` reports false
+/// (those numbers are not tracked individually — they log every time).
+fn test_unknown_syscall_trace_mode_capacity_overflow() {
+    use crate::userland::abi::{reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen};
+    set_trace_mode(true);
+    reset_unknown_syscall_trace();
+    let nr = 9999; // > 512
+    let mut args = SyscallArgs::default();
+    args.rax = nr;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, ENOSYS);
+    assert!(!unknown_syscall_was_seen(nr));
+    set_trace_mode(false);
+}
+
 /// `write(1, valid_ptr, len)` succeeds and returns `len`. The active
 /// user-VA bounds bracket the kernel buffer for the duration of the call —
 /// the dispatcher does not care where the bytes come from, only that the
@@ -2222,6 +2304,10 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_unmap_user_region_rejects_unmapped,
         // ABI / dispatcher
         &test_dispatch_unregistered_returns_enosys,
+        &test_unknown_syscall_trace_mode_returns_enosys_and_marks_seen,
+        &test_unknown_syscall_trace_mode_marks_only_once,
+        &test_unknown_syscall_trace_mode_off_does_not_mark,
+        &test_unknown_syscall_trace_mode_capacity_overflow,
         &test_write_handler_valid_slice,
         &test_write_handler_rejects_unknown_fd,
         &test_write_handler_rejects_kernel_pointer,
