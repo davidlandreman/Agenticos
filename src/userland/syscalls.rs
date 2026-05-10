@@ -38,7 +38,7 @@ use crate::userland::abi::{
     ENOSYS, ENOTDIR, ENOTTY, ERANGE, EROFS, ESPIPE, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
-use crate::userland::path::{copy_user_cstr, normalize_path};
+use crate::userland::path::{apply_fs_rewrite, copy_user_cstr, normalize_path};
 use alloc::string::String;
 use alloc::vec;
 use x86_64::VirtAddr;
@@ -967,10 +967,16 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let resolved_path =
-        crate::userland::lifecycle::with_current_process(|p| {
+    let resolved_path = {
+        let normalized = crate::userland::lifecycle::with_current_process(|p| {
             crate::userland::path::normalize_path(&p.cwd, &raw_path)
         });
+        // U4: same `/etc/...` rewrite that resolve_user_path applies — if
+        // someone ever does `execve("/etc/something")` it lands at the
+        // FAT-staged location. Cosmetic for execve in practice (zsh
+        // execs binaries under /HOST/, not /etc/), but consistent.
+        crate::userland::path::apply_fs_rewrite(&normalized)
+    };
     let argv_strings: Vec<String> = match copy_user_cstr_array(argv_ptr) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1597,11 +1603,15 @@ fn map_fs_err(err: &crate::fs::fs_manager::FsError) -> i64 {
 }
 
 /// Resolve a user path string against the active CWD into a normalized
-/// kernel-side string. Caps at `PATH_MAX` and validates the user pointer.
+/// kernel-side string, then apply the U4 `/etc/...` rewrite so musl's
+/// `getpwuid_r` and friends find files staged under `host_share/ETC/`.
+/// The rewrite runs AFTER `normalize_path` per the security finding —
+/// `..` segments must be collapsed before the prefix check or
+/// `/etc/../etc/shadow` could bypass the allowlist.
 fn resolve_user_path(ptr: u64) -> Result<String, i64> {
     let raw = copy_user_cstr(ptr)?;
-    let resolved = with_cwd(|cwd| normalize_path(cwd, &raw));
-    Ok(resolved)
+    let normalized = with_cwd(|cwd| normalize_path(cwd, &raw));
+    Ok(apply_fs_rewrite(&normalized))
 }
 
 /// Coarse monotonic clock — `timer_ticks * 10ms`. Wall-clock equivalence

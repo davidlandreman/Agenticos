@@ -1478,6 +1478,80 @@ fn test_dispatch_open_writable_flag_returns_erofs() {
     teardown_phase2_active_user();
 }
 
+/// U4 integration: `open("/etc/passwd", O_RDONLY)` succeeds via the path
+/// rewriter — the user-supplied "/etc/passwd" routes through
+/// resolve_user_path → apply_fs_rewrite → "/host/etc/passwd", which the
+/// FAT subdir walker resolves to `host_share/ETC/PASSWD` (staged by
+/// build.sh / test.sh). Skip-if-missing so the test is graceful when
+/// the FAT mount isn't present (shouldn't happen in normal test boots,
+/// but mirrors the established skip pattern).
+fn test_dispatch_open_etc_passwd_via_rewriter() {
+    if !crate::fs::exists("/host/etc/passwd") {
+        return;
+    }
+    setup_phase2_active_user();
+    let path = b"/etc/passwd\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = ptr;
+    args.rsi = 0; // O_RDONLY
+    let fd = syscall_dispatch(&mut args);
+    assert!(fd >= 0, "expected fd >= 0, got {}", fd);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// U4 integration: `open("/etc/shadow", O_RDONLY)` returns -ENOENT —
+/// the rewriter maps it to /host/etc/shadow which is not staged.
+/// Validates the "fail closed" behavior when /etc/* is asked for but
+/// the underlying FAT path doesn't exist.
+fn test_dispatch_open_etc_unstaged_returns_enoent() {
+    if !crate::fs::exists("/host/etc/passwd") {
+        return; // host mount missing entirely — skip
+    }
+    setup_phase2_active_user();
+    let path = b"/etc/shadow\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = ptr;
+    args.rsi = 0;
+    assert_eq!(syscall_dispatch(&mut args), ENOENT);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// U4 integration: `/etc/../etc/passwd` resolves correctly through the
+/// rewriter — normalize_path collapses the .. first, then the rewriter
+/// sees /etc/passwd and rewrites it. This locks in the security
+/// invariant that path traversal can't bypass the allowlist.
+fn test_dispatch_open_etc_traversal_collapses() {
+    if !crate::fs::exists("/host/etc/passwd") {
+        return;
+    }
+    setup_phase2_active_user();
+    let path = b"/etc/../etc/passwd\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = ptr;
+    args.rsi = 0;
+    let fd = syscall_dispatch(&mut args);
+    assert!(fd >= 0, "expected fd >= 0 after traversal, got {}", fd);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
 fn test_dispatch_close_stream_is_noop() {
     setup_phase2_active_user();
     let mut args = SyscallArgs::default();
@@ -2666,6 +2740,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_chdir_nonexistent_returns_enoent,
         &test_dispatch_open_nonexistent_returns_enoent,
         &test_dispatch_open_writable_flag_returns_erofs,
+        &test_dispatch_open_etc_passwd_via_rewriter,
+        &test_dispatch_open_etc_unstaged_returns_enoent,
+        &test_dispatch_open_etc_traversal_collapses,
         &test_dispatch_close_stream_is_noop,
         &test_dispatch_dup_stdout,
         &test_dispatch_lseek_on_stream_returns_espipe,
