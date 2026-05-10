@@ -122,6 +122,32 @@ if [ "$SKIP_USERLAND" -eq 0 ]; then
     else
         echo "Note: $MUSL_GXX not found; skipping HELLOCPP.ELF (install: brew install x86_64-linux-musl-cross)"
     fi
+
+    # zsh userland. Soft-fail mirrors HELLOCPP — kernel tests use embedded
+    # fixtures, so a missing zsh build only blocks the e2e zsh tests; other
+    # tests still run.
+    MUSL_CC="${MUSL_CC:-x86_64-linux-musl-gcc}"
+    if command -v "$MUSL_CC" >/dev/null 2>&1; then
+        if make -C userland/apps/zsh MUSL_CC="$MUSL_CC"; then
+            ZSH_BIN="userland/apps/zsh/build/zsh"
+            if [ -f "$ZSH_BIN" ]; then
+                MUSL_READELF="${MUSL_CC%gcc}readelf"
+                command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
+                ET_TYPE=$("$MUSL_READELF" -h "$ZSH_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
+                if [ "$ET_TYPE" = "EXEC" ]; then
+                    STAGED="$HOST_SHARE_STAGE/ZSH.ELF"
+                    TMP="$HOST_SHARE_STAGE/.ZSH.ELF.tmp.$$"
+                    cp "$ZSH_BIN" "$TMP"
+                    mv -f "$TMP" "$STAGED"
+                    echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
+                else
+                    echo "Warning: $ZSH_BIN is $ET_TYPE, expected EXEC; skipping stage"
+                fi
+            fi
+        fi
+    else
+        echo "Note: $MUSL_CC not found; skipping ZSH.ELF (install: brew install x86_64-linux-musl-cross)"
+    fi
 else
     echo "Skipping userland prebuild (--skip-userland)"
 fi

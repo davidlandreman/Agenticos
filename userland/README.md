@@ -125,6 +125,31 @@ deferring the surprise to a confusing kernel-side rejection at run time.
 4. Update `build.sh` / `test.sh` to invoke the new `make` target and
    stage the binary at an uppercase 8.3 filename in `host_share/`.
 
+## Adding an upstream C app (zsh-style)
+
+For apps with their own autoconf build system (zsh, busybox, dash, etc.),
+mirror `userland/apps/zsh/`:
+
+1. `mkdir -p userland/apps/<name>` and add a `Makefile` that fetches the
+   upstream tarball into `build/tarballs/`, verifies SHA256, extracts it,
+   runs `./configure --host=x86_64-linux-musl` with the static-only flag
+   set, runs `make`, and copies a stripped binary to `build/<name>`.
+2. Pin both the source version and the SHA256 in the Makefile and the
+   app's `README.md`. Bumping a version bumps the SHA in lockstep.
+3. Add a parallel staging block in `build.sh` and `test.sh` after the
+   HELLOCPP block — same `MUSL_CC` probe-and-warn pattern, same
+   `readelf` ET_EXEC verification, same tmp-file + `mv -f` staging into
+   `host_share/<NAME>.ELF`.
+4. Add `build/` to `userland/apps/<name>/.gitignore` — the build tree
+   contains tarballs, extracted source, and intermediate artifacts that
+   shouldn't be tracked.
+
+The zsh app additionally vendors a build-time-only ncurses inside its
+own build tree because the cross-musl toolchain doesn't ship one. If
+your upstream app needs other libraries (zlib, libssl, etc.), follow
+the same pattern: another fetch + verify + cross-build step before the
+app's own configure runs.
+
 ### libstdc++ buffering caveat
 
 The kernel returns `-ENOTTY` for `ioctl(fd, TCGETS, ...)`, which makes
