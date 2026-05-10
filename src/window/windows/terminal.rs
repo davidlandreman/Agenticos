@@ -165,9 +165,20 @@ impl TerminalWindow {
             callback(input.clone());
         }
 
-        // Route input to this terminal's shell
-        let terminal_id = self.text_window.id();
-        crate::window::terminal::route_terminal_input(terminal_id, input);
+        // Phase-1 stdin routing: if a ring-3 user process is currently
+        // running, deliver the line + '\n' into its stdin queue rather
+        // than back to the in-kernel shell. The shell is parked while a
+        // user app runs (`command_running` is true on its `ShellInstance`),
+        // so a line routed there would just queue up and be re-executed
+        // as a shell command after the app exits — clearly wrong.
+        if crate::userland::stdin::is_active() {
+            crate::userland::stdin::push_bytes(input.as_bytes());
+            crate::userland::stdin::push_bytes(b"\n");
+        } else {
+            // Route input to this terminal's shell
+            let terminal_id = self.text_window.id();
+            crate::window::terminal::route_terminal_input(terminal_id, input);
+        }
 
         // Update input start position for next input
         let (col, row) = self.text_window.cursor_position();
@@ -248,6 +259,34 @@ impl Window for TerminalWindow {
     fn handle_event(&mut self, event: Event) -> EventResult {
         match event {
             Event::Keyboard(kbd_event) if kbd_event.pressed => {
+                // Phase 3: when a user process is active and has put the
+                // tty into raw mode (ICANON off), bypass the terminal's
+                // line editor and forward each keystroke as raw bytes to
+                // user stdin. zsh's zle does this so it can paint its
+                // own prompt and handle history/completion.
+                if crate::userland::stdin::is_active()
+                    && !crate::userland::tty::is_canonical()
+                {
+                    let bytes = encode_keystroke_for_raw_mode(
+                        kbd_event.key_code,
+                        kbd_event.modifiers,
+                    );
+                    if !bytes.is_empty() {
+                        crate::userland::stdin::push_bytes(&bytes);
+                        if crate::userland::tty::is_echo() {
+                            // ECHO in raw mode: echo only printable bytes
+                            // (skip control characters / escape sequences,
+                            // which the user app will redraw itself).
+                            for &b in &bytes {
+                                if (0x20..0x7F).contains(&b) {
+                                    self.text_window.write_char(b as char);
+                                }
+                            }
+                        }
+                    }
+                    return EventResult::Handled;
+                }
+
                 match kbd_event.key_code {
                     KeyCode::Enter => {
                         self.handle_enter();
@@ -269,17 +308,22 @@ impl Window for TerminalWindow {
                         crate::debug_trace!("Terminal handling key: {:?}", kbd_event.key_code);
                         if let Some(ch) = keycode_to_char(kbd_event.key_code, kbd_event.modifiers) {
                             crate::debug_trace!("Converted to character: '{}'", ch);
-                            
+
                             // Log current cursor position
                             let (cur_col, cur_row) = self.text_window.cursor_position();
-                            crate::debug_trace!("Current cursor at ({}, {}), input starts at ({}, {})", 
+                            crate::debug_trace!("Current cursor at ({}, {}), input starts at ({}, {})",
                                 cur_col, cur_row, self.input_start_col, self.input_start_row);
-                            
+
+                            // Phase 3: when a user is active and ECHO is
+                            // off in canonical mode (e.g. password
+                            // prompt), accept the byte but don't paint it.
                             self.input_buffer.push(ch);
-                            
-                            // Write the character
-                            self.text_window.write_char(ch);
-                            
+                            let echo_to_screen = !crate::userland::stdin::is_active()
+                                || crate::userland::tty::is_echo();
+                            if echo_to_screen {
+                                self.text_window.write_char(ch);
+                            }
+
                             EventResult::Handled
                         } else {
                             crate::debug_trace!("No character mapping for key");
@@ -294,5 +338,58 @@ impl Window for TerminalWindow {
 
     fn can_focus(&self) -> bool {
         self.text_window.can_focus()
+    }
+}
+
+/// Translate a keyboard event into the raw bytes a Linux TTY would
+/// deliver in raw mode. Used only when a user process is active and
+/// has cleared `ICANON` via `tcsetattr`.
+///
+/// - **Ctrl+letter** → control byte (Ctrl-A=0x01 ... Ctrl-Z=0x1A).
+/// - **Backspace** → 0x7F (DEL — Linux convention; `stty erase` lets
+///   apps remap to 0x08 (BS) but the wire byte is DEL).
+/// - **Enter** → 0x0D (CR). zsh will translate via ICRNL if set.
+/// - **Arrow keys** → ESC [ A/B/C/D (the ANSI VT100 sequences zle
+///   reads).
+/// - **Escape** → 0x1B.
+/// - **Tab** → 0x09.
+/// - Anything else falls back to the printable-character mapping that
+///   the canonical-mode path uses.
+fn encode_keystroke_for_raw_mode(
+    key: crate::window::event::KeyCode,
+    modifiers: crate::window::event::KeyModifiers,
+) -> Vec<u8> {
+    use crate::window::event::KeyCode;
+    // Ctrl + ASCII letter → control byte. Hits before the named-key
+    // matches so Ctrl-M etc. produce the right byte instead of '\r'.
+    if modifiers.ctrl {
+        if let Some(ch) = keycode_to_char(key, crate::window::event::KeyModifiers::default()) {
+            if ch.is_ascii_alphabetic() {
+                let lower = ch.to_ascii_lowercase() as u8;
+                return alloc::vec![lower - b'a' + 1];
+            }
+        }
+    }
+    match key {
+        KeyCode::Enter => alloc::vec![b'\r'],
+        KeyCode::Backspace => alloc::vec![0x7F],
+        KeyCode::Tab => alloc::vec![b'\t'],
+        KeyCode::Escape => alloc::vec![0x1B],
+        KeyCode::Up => alloc::vec![0x1B, b'[', b'A'],
+        KeyCode::Down => alloc::vec![0x1B, b'[', b'B'],
+        KeyCode::Right => alloc::vec![0x1B, b'[', b'C'],
+        KeyCode::Left => alloc::vec![0x1B, b'[', b'D'],
+        KeyCode::Home => alloc::vec![0x1B, b'[', b'H'],
+        KeyCode::End => alloc::vec![0x1B, b'[', b'F'],
+        KeyCode::Delete => alloc::vec![0x1B, b'[', b'3', b'~'],
+        _ => {
+            if let Some(ch) = keycode_to_char(key, modifiers) {
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                s.as_bytes().to_vec()
+            } else {
+                Vec::new()
+            }
+        }
     }
 }

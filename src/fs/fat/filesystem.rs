@@ -121,40 +121,110 @@ impl<'a> FatFilesystem<'a> {
         Ok(file.size as usize)
     }
     
+    /// Walk an absolute path, descending into subdirectories component by
+    /// component. Each intermediate component must resolve to a directory;
+    /// the final component may be a file or a directory.
+    ///
+    /// `find_file("/")` returns a synthetic directory `FileHandle` for the
+    /// root — callers that need its entries should call `list_directory`
+    /// with `None` as the cluster.
     pub fn find_file(&self, path: &str) -> Result<FileHandle, FatError> {
-        // For now, only support root directory files
-        // Handle both absolute paths (with /) and relative paths (without /)
-        let filename = if path.starts_with('/') {
-            &path[1..]
-        } else {
-            path
-        };
-        
-        // Don't process empty filenames or subdirectory paths
-        if filename.is_empty() || filename.contains('/') {
+        let trimmed = path.trim_start_matches('/');
+        if trimmed.is_empty() {
+            // Root directory: no real on-disk entry, but callers expect
+            // a directory-shaped handle. The `first_cluster` is unused
+            // by the caller for root (they go through `list_root_array`).
+            return Ok(FileHandle {
+                name: *b"/\0\0\0\0\0\0\0\0\0\0\0\0",
+                size: 0,
+                first_cluster: ClusterId(0),
+                is_directory: true,
+            });
+        }
+
+        let components: alloc::vec::Vec<&str> = trimmed
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if components.is_empty() {
             return Err(FatError::NotFound);
         }
-        
-        let mut files = [FileHandle {
+
+        // Buffer reused across each directory level. 256 entries × ~24 B
+        // = ~6 KiB stack, matches the pre-subdir-walk allocation.
+        let mut buf = [FileHandle {
             name: [0; 13],
             size: 0,
             first_cluster: ClusterId(0),
             is_directory: false,
         }; 256];
-        let file_count = self.list_root_array(&mut files, 256)?;
-        for i in 0..file_count {
-            let file = &files[i];
-            let file_name_str = core::str::from_utf8(&file.name)
-                .ok()
-                .and_then(|s| s.split('\0').next())
-                .unwrap_or("");
-                
-            if file_name_str.eq_ignore_ascii_case(filename) {
-                return Ok(*file);
+
+        let last = components.len() - 1;
+        let mut current_cluster: Option<ClusterId> = None; // None = root
+        for (idx, component) in components.iter().enumerate() {
+            let count = match current_cluster {
+                None => self.list_root_array(&mut buf, 256)?,
+                Some(c) => self.read_directory_array(c, &mut buf, 256)?,
+            };
+            let mut found: Option<FileHandle> = None;
+            for i in 0..count {
+                let fh = &buf[i];
+                let name_str = core::str::from_utf8(&fh.name)
+                    .ok()
+                    .and_then(|s| s.split('\0').next())
+                    .unwrap_or("");
+                if name_str.eq_ignore_ascii_case(component) {
+                    found = Some(*fh);
+                    break;
+                }
             }
+            let fh = found.ok_or(FatError::NotFound)?;
+            if idx == last {
+                return Ok(fh);
+            }
+            // Intermediate component must be a directory we can descend
+            // into. Refuse files or `..`-style oddities.
+            if !fh.is_directory {
+                return Err(FatError::NotFound);
+            }
+            current_cluster = Some(fh.first_cluster);
         }
-        
+
         Err(FatError::NotFound)
+    }
+
+    /// List the entries of a directory identified by either the root
+    /// (`None`) or a starting cluster. Used by `enumerate_path` and the
+    /// userland `getdents64` syscall.
+    pub fn list_directory(
+        &self,
+        cluster: Option<ClusterId>,
+        entries: &mut [FileHandle],
+        max: usize,
+    ) -> Result<usize, FatError> {
+        match cluster {
+            None => self.list_root_array(entries, max),
+            Some(c) => self.read_directory_array(c, entries, max),
+        }
+    }
+
+    /// Variant of `find_file` that walks all path components except the
+    /// last and returns the cluster where the final component would
+    /// live, plus the final-component filename. Useful when the caller
+    /// wants to list a directory by its path (`enumerate_path`) without
+    /// a separate find→list sequence.
+    pub fn resolve_directory(&self, path: &str) -> Result<Option<ClusterId>, FatError> {
+        let fh = self.find_file(path)?;
+        if !fh.is_directory {
+            return Err(FatError::NotFound);
+        }
+        // Root is a sentinel: `/`-handle has cluster 0 but means root.
+        let trimmed = path.trim_start_matches('/');
+        if trimmed.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(fh.first_cluster))
+        }
     }
 }
 

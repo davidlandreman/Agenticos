@@ -21,10 +21,17 @@
 // long-jump. A second `run` while one is active is rejected by the run
 // command before `enter_user_mode` is reached.
 
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 use x86_64::VirtAddr;
 
+use crate::userland::address_space::AddressSpace;
+use crate::userland::fdtable::FdTable;
 use crate::userland::image::UserImage;
+use crate::userland::kernel_stack::KernelStack;
+use crate::userland::signal::SignalState;
 
 /// Reason a user process is being torn down. Populated by exception handlers
 /// (fault) or the `exit` syscall (cooperative).
@@ -79,7 +86,23 @@ pub struct KernelContinuation {
 /// expected state and gives up if not present. Long-jump readers always
 /// observe a consistent snapshot because the writer (`enter_user_mode`)
 /// completes the write before the `iretq`.
-pub struct ActiveUser {
+/// A ring-3 process. Each user binary launched by `enter_user_mode_with`
+/// gets a fresh `Process` slot; the slot is removed when the long-jump
+/// returns and the run command calls `release_active_image`.
+///
+/// Phase 4 PR-A: this replaces the prior single-process `ActiveUser`
+/// global. Today only one slot is ever populated at a time (single-user-
+/// app D5), but the table-of-Processes shape unblocks fork (PR-C) and
+/// execve (PR-D) which need to address parent and child by PID.
+pub struct Process {
+    /// Stable per-process identifier. Allocated monotonically from
+    /// `NEXT_PID` on `enter_user_mode_with`. Visible to ring 3 via
+    /// `getpid`. PID 0 is reserved (kernel proper).
+    pub pid: u32,
+    /// PID of the parent that created us. For binaries launched by the
+    /// `run` command, this is `0` (kernel as parent). For fork-spawned
+    /// children (PR-C), this becomes the parent's PID.
+    pub parent_pid: u32,
     pub continuation: Option<KernelContinuation>,
     pub image: Option<UserImage>,
     pub exit_kind: ExitKind,
@@ -92,6 +115,48 @@ pub struct ActiveUser {
     /// `USER_MMAP_BASE` and bumps upward by the page-rounded length of each
     /// successful anonymous `mmap`. No coalescing or reuse for this milestone.
     pub mmap_next: u64,
+    /// Phase 2: file-descriptor table. Slots 0/1/2 are pinned to the
+    /// standard streams; slots 3..N hold `Arc<File>` opened via `openat`.
+    pub fd_table: FdTable,
+    /// Phase 2: per-process current working directory. Anchors relative
+    /// paths in `openat(AT_FDCWD, …)`, `stat`, `access`, etc. Always
+    /// stored as a normalized absolute path.
+    pub cwd: String,
+    /// Phase 4 PR-B: per-process L4 page table. Owns the L4 frame. The
+    /// option is `None` for the kernel-sentinel slot (PID 0); every
+    /// real user process has a populated `AddressSpace`.
+    pub address_space: Option<AddressSpace>,
+    /// Phase 5 PR-B: signal actions, blocked mask, pending mask.
+    /// Reset on every `enter_user_mode_with` and on `execve` (signals
+    /// are not preserved across exec, per POSIX). Inherited by fork
+    /// children (shallow copy is fine — there are no shared
+    /// references inside SignalState).
+    pub signal_state: SignalState,
+    /// Phase 5 PR-C1: per-process kernel stack. The SYSCALL stub
+    /// reads the rsp top from `gs:[0]`, which we update to point at
+    /// this stack's `top()` whenever the process is the active one.
+    /// Interrupt gates use TSS.rsp0 (also kept in sync). Each process
+    /// gets its own buffer so parent + child syscall handlers don't
+    /// share a single rsp0 area.
+    pub kernel_stack: Option<KernelStack>,
+}
+
+/// Compatibility alias retained for the long tail of callsites using
+/// the old name. New code should refer to `Process` directly.
+pub type ActiveUser = Process;
+
+/// State of a user process. Phase 4 PR-C lays the type in place; the
+/// transitions to `Zombie` and back to `Reaped` are wired up by `_exit`
+/// and `waitpid` in a follow-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ProcessState {
+    /// Currently runnable / running.
+    Running,
+    /// Exited but not yet reaped by a `waitpid`. Holds the exit code.
+    Zombie { exit_code: i64 },
+    /// Reaped — slot is free.
+    Reaped,
 }
 
 /// What ended the user process.
@@ -111,26 +176,184 @@ pub enum ExitKind {
     UnimplementedSyscall { nr: u64 },
 }
 
-static ACTIVE_USER: Mutex<ActiveUser> = Mutex::new(ActiveUser {
+/// Reserved PID for "no current process." Real PIDs start at 1.
+const KERNEL_PID: u32 = 0;
+
+/// Monotonic PID allocator. Wrapping is unrealistic for our scope; we
+/// stop the kernel before exhausting u32.
+static NEXT_PID: AtomicU32 = AtomicU32::new(1);
+
+/// The single live `Process` slot. PR-A still enforces D5 (single user
+/// app at a time). PR-C will replace this with a real `BTreeMap<pid,
+/// Process>`-shaped table.
+static CURRENT_PROCESS: Mutex<Process> = Mutex::new(Process {
+    pid: KERNEL_PID,
+    parent_pid: KERNEL_PID,
     continuation: None,
     image: None,
     exit_kind: ExitKind::None,
     exit_code: 0,
     brk_current: 0,
     mmap_next: 0,
+    fd_table: FdTable::new(),
+    cwd: String::new(),
+    address_space: None,
+    signal_state: SignalState::new(),
+    kernel_stack: None,
 });
 
-/// Acquire the active-user slot for read/write. Used by the run command to
-/// install / drop the image and to inspect the recorded exit info.
-pub fn with_active_user<R>(f: impl FnOnce(&mut ActiveUser) -> R) -> R {
-    let mut g = ACTIVE_USER.lock();
+/// Acquire the current process slot for read/write. Used by syscall
+/// handlers and the run command to install / drop the image and to
+/// inspect the recorded exit info.
+pub fn with_current_process<R>(f: impl FnOnce(&mut Process) -> R) -> R {
+    let mut g = CURRENT_PROCESS.lock();
     f(&mut g)
 }
 
-/// Returns true while a user process owns the active slot. The run command
+/// Compatibility alias for old callsites — slated for removal as PR-C
+/// lands. New code should use `with_current_process`.
+pub fn with_active_user<R>(f: impl FnOnce(&mut Process) -> R) -> R {
+    with_current_process(f)
+}
+
+/// Returns true while a user process owns the slot. The run command
 /// uses this to enforce the single-user invariant (D5).
 pub fn user_active() -> bool {
-    ACTIVE_USER.lock().image.is_some()
+    CURRENT_PROCESS.lock().image.is_some()
+}
+
+/// Allocate a fresh PID. Used by `enter_user_mode_with` and (future)
+/// `fork`.
+pub fn alloc_pid() -> u32 {
+    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Initialize the process slot for a new ring-3 binary launched by the
+/// kernel (`run /HOST/...`). Assigns a fresh PID with `parent_pid =
+/// KERNEL_PID`. Called by `enter_user_mode_with` before iretq.
+pub fn install_new_process(
+    image: UserImage,
+    brk_base: u64,
+    mmap_base: u64,
+    address_space: AddressSpace,
+) -> u32 {
+    install_new_process_opt(image, brk_base, mmap_base, Some(address_space))
+}
+
+/// Variant that accepts an optional address space. The kernel-test
+/// path bypasses the run command and runs binaries on the kernel L4
+/// directly, passing `None`; production launches always pass `Some`.
+pub fn install_new_process_opt(
+    image: UserImage,
+    brk_base: u64,
+    mmap_base: u64,
+    address_space: Option<AddressSpace>,
+) -> u32 {
+    let pid = alloc_pid();
+    with_current_process(|p| {
+        p.pid = pid;
+        p.parent_pid = KERNEL_PID;
+        p.image = Some(image);
+        p.exit_kind = ExitKind::None;
+        p.exit_code = 0;
+        p.brk_current = brk_base;
+        p.mmap_next = mmap_base;
+        p.fd_table.clear();
+        p.fd_table.install_default_streams();
+        p.cwd = String::from("/host");
+        p.address_space = address_space;
+        p.signal_state = SignalState::new();
+        p.kernel_stack = Some(KernelStack::new());
+    });
+    pid
+}
+
+/// Returns the PID of the running process, or `KERNEL_PID` (0) if none.
+pub fn current_pid() -> u32 {
+    CURRENT_PROCESS.lock().pid
+}
+
+// ---------- Phase 4 PR-C2: parent stash + zombie table ----------
+
+/// While `fork()` runs the child synchronously, the parent's `Process`
+/// is moved out of `CURRENT_PROCESS` into here. When the child exits
+/// (long-jumps back to `fork_handler`), the parent is moved back.
+///
+/// One slot — i.e., fork nesting depth = 1 — is sufficient for zsh's
+/// pattern of "fork from main, child runs, parent waits." Deeply
+/// nested fork (fork from inside a forked child) would need a stack;
+/// trivial extension when needed.
+static PARENT_STASH: Mutex<Option<Process>> = Mutex::new(None);
+
+pub fn stash_parent(process: Process) {
+    let mut g = PARENT_STASH.lock();
+    debug_assert!(g.is_none(), "PARENT_STASH already occupied — nested fork not yet supported");
+    *g = Some(process);
+}
+
+pub fn take_stashed_parent() -> Option<Process> {
+    PARENT_STASH.lock().take()
+}
+
+pub fn parent_stashed() -> bool {
+    PARENT_STASH.lock().is_some()
+}
+
+/// Raise a signal on the parent stashed by `fork()`. Used by the
+/// child-exit path to set SIGCHLD pending on the parent before the
+/// long-jump back. No-op if the stash is empty (the dying process is
+/// the top-level kernel-launched binary, which has no userland
+/// parent).
+pub fn raise_signal_on_stashed_parent(sig: i32) {
+    if let Some(parent) = PARENT_STASH.lock().as_mut() {
+        parent.signal_state.raise(sig);
+    }
+}
+
+/// Replace the current process with a fresh one, returning the previous.
+pub fn swap_current_process(new: Process) -> Process {
+    let mut g = CURRENT_PROCESS.lock();
+    core::mem::replace(&mut *g, new)
+}
+
+/// Record of a child that exited but hasn't been reaped yet.
+#[derive(Debug, Clone, Copy)]
+pub struct ZombieRecord {
+    pub exit_code: i64,
+    pub parent_pid: u32,
+}
+
+static ZOMBIES: Mutex<BTreeMap<u32, ZombieRecord>> = Mutex::new(BTreeMap::new());
+
+/// Mark `pid` as a zombie awaiting reap. Called by `_exit` / `exit_group`
+/// when the dying process has a real parent (i.e. was forked).
+pub fn record_zombie(pid: u32, parent_pid: u32, exit_code: i64) {
+    ZOMBIES.lock().insert(pid, ZombieRecord { exit_code, parent_pid });
+}
+
+/// Reap a zombie child. If `target_pid` is positive, only that PID
+/// matches; if `target_pid == -1` (any-child semantics), the first
+/// zombie with `parent_pid == reaper` is returned. Returns `(pid,
+/// exit_code)` on success, `None` if no matching zombie exists.
+pub fn reap_zombie(target_pid: i32, reaper: u32) -> Option<(u32, i64)> {
+    let mut zombies = ZOMBIES.lock();
+    let pid = if target_pid == -1 {
+        zombies
+            .iter()
+            .find(|(_, z)| z.parent_pid == reaper)
+            .map(|(&k, _)| k)?
+    } else if target_pid > 0 {
+        let key = target_pid as u32;
+        let z = zombies.get(&key)?;
+        if z.parent_pid != reaper {
+            return None;
+        }
+        key
+    } else {
+        return None;
+    };
+    let z = zombies.remove(&pid)?;
+    Some((pid, z.exit_code))
 }
 
 /// Counts the number of active "loading-or-running a user binary" calls. The
@@ -173,14 +396,14 @@ impl Drop for BinaryLoadGuard {
 /// Save the kernel continuation. Called by `enter_user_mode` immediately
 /// before issuing `iretq` to user space.
 pub fn install_continuation(c: KernelContinuation) {
-    ACTIVE_USER.lock().continuation = Some(c);
+    CURRENT_PROCESS.lock().continuation = Some(c);
 }
 
 /// Take ownership of the active continuation, if any. Used by the long-jump
 /// path before restoring registers — the slot is cleared so a second teardown
 /// is a no-op.
 pub fn take_continuation() -> Option<KernelContinuation> {
-    ACTIVE_USER.lock().continuation.take()
+    CURRENT_PROCESS.lock().continuation.take()
 }
 
 /// Helper used by exception handlers: returns true when the saved CS in the
@@ -242,7 +465,7 @@ pub fn cooperative_exit(code: i64) -> ! {
 /// diagnostic on serial.
 pub fn unimplemented_syscall_exit(nr: u64) -> ! {
     crate::debug_warn!("USERLAND: unimplemented syscall nr={} — terminating user process", nr);
-    let mut g = ACTIVE_USER.lock();
+    let mut g = CURRENT_PROCESS.lock();
     if matches!(g.exit_kind, ExitKind::None) {
         g.exit_kind = ExitKind::UnimplementedSyscall { nr };
         g.exit_code = -38; // ENOSYS sentinel for the run command's log
@@ -252,7 +475,7 @@ pub fn unimplemented_syscall_exit(nr: u64) -> ! {
 }
 
 fn record_exit(kind: ExitKind, code: i64) {
-    let mut g = ACTIVE_USER.lock();
+    let mut g = CURRENT_PROCESS.lock();
     // Only record if not already terminated (defensive: a second fault from
     // an already-failing app would otherwise overwrite the original reason).
     if matches!(g.exit_kind, ExitKind::None) {

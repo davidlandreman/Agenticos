@@ -74,20 +74,10 @@ impl RunProcess {
         if self.args.is_empty() {
             display::set_color(Color::RED);
             println!("run: missing path argument");
-            println!("Usage: run <path>");
+            println!("Usage: run <path> [args...]");
             display::set_color(Color::WHITE);
             return;
         }
-
-        // Mark the kernel as actively loading/running a binary so the kernel
-        // main loop pauses GUI/render housekeeping for the duration. This
-        // covers the full read → load_elf → enter_user_mode → ring-3 →
-        // exit window; without it, `render_frame`'s ~3.7 MiB-per-repaint
-        // framebuffer writes contend with PIO IDE reads and heap demand-
-        // paging, stretching the multi-MiB binary load well past what test
-        // mode (no GUI) measures. RAII guard ensures the marker drops on
-        // every exit path including early returns. (D5 single-user-app.)
-        let _load_guard = crate::userland::lifecycle::BinaryLoadGuard::enter();
 
         let path = self.args[0].clone();
         match self.run_path(&path) {
@@ -106,25 +96,61 @@ impl RunProcess {
             return Err(String::from("another user app is already running"));
         }
 
-        // Read the ELF bytes through the FAT VFS.
-        crate::debug_info!("[run] read_to_vec({}) starting", path);
-        let bytes = read_file_bytes(path)?;
-        crate::debug_info!("[run] read_to_vec returned {} bytes", bytes.len());
+        // Phase 4 PR-B: each user process runs on its own L4 page-
+        // table root. Build it now (kernel-half entries are shared by
+        // copying their PML4 entries; PML4[0] is empty), activate it,
+        // and let the loader map user pages into PML4[0] of this fresh
+        // L4.
+        let aspace = crate::userland::address_space::AddressSpace::new()
+            .map_err(|e| alloc::format!("AddressSpace::new: {:?}", e))?;
+        // SAFETY: the kernel half (PML4 1..512) was just copied from
+        // the kernel L4, so the very kernel code that runs after the
+        // CR3 write is still reachable.
+        unsafe { aspace.activate(); }
 
-        // Parse + map + relocate. On error, the partial UserImage drops here
-        // and the rollback unmaps any pages the loader had committed.
-        let image = crate::userland::loader::load_elf(&bytes)
-            .map_err(|e| alloc::format!("loader error: {:?}", e))?;
+        // Scope the BinaryLoadGuard to the load phase (file read + ELF
+        // parse + page mapping). It pauses GUI/render housekeeping so the
+        // multi-MiB load runs uncontended (see
+        // `docs/solutions/learnings/2026-05-09-multi-mib-user-binary-load.md`).
+        // We deliberately drop the guard before `enter_user_mode` so that
+        // during ring-3 execution the kernel main loop runs input routing
+        // and `render_frame` — the user's typed input gets echoed and
+        // their `write` syscalls become visible immediately.
+        let image = {
+            let _load_guard = crate::userland::lifecycle::BinaryLoadGuard::enter();
+            crate::debug_info!("[run] read_to_vec({}) starting", path);
+            let bytes = read_file_bytes(path)?;
+            crate::debug_info!("[run] read_to_vec returned {} bytes", bytes.len());
+            crate::userland::loader::load_elf(&bytes)
+                .map_err(|e| alloc::format!("loader error: {:?}", e))?
+        };
+
+        // Build argv from the run command's tokens (path + remaining args)
+        // and a small envp the user app can rely on. Borrow as &str slices
+        // straight out of the `Vec<String>` — the references stay valid
+        // until `enter_user_mode_with` returns, which is the entire
+        // user-process lifetime.
+        let argv: Vec<&str> = self.args.iter().map(|s| s.as_str()).collect();
+        let envp: [&str; 4] = [
+            "PATH=/host",
+            "HOME=/",
+            "TERM=dumb",
+            "LANG=C",
+        ];
 
         // Enter ring 3. Returns when the user app exits (cooperative or
-        // abnormal). The `image` was *moved* into the active-user slot by
-        // `enter_user_mode` — we no longer own it.
-        let result = crate::userland::enter_user_mode(image)
-            .map_err(|e| alloc::format!("enter_user_mode: {:?}", e))?;
+        // abnormal). The `image` and `aspace` were *moved* into the
+        // active process slot — we no longer own either.
+        let result = crate::userland::enter_user_mode_with_aspace(
+            image, &argv, &envp, Some(aspace),
+        )
+        .map_err(|e| alloc::format!("enter_user_mode: {:?}", e))?;
 
-        // Drop the active image (unmaps + frees). We must do this BEFORE
-        // returning so a follow-up `run` finds a clean user VA window.
-        let _ = crate::userland::release_active_image();
+        // Drop the active image (unmaps + frees) and the address space
+        // it ran on. `release_active_image` returns the AddressSpace
+        // it took out of the process slot (if any); its `Drop` impl
+        // switches CR3 back to the kernel L4 if it was still active.
+        let (_img, _aspace) = crate::userland::release_active_image();
 
         // Report the exit reason.
         match result {

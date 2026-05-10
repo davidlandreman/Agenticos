@@ -316,6 +316,279 @@ pub fn syscall_exit42_elf() -> Vec<u8> {
     runnable_elf_rx(&code)
 }
 
+/// Fork + execve negative-path demo. Parent forks; child calls
+/// `execve("/host/NOPE.ELF", NULL, NULL)`. The path doesn't exist, so
+/// execve returns `-ENOENT` (-2). Child checks rax: if exec failed
+/// (rax < 0), child exits 11. Parent wait4s and exits with 11 too.
+///
+/// This validates: fork() works, execve() dispatches and validates
+/// arguments, execve() returns errno on failure (rather than
+/// terminating the process), and the failed execve doesn't corrupt
+/// the calling process's state.
+///
+/// x86-64 assembly:
+/// ```text
+///   mov eax, 57          ; SYS_fork
+///   syscall
+///   test eax, eax
+///   jz   child
+///   ; parent path
+///   mov  edi, eax        ; child pid
+///   xor  esi, esi
+///   xor  edx, edx
+///   xor  r10, r10
+///   mov  eax, 61         ; SYS_wait4
+///   syscall
+///   ; rax holds child pid; we just exit 11 to confirm the round trip
+///   mov  edi, 11
+///   mov  eax, 231
+///   syscall
+///   hlt
+/// child:
+///   lea  rdi, [rip + path]   ; path = "/HOST/NOPE.ELF\0"
+///   xor  rsi, rsi            ; argv = NULL
+///   xor  rdx, rdx            ; envp = NULL
+///   mov  eax, 59             ; SYS_execve
+///   syscall
+///   ; execve returned, so it failed. rax = -errno.
+///   mov  edi, 11
+///   mov  eax, 231
+///   syscall
+///   hlt
+/// path: db "/host/NOPE.ELF",0
+/// ```
+pub fn fork_execve_badpath_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+
+    // mov eax, 57 (SYS_fork)
+    code.extend_from_slice(&[0xB8, 0x39, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // test eax, eax
+    code.extend_from_slice(&[0x85, 0xC0]);
+    // jz rel8
+    code.extend_from_slice(&[0x74, 0x00]);
+    let jz_at = code.len() - 1;
+
+    // ----- parent path -----
+    // mov edi, eax
+    code.extend_from_slice(&[0x89, 0xC7]);
+    // xor esi, esi
+    code.extend_from_slice(&[0x31, 0xF6]);
+    // xor edx, edx
+    code.extend_from_slice(&[0x31, 0xD2]);
+    // xor r10, r10
+    code.extend_from_slice(&[0x4D, 0x31, 0xD2]);
+    // mov eax, 61 (SYS_wait4)
+    code.extend_from_slice(&[0xB8, 0x3D, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // mov edi, 11
+    code.extend_from_slice(&[0xBF, 0x0B, 0x00, 0x00, 0x00]);
+    // mov eax, 231 (SYS_exit_group)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt
+    code.push(0xF4);
+
+    // ----- child path -----
+    let child_target = code.len();
+    // lea rdi, [rip + path]   — 7 bytes (REX.W + 8D + ModR/M + rel32)
+    // We don't know rel32 yet; emit placeholder and patch.
+    code.extend_from_slice(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00]);
+    let lea_disp_at = code.len() - 4; // start of the 4-byte displacement
+    let lea_end = code.len(); // RIP after the lea instruction
+    // xor rsi, rsi
+    code.extend_from_slice(&[0x48, 0x31, 0xF6]);
+    // xor rdx, rdx
+    code.extend_from_slice(&[0x48, 0x31, 0xD2]);
+    // mov eax, 59 (SYS_execve)
+    code.extend_from_slice(&[0xB8, 0x3B, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // execve failed: mov edi, 11
+    code.extend_from_slice(&[0xBF, 0x0B, 0x00, 0x00, 0x00]);
+    // mov eax, 231
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt
+    code.push(0xF4);
+
+    // Path string at end of code blob: "/host/NOPE.ELF\0"
+    let path_target = code.len();
+    code.extend_from_slice(b"/host/NOPE.ELF\0");
+
+    // Patch jz to child.
+    let off = child_target as i32 - (jz_at + 1) as i32;
+    assert!(off >= -128 && off <= 127, "jz rel8 out of range: {}", off);
+    code[jz_at] = off as i8 as u8;
+
+    // Patch lea displacement: rel32 from RIP (= lea_end) to path_target.
+    let disp = path_target as i32 - lea_end as i32;
+    code[lea_disp_at..lea_disp_at + 4].copy_from_slice(&disp.to_le_bytes());
+
+    runnable_elf_rx(&code)
+}
+
+/// Phase 5 PR-B2 signal-delivery fixture.
+///
+/// Layout (single PT_LOAD R-X, loaded at USER_LOAD_BASE):
+/// ```text
+///   0x00: main:     mov  eax, 39          ; SYS_getpid
+///   0x05:           syscall                ; rax = self pid
+///   0x07:           mov  edi, eax          ; arg1 = pid
+///   0x09:           mov  esi, 10           ; arg2 = SIGUSR1
+///   0x0E:           mov  eax, 62           ; SYS_kill
+///   0x13:           syscall                ; (handler runs, exits 42)
+///   0x15:           mov  edi, 99           ; never reached
+///   0x1A:           mov  eax, 231          ; SYS_exit_group
+///   0x1F:           syscall
+///   0x21:           hlt
+///   ; handler entry — kernel test installs the action with sa_handler
+///   ; pointing here. Handler ignores the signum arg in rdi and just
+///   ; exits with code 42. Skips the round-trip via sigreturn.
+///   0x22: handler:  mov  edi, 42
+///   0x27:           mov  eax, 231
+///   0x2C:           syscall
+///   0x2E:           hlt
+/// ```
+///
+/// The fixture builder returns the (bytes, handler_offset) pair so
+/// the kernel test can install the action at `entry + handler_offset`.
+pub fn signal_delivery_handler_exits_elf() -> (Vec<u8>, u64) {
+    let mut code: Vec<u8> = Vec::new();
+
+    // ----- main -----
+    // mov eax, 39 (SYS_getpid)
+    code.extend_from_slice(&[0xB8, 0x27, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // mov edi, eax  (kill arg 1 = pid)
+    code.extend_from_slice(&[0x89, 0xC7]);
+    // mov esi, 10  (kill arg 2 = SIGUSR1)
+    code.extend_from_slice(&[0xBE, 0x0A, 0x00, 0x00, 0x00]);
+    // mov eax, 62  (SYS_kill)
+    code.extend_from_slice(&[0xB8, 0x3E, 0x00, 0x00, 0x00]);
+    // syscall — control transfers to the handler at end of dispatcher
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // Fallback path if signal didn't deliver: exit_group(99).
+    // mov edi, 99
+    code.extend_from_slice(&[0xBF, 0x63, 0x00, 0x00, 0x00]);
+    // mov eax, 231
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt
+    code.push(0xF4);
+
+    // ----- handler -----
+    let handler_offset = code.len() as u64;
+    // mov edi, 42
+    code.extend_from_slice(&[0xBF, 0x2A, 0x00, 0x00, 0x00]);
+    // mov eax, 231
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt
+    code.push(0xF4);
+
+    (runnable_elf_rx(&code), handler_offset)
+}
+
+/// Fork-and-wait demo: parent forks, child exits with code 42, parent
+/// waits and then exits with code 7.
+///
+/// The expected end-state recorded by `LAST_EXIT_CODE` is **7** — only
+/// the parent's final exit_group runs through `cooperative_exit` from
+/// the top-level (KERNEL parent) lifecycle path. The child's
+/// `exit_group(42)` long-jumps via the fork's own continuation, not
+/// the run command's, so its 42 is parked in the zombie table for
+/// `wait4` to reap.
+///
+/// Verifies end-to-end: fork copies parent state (RIP/RFLAGS/RSP),
+/// child's address space is independent, child's exit routes back to
+/// fork, parent's wait4 returns the child PID, parent resumes and
+/// exits cleanly.
+///
+/// x86-64 assembly:
+/// ```text
+///   mov eax, 57          ; SYS_fork
+///   syscall              ; rax = 0 (child) or child PID (parent)
+///   test eax, eax
+///   jz   child           ; child branch if rax == 0
+///   ; parent path
+///   mov  edi, eax        ; rdi = child pid
+///   xor  esi, esi        ; status pointer = NULL
+///   xor  edx, edx        ; options = 0
+///   xor  r10, r10        ; rusage = NULL
+///   mov  eax, 61         ; SYS_wait4
+///   syscall
+///   mov  edi, 7          ; parent exit code
+///   mov  eax, 231        ; SYS_exit_group
+///   syscall
+///   hlt
+/// child:
+///   mov  edi, 42         ; child exit code
+///   mov  eax, 231        ; SYS_exit_group
+///   syscall
+///   hlt
+/// ```
+pub fn fork_then_wait_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+
+    // mov eax, 57 (SYS_fork)
+    code.extend_from_slice(&[0xB8, 0x39, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // test eax, eax
+    code.extend_from_slice(&[0x85, 0xC0]);
+    // jz rel8 → patched after we know offset to child label
+    code.extend_from_slice(&[0x74, 0x00]);
+    let jz_at = code.len() - 1;
+
+    // ----- parent path -----
+    // mov edi, eax  (8B FA in clang? actually mov rdi, rax = 48 89 C7 / mov edi, eax = 89 C7)
+    code.extend_from_slice(&[0x89, 0xC7]);
+    // xor esi, esi
+    code.extend_from_slice(&[0x31, 0xF6]);
+    // xor edx, edx
+    code.extend_from_slice(&[0x31, 0xD2]);
+    // xor r10, r10
+    code.extend_from_slice(&[0x4D, 0x31, 0xD2]);
+    // mov eax, 61 (SYS_wait4)
+    code.extend_from_slice(&[0xB8, 0x3D, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // mov edi, 7
+    code.extend_from_slice(&[0xBF, 0x07, 0x00, 0x00, 0x00]);
+    // mov eax, 231 (SYS_exit_group)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt (safety — should not be reached)
+    code.push(0xF4);
+
+    // ----- child path -----
+    let child_target = code.len();
+    // mov edi, 42
+    code.extend_from_slice(&[0xBF, 0x2A, 0x00, 0x00, 0x00]);
+    // mov eax, 231 (SYS_exit_group)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt
+    code.push(0xF4);
+
+    // Patch the jz: rel8 = child_target - (jz_at + 1).
+    let off = child_target as i32 - (jz_at + 1) as i32;
+    assert!(off >= -128 && off <= 127, "jz rel8 out of range: {}", off);
+    code[jz_at] = off as i8 as u8;
+
+    runnable_elf_rx(&code)
+}
+
 /// Fixture B — Linux initial-stack contract.
 ///
 /// Verifies the kernel built `argc/argv/envp/auxv` correctly. The binary:

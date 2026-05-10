@@ -23,6 +23,9 @@ use x86_64::structures::tss::TaskStateSegment;
 /// IST entry index used by the double-fault handler.
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
+// Phase 5 PR-C1 gives each user process its own 16 KiB kernel stack,
+// so this global stack is only used between user-process activations
+// (kernel main loop and one-off kernel syscalls). 16 KiB is plenty.
 const KERNEL_RSP0_STACK_SIZE: usize = 16 * 1024;
 const DOUBLE_FAULT_STACK_SIZE: usize = 4 * 1024;
 

@@ -43,72 +43,77 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
     }
     
     fn read_dir(&self, path: &str) -> Result<DirectoryIterator<'_>, FilesystemError> {
-        // For now, only support root directory
-        if path.is_empty() || path == "/" {
-            Ok(DirectoryIterator::new(self, path))
-        } else {
-            Err(FilesystemError::NotFound)
+        // Validate the path can be resolved as a directory before
+        // returning an iterator. The legacy `DirectoryIterator` only
+        // walks the root, but rejecting bad paths up front is cheap
+        // and preserves the iterator contract.
+        match self.inner.resolve_directory(path) {
+            Ok(_) => Ok(DirectoryIterator::new(self, path)),
+            Err(_) => Err(FilesystemError::NotFound),
         }
     }
-    
+
     fn enumerate_dir(&self, path: &str) -> Result<alloc::vec::Vec<DirectoryEntry>, FilesystemError> {
-        // Override the default implementation to directly access FAT directory entries
-        if path.is_empty() || path == "/" {
-            let mut entries = alloc::vec::Vec::new();
-            
-            // Use the FAT-specific list_root_array method
-            let mut fat_files = [crate::fs::fat::filesystem::FileHandle {
-                name: [0; 13],
-                size: 0,
-                first_cluster: crate::fs::fat::types::ClusterId(0),
-                is_directory: false,
-            }; 64]; // Buffer for up to 64 files
-            
-            match self.inner.list_root_array(&mut fat_files, 64) {
-                Ok(count) => {
-                    for i in 0..count {
-                        let fat_file = &fat_files[i];
-                        
-                        // Convert FAT FileHandle to filesystem DirectoryEntry
-                        let mut entry = DirectoryEntry {
-                            name: [0u8; 256],
-                            name_len: 0,
-                            file_type: if fat_file.is_directory { 
-                                crate::fs::filesystem::FileType::Directory 
-                            } else { 
-                                crate::fs::filesystem::FileType::File 
-                            },
-                            size: fat_file.size as u64,
-                            attributes: crate::fs::filesystem::FileAttributes {
-                                read_only: false,
-                                hidden: false,
-                                system: false,
-                                archive: false,
-                            },
-                            created: 0,
-                            modified: 0,
-                            accessed: 0,
-                        };
-                        
-                        // Copy the name, trimming null bytes
-                        let name_bytes = &fat_file.name;
-                        let len = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_bytes.len());
-                        let copy_len = len.min(255);
-                        entry.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-                        entry.name_len = copy_len;
-                        
-                        entries.push(entry);
-                    }
-                }
-                Err(_) => {
-                    return Err(FilesystemError::IoError);
-                }
+        // Resolve the path to a directory cluster (or root) and then
+        // walk the directory entries. Works uniformly for the root
+        // and any nested subdirectory.
+        let cluster = self
+            .inner
+            .resolve_directory(path)
+            .map_err(|_| FilesystemError::NotFound)?;
+
+        let mut entries = alloc::vec::Vec::new();
+        let mut fat_files = [crate::fs::fat::filesystem::FileHandle {
+            name: [0; 13],
+            size: 0,
+            first_cluster: crate::fs::fat::types::ClusterId(0),
+            is_directory: false,
+        }; 64];
+
+        let count = self
+            .inner
+            .list_directory(cluster, &mut fat_files, 64)
+            .map_err(|_| FilesystemError::IoError)?;
+
+        for fat_file in fat_files.iter().take(count) {
+            let name_bytes = &fat_file.name;
+            let len = name_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(name_bytes.len());
+            // Skip the FAT "." and ".." entries — userland gets enough
+            // of those by walking via the kernel's normalizer.
+            let copy_len = len.min(255);
+            let name_slice = &name_bytes[..copy_len];
+            if name_slice == b"." || name_slice == b".." {
+                continue;
             }
-            
-            Ok(entries)
-        } else {
-            Err(FilesystemError::NotFound)
+
+            let mut entry = DirectoryEntry {
+                name: [0u8; 256],
+                name_len: 0,
+                file_type: if fat_file.is_directory {
+                    crate::fs::filesystem::FileType::Directory
+                } else {
+                    crate::fs::filesystem::FileType::File
+                },
+                size: fat_file.size as u64,
+                attributes: crate::fs::filesystem::FileAttributes {
+                    read_only: false,
+                    hidden: false,
+                    system: false,
+                    archive: false,
+                },
+                created: 0,
+                modified: 0,
+                accessed: 0,
+            };
+            entry.name[..copy_len].copy_from_slice(name_slice);
+            entry.name_len = copy_len;
+            entries.push(entry);
         }
+
+        Ok(entries)
     }
     
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError> {
