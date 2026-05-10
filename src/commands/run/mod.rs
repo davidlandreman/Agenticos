@@ -71,26 +71,60 @@ impl RunnableProcess for RunProcess {
 
 impl RunProcess {
     pub fn run(&mut self) {
-        if self.args.is_empty() {
+        // U8: strip leading flags before the path argument. Today we
+        // recognize `--trace`, which flips the unknown-syscall trace
+        // mode on for this launch (auto-restored after exit). Future
+        // flags can join this loop without touching downstream code.
+        let mut trace = false;
+        let mut consumed = 0usize;
+        for tok in self.args.iter() {
+            match tok.as_str() {
+                "--trace" => {
+                    trace = true;
+                    consumed += 1;
+                }
+                "--" => {
+                    consumed += 1;
+                    break;
+                }
+                s if s.starts_with("--") => {
+                    display::set_color(Color::RED);
+                    println!("run: unknown flag '{}'", s);
+                    display::set_color(Color::WHITE);
+                    return;
+                }
+                _ => break,
+            }
+        }
+        let argv_after_flags: Vec<String> = self.args.iter().skip(consumed).cloned().collect();
+        if argv_after_flags.is_empty() {
             display::set_color(Color::RED);
             println!("run: missing path argument");
-            println!("Usage: run <path> [args...]");
+            println!("Usage: run [--trace] <path> [args...]");
             display::set_color(Color::WHITE);
             return;
         }
 
-        let path = self.args[0].clone();
-        match self.run_path(&path) {
-            Ok(()) => {}
-            Err(msg) => {
-                display::set_color(Color::RED);
-                println!("run: {}", msg);
-                display::set_color(Color::WHITE);
-            }
+        let path = argv_after_flags[0].clone();
+        let prior_trace = crate::userland::abi::is_trace_mode();
+        if trace {
+            crate::userland::abi::set_trace_mode(true);
+            println!("[run] unknown-syscall trace ON");
+        }
+        let result = self.run_path(&path, &argv_after_flags);
+        if trace {
+            // Always restore trace state — a launch shouldn't leak the
+            // trace flag into the next `run` invocation.
+            crate::userland::abi::set_trace_mode(prior_trace);
+        }
+        if let Err(msg) = result {
+            display::set_color(Color::RED);
+            println!("run: {}", msg);
+            display::set_color(Color::WHITE);
         }
     }
 
-    fn run_path(&self, path: &str) -> Result<(), String> {
+    fn run_path(&self, path: &str, parsed_argv: &[String]) -> Result<(), String> {
         // D5: refuse a second user app while one is already active.
         if crate::userland::lifecycle::user_active() {
             return Err(String::from("another user app is already running"));
@@ -132,15 +166,26 @@ impl RunProcess {
                 .map_err(|e| alloc::format!("loader error: {:?}", e))?
         };
 
-        // Build argv from the run command's tokens (path + remaining args)
-        // and a small envp the user app can rely on. Borrow as &str slices
-        // straight out of the `Vec<String>` — the references stay valid
-        // until `enter_user_mode_with` returns, which is the entire
+        // Build argv from the parsed tokens (path + remaining args, with
+        // the leading flags U8 stripped already) and a small envp the
+        // user app can rely on. Borrow as &str slices straight out of
+        // the `Vec<String>` — the references stay valid until
+        // `enter_user_mode_with` returns, which is the entire
         // user-process lifetime.
-        let argv: Vec<&str> = self.args.iter().map(|s| s.as_str()).collect();
-        let envp: [&str; 4] = [
+        let argv: Vec<&str> = parsed_argv.iter().map(|s| s.as_str()).collect();
+        // U8: the envp is shaped for the staged /etc/passwd entry
+        // (root:x:0:0::/root:/bin/zsh). HOME/USER/LOGNAME match what
+        // musl's getpwuid_r would resolve so zsh doesn't have to do the
+        // lookup at startup; SHELL=/bin/zsh keeps zsh's $SHELL accurate;
+        // TERM=dumb dodges terminfo lookups (we don't ship a database
+        // yet). PATH=/host so zsh can exec other userland binaries
+        // staged in host_share/.
+        let envp: [&str; 7] = [
             "PATH=/host",
-            "HOME=/",
+            "HOME=/root",
+            "USER=root",
+            "LOGNAME=root",
+            "SHELL=/bin/zsh",
             "TERM=dumb",
             "LANG=C",
         ];

@@ -54,6 +54,7 @@ The user-visible payoff matters: every shell command in AgenticOS today is a Rus
 
 ### Deferred to Follow-Up Work
 
+- **Heap allocator replacement (blocking U8's e2e tests).** U8 surfaced a `linked_list_allocator` 0.10.6 behavior: `allocate_first_fit` returns `Err` for a 4 KiB align-1 layout even when stats report ~99 MiB free, deterministically reproducible after zsh's third `mmap` call during musl init. HELLOCPP.ELF (5.79 MiB, similar musl init shape) doesn't reproduce — pattern-specific to zsh's small-alloc/free cycles. The U8 e2e tests (`test_run_zsh_minimal_exit`, `test_run_zsh_echo_command`, `test_run_zsh_pwd`) are written but gated off `get_tests()` until the allocator is swapped (e.g., to `talc`) or the pattern is otherwise unblocked. The launch-verb extensions (`--trace` flag, zsh-shaped envp seeding) are independent and shipped in U8 — only the e2e tests are gated.
 - Sharing the `host_share` staging block between `build.sh` and `test.sh` (today they're duplicated and have already drifted on whether ET_EXEC failure is hard or soft). Worth doing as a third app gets added but not required for this plan.
 - FAT cluster-walk caching in `fat_table.rs`. Zsh + scripts will make this matter sooner than the C++ hello binary did, but it's an optimization, not a correctness requirement.
 - A richer `/proc` (e.g., `/proc/self/maps`, `/proc/self/status`). Phase C's procfs is the bare minimum to satisfy `ttyname()`.
