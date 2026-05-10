@@ -74,6 +74,8 @@ const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
 const TCSETSW: u64 = 0x5403;
 const TCSETSF: u64 = 0x5404;
+const TIOCGPGRP: u64 = 0x540F;
+const TIOCSPGRP: u64 = 0x5410;
 const TIOCGWINSZ: u64 = 0x5413;
 
 // ---------- write / writev / read ----------
@@ -496,10 +498,28 @@ pub fn arch_prctl_handler(args: &mut SyscallArgs) -> i64 {
 ///   drain — so all three are equivalent.
 /// - `TIOCGWINSZ`: copy the synthesized winsize (80x24) into the user
 ///   buffer. zsh's `zle` consults this to decide where to wrap.
+/// - `TIOCGPGRP`: U5 — return `-ENOTTY`. zsh's `acquire_pgrp`
+///   (`Src/init.c`) treats this as "no controlling tty" and clears
+///   `opts[MONITOR]`, which disables the entire job-control surface
+///   (setpgid/setsid/tcsetpgrp). This is the cleanest path to
+///   no-job-control: no `+m` argv hack required, no build-time
+///   `--without-tcsetpgrp` reliance. The `--without-tcsetpgrp`
+///   configure flag is also passed by U1's Makefile as
+///   belt-and-suspenders.
+/// - `TIOCSPGRP`: U5 — return `0`. Defensive stub; zsh shouldn't
+///   reach this path with MONITOR cleared, but a silent success
+///   avoids surprises if a configuration somehow does.
 ///
 /// Calls on non-tty fds (anything other than stdin/stdout/stderr)
 /// return `-ENOTTY`; libc relies on this to detect "this fd is a file"
 /// and disable line buffering.
+///
+/// Per the feasibility doc-review finding, the new TIOCGPGRP arm sits
+/// inside the request match alongside TCGETS — NOT relying on the
+/// non-tty fd short-circuit above. Today's tty-fd unknown-request
+/// default is `-ENOSYS`; without an explicit arm, TIOCGPGRP on stdin
+/// would return ENOSYS (not ENOTTY), and zsh's MONITOR-clearing path
+/// is gated specifically on ENOTTY.
 pub fn ioctl_handler(args: &mut SyscallArgs) -> i64 {
     let fd = args.rdi as i32;
     let request = args.rsi;
@@ -560,6 +580,8 @@ pub fn ioctl_handler(args: &mut SyscallArgs) -> i64 {
             }
             0
         }
+        TIOCGPGRP => ENOTTY,
+        TIOCSPGRP => 0,
         _ => ENOSYS,
     }
 }

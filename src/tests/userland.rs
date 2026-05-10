@@ -4,7 +4,7 @@ use crate::mm::paging::{
     UserMapError, UserPerms, USER_LOAD_BASE, USER_VA_RANGE_END, USER_VA_RANGE_START,
 };
 use crate::userland::abi::{
-    self, nr, syscall_dispatch, validate_user_slice, EBADF, EFAULT, EINVAL, ENOENT, ENOSYS,
+    self, nr, syscall_dispatch, validate_user_slice, EBADF, EFAULT, EINVAL, ENOENT, ENOSYS, ENOTTY,
     ERANGE, EROFS, LAST_EXIT_CODE, UserVaBounds,
 };
 use crate::userland::error::LoaderError;
@@ -2444,6 +2444,36 @@ fn test_dispatch_ioctl_tiocgwinsz_returns_80x24() {
     teardown_phase2_active_user();
 }
 
+/// U5: `ioctl(stdin, TIOCGPGRP, ...)` returns -ENOTTY. Zsh's
+/// `acquire_pgrp` reads this as "no controlling tty" and clears the
+/// MONITOR option, suppressing every subsequent setpgid/tcsetpgrp call.
+/// Critical: the arm sits inside the request match — the non-tty
+/// short-circuit only fires on file fds, not on stdin.
+fn test_dispatch_ioctl_tiocgpgrp_returns_enotty() {
+    setup_phase2_active_user();
+    let mut args = SyscallArgs::default();
+    args.rax = nr::IOCTL;
+    args.rdi = 0; // stdin
+    args.rsi = 0x540F; // TIOCGPGRP
+    args.rdx = 0; // arg ignored — we never touch user memory
+    assert_eq!(syscall_dispatch(&mut args), ENOTTY);
+    teardown_phase2_active_user();
+}
+
+/// U5: `ioctl(stdout, TIOCSPGRP, ...)` returns 0 (silent success).
+/// Defensive — zsh shouldn't reach this path with MONITOR cleared,
+/// but the stub avoids surprises if a build configuration somehow does.
+fn test_dispatch_ioctl_tiocspgrp_returns_zero() {
+    setup_phase2_active_user();
+    let mut args = SyscallArgs::default();
+    args.rax = nr::IOCTL;
+    args.rdi = 1; // stdout
+    args.rsi = 0x5410; // TIOCSPGRP
+    args.rdx = 0;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    teardown_phase2_active_user();
+}
+
 // ---------- Phase 2 PR-4: directories + getdents64 ----------
 
 /// `open("/host")` must succeed (host folder mount root) and produce a
@@ -2763,6 +2793,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_ioctl_tcsets_updates_termios,
         &test_dispatch_ioctl_on_file_returns_enotty,
         &test_dispatch_ioctl_tiocgwinsz_returns_80x24,
+        &test_dispatch_ioctl_tiocgpgrp_returns_enotty,
+        &test_dispatch_ioctl_tiocspgrp_returns_zero,
         // Phase 4 PR-A: process table + real PIDs
         &test_getpid_returns_real_pid,
         &test_pid_allocation_is_monotonic,
