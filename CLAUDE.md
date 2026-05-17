@@ -115,6 +115,13 @@ These are cross-cutting (not subsystem-local). Subsystem-specific known issues l
 3. **Command System** — Could benefit from better parsing/validation.
 4. **Mouse Integration** — Cursor rendering tightly coupled to display.
 
+### Deferred from the zsh-interactive bring-up
+Bundled with `nosuchcommand` / `ls`-from-zsh fixes. Each is non-blocking for basic interactive zsh, but the next workload that exercises them will hit the gap.
+
+1. **Demand-grown user stack** — `USER_STACK_PAGES` in `src/userland/loader.rs:72` is a fixed 64 pages (256 KiB), bumped from 8 because zsh's post-fork prep blew past 32 KiB. Linux grows the stack on faults below the current bottom up to `RLIMIT_STACK`; we map a fixed region eagerly. Any binary that needs >256 KiB of stack will repeat the original `0x7f52c0`-style page fault. Proper fix: in the ring-3 page-fault handler, if the faulting address is below the current process's mapped stack and within a growth limit, map a fresh page and resume instead of routing through `cleanup_user_process`.
+2. **Signal mask not restored on `rt_sigreturn`** — `src/userland/syscalls.rs:1214` (`rt_sigreturn_handler`) restores `UserState` but not `signal_state.blocked`. Affects both `rt_sigsuspend`'s temporary mask (`syscalls.rs::rt_sigsuspend_handler`) and `SigAction::sa_mask` on regular delivery. zsh re-asserts its mask via `rt_sigprocmask` on every `waitjobs` iteration so it doesn't bite today, but any program relying on POSIX mask-restore semantics will see the wrong mask after a signal handler returns. Proper fix: save the pre-delivery `blocked` mask into the signal frame in `deliver_signal` (`syscalls.rs:1256`) and restore it in `rt_sigreturn_handler`.
+3. **POSIX `WIFSIGNALED` encoding in `wait4`** — `src/userland/syscalls.rs::wait4_handler` only knows the cooperative-exit status encoding (`((code & 0xFF) << 8)`). For child crashes we record `exit_code = 128 + signum` (shell convention), so the parent's `wait4` writes a status whose low 7 bits are 0 — `WIFEXITED` returns true and `WEXITSTATUS` is `128+signum`. zsh therefore reports `nosuchcommand` returning `139` instead of printing "Segmentation fault". Proper fix: extend `ZombieRecord` to carry whether the child died via signal, and have `wait4_handler` emit either `(code & 0xff) << 8` (exited) or `signum & 0x7f` (signaled).
+
 ## Important Resources
 
 - Implementation plan: `docs/IMPLEMENTATION_PLAN.md`

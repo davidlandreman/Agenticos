@@ -318,6 +318,25 @@ pub fn raise_signal_on_stashed_parent(sig: i32) {
     }
 }
 
+/// Notify the stashed parent that a forked child has exited: file the
+/// zombie so `wait4` finds it, and raise SIGCHLD so the parent's
+/// pending-signal mask reflects the death. No-op when `parent_pid == 0`
+/// (top-level binary launched by the run command — no userland parent).
+///
+/// Centralizes the bookkeeping that all three exit paths share:
+/// `exit_group` (cooperative), `cleanup_user_process` (ring-3 fault),
+/// and `unimplemented_syscall_exit` (default dispatcher arm). Before
+/// the helper existed, only the cooperative path notified the parent;
+/// abnormal exits left zsh hung in `rt_sigsuspend` waiting for a
+/// SIGCHLD that never arrived.
+pub fn notify_parent_of_exit(pid: u32, parent_pid: u32, exit_code: i64) {
+    if parent_pid == 0 {
+        return;
+    }
+    record_zombie(pid, parent_pid, exit_code);
+    raise_signal_on_stashed_parent(crate::userland::signal::SIGCHLD);
+}
+
 /// Replace the current process with a fresh one, returning the previous.
 pub fn swap_current_process(new: Process) -> Process {
     let mut g = CURRENT_PROCESS.lock();
@@ -449,12 +468,42 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
         reason.fault_rip
     );
 
-    record_exit(ExitKind::Abnormal {
-        vector: reason.vector,
-        fault_rip: reason.fault_rip.as_u64(),
-    }, 0);
+    // Shell convention: a process killed by signal N reports exit code
+    // 128 + N. Lets the parent's wait4 surface a non-zero, vector-
+    // distinguishable code without teaching wait4 the full POSIX
+    // WIFSIGNALED encoding (separate follow-up).
+    let signum = signum_for_vector(reason.vector);
+    let exit_code = 128 + signum as i64;
+
+    record_exit(
+        ExitKind::Abnormal {
+            vector: reason.vector,
+            fault_rip: reason.fault_rip.as_u64(),
+        },
+        exit_code,
+    );
+
+    let (pid, parent_pid) = {
+        let p = CURRENT_PROCESS.lock();
+        (p.pid, p.parent_pid)
+    };
+    notify_parent_of_exit(pid, parent_pid, exit_code);
 
     long_jump_to_run_or_halt();
+}
+
+/// Map an x86 exception vector to the POSIX signal a Linux kernel would
+/// deliver for that fault. Used by the abnormal-exit path to surface a
+/// distinguishable exit code via the `128 + signum` shell convention.
+fn signum_for_vector(vector: u8) -> i32 {
+    use crate::userland::signal::{SIGBUS, SIGFPE, SIGILL, SIGSEGV};
+    match vector {
+        0 | 16 | 19 => SIGFPE,    // #DE divide-by-zero, #MF x87, #XM SIMD
+        6 => SIGILL,              // #UD invalid opcode
+        17 => SIGBUS,             // #AC alignment check
+        13 | 14 => SIGSEGV,       // #GP general protection, #PF page fault
+        _ => SIGSEGV,             // conservative default
+    }
 }
 
 /// Cooperative-exit path — invoked from the `exit` syscall handler.
@@ -473,12 +522,21 @@ pub fn cooperative_exit(code: i64) -> ! {
 /// diagnostic on serial.
 pub fn unimplemented_syscall_exit(nr: u64) -> ! {
     crate::debug_warn!("USERLAND: unimplemented syscall nr={} — terminating user process", nr);
-    let mut g = CURRENT_PROCESS.lock();
-    if matches!(g.exit_kind, ExitKind::None) {
-        g.exit_kind = ExitKind::UnimplementedSyscall { nr };
-        g.exit_code = -38; // ENOSYS sentinel for the run command's log
-    }
-    drop(g);
+    let (pid, parent_pid, exit_code) = {
+        let mut g = CURRENT_PROCESS.lock();
+        if matches!(g.exit_kind, ExitKind::None) {
+            g.exit_kind = ExitKind::UnimplementedSyscall { nr };
+            g.exit_code = -38; // ENOSYS sentinel for the run command's log
+        }
+        (g.pid, g.parent_pid, g.exit_code)
+    };
+    // 128 + SIGSYS so the parent's wait4 surfaces a distinguishable
+    // shell-style exit code. The kernel-internal `exit_code` field
+    // keeps the -ENOSYS sentinel for run-command logging; the value
+    // passed to the parent is what `wait4` reports.
+    let parent_visible_code = 128 + crate::userland::signal::SIGSYS as i64;
+    let _ = exit_code;
+    notify_parent_of_exit(pid, parent_pid, parent_visible_code);
     long_jump_to_run_or_halt();
 }
 
