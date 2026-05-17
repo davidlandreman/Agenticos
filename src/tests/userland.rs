@@ -3921,6 +3921,57 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
     crate::arch::x86_64::msr::set_fs_base(saved_original);
 }
 
+// ---------- U6: wait4 POSIX-correctness fixes ----------
+
+/// has_children returns false when no process has parent_pid == me and
+/// no zombie has parent_pid == me. Used by wait4 to distinguish
+/// "no children → ECHILD" from "has children, none zombie → block".
+fn test_has_children_returns_false_when_no_children() {
+    assert!(!crate::userland::lifecycle::has_children(9999));
+}
+
+/// has_children returns true when a child Process is in the table.
+fn test_has_children_sees_live_child() {
+    use crate::userland::lifecycle::{insert_process, remove_process, Process, ExitKind};
+    let child = Process {
+        pid: 8001,
+        parent_pid: 8000,
+        continuation: None,
+        image: None,
+        exit_kind: ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
+        fs_base: 0,
+        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+    };
+    insert_process(child);
+    assert!(crate::userland::lifecycle::has_children(8000));
+    assert!(!crate::userland::lifecycle::has_children(8002));
+    drop(remove_process(8001));
+}
+
+/// has_children returns true when a zombie is filed for me. Cleanup
+/// drains the zombie so subsequent tests aren't affected.
+fn test_has_children_sees_zombie_child() {
+    use crate::userland::lifecycle::{record_zombie, reap_zombie};
+    record_zombie(8101, 8100, 0);
+    assert!(crate::userland::lifecycle::has_children(8100));
+    let _ = reap_zombie(8101, 8100);
+    assert!(!crate::userland::lifecycle::has_children(8100));
+}
+
 // ---------- U3: ring-3 scheduling state ----------
 
 /// Helper: clear the ring-3 ready/blocked queues so tests start from a
@@ -4123,6 +4174,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_wake_ring3_blocked_on_child_specific,
         &test_remove_process_cleans_ring3_queues,
         &test_next_runnable_prefers_ring3,
+        &test_has_children_returns_false_when_no_children,
+        &test_has_children_sees_live_child,
+        &test_has_children_sees_zombie_child,
         &test_set_stack_window_records_all_fields,
         &test_unmap_user_stack_sentinel_is_noop,
         &test_unmap_user_stack_releases_range,
