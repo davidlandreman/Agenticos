@@ -346,6 +346,171 @@ impl Process {
     }
 }
 
+/// Outcome of a `try_grow_user_stack` call. The page-fault handler
+/// (`src/arch/x86_64/interrupts.rs::page_fault_handler`) inspects this
+/// to decide whether to return immediately (Grew) or fall through to
+/// `cleanup_user_process` with vector 14 / SIGSEGV.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrowOutcome {
+    /// Faulting address mapped one fresh page; CPU retries the
+    /// instruction.
+    Grew,
+    /// Faulting address is not in the stack-grow window (above the
+    /// current bottom, or above stack_top). The fault is something else
+    /// — let the standard fault path handle it.
+    NotStackGrow,
+    /// Faulting address is below the per-process growth floor — true
+    /// stack overflow.
+    Overflow,
+    /// Per-process growth budget exhausted. Defends against a malicious
+    /// binary fault-storming the window to chew through the bump
+    /// allocator.
+    BudgetExhausted,
+    /// `CURRENT_PROCESS.try_lock()` returned `None`. Some other path
+    /// already holds the mutex (shouldn't happen in single-app-
+    /// synchronous mode, but defensive: a blocking `lock()` from
+    /// interrupt context would deadlock). Treated as overflow — the
+    /// process is in an unrecoverable state anyway.
+    LockContended,
+    /// `map_user_region` failed (OOM or invalid range). Treated as
+    /// overflow.
+    MapFailed,
+}
+
+/// Test-visible cell holding the most recent `GrowOutcome` from the
+/// fault handler. Tests assert on this rather than parsing serial.
+#[cfg(feature = "test")]
+pub static LAST_GROW_OUTCOME: spin::Mutex<Option<GrowOutcome>> =
+    spin::Mutex::new(None);
+
+/// Ring-3 page-fault hook: if `fault_addr` falls in the active
+/// process's stack-grow window and the per-process budget allows,
+/// map a single fresh page and update the bookkeeping. Otherwise
+/// classify the fault for the caller.
+///
+/// The caller is `page_fault_handler` in `src/arch/x86_64/interrupts.rs`
+/// — it invokes this for every ring-3 fault before routing to
+/// `cleanup_user_process`. On `Grew` the handler returns immediately;
+/// on every other outcome it falls through to cleanup.
+pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
+    use crate::mm::paging::UserPerms;
+
+    // Classification + mutation happens under the Process lock. We
+    // drop the lock before calling map_user_region — the mapper is a
+    // separate Mutex and nesting interrupt-context locks invites
+    // deadlock if any future code path takes them in the opposite
+    // order. Re-acquire after map to update bookkeeping.
+    let (new_page, _stack_top, _stack_max_growth_floor) = {
+        let mut guard = match CURRENT_PROCESS.try_lock() {
+            Some(g) => g,
+            None => {
+                #[cfg(feature = "test")]
+                {
+                    *LAST_GROW_OUTCOME.lock() = Some(GrowOutcome::LockContended);
+                }
+                return GrowOutcome::LockContended;
+            }
+        };
+        let p = &mut *guard;
+
+        let addr = fault_addr.as_u64();
+        // No active process (sentinel slot) — stack fields are zero
+        // and any compare against them is meaningless. Treat as
+        // not-a-stack-grow so the caller routes to its normal path.
+        if p.stack_top == 0 || p.stack_max_growth_floor == 0 {
+            #[cfg(feature = "test")]
+            {
+                *LAST_GROW_OUTCOME.lock() = Some(GrowOutcome::NotStackGrow);
+            }
+            return GrowOutcome::NotStackGrow;
+        }
+
+        // Not a stack-grow if the address is above the current bottom
+        // (page is already mapped — fault must be a permissions
+        // violation, not absence) or above the stack top entirely.
+        if addr >= p.stack_bottom || addr >= p.stack_top {
+            #[cfg(feature = "test")]
+            {
+                *LAST_GROW_OUTCOME.lock() = Some(GrowOutcome::NotStackGrow);
+            }
+            return GrowOutcome::NotStackGrow;
+        }
+        // Below the growth floor — true overflow.
+        if addr < p.stack_max_growth_floor {
+            #[cfg(feature = "test")]
+            {
+                *LAST_GROW_OUTCOME.lock() = Some(GrowOutcome::Overflow);
+            }
+            return GrowOutcome::Overflow;
+        }
+        // Budget exhausted — fault-storm defense.
+        if p.growth_faults_remaining == 0 {
+            #[cfg(feature = "test")]
+            {
+                *LAST_GROW_OUTCOME.lock() = Some(GrowOutcome::BudgetExhausted);
+            }
+            return GrowOutcome::BudgetExhausted;
+        }
+
+        let new_page = addr & !0xFFF;
+        (new_page, p.stack_top, p.stack_max_growth_floor)
+        // guard drops here — release Process lock before taking mapper lock.
+    };
+
+    // Map one page R+W under the active address space.
+    let map_result = crate::mm::memory::with_memory_mapper(|m| {
+        m.map_user_region(x86_64::VirtAddr::new(new_page), 1, UserPerms::ReadWrite)
+    });
+    match map_result {
+        Some(Ok(_)) => {}
+        _ => {
+            #[cfg(feature = "test")]
+            {
+                *LAST_GROW_OUTCOME.lock() = Some(GrowOutcome::MapFailed);
+            }
+            return GrowOutcome::MapFailed;
+        }
+    }
+
+    // Re-acquire Process lock to update bookkeeping. If contention
+    // sneaks in here, the page is already mapped — record the leak
+    // implicitly (stack_mapped_bottom stays at its old value, so
+    // unmap_user_stack won't release this page on exit) and still
+    // return Grew so the user instruction succeeds. This is a
+    // single-frame leak, not a correctness issue.
+    if let Some(mut guard) = CURRENT_PROCESS.try_lock() {
+        let p = &mut *guard;
+        p.stack_bottom = new_page;
+        p.stack_mapped_bottom = new_page;
+        p.growth_faults_remaining = p.growth_faults_remaining.saturating_sub(1);
+    } else {
+        crate::debug_warn!(
+            "try_grow_user_stack: re-acquire failed, single-frame leak at {:#x}",
+            new_page
+        );
+    }
+
+    // Widen syscall validated bounds so the freshly mapped page is
+    // accepted by validate_user_slice. We narrow bounds.start to the
+    // new_page; bounds.end stays. If user_va_bounds is None (test
+    // context), this is a no-op.
+    if let Some(mut b) = crate::userland::abi::user_va_bounds() {
+        if new_page < b.start {
+            b.start = new_page;
+            crate::userland::abi::set_user_va_bounds(b);
+        }
+    }
+
+    crate::debug_trace!("stack grew to {:#x}", new_page);
+
+    #[cfg(feature = "test")]
+    {
+        *LAST_GROW_OUTCOME.lock() = Some(GrowOutcome::Grew);
+    }
+
+    GrowOutcome::Grew
+}
+
 /// Unmap the user stack range a process owns and zero its stack-window
 /// fields. Called from `cleanup_user_process` and `cooperative_exit`
 /// (U4) so grown stack pages are released regardless of which exit path
@@ -578,6 +743,12 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
         reason.fault_rip
     );
 
+    // Demand-grown stack (U4): release the [stack_mapped_bottom,
+    // stack_top) range before UserImage::Drop runs. unmap_user_stack
+    // also clears the image's stack_initial_bottom so Drop skips a
+    // duplicate stack unmap.
+    with_current_process(unmap_user_stack);
+
     // Shell convention: a process killed by signal N reports exit code
     // 128 + N. Lets the parent's wait4 surface a non-zero, vector-
     // distinguishable code without teaching wait4 the full POSIX
@@ -620,6 +791,8 @@ fn signum_for_vector(vector: u8) -> i32 {
 /// Same teardown as `cleanup_user_process`, with `ExitKind::Cooperative`.
 pub fn cooperative_exit(code: i64) -> ! {
     record_exit(ExitKind::Cooperative, code);
+    // Demand-grown stack (U4): release [stack_mapped_bottom, stack_top).
+    with_current_process(unmap_user_stack);
     long_jump_to_run_or_halt();
 }
 

@@ -241,10 +241,25 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let addr = accessed_addr.as_u64();
 
-    // Ring-3 page faults are lifecycle events for the user process — never
-    // auto-map them, even when the address falls in the kernel heap/stack
-    // range. Route to cleanup_user_process instead.
+    // Ring-3 page faults: first try the demand-grown stack hook. If
+    // the fault is inside the active process's stack-grow window and
+    // the per-process budget allows, `try_grow_user_stack` maps a
+    // fresh page and we return so the CPU retries the instruction.
+    // Everything else (overflow, budget exhaustion, lock contention,
+    // map failure, or a fault outside the grow window) routes to
+    // `cleanup_user_process` with vector 14 / SIGSEGV — the single
+    // termination path preserves the SS-restore invariant guarded by
+    // test_kernel_ss_after_user_fault.
     if frame_is_user(stack_frame.code_segment as u64) {
+        use crate::userland::lifecycle::{try_grow_user_stack, GrowOutcome};
+        match try_grow_user_stack(accessed_addr) {
+            GrowOutcome::Grew => return,
+            GrowOutcome::NotStackGrow
+            | GrowOutcome::Overflow
+            | GrowOutcome::BudgetExhausted
+            | GrowOutcome::LockContended
+            | GrowOutcome::MapFailed => {}
+        }
         debug_error!("EXCEPTION: PAGE FAULT (ring 3)");
         cleanup_user_process(AbnormalExit {
             vector: 14,

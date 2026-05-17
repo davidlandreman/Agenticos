@@ -3060,6 +3060,234 @@ fn test_run_leak_loop_fault() {
     }
 }
 
+// --- U4: try_grow_user_stack classification + mutation ---
+
+/// Helper: drop into Process and stage a stack window. Returns the
+/// snapshot so the caller can restore after the test.
+fn stage_stack_window(
+    top: u64,
+    bottom: u64,
+    floor: u64,
+    budget: u64,
+) -> (u64, u64, u64, u64, u64) {
+    use crate::userland::lifecycle::with_current_process;
+    with_current_process(|p| {
+        let snap = (
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        );
+        p.stack_top = top;
+        p.stack_bottom = bottom;
+        p.stack_mapped_bottom = bottom;
+        p.stack_max_growth_floor = floor;
+        p.growth_faults_remaining = budget;
+        snap
+    })
+}
+
+fn restore_stack_window(snap: (u64, u64, u64, u64, u64)) {
+    use crate::userland::lifecycle::with_current_process;
+    with_current_process(|p| {
+        p.stack_top = snap.0;
+        p.stack_bottom = snap.1;
+        p.stack_mapped_bottom = snap.2;
+        p.stack_max_growth_floor = snap.3;
+        p.growth_faults_remaining = snap.4;
+    });
+}
+
+/// A fault one page below the current bottom, well above the floor and
+/// with budget remaining, returns `Grew` and updates stack_bottom.
+fn test_try_grow_user_stack_grew() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::lifecycle::{
+        try_grow_user_stack, with_current_process, GrowOutcome,
+    };
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 64 * 0x1000;
+    // Map the initial commit so the fault handler's lookup of an existing
+    // mapping (when it'd grow into it) doesn't surprise us. Then test the
+    // grow path on the page below it.
+    crate::mm::memory::with_memory_mapper(|m| {
+        m.map_user_region(
+            VirtAddr::new(bottom),
+            8,
+            crate::mm::paging::UserPerms::ReadWrite,
+        )
+    })
+    .unwrap()
+    .unwrap();
+
+    let snap = stage_stack_window(top, bottom, floor, 100);
+
+    let fault_addr = VirtAddr::new(bottom - 0x800); // mid-page below bottom
+    let outcome = try_grow_user_stack(fault_addr);
+    assert_eq!(outcome, GrowOutcome::Grew);
+
+    with_current_process(|p| {
+        let expected_new_page = (bottom - 0x800) & !0xFFF;
+        assert_eq!(p.stack_bottom, expected_new_page);
+        assert_eq!(p.stack_mapped_bottom, expected_new_page);
+        assert_eq!(p.growth_faults_remaining, 99);
+    });
+
+    // Cleanup: unmap the grown stack.
+    crate::userland::lifecycle::with_current_process(
+        crate::userland::lifecycle::unmap_user_stack,
+    );
+    restore_stack_window(snap);
+}
+
+/// A fault below the growth floor returns `Overflow` and does not
+/// mutate stack_bottom or call the mapper.
+fn test_try_grow_user_stack_overflow_below_floor() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::lifecycle::{
+        try_grow_user_stack, with_current_process, GrowOutcome,
+    };
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 16 * 0x1000;
+    let snap = stage_stack_window(top, bottom, floor, 100);
+
+    let fault_addr = VirtAddr::new(floor - 0x100);
+    assert_eq!(try_grow_user_stack(fault_addr), GrowOutcome::Overflow);
+
+    // Bookkeeping unchanged.
+    with_current_process(|p| {
+        assert_eq!(p.stack_bottom, bottom);
+        assert_eq!(p.stack_mapped_bottom, bottom);
+        assert_eq!(p.growth_faults_remaining, 100);
+    });
+
+    restore_stack_window(snap);
+}
+
+/// A fault inside the window but with budget==0 returns
+/// `BudgetExhausted` and does not call the mapper.
+fn test_try_grow_user_stack_budget_exhausted() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::lifecycle::{
+        try_grow_user_stack, with_current_process, GrowOutcome,
+    };
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 64 * 0x1000;
+    let snap = stage_stack_window(top, bottom, floor, 0);
+
+    let fault_addr = VirtAddr::new(bottom - 0x800);
+    assert_eq!(try_grow_user_stack(fault_addr), GrowOutcome::BudgetExhausted);
+
+    with_current_process(|p| {
+        assert_eq!(p.stack_bottom, bottom);
+        assert_eq!(p.growth_faults_remaining, 0);
+    });
+
+    restore_stack_window(snap);
+}
+
+/// A fault at or above stack_bottom returns `NotStackGrow` —
+/// already-mapped pages aren't this handler's problem.
+fn test_try_grow_user_stack_not_stack_grow_above_bottom() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::lifecycle::{try_grow_user_stack, GrowOutcome};
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 64 * 0x1000;
+    let snap = stage_stack_window(top, bottom, floor, 100);
+
+    // Above the current bottom.
+    assert_eq!(
+        try_grow_user_stack(VirtAddr::new(bottom + 0x100)),
+        GrowOutcome::NotStackGrow,
+    );
+    // Above stack_top entirely.
+    assert_eq!(
+        try_grow_user_stack(VirtAddr::new(top + 0x10000)),
+        GrowOutcome::NotStackGrow,
+    );
+
+    restore_stack_window(snap);
+}
+
+/// Sentinel slot (no active process): try_grow returns NotStackGrow so
+/// the caller routes through its normal heap/stack path.
+fn test_try_grow_user_stack_sentinel_is_not_stack_grow() {
+    use crate::userland::lifecycle::{try_grow_user_stack, GrowOutcome};
+    use x86_64::VirtAddr;
+
+    // Sentinel state — all stack fields zero.
+    let snap = stage_stack_window(0, 0, 0, 0);
+
+    assert_eq!(
+        try_grow_user_stack(VirtAddr::new(0x7F_0000)),
+        GrowOutcome::NotStackGrow,
+    );
+
+    restore_stack_window(snap);
+}
+
+/// After a successful growth, set_user_va_bounds widens the start so
+/// validate_user_slice accepts pointers into the freshly mapped page.
+fn test_try_grow_user_stack_widens_validated_bounds() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::abi::{
+        clear_user_va_bounds, set_user_va_bounds, user_va_bounds,
+        validate_user_slice, UserVaBounds,
+    };
+    use crate::userland::lifecycle::{
+        try_grow_user_stack, with_current_process, GrowOutcome,
+    };
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 64 * 0x1000;
+    // Map the initial commit so growth can lower below it cleanly.
+    crate::mm::memory::with_memory_mapper(|m| {
+        m.map_user_region(
+            VirtAddr::new(bottom),
+            8,
+            crate::mm::paging::UserPerms::ReadWrite,
+        )
+    })
+    .unwrap()
+    .unwrap();
+    let stack_snap = stage_stack_window(top, bottom, floor, 100);
+    set_user_va_bounds(UserVaBounds {
+        start: bottom,
+        end: top,
+    });
+
+    let new_page = (bottom - 0x800) & !0xFFF;
+    // Before grow: a pointer at new_page is rejected.
+    assert!(validate_user_slice(new_page, 8).is_err());
+
+    let outcome = try_grow_user_stack(VirtAddr::new(bottom - 0x800));
+    assert_eq!(outcome, GrowOutcome::Grew);
+
+    // After grow: bounds.start is new_page; the pointer passes.
+    let b = user_va_bounds().expect("bounds set");
+    assert_eq!(b.start, new_page);
+    assert!(validate_user_slice(new_page, 8).is_ok());
+
+    with_current_process(crate::userland::lifecycle::unmap_user_stack);
+    restore_stack_window(stack_snap);
+    clear_user_va_bounds();
+}
+
 // --- U3: install_new_process_opt populates Process stack-window ---
 
 /// After install_new_process_opt the Process slot reports the loader's
@@ -3364,6 +3592,12 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_unmap_user_stack_sentinel_is_noop,
         &test_unmap_user_stack_releases_range,
         &test_install_new_process_populates_stack_window,
+        &test_try_grow_user_stack_grew,
+        &test_try_grow_user_stack_overflow_below_floor,
+        &test_try_grow_user_stack_budget_exhausted,
+        &test_try_grow_user_stack_not_stack_grow_above_bottom,
+        &test_try_grow_user_stack_sentinel_is_not_stack_grow,
+        &test_try_grow_user_stack_widens_validated_bounds,
         &test_loader_per_binary_floor_from_pt_load_end,
         &test_loader_rejects_binary_too_big_for_initial_stack,
         &test_loader_bounds_start_at_initial_commit,
