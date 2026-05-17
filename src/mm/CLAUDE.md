@@ -23,7 +23,7 @@ The kernel address space is partitioned into disjoint regions, each owned by exa
 
 | Range | Owner | Notes |
 |---|---|---|
-| `0x0040_0000` – `0x0080_0000` | userland binary + stack | `USER_LOAD_BASE` and `USER_STACK_TOP`; stack grows down. |
+| `0x0040_0000` – `0x0080_0000` | userland binary + stack | `USER_LOAD_BASE` and `USER_STACK_TOP`; stack grows down. Initial commit `USER_STACK_INITIAL_PAGES = 8` mapped eagerly; demand-grown on page faults up to `USER_STACK_MAX_GROWTH_PAGES = 768` (intent — saturates at `USER_LOAD_BASE` in this 4 MiB slice) and bounded per-binary by `highest_pt_load_end + USER_STACK_GUARD_PAGES * 0x1000` (16-page guard). Growth driven by `lifecycle::try_grow_user_stack` from the ring-3 page-fault handler. |
 | `0x0100_0000` – `0x0100_2000` | userland TLS | TLS image page (`USER_TLS_IMAGE_VA`) + TCB page (`USER_TCB_VA`). FS_BASE points at TCB. Mapped only when the binary has a `PT_TLS` segment. |
 | `0x0200_0000` – `0x0280_0000` | userland brk arena | `USER_BRK_BASE` + 8 MiB cap. `brk(0)` returns the current high water; `brk(addr)` grows on demand. |
 | `0x0300_0000` – `0x4000_0000` | userland mmap arena | `USER_MMAP_BASE`. Anonymous-private bump arena, no coalescing. Reaches `USER_VA_RANGE_END` at 1 GiB. |
@@ -53,6 +53,12 @@ When code accesses an unmapped heap page:
 4. Execution resumes transparently.
 
 A page fault outside the heap range is fatal — it indicates a real bug, not lazy mapping.
+
+### Ring-3 stack-grow path
+
+A ring-3 page fault (CPL=3) is routed through `lifecycle::try_grow_user_stack` *before* the standard cleanup path. If the fault address falls inside the active process's grow window (`stack_max_growth_floor ≤ addr < stack_bottom`) and the per-process growth budget allows, the handler maps one fresh page R+W, lowers `stack_bottom` and `stack_mapped_bottom`, widens `validate_user_slice`'s bounds via `set_user_va_bounds`, and returns so the CPU retries the instruction. Everything else (overflow, budget exhaustion, lock contention, map failure, fault outside the window) falls through to `cleanup_user_process` with vector 14 / SIGSEGV.
+
+The stack-grow helper holds the Process lock via `try_lock` only — blocking `lock()` from interrupt context would deadlock the single core. Bookkeeping mutations are split across two short critical sections so `map_user_region`'s mapper-lock acquisition never nests with the Process lock.
 
 ## Hot-path log levels
 
