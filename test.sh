@@ -150,7 +150,8 @@ if [ "$SKIP_USERLAND" -eq 0 ]; then
     export REPO_ROOT HOST_SHARE_STAGE
     # shellcheck source=userland/prebuilt-lib.sh
     . "$REPO_ROOT/userland/prebuilt-lib.sh"
-    stage_zsh || true  # soft-fail: kernel tests use embedded fixtures
+    stage_zsh     || true  # soft-fail: kernel tests use embedded fixtures
+    stage_busybox || true  # soft-fail: kernel tests use embedded fixtures
 else
     echo "Skipping userland prebuild (--skip-userland)"
 fi

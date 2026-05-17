@@ -43,7 +43,8 @@ echo "🔄 Refreshing prebuilt userland ELFs..."
 # Each stage_* call is a hard failure point — refresh is the explicit
 # "I want fresh binaries" workflow, so any failure should stop and
 # surface immediately rather than silently committing stale bits.
-stage_zsh || { echo "❌ stage_zsh failed."; exit 1; }
+stage_zsh     || { echo "❌ stage_zsh failed.";     exit 1; }
+stage_busybox || { echo "❌ stage_busybox failed."; exit 1; }
 
 # Future prebuilt-managed apps go here:
 # stage_bash || { echo "❌ stage_bash failed."; exit 1; }

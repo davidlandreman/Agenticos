@@ -87,6 +87,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
     ("path", crate::userland::path::path_tests),
+    ("bin_namespace", crate::userland::bin_namespace::bin_namespace_tests),
     ("fonts", fonts::get_tests),
     ("window_clipping", window_clipping::get_tests),
     ("graphics_device_image", graphics_device_image::get_tests),

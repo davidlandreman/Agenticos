@@ -9,9 +9,10 @@ and without an outbound network fetch.
 
 ## What lives here
 
-| File       | Source                | Type | Size      | Notes                                      |
-|------------|-----------------------|------|-----------|--------------------------------------------|
-| `ZSH.ELF`  | `userland/apps/zsh/`  | EXEC | ~1.5 MiB  | static-musl zsh, vendors ncurses-widec     |
+| File       | Source                    | Type | Size      | Notes                                          |
+|------------|---------------------------|------|-----------|------------------------------------------------|
+| `ZSH.ELF`  | `userland/apps/zsh/`      | EXEC | ~1.5 MiB  | static-musl zsh, vendors ncurses-widec         |
+| `BB.ELF`   | `userland/apps/busybox/`  | EXEC | ~700 KiB  | static-musl BusyBox multicall (~240 applets)   |
 
 (Add a row when a new prebuilt-managed app lands. Keep size approximate
 — the reviewer uses it to gut-check binary diffs, not for exactness.)

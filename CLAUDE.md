@@ -16,7 +16,7 @@ See `docs/ai-context-conventions.md` for the convention in detail (when to add a
 
 AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch with the eventual goal of supporting agent-based computing capabilities.
 
-**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. A window system provides hierarchical window management, event routing, and mouse support. The OS boots into a GUI desktop with a blue background and a windowed terminal application. The "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
+**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. A window system provides hierarchical window management, event routing, and mouse support. The OS boots into a GUI desktop with a blue background and a windowed terminal application. A real ring-3 userland runs Linux static-musl binaries — `zsh` is the interactive shell, and a static BusyBox (`BB.ELF`) provides ~240 coreutils applets via a kernel-side virtual `/bin/<applet>` namespace (`src/userland/bin_namespace.rs`). Write-side applets (`cp`, `mv`, `rm`, …) surface `EROFS` at runtime because the FS is read-only. The "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
 
 ## Common Commands
 

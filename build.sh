@@ -162,7 +162,8 @@ REPO_ROOT="$(pwd)"
 export REPO_ROOT HOST_SHARE_STAGE
 # shellcheck source=userland/prebuilt-lib.sh
 . "$REPO_ROOT/userland/prebuilt-lib.sh"
-stage_zsh || true  # soft-fail: kernel build + tests don't depend on ZSH.ELF
+stage_zsh || true      # soft-fail: kernel build + tests don't depend on ZSH.ELF
+stage_busybox || true  # soft-fail: kernel build + tests don't depend on BB.ELF
 
 # Determine build flags
 BUILD_FLAGS="--release"

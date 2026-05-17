@@ -43,12 +43,37 @@ invoke its `Makefile` separately.
 
 Apps that fetch upstream tarballs and / or take long enough that
 rebuilding on every kernel iteration is friction ship as **committed
-binaries** under `userland/prebuilt/`. Today the only entry is
-`ZSH.ELF`; future Linux ports (bash, vim, coreutils, …) belong here
-too. The committed binary is what `build.sh` / `test.sh` copy into
-`host_share/` by default — fresh clones boot a working zsh without
-the `x86_64-linux-musl-cross` toolchain installed and without an
-outbound network fetch.
+binaries** under `userland/prebuilt/`. Current entries: `ZSH.ELF` and
+`BB.ELF` (BusyBox); future Linux ports (bash, vim, …) belong here too.
+The committed binary is what `build.sh` / `test.sh` copy into
+`host_share/` by default — fresh clones boot a working zsh + coreutils
+without the `x86_64-linux-musl-cross` toolchain installed and without
+an outbound network fetch.
+
+### BusyBox `/bin` namespace
+
+`BB.ELF` is a single static-musl multicall binary providing `ls`,
+`cat`, `grep`, `sed`, `awk`, `find`, `wc`, `head`, `tail`, `sort`,
+`uniq`, and ~230 other applets. The kernel exposes a virtual
+`/bin/<applet>` namespace — see `src/userland/bin_namespace.rs` for
+the applet list and the `apply_bin_rewrite` helper. `execve("/bin/ls",
+argv, envp)` resolves to `BB.ELF` with `argv[0]` overwritten to
+`"ls"`, and BusyBox's own dispatcher picks the right applet from
+there. No symlinks, no per-applet ELF copies — the namespace is pure
+kernel synthesis.
+
+`stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
+directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
+(`access("/bin/ls", X_OK)` followed by `execve`) finds applets without
+any zsh-side hooks. The run command's default envp seeds `PATH=/bin:/host`
+so bare `ls`, `cat`, etc. Just Work in an interactive shell.
+
+**Read-only FS caveat**: write-side applets (`cp`, `mv`, `rm`,
+`mkdir`, `touch`, `chmod`, `chown`, `ln`, `dd`) ship in `BB.ELF` and
+the namespace resolves them normally, but every `write()` to a
+file-backed FD returns `EROFS`. The applets print a clean error and
+exit non-zero — they do not panic the kernel. These will start working
+when the FS gains write support.
 
 Decision tree for adding a new app:
 
