@@ -945,6 +945,15 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
             options(nomem, preserves_flags, nostack),
         );
     }
+
+    // 9c. Save the parent's IA32_FS_BASE. The child (especially after
+    //     execve) reinstalls its own FS_BASE pointing at the child's
+    //     musl-allocated TCB. Without this save/restore, the parent
+    //     resumes with FS_BASE still pointing at a VA that exists in
+    //     parent's L4 but contains unrelated data — `__errno_location`
+    //     style accesses then fault. (See CLAUDE.md "Deferred from the
+    //     zsh-interactive bring-up" follow-up.)
+    let saved_fs_base = crate::arch::x86_64::msr::read_fs_base();
     let child_top = crate::userland::lifecycle::with_current_process(|child| {
         child.kernel_stack.as_ref().expect("child kernel stack").top()
     });
@@ -971,6 +980,9 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         crate::arch::x86_64::syscall::set_percpu_kernel_rsp_top(saved_kernel_rsp_top);
         crate::arch::x86_64::gdt::set_kernel_rsp0(VirtAddr::new(saved_kernel_rsp_top));
     }
+
+    // 10c. Restore the parent's FS_BASE. Paired with step 9c.
+    crate::arch::x86_64::msr::set_fs_base(saved_fs_base);
 
     // 11. Child has exited and long-jumped back. Capture the recorded
     //     zombie info (the child's `exit_group` already filed it into
