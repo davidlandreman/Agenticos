@@ -902,6 +902,17 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         stack_mapped_bottom: parent.stack_mapped_bottom,
         stack_max_growth_floor: parent.stack_max_growth_floor,
         growth_faults_remaining: parent.growth_faults_remaining,
+        // U2: child inherits parent's TLS pointer (FS_BASE). musl in
+        // the child may later re-call arch_prctl after fork to install
+        // its own TCB, but the initial inherit matches Linux's
+        // copy-on-fork semantics.
+        fs_base: parent.fs_base,
+        // U2: fresh FPU state for the child. POSIX-Linux semantics:
+        // FPU state is NOT inherited across fork — children start with
+        // a clean register file. (The parent's pre-fork XMM values
+        // don't leak in because the SYSCALL fast path zeros them, and
+        // U4's switch primitive saves/restores.)
+        fpu_state: crate::arch::x86_64::fpu::FpuState::fresh(),
     });
 
     // 8. Stash the parent's Process and install the child as current.
@@ -1577,42 +1588,86 @@ fn pipe2_common(fds_ptr: u64, flags: u32) -> i64 {
     0
 }
 
-/// `wait4(pid, status, options, rusage) -> pid`. Reaps a zombie child;
-/// since fork is synchronous, by the time the parent reaches wait4
-/// the zombie is already in the table. Writes a Linux-shaped status
-/// word to `status` if non-NULL: `((exit_code & 0xFF) << 8)`.
+/// `wait4(pid, status, options, rusage) -> pid`.
+///
+/// U6 — POSIX-correct returns:
+///   - Matching zombie present → reap and return its PID; status word
+///     follows the WIFEXITED / WIFSIGNALED encoding driven by the
+///     zombie's `signal_termination` field.
+///   - No matching zombie, caller has no children → `-ECHILD` (POSIX).
+///   - No matching zombie, caller HAS children, `WNOHANG` set → `0`.
+///   - No matching zombie, caller HAS children, `WNOHANG` clear:
+///     **today** returns `-ECHILD` (matches pre-U6 behavior so the
+///     synchronous-fork callers don't regress); U5 will replace this
+///     branch with `mark_ring3_blocked + yield` so the caller actually
+///     parks. The wake path on the other side (`notify_parent_of_*`)
+///     is already wired in U3.
+///
+/// WNOHANG is the only options bit handled today. WUNTRACED / WCONTINUED
+/// require process-state tracking we don't implement.
 pub fn wait4_handler(args: &mut SyscallArgs) -> i64 {
     use crate::userland::abi::ECHILD;
+    const WNOHANG: u64 = 1;
+
     let target = args.rdi as i32;
     let status_ptr = args.rsi;
-    let _options = args.rdx;
+    let options = args.rdx;
     let _rusage = args.r10;
 
     let me = crate::userland::lifecycle::current_pid();
-    match crate::userland::lifecycle::reap_zombie(target, me) {
-        Some((pid, code, signal_termination)) => {
-            if status_ptr != 0 {
-                if let Err(e) = validate_user_slice(status_ptr, 4) {
-                    return e;
-                }
-                // POSIX wait status encoding:
-                //   Exited normally: bits 8..15 = exit code, bits 0..7 = 0
-                //                    → WIFEXITED == true
-                //   Killed by signal: bits 0..6 = signum, bit 7 = 0
-                //                    → WIFSIGNALED == true (lo 7 bits 1..=126)
-                // Mixing the two is what made zsh print exit codes for
-                // segfaults; key off the signal-termination flag from the
-                // zombie record.
-                let status = match signal_termination {
-                    Some(sig) => (sig as u32) & 0x7F,
-                    None => ((code as u32) & 0xFF) << 8,
-                };
-                unsafe { core::ptr::write(status_ptr as *mut u32, status); }
+
+    // Fast path: a matching zombie is already in the table.
+    if let Some((pid, code, signal_termination)) =
+        crate::userland::lifecycle::reap_zombie(target, me)
+    {
+        if status_ptr != 0 {
+            if let Err(e) = validate_user_slice(status_ptr, 4) {
+                return e;
             }
-            pid as i64
+            // POSIX wait status encoding:
+            //   Exited normally: bits 8..15 = exit code, bits 0..7 = 0
+            //                    → WIFEXITED == true
+            //   Killed by signal: bits 0..6 = signum, bit 7 = 0
+            //                    → WIFSIGNALED == true (lo 7 bits 1..=126)
+            let status = match signal_termination {
+                Some(sig) => (sig as u32) & 0x7F,
+                None => ((code as u32) & 0xFF) << 8,
+            };
+            unsafe { core::ptr::write(status_ptr as *mut u32, status); }
         }
-        None => ECHILD,
+        return pid as i64;
     }
+
+    // No matching zombie. POSIX distinguishes "no children at all"
+    // (-ECHILD) from "has children but none ready" (block, or return
+    // 0 under WNOHANG).
+    if !crate::userland::lifecycle::has_children(me) {
+        return ECHILD;
+    }
+
+    if options & WNOHANG != 0 {
+        // WNOHANG: return 0 to indicate "no status available yet."
+        // Per POSIX `WIFEXITED(0)` is false, `WIFSIGNALED(0)` is false
+        // — caller's loop interprets 0 as "try again later."
+        return 0;
+    }
+
+    // U6/U5 hand-off point. Under U5+U7, this becomes:
+    //   crate::userland::lifecycle::mark_ring3_blocked(
+    //       me,
+    //       crate::userland::lifecycle::Ring3BlockReason::WaitingForChild { target },
+    //   );
+    //   yield_to_ring3_scheduler();  // returns when child exits
+    //   retry reap_zombie(target, me)
+    //
+    // Until U5 wires the ring-3 yield path, parking here would hang
+    // the only ring-3 process (no other thing can run it back). The
+    // synchronous-fork pattern that exists today never reaches this
+    // branch (children always exit before the parent reaches wait4),
+    // so returning ECHILD preserves current behavior. The wake path
+    // (`wake_ring3_blocked_on_child` in notify_parent_of_*) is already
+    // armed and will fire correctly once U5 wires the block.
+    ECHILD
 }
 
 // ---------- exit ----------

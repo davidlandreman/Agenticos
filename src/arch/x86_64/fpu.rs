@@ -22,11 +22,19 @@
 //!   (vector 19) instead of `#UD`, so a misbehaving user app gets a routable
 //!   SIMD fault rather than an opaque invalid-opcode trap.
 //!
-//! No FP context-switching is implemented — the kernel never touches the
-//! XMM register file, so user-process state is preserved across kernel
-//! transitions for free (the SYSCALL fast path does not save/restore XMM).
-//! This becomes load-bearing if the kernel ever uses SSE itself or if more
-//! than one ring-3 process is concurrent.
+//! ## Per-process FPU state (U2)
+//!
+//! Originally the SYSCALL fast path didn't save/restore XMM because the
+//! kernel never touches the register file — single ring-3 process state
+//! survived for free. U2 (the multi-ring-3 scheduling refactor) adds the
+//! [`FpuState`] buffer plus [`save_fpu`] / [`restore_fpu`] primitives so
+//! the U4 ring-3 switch can swap FPU state between processes on
+//! context switch. The SYSCALL fast path is still cheap — saves happen
+//! only on real switches, not on every syscall return.
+//!
+//! Invariant the kernel relies on: kernel code never executes SSE/MMX
+//! instructions (target spec carries `+soft-float`). If that changes,
+//! save_fpu must run on every syscall entry rather than only on switch.
 
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 
@@ -62,4 +70,86 @@ pub fn sse_enabled() -> bool {
         && cr0.contains(Cr0Flags::MONITOR_COPROCESSOR)
         && cr4.contains(Cr4Flags::OSFXSR)
         && cr4.contains(Cr4Flags::OSXMMEXCPT_ENABLE)
+}
+
+/// FXSAVE-area buffer. The CPU writes 512 bytes here; the area MUST be
+/// 16-byte aligned per Intel SDM §10.5.1. `repr(C, align(16))`
+/// propagates the alignment requirement out to any enclosing type
+/// (e.g., the per-process `Process` struct embeds one of these).
+#[repr(C, align(16))]
+pub struct FpuState {
+    bytes: [u8; 512],
+}
+
+impl Default for FpuState {
+    /// Architectural reset state for FPU/SSE. `fninit` + zeroed XMM
+    /// registers corresponds to MXCSR=0x1F80 and all-zero data.
+    /// Returning a zeroed buffer here is acceptable because the kernel
+    /// always calls `fxrstor` on this buffer before the first user
+    /// instruction; the reset bytes (header + zero registers) match
+    /// what fresh processes expect. New processes that observe their
+    /// own FPU state via, e.g., `fstmxcsr`, will see the FXSAVE area's
+    /// `mxcsr` field initialized via [`Self::with_default_mxcsr`].
+    fn default() -> Self {
+        Self { bytes: [0u8; 512] }
+    }
+}
+
+impl FpuState {
+    /// FXSAVE area shape: bytes [24..28] hold MXCSR. Initialize to the
+    /// architectural reset value (0x1F80 — all FP exceptions masked,
+    /// round-to-nearest) so a freshly-installed process sees the same
+    /// FPU configuration musl expects on startup.
+    pub fn fresh() -> Self {
+        let mut s = Self::default();
+        s.bytes[24] = 0x80;
+        s.bytes[25] = 0x1F;
+        s.bytes[26] = 0x00;
+        s.bytes[27] = 0x00;
+        s
+    }
+
+    /// Raw byte view — used by the test-only roundtrip check that
+    /// asserts XMM register state survives a save/restore pair.
+    #[cfg(feature = "test")]
+    pub fn bytes(&self) -> &[u8; 512] {
+        &self.bytes
+    }
+}
+
+/// Capture the current FPU/SSE register state into `buf`. Wraps the
+/// `fxsave` instruction. Must be called from CPL=0; the buffer must be
+/// 16-byte aligned (`FpuState` enforces this via `repr(align(16))`).
+///
+/// Used by the U4 ring-3 switch primitive on switch-out — after this
+/// returns, the live XMM state can be clobbered without losing the
+/// process's data.
+#[inline]
+pub fn save_fpu(buf: &mut FpuState) {
+    unsafe {
+        core::arch::asm!(
+            "fxsave [{0}]",
+            in(reg) buf.bytes.as_mut_ptr(),
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Reload FPU/SSE register state from `buf`. Wraps the `fxrstor`
+/// instruction. Must be called from CPL=0; `buf` must be 16-byte
+/// aligned. After this returns, the CPU's FPU/SSE state matches what
+/// was in `buf` at the time of the matching `save_fpu`.
+///
+/// Used by the U4 ring-3 switch primitive on switch-in — restores the
+/// resumed process's XMM registers, x87 state, and MXCSR before the
+/// `iretq` to ring 3.
+#[inline]
+pub fn restore_fpu(buf: &FpuState) {
+    unsafe {
+        core::arch::asm!(
+            "fxrstor [{0}]",
+            in(reg) buf.bytes.as_ptr(),
+            options(nostack, preserves_flags),
+        );
+    }
 }
