@@ -265,7 +265,17 @@ This is a scope declaration. Per-unit `Files:` sections remain authoritative.
 
 ### Phase A — Read-side correctness (mixed case + long names)
 
-#### U1. Build-side: post-process boot image with `fatfs` crate
+> **Phase A status (2026-05-16):** Shipped. U1 was unnecessary — the
+> `bootloader` 0.11 crate already emits VFAT LFN entries on its own
+> (verified empirically against `target/bootloader/bios.img`: every
+> asset has an LFN run including `system.ttf`, `agentic-banner.bmp`,
+> `WALLPAPR.BMP`, `system.ttf.LICENSE`). U2 shipped the kernel-side
+> LFN parser; the integration tests in `src/tests/filesystem.rs` pin
+> the expected long-name surfaces. No xtask, no workspace conversion,
+> no MBR offset wrapper needed. The unit text below is preserved for
+> historical traceability; do NOT implement U1.
+
+#### U1. ~~Build-side: post-process boot image with `fatfs` crate~~ — SKIPPED
 
 **Goal:** The bundled BIOS image carries real lowercase + LFN filenames so future readers can validate against ground truth.
 
@@ -301,7 +311,7 @@ This is a scope declaration. Per-unit `Files:` sections remain authoritative.
 
 ---
 
-#### U2. VFAT LFN read parser
+#### U2. VFAT LFN read parser — SHIPPED 2026-05-16
 
 **Goal:** Directory enumeration returns long mixed-case filenames; existing 8.3 lookups still work.
 

@@ -438,6 +438,85 @@ fn test_run_hellocpp_end_to_end() {
     );
 }
 
+// --- VFAT long-filename integration coverage (U2) -----------------------
+//
+// The bundled bootloader's FAT writer (the `bootloader` 0.11 crate)
+// emits VFAT LFN entries for every asset. Before U2 the kernel
+// silently discarded them and returned only the SFN (e.g.
+// `AGENTI~1.BMP` for `agentic-banner.bmp`). These tests pin the
+// post-U2 behavior: enumeration surfaces the decoded long names and
+// lookups resolve against them.
+
+fn test_enumerate_root_contains_long_lowercase_names() {
+    debug_info!("Enumerating / and looking for long/lowercase names...");
+
+    let dir = match crate::fs::Directory::open("/") {
+        Ok(d) => d,
+        Err(e) => panic!("Directory::open(/) failed: {:?}", e),
+    };
+    let entries = dir.entries();
+
+    let mut names = alloc::vec::Vec::new();
+    for entry in &entries {
+        names.push(alloc::string::ToString::to_string(entry.name_str()));
+    }
+    debug_info!("Root entries ({}): {:?}", names.len(), names);
+
+    // `system.ttf` is in the assets/ source as lowercase 8.3 — the
+    // bootloader emits an LFN that decodes to `system.ttf` AND sets
+    // the lowercase-attr bits. Either path should surface lowercase.
+    assert!(
+        names.iter().any(|n| n == "system.ttf"),
+        "expected lowercase `system.ttf` in root enumeration; got {:?}",
+        names
+    );
+
+    // `agentic-banner.bmp` is too long for 8.3 (basename > 8 chars,
+    // contains a hyphen). Before U2 the kernel saw `AGENTI~1.BMP`.
+    assert!(
+        names.iter().any(|n| n == "agentic-banner.bmp"),
+        "expected `agentic-banner.bmp` in root enumeration; got {:?}",
+        names
+    );
+}
+
+fn test_stat_returns_long_name() {
+    debug_info!("Stat /agentic-banner.bmp must return long name...");
+    match crate::fs::metadata("/agentic-banner.bmp") {
+        Ok(md) => {
+            assert_eq!(md.name_str(), "agentic-banner.bmp");
+            assert!(md.size > 0);
+        }
+        Err(e) => panic!("metadata(/agentic-banner.bmp) failed: {:?}", e),
+    }
+}
+
+fn test_lookup_resolves_long_lowercase_name() {
+    // Existing test_file_open_arial uses /system.ttf which already
+    // worked via case-insensitive 8.3 lookup pre-U2. This one
+    // exercises a name that REQUIRES LFN decoding (basename > 8
+    // chars), so it fails outright without U2.
+    debug_info!("Open /agentic-banner.bmp (LFN-only path)...");
+    match crate::fs::File::open_read("/agentic-banner.bmp") {
+        Ok(f) => {
+            assert!(f.size() > 0);
+        }
+        Err(e) => panic!("open_read(/agentic-banner.bmp) failed: {:?}", e),
+    }
+}
+
+fn test_lookup_case_insensitive_on_long_name() {
+    // Path lookup should still be case-insensitive against the
+    // decoded long name — `/AGENTIC-BANNER.BMP` should resolve to
+    // `agentic-banner.bmp`.
+    match crate::fs::File::open_read("/AGENTIC-BANNER.BMP") {
+        Ok(f) => {
+            assert!(f.size() > 0);
+        }
+        Err(e) => panic!("case-insensitive long-name lookup failed: {:?}", e),
+    }
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_filesystem_basic_exists,
@@ -454,5 +533,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_read_to_vec_vs_pre_zero_baseline,
         &test_fat_read_throughput_host_hellocpp,
         &test_run_hellocpp_end_to_end,
+        &test_enumerate_root_contains_long_lowercase_names,
+        &test_stat_returns_long_name,
+        &test_lookup_resolves_long_lowercase_name,
+        &test_lookup_case_insensitive_on_long_name,
     ]
 }

@@ -55,71 +55,58 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
 
     fn enumerate_dir(&self, path: &str) -> Result<alloc::vec::Vec<DirectoryEntry>, FilesystemError> {
         // Resolve the path to a directory cluster (or root) and then
-        // walk the directory entries. Works uniformly for the root
-        // and any nested subdirectory.
+        // walk the entries via the long-name-aware walker so the
+        // returned `DirectoryEntry.name` carries the decoded VFAT LFN
+        // (or 8.3 with lowercase-attr bits) rather than the raw 8.3
+        // form.
         let cluster = self
             .inner
             .resolve_directory(path)
             .map_err(|_| FilesystemError::NotFound)?;
 
         let mut entries = alloc::vec::Vec::new();
-        let mut fat_files = [crate::fs::fat::filesystem::FileHandle {
-            name: [0; 13],
-            size: 0,
-            first_cluster: crate::fs::fat::types::ClusterId(0),
-            is_directory: false,
-        }; 64];
+        self.inner
+            .walk_directory(cluster, |name, raw, _first_cluster, is_dir| {
+                // Skip FAT "." and ".." synthetic entries — userland
+                // gets those from the kernel's path normalizer.
+                let name_bytes = name.as_bytes();
+                if name_bytes == b"." || name_bytes == b".." {
+                    return false;
+                }
 
-        let count = self
-            .inner
-            .list_directory(cluster, &mut fat_files, 64)
+                let copy_len = name_bytes.len().min(255);
+                let mut entry = DirectoryEntry {
+                    name: [0u8; 256],
+                    name_len: 0,
+                    file_type: if is_dir {
+                        crate::fs::filesystem::FileType::Directory
+                    } else {
+                        crate::fs::filesystem::FileType::File
+                    },
+                    size: raw.file_size as u64,
+                    attributes: crate::fs::filesystem::FileAttributes {
+                        read_only: raw.attributes().is_read_only(),
+                        hidden: raw.attributes().is_hidden(),
+                        system: raw.attributes().is_system(),
+                        archive: raw.attributes().is_archive(),
+                    },
+                    created: 0,
+                    modified: 0,
+                    accessed: 0,
+                };
+                entry.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+                entry.name_len = copy_len;
+                entries.push(entry);
+                false
+            })
             .map_err(|_| FilesystemError::IoError)?;
-
-        for fat_file in fat_files.iter().take(count) {
-            let name_bytes = &fat_file.name;
-            let len = name_bytes
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(name_bytes.len());
-            // Skip the FAT "." and ".." entries — userland gets enough
-            // of those by walking via the kernel's normalizer.
-            let copy_len = len.min(255);
-            let name_slice = &name_bytes[..copy_len];
-            if name_slice == b"." || name_slice == b".." {
-                continue;
-            }
-
-            let mut entry = DirectoryEntry {
-                name: [0u8; 256],
-                name_len: 0,
-                file_type: if fat_file.is_directory {
-                    crate::fs::filesystem::FileType::Directory
-                } else {
-                    crate::fs::filesystem::FileType::File
-                },
-                size: fat_file.size as u64,
-                attributes: crate::fs::filesystem::FileAttributes {
-                    read_only: false,
-                    hidden: false,
-                    system: false,
-                    archive: false,
-                },
-                created: 0,
-                modified: 0,
-                accessed: 0,
-            };
-            entry.name[..copy_len].copy_from_slice(name_slice);
-            entry.name_len = copy_len;
-            entries.push(entry);
-        }
 
         Ok(entries)
     }
     
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError> {
-        // Try to find the file
-        match self.inner.find_file(path) {
-            Ok(fat_file) => {
+        match self.inner.find_file_with_long_name(path) {
+            Ok((fat_file, long_name, long_len)) => {
                 let mut entry = DirectoryEntry {
                     name: [0; 256],
                     name_len: 0,
@@ -135,13 +122,9 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
                     modified: 0,
                     accessed: 0,
                 };
-                
-                // Copy name
-                let name_bytes = &fat_file.name;
-                let len = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_bytes.len());
-                entry.name[..len].copy_from_slice(&name_bytes[..len]);
-                entry.name_len = len;
-                
+                let copy = long_len.min(256);
+                entry.name[..copy].copy_from_slice(&long_name[..copy]);
+                entry.name_len = copy;
                 Ok(entry)
             }
             Err(_) => Err(FilesystemError::NotFound),

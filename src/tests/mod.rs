@@ -84,6 +84,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("heap", heap::get_tests),
     ("arc", arc::get_tests),
     ("filesystem", filesystem::get_tests),
+    ("fat_lfn", crate::fs::fat::lfn::lfn_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
     ("path", crate::userland::path::path_tests),

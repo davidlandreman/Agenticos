@@ -104,12 +104,11 @@ These are cross-cutting (not subsystem-local). Subsystem-specific known issues l
 
 ### Current Limitations
 1. **No Multitasking** — Everything runs synchronously in kernel space.
-2. **Read-Only Filesystem** — No write support implemented.
-3. **8.3 Filenames Only** — No long filename support.
-4. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
-5. **Global State** — Heavy use of `static mut` and `lazy_static`.
-6. **No User Space** — Everything runs in ring 0 (kernel mode).
-7. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.
+2. **Read-Only Filesystem** — No write support yet (in-progress per `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md`). LFN read + mixed-case lookup shipped 2026-05-16.
+3. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
+4. **Global State** — Heavy use of `static mut` and `lazy_static`.
+5. **No User Space** — Everything runs in ring 0 (kernel mode).
+6. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.
 
 ### Areas Needing Refactoring
 1. **Graphics Subsystem** — Complex relationships between display modules. (Detail in `src/graphics/CLAUDE.md`.)
