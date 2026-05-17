@@ -9,7 +9,7 @@
 
 [workspace]
 resolver = "2"
-members = ["runtime", "apps/hello"]
+members = ["runtime", "apps/hello", "apps/guilaunch"]
 
 # Release profile: small, panic-abort, LTO, strip. The output ELF must fit
 # inside the FAT16/vvfat-friendly 64 KiB ceiling and be acceptable to the U6

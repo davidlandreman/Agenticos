@@ -425,10 +425,9 @@ pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
             return GrowOutcome::NotStackGrow;
         }
 
-        // Not a stack-grow if the address is above the current bottom
-        // (page is already mapped — fault must be a permissions
-        // violation, not absence) or above the stack top entirely.
-        if addr >= p.stack_bottom || addr >= p.stack_top {
+        // Out of the stack VA range — fault is in heap/mmap/code,
+        // someone else's problem.
+        if addr >= p.stack_top {
             #[cfg(feature = "test")]
             {
                 *LAST_GROW_OUTCOME.lock() = Some(GrowOutcome::NotStackGrow);
@@ -452,6 +451,15 @@ pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
             return GrowOutcome::BudgetExhausted;
         }
 
+        // Note: we don't reject `addr >= stack_bottom` — the
+        // initially-mapped pages plus prior grows may have left gaps
+        // (e.g., a fork()-child inherits the parent's mapping but
+        // libc then writes to a page above its grown floor but
+        // below the initial mapping). Inside [stack_max_growth_floor,
+        // stack_top), any unmapped page is fair game. If the page is
+        // ALREADY mapped, map_user_region will return PageAlreadyMapped
+        // and we'll fall through to NotStackGrow below (treating the
+        // fault as a permissions violation, not absence).
         let new_page = addr & !0xFFF;
         (new_page, p.stack_top, p.stack_max_growth_floor)
         // guard drops here — release Process lock before taking mapper lock.
@@ -463,6 +471,16 @@ pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
     });
     match map_result {
         Some(Ok(_)) => {}
+        // The page was already mapped — the fault must have been a
+        // permissions violation, not absence. Fall through to the
+        // standard fault path which will surface SIGSEGV.
+        Some(Err(crate::mm::paging::UserMapError::PageAlreadyMapped)) => {
+            #[cfg(feature = "test")]
+            {
+                *LAST_GROW_OUTCOME.lock() = Some(GrowOutcome::NotStackGrow);
+            }
+            return GrowOutcome::NotStackGrow;
+        }
         _ => {
             #[cfg(feature = "test")]
             {
@@ -472,16 +490,19 @@ pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
         }
     }
 
-    // Re-acquire Process lock to update bookkeeping. If contention
-    // sneaks in here, the page is already mapped — record the leak
-    // implicitly (stack_mapped_bottom stays at its old value, so
-    // unmap_user_stack won't release this page on exit) and still
-    // return Grew so the user instruction succeeds. This is a
-    // single-frame leak, not a correctness issue.
+    // Re-acquire Process lock to update bookkeeping. The new page MAY
+    // be above the current stack_bottom (gap-filling within the
+    // initial-mapped region's footprint, see the long comment above).
+    // Only lower stack_bottom / stack_mapped_bottom when the new page
+    // actually extends the contiguous low-water mark — otherwise
+    // unmap_user_stack would walk a range that includes already-mapped
+    // pages it doesn't own.
     if let Some(mut guard) = CURRENT_PROCESS.try_lock() {
         let p = &mut *guard;
-        p.stack_bottom = new_page;
-        p.stack_mapped_bottom = new_page;
+        if new_page < p.stack_bottom {
+            p.stack_bottom = new_page;
+            p.stack_mapped_bottom = new_page;
+        }
         p.growth_faults_remaining = p.growth_faults_remaining.saturating_sub(1);
     } else {
         crate::debug_warn!(
@@ -593,22 +614,30 @@ pub fn raise_signal_on_stashed_parent(sig: i32) {
     }
 }
 
-/// Notify the stashed parent that a forked child has exited: file the
-/// zombie so `wait4` finds it, and raise SIGCHLD so the parent's
-/// pending-signal mask reflects the death. No-op when `parent_pid == 0`
-/// (top-level binary launched by the run command — no userland parent).
-///
-/// Centralizes the bookkeeping that all three exit paths share:
-/// `exit_group` (cooperative), `cleanup_user_process` (ring-3 fault),
-/// and `unimplemented_syscall_exit` (default dispatcher arm). Before
-/// the helper existed, only the cooperative path notified the parent;
-/// abnormal exits left zsh hung in `rt_sigsuspend` waiting for a
-/// SIGCHLD that never arrived.
+/// Notify the stashed parent that a forked child has exited
+/// cooperatively (via `exit_group`): file the zombie so `wait4` finds
+/// it, and raise SIGCHLD. No-op when `parent_pid == 0` (top-level
+/// binary launched by the run command — no userland parent).
 pub fn notify_parent_of_exit(pid: u32, parent_pid: u32, exit_code: i64) {
     if parent_pid == 0 {
         return;
     }
     record_zombie(pid, parent_pid, exit_code);
+    raise_signal_on_stashed_parent(crate::userland::signal::SIGCHLD);
+}
+
+/// Same as [`notify_parent_of_exit`] for children killed by a signal
+/// (fault or unimplemented syscall). The zombie is filed with the
+/// signal number so `wait4_handler` can emit a POSIX-correct
+/// `WIFSIGNALED` status word — without this, the parent's
+/// `wait4` would see `WIFEXITED` with `WEXITSTATUS = 128 + signum`,
+/// which is the shell-convention exit code, NOT the POSIX wait status
+/// (so `zsh` never prints "Segmentation fault", etc.).
+pub fn notify_parent_of_signaled_exit(pid: u32, parent_pid: u32, signum: i32, exit_code: i64) {
+    if parent_pid == 0 {
+        return;
+    }
+    record_zombie_signaled(pid, parent_pid, signum, exit_code);
     raise_signal_on_stashed_parent(crate::userland::signal::SIGCHLD);
 }
 
@@ -619,25 +648,48 @@ pub fn swap_current_process(new: Process) -> Process {
 }
 
 /// Record of a child that exited but hasn't been reaped yet.
+///
+/// `signal_termination = Some(sig)` means the child died by signal `sig`
+/// (fault or unimplemented syscall path); `exit_code` is the
+/// shell-style `128 + sig` mirror but `wait4` MUST emit the
+/// `WIFSIGNALED` encoding, not the `WIFEXITED` encoding. `None` means
+/// the child called `exit_group(code)` cooperatively.
 #[derive(Debug, Clone, Copy)]
 pub struct ZombieRecord {
     pub exit_code: i64,
     pub parent_pid: u32,
+    pub signal_termination: Option<i32>,
 }
 
 static ZOMBIES: Mutex<BTreeMap<u32, ZombieRecord>> = Mutex::new(BTreeMap::new());
 
-/// Mark `pid` as a zombie awaiting reap. Called by `_exit` / `exit_group`
-/// when the dying process has a real parent (i.e. was forked).
+/// Mark `pid` as a cooperatively-exited zombie awaiting reap. Used by
+/// `_exit` / `exit_group` when the dying process has a real parent.
 pub fn record_zombie(pid: u32, parent_pid: u32, exit_code: i64) {
-    ZOMBIES.lock().insert(pid, ZombieRecord { exit_code, parent_pid });
+    ZOMBIES.lock().insert(
+        pid,
+        ZombieRecord { exit_code, parent_pid, signal_termination: None },
+    );
+}
+
+/// Mark `pid` as a signal-killed zombie awaiting reap. Used by the
+/// abnormal-exit and unimplemented-syscall paths; `exit_code` retains
+/// the `128 + signum` shell convention for the rare consumer that
+/// reads it directly, but `wait4_handler` keys off `signal_termination`
+/// for the POSIX status word.
+pub fn record_zombie_signaled(pid: u32, parent_pid: u32, signum: i32, exit_code: i64) {
+    ZOMBIES.lock().insert(
+        pid,
+        ZombieRecord { exit_code, parent_pid, signal_termination: Some(signum) },
+    );
 }
 
 /// Reap a zombie child. If `target_pid` is positive, only that PID
 /// matches; if `target_pid == -1` (any-child semantics), the first
 /// zombie with `parent_pid == reaper` is returned. Returns `(pid,
-/// exit_code)` on success, `None` if no matching zombie exists.
-pub fn reap_zombie(target_pid: i32, reaper: u32) -> Option<(u32, i64)> {
+/// exit_code, signal_termination)` on success, `None` if no matching
+/// zombie exists.
+pub fn reap_zombie(target_pid: i32, reaper: u32) -> Option<(u32, i64, Option<i32>)> {
     let mut zombies = ZOMBIES.lock();
     let pid = if target_pid == -1 {
         zombies
@@ -655,7 +707,7 @@ pub fn reap_zombie(target_pid: i32, reaper: u32) -> Option<(u32, i64)> {
         return None;
     };
     let z = zombies.remove(&pid)?;
-    Some((pid, z.exit_code))
+    Some((pid, z.exit_code, z.signal_termination))
 }
 
 /// Counts the number of active "loading-or-running a user binary" calls. The
@@ -749,10 +801,12 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
     // duplicate stack unmap.
     with_current_process(unmap_user_stack);
 
-    // Shell convention: a process killed by signal N reports exit code
-    // 128 + N. Lets the parent's wait4 surface a non-zero, vector-
-    // distinguishable code without teaching wait4 the full POSIX
-    // WIFSIGNALED encoding (separate follow-up).
+    // Shell convention: keep `exit_code = 128 + signum` for any
+    // consumer that reads `exit_code` directly (the run command's log,
+    // tests). The parent's wait4 path now uses the POSIX
+    // WIFSIGNALED encoding via `notify_parent_of_signaled_exit` so
+    // shells (zsh) print "Segmentation fault" instead of treating 139
+    // as a normal exit status.
     let signum = signum_for_vector(reason.vector);
     let exit_code = 128 + signum as i64;
 
@@ -768,7 +822,7 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
         let p = CURRENT_PROCESS.lock();
         (p.pid, p.parent_pid)
     };
-    notify_parent_of_exit(pid, parent_pid, exit_code);
+    notify_parent_of_signaled_exit(pid, parent_pid, signum, exit_code);
 
     long_jump_to_run_or_halt();
 }
@@ -813,13 +867,14 @@ pub fn unimplemented_syscall_exit(nr: u64) -> ! {
         }
         (g.pid, g.parent_pid, g.exit_code)
     };
-    // 128 + SIGSYS so the parent's wait4 surfaces a distinguishable
-    // shell-style exit code. The kernel-internal `exit_code` field
-    // keeps the -ENOSYS sentinel for run-command logging; the value
-    // passed to the parent is what `wait4` reports.
-    let parent_visible_code = 128 + crate::userland::signal::SIGSYS as i64;
+    // POSIX wait4: encode this as a SIGSYS-killed child. The kernel-
+    // internal `exit_code` field keeps the -ENOSYS sentinel for run-
+    // command logging; the parent's wait4 sees `WIFSIGNALED` with
+    // signal SIGSYS.
+    let signum = crate::userland::signal::SIGSYS;
+    let parent_visible_code = 128 + signum as i64;
     let _ = exit_code;
-    notify_parent_of_exit(pid, parent_pid, parent_visible_code);
+    notify_parent_of_signaled_exit(pid, parent_pid, signum, parent_visible_code);
     long_jump_to_run_or_halt();
 }
 

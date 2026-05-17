@@ -434,27 +434,12 @@ fn try_mount_host_disk() {
 pub fn run() -> ! {
     debug_info!("Kernel initialization complete.");
 
-    // Register available commands with the process manager
-    debug_info!("Registering commands...");
-    crate::process::register_command("dir", crate::commands::dir::create_dir_process);
-    crate::process::register_command("cat", crate::commands::cat::create_cat_process);
-    crate::process::register_command("echo", crate::commands::echo::create_echo_process);
-    crate::process::register_command("head", crate::commands::head::create_head_process);
-    crate::process::register_command("tail", crate::commands::tail::create_tail_process);
-    crate::process::register_command("wc", crate::commands::wc::create_wc_process);
-    crate::process::register_command("touch", crate::commands::touch::create_touch_process);
-    crate::process::register_command("hexdump", crate::commands::hexdump::create_hexdump_process);
-    crate::process::register_command("time", crate::commands::time::create_time_process);
-    crate::process::register_command("grep", crate::commands::grep::create_grep_process);
-    crate::process::register_command("pwd", crate::commands::pwd::create_pwd_process);
-    crate::process::register_command("ls", crate::commands::ls::create_ls_process);
-    crate::process::register_command("painting", crate::commands::painting::create_painting_process);
-    crate::process::register_command("calc", crate::commands::calc::create_calc_process);
-    crate::process::register_command("notepad", crate::commands::notepad::create_notepad_process);
-    crate::process::register_command("tasks", crate::commands::tasks::create_tasks_process);
-    crate::process::register_command("run", crate::commands::run::create_run_process);
-    crate::process::register_command("explorer", crate::commands::explorer::create_explorer_process);
-    debug_info!("All {} commands registered successfully.", 18);
+    // GUI app launchers (painting, calc, notepad, tasks, explorer) are
+    // now invoked via the `sys_gui_launch` syscall from `GLAUNCH.ELF`
+    // (see src/commands/gui_launch_table.rs and
+    // src/userland/bin_namespace.rs). File-utility commands have been
+    // replaced by BusyBox applets. The kernel-side command registry has
+    // been removed; zsh (the default terminal shell) drives everything.
 
     // Force an initial render to display the desktop
     window::render_frame();
@@ -562,14 +547,6 @@ pub fn run() -> ! {
             // Each event signals relevant sleeping processes
             for event in input_processor.process_pending(&crate::input::INPUT_QUEUE) {
                 window::process_event(event);
-            }
-
-            // === SHELL PROCESSING ===
-            // Poll shells that have pending work (cooperative multitasking)
-            // Only processes shells with has_pending_work() == true
-            let exited_terminals = crate::commands::shell::shell_process::poll_all_shells();
-            for terminal_id in exited_terminals {
-                crate::window::terminal_factory::close_terminal(terminal_id);
             }
         }
 

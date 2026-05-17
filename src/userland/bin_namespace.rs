@@ -1,26 +1,53 @@
-//! Virtual `/bin/<applet>` namespace backed by the BusyBox multicall ELF.
+//! Virtual `/bin/<applet>` namespace backed by two multicall ELFs.
 //!
-//! BusyBox ships one `BB.ELF` binary that dispatches on `argv[0]` to ~240
-//! different applets (`ls`, `cat`, `grep`, …). The kernel exposes a
-//! virtual `/bin` directory whose entries all resolve to that single
-//! binary. `execve("/bin/ls", ["ls", ...], envp)` rewrites under the
-//! hood to `execve("/host/BB.ELF", ["ls", ...], envp)`; BusyBox's own
-//! dispatcher picks the `ls` applet from `argv[0]`.
+//! - **BusyBox** (`BB.ELF`) — one binary that dispatches on `argv[0]` to
+//!   ~240 coreutils applets (`ls`, `cat`, `grep`, …).
+//! - **GUILAUNCH** (`GLAUNCH.ELF`) — one ring-3 launcher binary that
+//!   takes an applet name in `argv[0]` and issues the
+//!   `gui_launch` syscall, spawning the matching kernel-side GUI app
+//!   (`painting`, `calc`, `notepad`, `tasks`, `explorer`).
+//!
+//! The kernel exposes a single virtual `/bin` directory whose entries
+//! resolve into either binary based on which list the name belongs to.
+//! `execve("/bin/ls", ["ls", ...], envp)` rewrites to
+//! `execve("/host/BB.ELF", ["ls", ...], envp)`; `execve("/bin/painting",
+//! ["painting"], envp)` rewrites to `execve("/host/GLAUNCH.ELF",
+//! ["painting"], envp)`. The respective multicall dispatcher then takes
+//! over.
 //!
 //! No symlinks, no directory mirror in `host_share/` — the namespace is
 //! pure kernel synthesis. Standard zsh PATH lookup (`access("/bin/ls",
 //! X_OK)` → `execve`) finds and runs the applet without zsh-side hooks.
 //!
 //! Keep [`APPLETS`] in sync with `userland/apps/busybox/busybox.config`.
-//! See the plan at
-//! `docs/plans/2026-05-16-002-feat-busybox-coreutils-userland-plan.md`
-//! (U3) for the convention. The list was generated from the BusyBox
-//! 1.36.1 build's `include/applet_tables.h` after applying our config.
+//! Keep [`GUI_APPLETS`] in sync with the match arms in
+//! `src/commands/gui_launch_table.rs::spawn_by_name` — a test in that
+//! module asserts coverage.
+//!
+//! See the plans at:
+//! - `docs/plans/2026-05-16-002-feat-busybox-coreutils-userland-plan.md`
+//! - `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`
 
-/// FAT path the kernel actually loads when a `/bin/<applet>` lookup
+/// FAT path the kernel loads when a `/bin/<busybox_applet>` lookup
 /// resolves. `build.sh` / `test.sh` stage `host_share/BB.ELF` (visible
 /// in the guest as `/host/BB.ELF`) from `userland/prebuilt/BB.ELF`.
 pub const BB_HOST_PATH: &str = "/host/BB.ELF";
+
+/// FAT path the kernel loads when a `/bin/<gui_applet>` lookup
+/// resolves. Built every run from `userland/apps/guilaunch/` (see
+/// `build.sh`) and staged into `host_share/GLAUNCH.ELF` (7.3 to fit
+/// the FAT 8.3 limit — the in-tree directory keeps the longer
+/// `guilaunch` name since FAT never sees it).
+pub const GUILAUNCH_HOST_PATH: &str = "/host/GLAUNCH.ELF";
+
+/// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
+/// MUST stay in sync with the match arms in
+/// [`crate::commands::gui_launch_table::spawn_by_name`]; a test in
+/// `gui_launch_table` asserts coverage in both directions.
+///
+/// Names MUST NOT collide with [`APPLETS`]. The disjoint-lists invariant
+/// is asserted at test time by `test_applets_and_gui_disjoint`.
+pub const GUI_APPLETS: &[&str] = &["calc", "explorer", "notepad", "painting", "tasks"];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
 /// `/bin/<name>`. Binary-searched on every lookup. MUST stay sorted —
@@ -270,21 +297,31 @@ pub const APPLETS: &[&str] = &[
     "zcat",
 ];
 
-/// True if `name` is a known BusyBox applet. O(log N) via `binary_search`.
+/// True if `name` is any known applet (BusyBox or GUI). O(log N) per
+/// list via `binary_search`.
 pub fn is_applet(name: &str) -> bool {
-    APPLETS.binary_search(&name).is_ok()
+    APPLETS.binary_search(&name).is_ok() || GUI_APPLETS.binary_search(&name).is_ok()
 }
 
-/// Look up an applet name and return the canonical `&'static str` from
-/// [`APPLETS`] (so callers can keep a static borrow rather than copying
-/// the user-supplied string).
+/// Look up an applet name in the BusyBox list and return the canonical
+/// `&'static str` (so callers can keep a static borrow rather than
+/// copying the user-supplied string). Does NOT check the GUI list —
+/// see [`lookup_gui`] for that.
 pub fn lookup(name: &str) -> Option<&'static str> {
     APPLETS.binary_search(&name).ok().map(|i| APPLETS[i])
 }
 
+/// Look up an applet name in the GUI list and return the canonical
+/// `&'static str`.
+pub fn lookup_gui(name: &str) -> Option<&'static str> {
+    GUI_APPLETS.binary_search(&name).ok().map(|i| GUI_APPLETS[i])
+}
+
 /// If `normalized` is `/bin/<applet>` for a known applet, return
-/// `(BB_HOST_PATH, applet_name)`. Returns `None` for anything else,
-/// including `/bin`, `/bin/`, `/bin/unknown`, `/bin/ls/extra`.
+/// `(host_binary_path, applet_name)` — either `(BB_HOST_PATH, name)`
+/// for BusyBox applets or `(GUILAUNCH_HOST_PATH, name)` for GUI apps.
+/// Returns `None` for anything else, including `/bin`, `/bin/`,
+/// `/bin/unknown`, `/bin/ls/extra`.
 ///
 /// Caller MUST pass a `normalize_path`-normalized string. Raw user
 /// input must run through `normalize_path` first so `/bin/../etc/shadow`
@@ -296,8 +333,70 @@ pub fn apply_bin_rewrite(normalized: &str) -> Option<(&'static str, &'static str
     if after.is_empty() || after.contains('/') {
         return None;
     }
-    let applet = lookup(after)?;
-    Some((BB_HOST_PATH, applet))
+    if let Some(applet) = lookup(after) {
+        return Some((BB_HOST_PATH, applet));
+    }
+    if let Some(applet) = lookup_gui(after) {
+        return Some((GUILAUNCH_HOST_PATH, applet));
+    }
+    None
+}
+
+/// Iterate every `(name, d_type)` entry in the merged `/bin` directory
+/// in sorted order, so `getdents64` produces the same shape it would if
+/// `/bin` were a real FAT directory. All entries are regular files
+/// (`DT_REG = 8`).
+///
+/// Yields BusyBox and GUI applets together in lexicographic order. Used
+/// by `getdents64_virtual_bin` and any directory-listing tool (`ls
+/// /bin`, BusyBox `find`).
+///
+/// Total entry count: `APPLETS.len() + GUI_APPLETS.len()`.
+pub fn merged_bin_entries() -> impl Iterator<Item = &'static str> {
+    // Both source lists are individually sorted and assumed disjoint
+    // (asserted in tests). Two-pointer merge yields a sorted stream
+    // without allocation.
+    MergedBinIter { i: 0, j: 0 }
+}
+
+struct MergedBinIter {
+    i: usize,
+    j: usize,
+}
+
+impl Iterator for MergedBinIter {
+    type Item = &'static str;
+    fn next(&mut self) -> Option<&'static str> {
+        let a = APPLETS.get(self.i).copied();
+        let b = GUI_APPLETS.get(self.j).copied();
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                if x <= y {
+                    self.i += 1;
+                    Some(x)
+                } else {
+                    self.j += 1;
+                    Some(y)
+                }
+            }
+            (Some(x), None) => {
+                self.i += 1;
+                Some(x)
+            }
+            (None, Some(y)) => {
+                self.j += 1;
+                Some(y)
+            }
+            (None, None) => None,
+        }
+    }
+}
+
+/// Total count of entries in the synthesized `/bin` directory. Used by
+/// `stat_virtual_bin` for `st_nlink` and by `getdents64_virtual_bin`
+/// for the EOF cursor.
+pub fn merged_bin_entry_count() -> usize {
+    APPLETS.len() + GUI_APPLETS.len()
 }
 
 /// True when `normalized` is exactly `/bin` (the synthesized directory
@@ -452,6 +551,67 @@ mod tests_internal {
         assert!(!is_bin_dir("/"));
     }
 
+    fn test_gui_applets_sorted() {
+        for win in GUI_APPLETS.windows(2) {
+            assert!(
+                win[0] < win[1],
+                "GUI_APPLETS must be sorted; offender: {:?} >= {:?}",
+                win[0],
+                win[1],
+            );
+        }
+    }
+
+    /// GUI applet names must not collide with BusyBox applet names — the
+    /// dispatch order in `apply_bin_rewrite` checks BusyBox first, so a
+    /// collision would silently shadow the GUI app.
+    fn test_applets_and_gui_disjoint() {
+        for &gui in GUI_APPLETS {
+            assert!(
+                !APPLETS.binary_search(&gui).is_ok(),
+                "GUI applet {:?} collides with a BusyBox applet name",
+                gui,
+            );
+        }
+    }
+
+    fn test_apply_bin_rewrite_dispatches_gui_app() {
+        let (path, applet) = apply_bin_rewrite("/bin/painting").expect("must resolve");
+        assert_eq!(path, "/host/GLAUNCH.ELF");
+        assert_eq!(applet, "painting");
+    }
+
+    fn test_apply_bin_rewrite_busybox_still_resolves() {
+        // Regression guard: making `apply_bin_rewrite` GUI-aware MUST NOT
+        // break BusyBox applet resolution.
+        let (path, applet) = apply_bin_rewrite("/bin/ls").expect("must resolve");
+        assert_eq!(path, "/host/BB.ELF");
+        assert_eq!(applet, "ls");
+    }
+
+    fn test_is_applet_covers_both_lists() {
+        assert!(is_applet("ls"));
+        assert!(is_applet("painting"));
+        assert!(!is_applet("not-a-real-applet"));
+    }
+
+    fn test_merged_bin_entries_sorted_and_complete() {
+        let entries: alloc::vec::Vec<&str> = merged_bin_entries().collect();
+        assert_eq!(entries.len(), merged_bin_entry_count());
+        assert_eq!(entries.len(), APPLETS.len() + GUI_APPLETS.len());
+        for win in entries.windows(2) {
+            assert!(
+                win[0] <= win[1],
+                "merged /bin entries out of order: {:?} > {:?}",
+                win[0],
+                win[1],
+            );
+        }
+        // Spot-check that both lists' entries are present.
+        assert!(entries.contains(&"ls"), "merged stream missing BusyBox 'ls'");
+        assert!(entries.contains(&"painting"), "merged stream missing GUI 'painting'");
+    }
+
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &[
             &test_applets_sorted,
@@ -466,6 +626,12 @@ mod tests_internal {
             &test_dispatch_access_bin_ls_succeeds,
             &test_dispatch_access_unknown_applet_returns_enoent,
             &test_dispatch_stat_bin_ls_returns_regular_file,
+            &test_gui_applets_sorted,
+            &test_applets_and_gui_disjoint,
+            &test_apply_bin_rewrite_dispatches_gui_app,
+            &test_apply_bin_rewrite_busybox_still_resolves,
+            &test_is_applet_covers_both_lists,
+            &test_merged_bin_entries_sorted_and_complete,
         ]
     }
 }

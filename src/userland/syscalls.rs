@@ -1084,21 +1084,24 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     let normalized_path = crate::userland::lifecycle::with_current_process(|p| {
         crate::userland::path::normalize_path(&p.cwd, &raw_path)
     });
-    // Virtual /bin namespace: rewrite the load path to BB.ELF AND
-    // override argv[0] so BusyBox's multicall dispatcher selects the
-    // requested applet. Linux preserves the caller's argv[0] verbatim;
-    // we deviate here because a multicall binary needs argv[0] to
-    // carry the applet name. Documented in src/userland/bin_namespace.rs.
-    let bin_applet =
-        crate::userland::bin_namespace::apply_bin_rewrite(&normalized_path).map(|(_, n)| n);
-    let resolved_path = if bin_applet.is_some() {
-        String::from(crate::userland::bin_namespace::BB_HOST_PATH)
-    } else {
-        // U4: same `/etc/...` rewrite that resolve_user_path applies — if
-        // someone ever does `execve("/etc/something")` it lands at the
-        // FAT-staged location. Cosmetic for execve in practice (zsh
-        // execs binaries under /HOST/, not /etc/), but consistent.
-        crate::userland::path::apply_fs_rewrite(&normalized_path)
+    // Virtual /bin namespace: rewrite the load path to either BB.ELF
+    // (BusyBox applets) or GLAUNCH.ELF (kernel-side GUI apps) AND
+    // override argv[0] so the chosen multicall binary's dispatcher picks
+    // the requested applet. Linux preserves the caller's argv[0]
+    // verbatim; we deviate here because both multicall binaries need
+    // argv[0] to carry the applet name. Documented in
+    // src/userland/bin_namespace.rs.
+    let bin_rewrite = crate::userland::bin_namespace::apply_bin_rewrite(&normalized_path);
+    let bin_applet = bin_rewrite.map(|(_, n)| n);
+    let resolved_path = match bin_rewrite {
+        Some((host_path, _)) => String::from(host_path),
+        None => {
+            // U4: same `/etc/...` rewrite that resolve_user_path applies — if
+            // someone ever does `execve("/etc/something")` it lands at the
+            // FAT-staged location. Cosmetic for execve in practice (zsh
+            // execs binaries under /HOST/, not /etc/), but consistent.
+            crate::userland::path::apply_fs_rewrite(&normalized_path)
+        }
     };
     let argv_strings: Vec<String> = match copy_user_cstr_array(argv_ptr) {
         Ok(v) => v,
@@ -1587,12 +1590,23 @@ pub fn wait4_handler(args: &mut SyscallArgs) -> i64 {
 
     let me = crate::userland::lifecycle::current_pid();
     match crate::userland::lifecycle::reap_zombie(target, me) {
-        Some((pid, code)) => {
+        Some((pid, code, signal_termination)) => {
             if status_ptr != 0 {
                 if let Err(e) = validate_user_slice(status_ptr, 4) {
                     return e;
                 }
-                let status = ((code as u32) & 0xFF) << 8;
+                // POSIX wait status encoding:
+                //   Exited normally: bits 8..15 = exit code, bits 0..7 = 0
+                //                    → WIFEXITED == true
+                //   Killed by signal: bits 0..6 = signum, bit 7 = 0
+                //                    → WIFSIGNALED == true (lo 7 bits 1..=126)
+                // Mixing the two is what made zsh print exit codes for
+                // segfaults; key off the signal-termination flag from the
+                // zombie record.
+                let status = match signal_termination {
+                    Some(sig) => (sig as u32) & 0x7F,
+                    None => ((code as u32) & 0xFF) << 8,
+                };
                 unsafe { core::ptr::write(status_ptr as *mut u32, status); }
             }
             pid as i64
@@ -1843,9 +1857,10 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
 
     // Virtual /bin namespace: opening /bin returns a directory FD that
     // getdents64 unpacks into the applet list; opening /bin/<applet>
-    // returns a regular File backed by BB.ELF (so tools that read or
-    // mmap their argv[0] see the BusyBox binary).
-    use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir, BB_HOST_PATH};
+    // returns a regular File backed by the underlying multicall binary
+    // (BB.ELF or GLAUNCH.ELF) so tools that read or mmap their
+    // argv[0] see something coherent.
+    use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir};
     if is_bin_dir(&path) {
         return with_fd_table_mut(|t| {
             t.alloc(FdSlot::VirtualBinDir { cursor: 0, cloexec })
@@ -1853,8 +1868,8 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
         .map(|fd| fd as i64)
         .unwrap_or(EMFILE);
     }
-    if apply_bin_rewrite(&path).is_some() {
-        let handle = match crate::fs::file_handle::File::open_read(BB_HOST_PATH) {
+    if let Some((host_path, _)) = apply_bin_rewrite(&path) {
+        let handle = match crate::fs::file_handle::File::open_read(host_path) {
             Ok(h) => h,
             Err(ref e) => return map_file_err(e),
         };
@@ -2089,9 +2104,11 @@ pub fn stat_handler(args: &mut SyscallArgs) -> i64 {
 
 /// Synthesize a `LinuxStat` for the virtual `/bin` namespace. Returns
 /// `Some(st)` if `path` is `/bin` (a directory) or `/bin/<applet>` (a
-/// regular file shadowing `BB.ELF`); `None` for any other path.
+/// regular file shadowing the appropriate multicall binary — `BB.ELF`
+/// for BusyBox applets, `GLAUNCH.ELF` for GUI apps); `None` for any
+/// other path.
 fn stat_virtual_bin(path: &str) -> Option<LinuxStat> {
-    use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir, APPLETS, BB_HOST_PATH};
+    use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir, merged_bin_entry_count};
     if is_bin_dir(path) {
         let mut st = LinuxStat::default();
         st.st_mode = S_IFDIR | PERM_RX_ALL;
@@ -2104,16 +2121,17 @@ fn stat_virtual_bin(path: &str) -> Option<LinuxStat> {
         st.st_blksize = 4096;
         return Some(st);
     }
-    if apply_bin_rewrite(path).is_some() {
-        // Stat shadows BB.ELF. Pull its size off the FAT mount so tools
-        // that mmap their argv[0] see a sensible length. If BB.ELF isn't
-        // staged the kernel returns a zero-size record rather than
-        // failing — applet PATH lookup still works (access() returns 0)
-        // and execve() will report the real error when it fails to load.
-        let size = crate::fs::metadata(BB_HOST_PATH).map(|m| m.size).unwrap_or(0);
+    if let Some((host_path, _)) = apply_bin_rewrite(path) {
+        // Stat shadows the underlying multicall binary. Pull its size
+        // off the FAT mount so tools that mmap their argv[0] see a
+        // sensible length. If the binary isn't staged the kernel
+        // returns a zero-size record rather than failing — applet PATH
+        // lookup still works (access() returns 0) and execve() will
+        // report the real error when it fails to load.
+        let size = crate::fs::metadata(host_path).map(|m| m.size).unwrap_or(0);
         let mut st = LinuxStat::default();
         st.st_mode = S_IFREG | PERM_RX_ALL;
-        st.st_nlink = APPLETS.len() as u64;
+        st.st_nlink = merged_bin_entry_count() as u64;
         st.st_size = size as i64;
         st.st_blksize = 4096;
         st.st_blocks = (st.st_size + 511) / 512;
@@ -2476,13 +2494,13 @@ fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
 ///   - 1..=APPLETS.len() → next applet index to emit (1 = first applet)
 ///   - APPLETS.len() + 1 → EOF
 fn getdents64_virtual_bin(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
-    use crate::userland::bin_namespace::APPLETS;
+    use crate::userland::bin_namespace::{merged_bin_entries, merged_bin_entry_count};
 
     let start = with_fd_table_mut(|t| match t.get(fd) {
         Some(FdSlot::VirtualBinDir { cursor, .. }) => Some(*cursor),
         _ => None,
     })?;
-    let total_records = APPLETS.len() + 2; // ".", ".." + applets
+    let total_records = merged_bin_entry_count() + 2; // ".", ".." + entries
     if start >= total_records {
         // EOF on this directory.
         return Some(0);
@@ -2493,11 +2511,16 @@ fn getdents64_virtual_bin(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
     // Synthetic inode numbers — keep them deterministic and non-zero.
     let parent_seed = fnv1a_64(0xcbf2_9ce4_8422_2325, b"/bin");
 
+    // Materialize merged entries once so we can index by cursor without
+    // re-walking the iterator. Two ~150-entry &'static lists; allocation
+    // is negligible vs. the syscall cost.
+    let entries: alloc::vec::Vec<&'static str> = merged_bin_entries().collect();
+
     while cursor < total_records {
         let (name, d_type) = match cursor {
             0 => (".".as_bytes(), DT_DIR),
             1 => ("..".as_bytes(), DT_DIR),
-            n => (APPLETS[n - 2].as_bytes(), DT_REG),
+            n => (entries[n - 2].as_bytes(), DT_REG),
         };
         let reclen = align_up_8(DIRENT_HEADER_SIZE + name.len() + 1);
         if staging.len() + reclen > cap {
@@ -3044,4 +3067,66 @@ pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
         );
     }
     0
+}
+
+/// AgenticOS-internal syscall `gui_launch(name_ptr, name_len) -> 0 | -errno`.
+///
+/// Looks `name` up in the kernel-side GUI applet table
+/// (`crate::commands::gui_launch_table::spawn_by_name`) and spawns the
+/// matching kernel-side GUI app process. Invoked by `GLAUNCH.ELF`
+/// (ring 3) — the user-typed `painting` in zsh resolves via the
+/// `/bin/<gui_applet>` rewrite in [`crate::userland::bin_namespace`] to
+/// the GUILAUNCH multicall binary with `argv[0] = "painting"`, which in
+/// turn issues this syscall.
+///
+/// `name_len` is capped at 32 to bound the user copy. Unknown applets
+/// return `-ENOENT`; spawn failure surfaces as the underlying errno.
+pub fn gui_launch_handler(args: &mut SyscallArgs) -> i64 {
+    const MAX_NAME_LEN: u64 = 32;
+    let name_ptr = args.rdi;
+    let name_len = args.rsi;
+
+    crate::debug_info!(
+        "[gui_launch] enter: name_ptr={:#x}, name_len={}",
+        name_ptr,
+        name_len,
+    );
+
+    if name_ptr == 0 {
+        crate::debug_warn!("[gui_launch] EFAULT: null name_ptr");
+        return EFAULT;
+    }
+    if name_len == 0 || name_len > MAX_NAME_LEN {
+        crate::debug_warn!("[gui_launch] EINVAL: name_len={} out of range", name_len);
+        return EINVAL;
+    }
+    if let Err(e) = validate_user_slice(name_ptr, name_len) {
+        crate::debug_warn!("[gui_launch] validate_user_slice failed: errno={}", e);
+        return e;
+    }
+
+    let mut bytes = alloc::vec::Vec::with_capacity(name_len as usize);
+    for i in 0..name_len {
+        let b = unsafe { core::ptr::read_volatile((name_ptr + i) as *const u8) };
+        bytes.push(b);
+    }
+    let name = match core::str::from_utf8(&bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            crate::debug_warn!("[gui_launch] EINVAL: name is not valid UTF-8");
+            return EINVAL;
+        }
+    };
+
+    crate::debug_info!("[gui_launch] name={:?}, dispatching to spawn_by_name", name);
+    match crate::commands::gui_launch_table::spawn_by_name(name) {
+        Ok(pid) => {
+            crate::debug_info!("[gui_launch] spawned pid={:?}, returning 0", pid);
+            0
+        }
+        Err(e) => {
+            crate::debug_warn!("[gui_launch] spawn_by_name failed: errno={}", e);
+            e
+        }
+    }
 }

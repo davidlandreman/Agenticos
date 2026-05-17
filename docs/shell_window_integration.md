@@ -1,5 +1,13 @@
 # Shell Window Integration Plan
 
+> **Historical.** This document described the integration of the
+> kernel-side `ShellProcess` (since deleted) with the window system.
+> As of 2026-05-16 the terminal launches ring-3 zsh
+> (`/host/ZSH.ELF`) directly — see
+> `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`
+> and `src/window/terminal_factory.rs::spawn_zsh_for_terminal`. Kept
+> for context on the prior design.
+
 ## Overview
 
 The AgenticOS shell currently blocks the window system's render loop, preventing proper window updates and mouse interaction. This document outlines the steps needed to integrate the shell with the window system to create a fully interactive terminal experience.

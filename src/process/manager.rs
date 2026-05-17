@@ -1,42 +1,46 @@
+//! Process-manager singleton.
+//!
+//! Currently the only state it carries is the *active stdin buffer* — a
+//! per-(focused-terminal) producer/consumer hook the keyboard driver
+//! uses to deliver characters into the in-kernel `read` path used by
+//! kernel-side processes (the userland ring-3 stdin queue lives in
+//! `src/userland/stdin.rs` separately).
+//!
+//! The kernel-side shell command registry (`register_command`,
+//! `execute_command`, …) was removed when zsh became the default
+//! terminal shell; see
+//! `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`.
+//! GUI app launches now go through `sys_gui_launch` →
+//! `src/commands/gui_launch_table.rs`.
+
 use spin::Mutex;
 use lazy_static::lazy_static;
 use crate::lib::arc::Arc;
 use crate::stdlib::io::StdinBuffer;
-use crate::process::process::RunnableProcess;
-use crate::window::WindowId;
-use alloc::{vec::Vec, string::String, boxed::Box, collections::BTreeMap, format};
 
 lazy_static! {
     static ref PROCESS_MANAGER: Mutex<ProcessManager> = Mutex::new(ProcessManager::new());
 }
 
-/// Command factory function type - creates a new instance of a command process
-pub type CommandFactory = fn(args: Vec<String>) -> Box<dyn RunnableProcess>;
-
-/// Result type for process execution
-pub type ProcessResult = Result<(), String>;
-
 pub struct ProcessManager {
     active_stdin_buffer: Option<Arc<Mutex<StdinBuffer>>>,
-    command_registry: BTreeMap<String, CommandFactory>,
 }
 
 impl ProcessManager {
     const fn new() -> Self {
         Self {
             active_stdin_buffer: None,
-            command_registry: BTreeMap::new(),
         }
     }
-    
+
     pub fn set_active_stdin(&mut self, buffer: Arc<Mutex<StdinBuffer>>) {
         self.active_stdin_buffer = Some(buffer);
     }
-    
+
     pub fn clear_active_stdin(&mut self) {
         self.active_stdin_buffer = None;
     }
-    
+
     pub fn push_keyboard_input(&self, ch: char) {
         crate::debug_trace!("ProcessManager::push_keyboard_input called with '{}'", ch);
         if let Some(ref buffer) = self.active_stdin_buffer {
@@ -45,100 +49,6 @@ impl ProcessManager {
         } else {
             crate::debug_debug!("No active stdin buffer registered");
         }
-    }
-    
-    /// Register a command with the process manager
-    pub fn register_command(&mut self, name: &str, factory: CommandFactory) {
-        self.command_registry.insert(String::from(name), factory);
-        crate::debug_info!("Registered command: {}", name);
-    }
-    
-    /// Execute a command by name with arguments
-    ///
-    /// Spawns the command as a separate process that runs via the scheduler.
-    /// The terminal_id is used to route output to the correct terminal.
-    pub fn execute_command(&self, command_line: &str, terminal_id: Option<WindowId>) -> ProcessResult {
-        let parts: Vec<&str> = command_line.trim().split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(()); // Empty command, do nothing
-        }
-
-        let command_name = parts[0];
-        let args: Vec<String> = parts[1..].iter().map(|s| String::from(*s)).collect();
-
-        if let Some(factory) = self.command_registry.get(command_name) {
-            crate::debug_info!("Spawning command: {} with {} args", command_name, args.len());
-
-            // Create the process object
-            let mut process = factory(args);
-            let process_name = String::from(process.get_name());
-
-            // Spawn as a separate process
-            crate::debug_info!("execute_command: about to call spawn_process for '{}'", process_name);
-            let _pid = crate::process::spawn_process(
-                process_name.clone(),
-                terminal_id,
-                move || {
-                    // Set up output routing to the correct terminal
-                    if let Some(tid) = terminal_id {
-                        crate::window::terminal::set_current_output_terminal(tid);
-                    }
-
-                    // Run the process
-                    process.run();
-
-                    // Clear output routing
-                    crate::window::terminal::clear_current_output_terminal();
-
-                    // Notify the shell so it can emit its next prompt below the
-                    // command's output (instead of before it).
-                    if let Some(tid) = terminal_id {
-                        crate::commands::shell::shell_process::notify_command_finished(tid);
-                    }
-                },
-            );
-            crate::debug_info!("execute_command: spawn_process returned for '{}'", process_name);
-
-            Ok(())
-        } else {
-            Err(format!("Unknown command: {}", command_name))
-        }
-    }
-
-    /// Execute a command synchronously (blocking)
-    ///
-    /// Runs the command directly without spawning a process.
-    /// Used by commands like `time` that need to measure execution.
-    pub fn execute_command_sync(&self, command_line: &str) -> ProcessResult {
-        let parts: Vec<&str> = command_line.trim().split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(()); // Empty command, do nothing
-        }
-
-        let command_name = parts[0];
-        let args: Vec<String> = parts[1..].iter().map(|s| String::from(*s)).collect();
-
-        if let Some(factory) = self.command_registry.get(command_name) {
-            crate::debug_info!("Executing command synchronously: {} with {} args", command_name, args.len());
-
-            // Run the command synchronously
-            let mut process = factory(args);
-            process.run();
-
-            Ok(())
-        } else {
-            Err(format!("Unknown command: {}", command_name))
-        }
-    }
-    
-    /// Get list of registered commands
-    pub fn list_commands(&self) -> Vec<String> {
-        self.command_registry.keys().cloned().collect()
-    }
-    
-    /// Check if a command is registered
-    pub fn has_command(&self, name: &str) -> bool {
-        self.command_registry.contains_key(name)
     }
 }
 
@@ -152,31 +62,4 @@ pub fn clear_active_stdin() {
 
 pub fn push_keyboard_input(ch: char) {
     PROCESS_MANAGER.lock().push_keyboard_input(ch);
-}
-
-/// Register a command globally
-pub fn register_command(name: &str, factory: CommandFactory) {
-    PROCESS_MANAGER.lock().register_command(name, factory);
-}
-
-/// Execute a command globally (spawns as a process)
-///
-/// Commands are spawned as separate processes and run by the scheduler.
-pub fn execute_command(command_line: &str, terminal_id: Option<WindowId>) -> ProcessResult {
-    PROCESS_MANAGER.lock().execute_command(command_line, terminal_id)
-}
-
-/// Execute a command synchronously (blocking)
-pub fn execute_command_sync(command_line: &str) -> ProcessResult {
-    PROCESS_MANAGER.lock().execute_command_sync(command_line)
-}
-
-/// Get list of all registered commands
-pub fn list_commands() -> Vec<String> {
-    PROCESS_MANAGER.lock().list_commands()
-}
-
-/// Check if a command is registered
-pub fn has_command(name: &str) -> bool {
-    PROCESS_MANAGER.lock().has_command(name)
 }

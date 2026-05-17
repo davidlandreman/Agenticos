@@ -286,8 +286,26 @@ fn close_start_menu() {
     }
 }
 
-/// Spawn a new terminal
+/// Spawn a new terminal.
+///
+/// The kernel is single-user-app-synchronous (D5): only one ring-3
+/// process can be active at a time. zsh is a ring-3 process, so each
+/// open terminal holds the slot. Opening a second terminal while one
+/// is still open would create a window, immediately fail to launch
+/// zsh, and close the window — confusing. Refuse upfront with a
+/// dialog instead.
 fn spawn_terminal() {
+    if crate::userland::lifecycle::user_active() {
+        crate::debug_warn!(
+            "GUIShell: refusing second terminal — a user app (likely zsh) is already running"
+        );
+        crate::window::dialogs::show_error(
+            "Cannot open terminal",
+            "Only one ring-3 process can run at a time in this kernel. \
+             Close the existing terminal first.",
+        );
+        return;
+    }
     match crate::window::terminal_factory::spawn_terminal_with_shell() {
         Ok(instance) => {
             crate::debug_info!("GUIShell: Spawned terminal {:?}", instance.terminal_id);
@@ -298,27 +316,27 @@ fn spawn_terminal() {
     }
 }
 
-/// Spawn the painting application
+/// Spawn the painting application via the kernel-side GUI launch table.
+/// Same path the ring-3 `sys_gui_launch` syscall uses, just invoked
+/// from kernel context (no ring-3 round-trip).
 fn spawn_painting() {
     crate::debug_info!("GUIShell: Spawning painting...");
-    if let Err(e) = crate::process::execute_command("painting", None) {
-        crate::debug_warn!("GUIShell: Failed to spawn painting: {:?}", e);
+    if let Err(e) = crate::commands::gui_launch_table::spawn_by_name("painting") {
+        crate::debug_warn!("GUIShell: Failed to spawn painting: errno={}", e);
     }
 }
 
-/// Spawn the calculator
 fn spawn_calc() {
     crate::debug_info!("GUIShell: Spawning calc...");
-    if let Err(e) = crate::process::execute_command("calc", None) {
-        crate::debug_warn!("GUIShell: Failed to spawn calc: {:?}", e);
+    if let Err(e) = crate::commands::gui_launch_table::spawn_by_name("calc") {
+        crate::debug_warn!("GUIShell: Failed to spawn calc: errno={}", e);
     }
 }
 
-/// Spawn notepad
 fn spawn_notepad() {
     crate::debug_info!("GUIShell: Spawning notepad...");
-    if let Err(e) = crate::process::execute_command("notepad", None) {
-        crate::debug_warn!("GUIShell: Failed to spawn notepad: {:?}", e);
+    if let Err(e) = crate::commands::gui_launch_table::spawn_by_name("notepad") {
+        crate::debug_warn!("GUIShell: Failed to spawn notepad: errno={}", e);
     }
     crate::debug_info!("GUIShell: spawn_notepad() completed");
 }

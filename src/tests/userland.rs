@@ -1254,14 +1254,22 @@ fn drive_zsh(argv_after_path: &[&str]) -> bool {
         crate::debug_info!("[u8] {} not staged; skipping", path);
         return false;
     }
-    let mut tokens: alloc::vec::Vec<String> = alloc::vec::Vec::new();
-    tokens.push(String::from("--trace"));
-    tokens.push(String::from(path));
+    // Enable trace mode for the duration of this launch so unknown
+    // syscalls log + return -ENOSYS instead of terminating the binary.
+    // Used to match the prior `RunProcess --trace` behavior.
+    let prior_trace = crate::userland::abi::is_trace_mode();
+    crate::userland::abi::set_trace_mode(true);
+    crate::userland::abi::reset_unknown_syscall_trace();
+
+    let mut argv_owned: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    argv_owned.push(String::from(path));
     for a in argv_after_path {
-        tokens.push(String::from(*a));
+        argv_owned.push(String::from(*a));
     }
-    let mut p = crate::commands::run::RunProcess::new_with_args(tokens);
-    p.run();
+    let argv_borrows: alloc::vec::Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
+    let _ = crate::userland::launcher::launch_user_binary(path, &argv_borrows, &[]);
+
+    crate::userland::abi::set_trace_mode(prior_trace);
     let still_active = with_active_user(|au| au.image.is_some());
     assert!(!still_active, "active-user slot should be empty after zsh run() returns");
     true
@@ -2239,8 +2247,10 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
     );
 
     // A zombie record exists for pid 101 → parent 100, exit code 139.
+    // (No signal_termination here — this test exercises the
+    // cooperative-exit path via notify_parent_of_exit.)
     let reaped = reap_zombie(101, 100).expect("zombie filed for child 101");
-    assert_eq!(reaped, (101, 139));
+    assert_eq!(reaped, (101, 139, None));
 
     // Cleanup: restore original current process.
     let _ = swap_current_process(saved);

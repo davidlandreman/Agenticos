@@ -113,6 +113,14 @@ if [ "$SKIP_USERLAND" -eq 0 ]; then
             mv -f "$TMP" "$STAGED"
             echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
         fi
+        USER_GUILAUNCH="userland/target/x86_64-unknown-none/release/guilaunch"
+        if [ -f "$USER_GUILAUNCH" ]; then
+            STAGED="$HOST_SHARE_STAGE/GLAUNCH.ELF"
+            TMP="$HOST_SHARE_STAGE/.GLAUNCH.ELF.tmp.$$"
+            cp "$USER_GUILAUNCH" "$TMP"
+            mv -f "$TMP" "$STAGED"
+            echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
+        fi
     else
         echo "Warning: userland build failed; continuing without HELLO.ELF"
     fi
