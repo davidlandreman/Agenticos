@@ -9,6 +9,16 @@
 //! We don't restore state between tests; the order in `get_tests()`
 //! matters. Each test names a cluster range it owns to minimize
 //! cross-test interference.
+//!
+//! Cross-module runner caveat: when this module runs in the SAME boot
+//! as `filesystem` (`./test.sh fat_write filesystem`), the kernel's
+//! wrapper-mounted FatFilesystem at /data and the `SHARED_FS`
+//! singleton below are TWO separate instances on the same disk. Each
+//! has its own cluster-allocator hint and short-name cache, so a
+//! create via one doesn't show up in the other's cache, and find can
+//! miss entries written via the other instance. Each module passes
+//! cleanly on its own; the combined run is a test-runner ordering
+//! concern, not a correctness bug in either path.
 
 use crate::debug_info;
 use crate::drivers::ide::{IDE_CONTROLLER, IdeBlockDevice, IdeChannel, IdeDrive};
@@ -248,11 +258,16 @@ fn shared_data_fs() -> &'static FatFilesystem<'static> {
         let leaked_dev: &'static IdeBlockDevice =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(dev));
         let fs = FatFilesystem::new(leaked_dev).expect("construct FatFilesystem on /data");
-        // First call sees a fresh-mkfs clean bit; subsequent calls
-        // hit the singleton early and skip this path. force=false is
-        // fine because we never reach here twice in the same boot.
-        fs.enable_writes(false)
-            .expect("enable writes (dirty bit clean post-mkfs)");
+        // force=true here: the kernel's main /data mount (via
+        // auto_mount_writable in kernel.rs) ALSO holds a writable
+        // FatFilesystem on this disk and has already cleared the
+        // dirty bit. This test-side FatFilesystem is a SECOND
+        // instance; it would otherwise refuse via the C-2 gate
+        // because the disk's dirty bit is now "dirty" (set by the
+        // first instance). QEMU snapshot=on means the disk state
+        // resets per boot, so this is safe for tests.
+        fs.enable_writes(true)
+            .expect("enable writes (force=true for test isolation)");
         let fs_static: &'static FatFilesystem<'static> =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(fs));
         SHARED_FS = Some(fs_static);

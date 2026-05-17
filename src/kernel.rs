@@ -78,6 +78,10 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // filesystem tests assert /host is mounted, so we keep it in test mode.
     try_mount_host_disk();
     try_mount_data_disk();
+    // Phase D U11: now that /data is mounted (if present), restore
+    // the overlay's upper-layer tmpfs from any persistent state.
+    // No-op when /data is missing or has no prior sync.
+    restore_overlay_upper_from_data();
 
     if let Some(rsdp_addr) = rsdp_addr {
         debug_debug!("RSDP address: 0x{:016x}", rsdp_addr);
@@ -506,6 +510,54 @@ fn try_mount_data_disk() {
     }
 }
 
+
+/// Phase D U11: after /data is mounted, find the overlay mounted at
+/// `/` and ask it to hydrate its upper-layer tmpfs from any prior
+/// sync output. Silently no-ops when /data isn't writable (no
+/// persistence target) or no prior state is present.
+fn restore_overlay_upper_from_data() {
+    use crate::fs::filesystem::Filesystem;
+    use crate::fs::overlay::Overlay;
+    use crate::fs::vfs::get_vfs;
+
+    // Confirm /data is writable; otherwise restoring is moot since
+    // future syncs won't be able to write either.
+    if !get_vfs()
+        .find_filesystem("/data")
+        .map(|(fs, _)| !fs.is_read_only())
+        .unwrap_or(false)
+    {
+        debug_info!("overlay restore: /data not writable; skipping persistence restore");
+        return;
+    }
+
+    // Find the overlay at /.
+    let root_mount = get_vfs()
+        .list_mounts()
+        .find(|m| m.path == "/" && m.filesystem.name() == "overlay");
+    let Some(mount) = root_mount else {
+        debug_info!("overlay restore: / is not an overlay; skipping");
+        return;
+    };
+
+    // Narrow the trait object to a concrete Overlay reference. We
+    // built this mount ourselves in vfs::mount_overlay_root, so the
+    // name-based guard + downcast is sound.
+    let overlay_ptr = mount.filesystem as *const dyn Filesystem as *const Overlay;
+    let overlay: &Overlay = unsafe { &*overlay_ptr };
+    let upper_dyn = overlay.upper();
+    if upper_dyn.name() != "tmpfs" {
+        debug_info!("overlay restore: upper isn't tmpfs; skipping");
+        return;
+    }
+    let upper_ptr = upper_dyn as *const dyn Filesystem as *const crate::fs::tmpfs::Tmpfs;
+    let upper: &crate::fs::tmpfs::Tmpfs = unsafe { &*upper_ptr };
+
+    match crate::fs::overlay::sync::restore_upper_from_disk(upper) {
+        Ok(n) => debug_info!("overlay restore: hydrated upper with {} entries from /data", n),
+        Err(e) => debug_warn!("overlay restore: failed: {:?}", e),
+    }
+}
 
 pub fn run() -> ! {
     debug_info!("Kernel initialization complete.");

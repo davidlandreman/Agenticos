@@ -27,6 +27,16 @@ pub enum TmpNode {
     Dir(DirBody),
 }
 
+impl Tmpfs {
+    /// Expose the root directory body so the overlay-persistence
+    /// path (Phase D U11) can recursively walk + serialize the entire
+    /// tree. Returns a clone of the Arc so the caller can lock it
+    /// without holding any tmpfs-internal locks.
+    pub fn root_dir(&self) -> DirBody {
+        Arc::clone(&self.root)
+    }
+}
+
 impl TmpNode {
     pub fn is_dir(&self) -> bool {
         matches!(self, TmpNode::Dir(_))

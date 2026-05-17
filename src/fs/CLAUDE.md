@@ -39,10 +39,10 @@ Cleanup is automatic when the last `Arc` reference drops.
 
 ## Current limitations
 
-- **`/` writes are RAM-only.** The boot root is mounted as `overlay(upper=tmpfs, lower=FAT)`. Reads pass through to FAT; writes land in the tmpfs upper and **do not survive reboot**. Persistence (flush the upper to a writable disk on `sync`) is Phase D.
-- **No persistent on-disk writes yet.** Phase C (FAT writes at `/data` on a separate disk) and Phase D (overlay persistence) are not implemented.
-- **FAT only on disk.** No other on-disk filesystem implementation.
+- **FAT mkdir / rmdir / rename on `/data` deferred.** The directory-mutation primitives (`.`/`..` entry generation, empty-dir check, cross-dir rename with proper flush ordering) are not implemented. Userland sees `UnsupportedOperation` for these on `/data`. Single-level file create/write/unlink works.
 - **No subdirectory traversal yet** in some higher-level APIs (FAT subdir reads work via `walk_directory`; some legacy paths still assume single-level).
+- **FAT only on disk.** No other on-disk filesystem implementation.
+- **No real `fsck`.** Crash recovery is best-effort per the per-op flush ordering. Dirty-bit detection refuses writable mount on detected uncleanness; the actual repair sweep is a follow-up.
 
 See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for the full plan.
 
@@ -51,12 +51,17 @@ See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for
 ```
   /          → overlay(upper = Tmpfs, lower = boot FAT partition)
   /host      → FAT (vvfat-backed, read-only)
+  /data      → FAT32 (writable, Secondary Master IDE, persistent)
   /bin/<applet> → synthesized at syscall layer (src/userland/bin_namespace.rs)
 ```
 
 The overlay's upper is a fresh `Tmpfs` constructed at boot in `vfs::mount_overlay_root`; the lower is the bootloader-built FAT image. `/bin` is invisible to the FS layer — the syscall dispatcher intercepts opens/access/stat before reaching the VFS.
 
-Writes under `/` go through copy-up: opening a lower-only file for write reads the whole file into RAM, creates it in upper, and operates from there. Copy-up is size-capped at 64 KiB (`overlay::filesystem::MAX_COPY_UP_BYTES`) to bound the heap-burst risk — bigger files surface as `EFBIG`.
+Writes under `/` go through copy-up into tmpfs; persistence happens via the `sync(2)` syscall (BusyBox `sync` applet) which flushes the upper to `/data/overlay-state.{0,1}` double-buffered blob with a 1-byte pointer commit. On boot, `restore_overlay_upper_from_data` validates the active blob's CRC32 and hydrates the upper tmpfs from it.
+
+Copy-up is size-capped at 64 KiB (`overlay::filesystem::MAX_COPY_UP_BYTES`) to bound the heap-burst risk — bigger files surface as `EFBIG`.
+
+Writes directly to `/data/<file>` skip the overlay and go straight to the FAT writer — persistent and immediate, no `sync` needed.
 
 ## tmpfs and overlay
 

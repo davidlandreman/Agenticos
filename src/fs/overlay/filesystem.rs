@@ -632,6 +632,13 @@ impl Filesystem for Overlay {
     }
 
     fn sync(&self) -> Result<(), FilesystemError> {
+        // Persist the upper layer to /data when /data is writable.
+        // Errors from the persistence path (no /data mount, /data
+        // read-only, /data full) are logged but not propagated —
+        // sync() shouldn't fail on the in-RAM side.
+        if let Err(e) = crate::fs::overlay::sync::synchronized_flush(self) {
+            crate::debug_warn!("overlay sync: flush to /data failed: {:?}", e);
+        }
         self.upper.sync()
     }
 }

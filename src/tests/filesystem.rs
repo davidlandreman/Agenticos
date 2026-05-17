@@ -580,6 +580,139 @@ fn test_data_write_larger_than_one_cluster() {
     assert_eq!(content, data);
 }
 
+// --- U11 / Phase D: overlay persistence to /data ---------------------
+
+fn test_u11_serialize_deserialize_round_trip() {
+    use crate::fs::overlay::sync::{deserialize_blob, serialize_upper};
+    use crate::fs::tmpfs::Tmpfs;
+    use crate::fs::filesystem::{FileMode, Filesystem};
+
+    let upper = Tmpfs::new();
+    upper.mkdir("/etc").expect("mkdir /etc");
+    // Put a file in.
+    let mut h = upper
+        .open(
+            "/etc/hello",
+            FileMode {
+                read: true,
+                write: true,
+                append: false,
+                create: true,
+                truncate: true,
+            },
+        )
+        .expect("open create");
+    upper.write(&mut h, b"persistent\n").expect("write");
+    upper.close(&mut h).expect("close");
+    // Whiteout marker.
+    let mut wh = upper
+        .open(
+            "/.wh.system.ttf",
+            FileMode {
+                read: false,
+                write: true,
+                append: false,
+                create: true,
+                truncate: true,
+            },
+        )
+        .expect("create whiteout");
+    upper.close(&mut wh).expect("close wh");
+
+    let blob = serialize_upper(&upper);
+    let entries = deserialize_blob(&blob).expect("deserialize");
+    debug_info!("  serialized {} bytes, {} entries", blob.len(), entries.len());
+    assert!(entries.len() >= 2);
+}
+
+fn test_u11_corrupted_blob_rejected() {
+    use crate::fs::overlay::sync::deserialize_blob;
+    let mut bad = alloc::vec::Vec::from(&b"XXXX\x01\x00\x00\x00\x00\x00"[..]);
+    while bad.len() < 32 {
+        bad.push(0);
+    }
+    assert!(deserialize_blob(&bad).is_err());
+}
+
+fn test_u11_flush_then_restore_on_live_data() {
+    // End-to-end: write a file under `/`, sync (flushes to /data),
+    // construct a fresh tmpfs, restore from /data — fresh tmpfs
+    // should now contain the file.
+    use crate::fs::overlay::sync::{flush_upper_to_disk, restore_upper_from_disk};
+    use crate::fs::filesystem::{FileMode, Filesystem};
+    use crate::fs::tmpfs::Tmpfs;
+
+    // Get the live overlay's upper layer.
+    let vfs = crate::fs::vfs::get_vfs();
+    let root = vfs.find_filesystem("/").expect("/ resolvable").0;
+    if root.name() != "overlay" {
+        debug_info!("  / is not overlay; skipping");
+        return;
+    }
+    let overlay_ptr =
+        root as *const dyn Filesystem as *const crate::fs::overlay::Overlay;
+    let overlay: &crate::fs::overlay::Overlay = unsafe { &*overlay_ptr };
+    let upper_dyn = overlay.upper();
+    let upper_ptr = upper_dyn as *const dyn Filesystem as *const Tmpfs;
+    let upper: &Tmpfs = unsafe { &*upper_ptr };
+
+    // Write a marker via the public File API (lands in the overlay
+    // upper → tmpfs).
+    let f = crate::fs::File::create("/u11-marker.txt").expect("create");
+    f.write(b"survived a reboot\n").expect("write");
+    drop(f);
+
+    flush_upper_to_disk(upper).expect("flush");
+
+    // Fresh tmpfs; restore from /data; verify our marker shows up.
+    let fresh = Tmpfs::new();
+    let count = restore_upper_from_disk(&fresh).expect("restore");
+    debug_info!("  restore loaded {} entries", count);
+    assert!(count >= 1);
+
+    // The marker file should be present in the fresh tmpfs.
+    let mut h = fresh
+        .open("/u11-marker.txt", FileMode::READ)
+        .expect("open marker in fresh tmpfs");
+    let mut buf = [0u8; 32];
+    let n = fresh.read(&mut h, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"survived a reboot\n");
+}
+
+fn test_u11_pointer_flip_is_atomic() {
+    // Two successive flushes should land in alternating slots so the
+    // commit is single-byte atomic.
+    use crate::fs::overlay::sync::flush_upper_to_disk;
+    use crate::fs::filesystem::Filesystem;
+    use crate::fs::tmpfs::Tmpfs;
+
+    let vfs = crate::fs::vfs::get_vfs();
+    let root = vfs.find_filesystem("/").expect("/ resolvable").0;
+    if root.name() != "overlay" { return; }
+    let overlay_ptr =
+        root as *const dyn Filesystem as *const crate::fs::overlay::Overlay;
+    let overlay: &crate::fs::overlay::Overlay = unsafe { &*overlay_ptr };
+    let upper_dyn = overlay.upper();
+    let upper_ptr = upper_dyn as *const dyn Filesystem as *const Tmpfs;
+    let upper: &Tmpfs = unsafe { &*upper_ptr };
+
+    flush_upper_to_disk(upper).expect("first flush");
+    let ptr1 = crate::fs::File::open_read("/data/overlay-state.ptr")
+        .expect("open ptr")
+        .read_to_vec()
+        .expect("read ptr");
+    flush_upper_to_disk(upper).expect("second flush");
+    let ptr2 = crate::fs::File::open_read("/data/overlay-state.ptr")
+        .expect("open ptr")
+        .read_to_vec()
+        .expect("read ptr");
+    // The pointer must have flipped.
+    assert_ne!(ptr1, ptr2, "ptr must alternate slots on successive flushes");
+    // And must be exactly 1 byte ('0' or '1').
+    assert_eq!(ptr2.len(), 1);
+    assert!(ptr2[0] == b'0' || ptr2[0] == b'1');
+}
+
 fn test_data_mkdir_returns_unsupported() {
     // U10 explicitly defers mkdir on FAT to a follow-up. Userland
     // should see ENOSYS / UnsupportedOperation, not a misleading
@@ -696,5 +829,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_data_unlink,
         &test_data_write_larger_than_one_cluster,
         &test_data_mkdir_returns_unsupported,
+        &test_u11_serialize_deserialize_round_trip,
+        &test_u11_corrupted_blob_rejected,
+        &test_u11_flush_then_restore_on_live_data,
+        &test_u11_pointer_flip_is_atomic,
     ]
 }

@@ -13,5 +13,6 @@
 //! Phase D concern.
 
 pub mod filesystem;
+pub mod sync;
 
 pub use filesystem::Overlay;
