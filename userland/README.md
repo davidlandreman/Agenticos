@@ -23,12 +23,13 @@ for the Linux-ABI cutover and the C++ pipeline.
 
 ```
 userland/
-├── Cargo.toml          # workspace manifest (members = runtime, apps/hello)
+├── Cargo.toml          # workspace manifest (members = runtime, apps/hello, apps/guilaunch)
 ├── .cargo/config.toml  # target = x86_64-unknown-none, build-std
 ├── linker.ld           # ENTRY(_start), base 0x40_0000, no PT_INTERP
-├── runtime/            # tiny library: print, exit (Linux syscall stubs)
+├── runtime/            # tiny library: print, exit, gui_launch, argv0_from_stack
 └── apps/
     ├── hello/          # rust app — prints "hello\n", exits 0
+    ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
     └── hello-cpp/      # C++ app — std::cout, exits 0
         ├── Makefile    # invokes x86_64-linux-musl-g++ -static -no-pie
         └── src/main.cpp
@@ -50,30 +51,50 @@ The committed binary is what `build.sh` / `test.sh` copy into
 without the `x86_64-linux-musl-cross` toolchain installed and without
 an outbound network fetch.
 
-### BusyBox `/bin` namespace
+### `/bin` virtual namespace (BusyBox + GUILAUNCH)
 
-`BB.ELF` is a single static-musl multicall binary providing `ls`,
-`cat`, `grep`, `sed`, `awk`, `find`, `wc`, `head`, `tail`, `sort`,
-`uniq`, and ~230 other applets. The kernel exposes a virtual
-`/bin/<applet>` namespace — see `src/userland/bin_namespace.rs` for
-the applet list and the `apply_bin_rewrite` helper. `execve("/bin/ls",
-argv, envp)` resolves to `BB.ELF` with `argv[0]` overwritten to
-`"ls"`, and BusyBox's own dispatcher picks the right applet from
-there. No symlinks, no per-applet ELF copies — the namespace is pure
-kernel synthesis.
+The kernel exposes a single virtual `/bin` directory whose entries
+resolve into one of two multicall binaries staged under `host_share/`:
+
+- **`BB.ELF` — BusyBox** (~240 coreutils applets: `ls`, `cat`, `grep`,
+  `sed`, `awk`, `find`, `wc`, `head`, `tail`, `sort`, `uniq`, …).
+- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (5 entries:
+  `painting`, `calc`, `notepad`, `tasks`, `explorer`).
+
+See `src/userland/bin_namespace.rs` for the lists and the
+`apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
+to `BB.ELF` with `argv[0]` overwritten to `"ls"`; BusyBox's own
+dispatcher picks the right applet. `execve("/bin/painting", argv,
+envp)` resolves to `GLAUNCH.ELF` with `argv[0]` overwritten to
+`"painting"`; GUILAUNCH's `_start` issues the AgenticOS-internal
+`sys_gui_launch("painting")` syscall, which spawns the kernel-side
+`PaintingProcess`. No symlinks, no per-applet ELF copies — the
+namespace is pure kernel synthesis.
 
 `stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
 directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
 (`access("/bin/ls", X_OK)` followed by `execve`) finds applets without
-any zsh-side hooks. The run command's default envp seeds `PATH=/bin:/host`
-so bare `ls`, `cat`, etc. Just Work in an interactive shell.
+any zsh-side hooks. The terminal's default envp seeds
+`PATH=/bin:/host` so bare `ls`, `cat`, `painting`, etc. all Just Work
+in an interactive shell.
 
-**Read-only FS caveat**: write-side applets (`cp`, `mv`, `rm`,
+**Read-only FS caveat**: write-side BusyBox applets (`cp`, `mv`, `rm`,
 `mkdir`, `touch`, `chmod`, `chown`, `ln`, `dd`) ship in `BB.ELF` and
 the namespace resolves them normally, but every `write()` to a
 file-backed FD returns `EROFS`. The applets print a clean error and
 exit non-zero — they do not panic the kernel. These will start working
 when the FS gains write support.
+
+### `GLAUNCH.ELF` (in-tree, built every run)
+
+`userland/apps/guilaunch/` is a tiny Rust `no_std` ring-3 binary
+(`#![no_main]`, custom `_start`). It reads `argv[0]`, issues
+`sys_gui_launch(name, len)` (number 5000 in the AgenticOS-internal
+syscall range), and exits. It exists so the `/bin/<gui_applet>` PATH
+lookups described above have something to `execve`. Built fresh on
+every `build.sh` / `test.sh` invocation — too small to bother
+prebuilt-managing. See
+`docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`.
 
 Decision tree for adding a new app:
 

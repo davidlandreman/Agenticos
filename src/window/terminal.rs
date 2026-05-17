@@ -106,8 +106,3 @@ pub fn has_terminal_output(terminal_id: WindowId) -> bool {
     buffers.get(&terminal_id).map_or(false, |b| !b.is_empty())
 }
 
-/// Route input from a terminal to its shell
-pub fn route_terminal_input(terminal_id: WindowId, line: String) {
-    // Route to the shell_process module
-    crate::commands::shell::shell_process::send_input(terminal_id, line);
-}

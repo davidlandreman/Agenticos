@@ -165,19 +165,20 @@ impl TerminalWindow {
             callback(input.clone());
         }
 
-        // Phase-1 stdin routing: if a ring-3 user process is currently
-        // running, deliver the line + '\n' into its stdin queue rather
-        // than back to the in-kernel shell. The shell is parked while a
-        // user app runs (`command_running` is true on its `ShellInstance`),
-        // so a line routed there would just queue up and be re-executed
-        // as a shell command after the app exits — clearly wrong.
+        // zsh (ring-3) is always the terminal's shell after boot, so
+        // every typed line goes into the user stdin queue. Before the
+        // userland subsystem is active (e.g., during boot before
+        // init_guishell_desktop has spawned zsh), input is silently
+        // dropped — the terminal window doesn't actually exist yet in
+        // that window so this branch is effectively unreachable in
+        // production.
         if crate::userland::stdin::is_active() {
             crate::userland::stdin::push_bytes(input.as_bytes());
             crate::userland::stdin::push_bytes(b"\n");
         } else {
-            // Route input to this terminal's shell
-            let terminal_id = self.text_window.id();
-            crate::window::terminal::route_terminal_input(terminal_id, input);
+            crate::debug_warn!(
+                "TerminalWindow::handle_enter: no userland stdin active; dropping line"
+            );
         }
 
         // Update input start position for next input

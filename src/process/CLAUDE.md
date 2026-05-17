@@ -5,7 +5,7 @@ The kernel runs a **live preemptive scheduler** with timer-driven context switch
 ## Key files
 
 - `process.rs` — `Process` and `BaseProcess` traits; sequential PID allocation (no reuse, starts at 1).
-- `manager.rs` — command registry; maps command names to factory functions; the shell routes unknown commands here.
+- `manager.rs` — small singleton holding the active stdin buffer used by kernel-side `read` paths. (The kernel-side shell command registry that used to live here was removed when zsh became the default terminal; see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`.)
 - `pcb.rs` — process control block. Carries name, PID, kernel stack, `CpuContext`, watchdog `last_activity_tick`, terminal id, optional entry-fn closure.
 - `context.rs` — `CpuContext` (all GPRs + RIP/RSP/RFLAGS + CS/SS). The CS/SS fields default to kernel selectors (0x08/0x10) so existing kernel-process flows don't change.
 - `scheduler.rs` — round-robin scheduler with sleep queue. Runs preemptively under the timer ISR.
@@ -15,11 +15,17 @@ The kernel runs a **live preemptive scheduler** with timer-driven context switch
 
 - Process / `BaseProcess` traits define the interface.
 - Sequential PID allocation.
-- Command registry: `register_command(name, factory)` populates a name → factory map.
-- Shell integration: the shell calls `execute_command(name args…)`, which dispatches via the registry.
 - **Preemptive timer-driven scheduling.** The PIT fires at 100 Hz; the timer ISR (`src/arch/x86_64/preemption.rs`) saves the running process's full register state, calls into the scheduler, and either `iretq`s into another process or back into the kernel main loop via the `KERNEL_CONTEXT` shadow.
 - **Cooperative voluntary switching.** `switch_context` and `switch_context_full_restore` in `src/arch/x86_64/context_switch.rs` provide the non-interrupt-driven path.
 - **Watchdog.** `WATCHDOG_TIMEOUT_TICKS = 1000` (~10 s); processes that don't update `last_activity_tick` are flagged for kill from the kernel main loop.
+
+## Spawning a kernel-side process
+
+`spawn_process(name, terminal_id, entry_fn)` in `src/process/mod.rs` allocates a PCB + kernel stack, sets the entry closure, and enqueues the process for the scheduler. Used by:
+
+- `src/window/terminal_factory.rs::spawn_zsh_for_terminal` — kernel process whose entry function blocks in `launch_user_binary("/host/ZSH.ELF")` until zsh exits, then closes the terminal window.
+- `src/commands/gui_launch_table.rs::spawn_by_name` — kernel process per GUI app launch (`painting`, `calc`, …).
+- `src/commands/guishell/mod.rs::spawn_guishell_process` — the desktop / taskbar background process.
 
 ## Ring-3 awareness
 
@@ -33,13 +39,9 @@ The kernel runs a **live preemptive scheduler** with timer-driven context switch
 - **No real concurrency.** Single execution thread per CPU; the scheduler multiplexes processes but does not exploit multiple cores.
 - **No IPC.**
 
-## Adding shell commands
-
-Lives in `src/commands/` — see `src/commands/CLAUDE.md` for the recipe.
-
 ## Cross-references
 
 - Naked-asm context switching and timer ISR: `src/arch/x86_64/CLAUDE.md`.
 - Userland (ring-3) processes: `src/userland/CLAUDE.md` (under construction).
-- Command implementations and the add-a-command recipe: `src/commands/CLAUDE.md`.
-- The shell that drives command dispatch: `src/commands/shell/`.
+- Kernel-side GUI app launchers: `src/commands/CLAUDE.md`.
+- The interactive shell now runs as ring-3 zsh (`/host/ZSH.ELF`) launched from `src/window/terminal_factory.rs::spawn_zsh_for_terminal`.

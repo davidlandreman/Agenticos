@@ -888,8 +888,11 @@ fn open_file(path: &str) {
     crate::debug_info!("explorer: open_file path={} action={:?}", path, action);
     match action {
         OpenAction::LaunchNotepad => {
-            let cmd = format!("notepad {}", path);
-            let result = crate::process::execute_command(&cmd, None);
+            // The kernel-side GUI launch table doesn't yet pipe argv
+            // through, so notepad opens without the file. Follow-up: add
+            // an argv-carrying variant of spawn_by_name and surface the
+            // file path here.
+            let result = crate::commands::gui_launch_table::spawn_by_name("notepad");
             crate::debug_info!("explorer: spawn notepad result={:?}", result);
         }
         OpenAction::LaunchRun => {
@@ -900,9 +903,21 @@ fn open_file(path: &str) {
                 );
                 return;
             }
-            let cmd = format!("run {}", path);
-            let result = crate::process::execute_command(&cmd, None);
-            crate::debug_info!("explorer: spawn run result={:?}", result);
+            // Launch the ELF on a fresh kernel process so explorer's UI
+            // loop doesn't block for the user binary's lifetime.
+            let owned_path = alloc::string::String::from(path);
+            crate::process::spawn_process(
+                alloc::string::String::from("run"),
+                None,
+                move || {
+                    let argv = [owned_path.as_str()];
+                    if let Err(msg) =
+                        crate::userland::launcher::launch_user_binary(&owned_path, &argv, &[])
+                    {
+                        crate::debug_warn!("explorer: launch failed: {}", msg);
+                    }
+                },
+            );
         }
         OpenAction::Unsupported(ext) => {
             let body = if ext.is_empty() {

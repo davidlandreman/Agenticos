@@ -406,21 +406,16 @@ fn test_run_hellocpp_end_to_end() {
     // Pass `--noecho` so HELLOCPP.ELF skips its stdin-read loop. There's
     // no terminal under test mode to feed bytes; the binary would otherwise
     // block forever inside `read(0, …)`.
-    let mut p = crate::commands::run::RunProcess::new_with_args(alloc::vec![
-        alloc::string::String::from(path),
-        alloc::string::String::from("--noecho"),
-    ]);
-    p.run();
+    let argv = [path, "--noecho"];
+    let result = crate::userland::launcher::launch_user_binary(path, &argv, &[]);
+    crate::debug_info!("[perf] launch_user_binary returned {:?}", result);
     let t1 = get_timer_ticks();
     let elapsed = t1.saturating_sub(t0);
 
-    // RunProcess::run() consumes the active-user slot before returning, so
-    // we can't inspect (kind, code) directly from here. Instead we rely on
-    // the debug_info traces inside run_path:
-    //   "run: app exited normally with code N"  (cooperative)
-    //   "[run] app terminated by fault: ..."     (fault — printed to terminal in red)
-    //   "[run] app issued unimplemented syscall" (ENOSYS path)
-    // The grep target is "app exited normally with code 0" on serial.
+    // launcher::launch_user_binary consumes the active-user slot before
+    // returning, so we can't inspect (kind, code) from outside. Instead
+    // we rely on the debug_info traces inside the launcher and the
+    // returned `(ExitKind, i64)` printed above.
     //
     // For the assertion, we re-check the active-user slot is now empty and
     // that user_active() is false — i.e. the run command cleaned up.

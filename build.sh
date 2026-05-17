@@ -104,6 +104,24 @@ if cargo build --release --manifest-path userland/Cargo.toml; then
     else
         echo "⚠️  Userland build succeeded but $USER_HELLO not found; skipping stage"
     fi
+    # GLAUNCH.ELF — kernel-side GUI app launcher (see
+    # docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md).
+    # Tiny multicall binary, built every run (no prebuilt). Surfaces
+    # /bin/painting, /bin/calc, etc. through zsh's PATH lookup via the
+    # /bin/<gui_applet> rewrite in src/userland/bin_namespace.rs.
+    # Staged name is GLAUNCH (7 chars) to fit FAT 8.3; in-tree dir is
+    # `userland/apps/guilaunch/`.
+    USER_GUILAUNCH="userland/target/x86_64-unknown-none/release/guilaunch"
+    if [ -f "$USER_GUILAUNCH" ]; then
+        STAGED="$HOST_SHARE_STAGE/GLAUNCH.ELF"
+        TMP="$HOST_SHARE_STAGE/.GLAUNCH.ELF.tmp.$$"
+        cp "$USER_GUILAUNCH" "$TMP"
+        mv -f "$TMP" "$STAGED"
+        SIZE=$(wc -c < "$STAGED" | tr -d ' ')
+        echo "📦 Staged $STAGED ($SIZE bytes)"
+    else
+        echo "⚠️  Userland build succeeded but $USER_GUILAUNCH not found; skipping stage"
+    fi
 else
     echo "⚠️  Userland build failed; continuing without HELLO.ELF (kernel tests use embedded fixtures)"
 fi

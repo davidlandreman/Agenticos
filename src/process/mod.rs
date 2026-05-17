@@ -8,7 +8,6 @@ pub mod scheduler;
 pub use process::{BaseProcess, HasBaseProcess, RunnableProcess, ProcessId, allocate_pid};
 pub use manager::{
     set_active_stdin, clear_active_stdin, push_keyboard_input,
-    register_command, execute_command, execute_command_sync, list_commands
 };
 pub use pcb::{ProcessControlBlock, ProcessState, BlockReason, WakeEvents, SignalFlags};
 pub use context::CpuContext;

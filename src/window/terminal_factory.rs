@@ -137,23 +137,30 @@ pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
     Ok(instance)
 }
 
-/// Spawn a terminal with an associated shell
+/// Spawn a terminal with `zsh` (`/host/ZSH.ELF`) running as its shell.
+///
+/// Replaces the prior cooperative-poll kernel shell. The terminal is
+/// created first (so the window exists and can show an error if zsh
+/// fails to launch), then a kernel-side process is spawned whose entry
+/// function loads ZSH.ELF and `iretq`s into ring 3. zsh's stdio routes
+/// through the existing path: `crate::print!` macro writes from
+/// stdout/stderr land via `set_current_output_terminal`, and the
+/// TerminalWindow pushes keystrokes into `crate::userland::stdin`
+/// (raw or cooked depending on zsh's tty mode).
+///
+/// See `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`.
 pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
     let mut instance = spawn_terminal()?;
-
-    // Register a shell for this terminal (cooperative/polled, not a real process)
     let terminal_id = instance.terminal_id;
-    let pid = crate::process::allocate_pid();
 
-    // Register the terminal for output routing
+    // Output routing — same registration the old kernel shell used so
+    // text the loader prints during early launch (and any error
+    // surfaced before zsh's first write) lands in this terminal.
     crate::window::terminal::register_terminal(terminal_id);
 
-    // Register the shell instance
-    crate::commands::shell::shell_process::register_shell(terminal_id, pid);
-
+    let pid = spawn_zsh_for_terminal(terminal_id);
     instance.shell_pid = Some(pid);
 
-    // Update the stored instance
     {
         let mut instances = TERMINAL_INSTANCES.lock();
         if let Some(inst) = instances.iter_mut().find(|i| i.terminal_id == terminal_id) {
@@ -162,11 +169,63 @@ pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
     }
 
     crate::debug_info!(
-        "Terminal factory: Shell registered for terminal {} with PID {:?}",
+        "Terminal factory: zsh spawned for terminal {} with PID {:?}",
         instance.number, pid
     );
 
     Ok(instance)
+}
+
+/// FAT path the kernel loads when launching the default shell. Staged
+/// from `userland/prebuilt/ZSH.ELF` by `build.sh` / `test.sh`.
+const ZSH_HOST_PATH: &str = "/host/ZSH.ELF";
+
+/// Spawn a kernel-side process whose entry function loads
+/// `/host/ZSH.ELF` and enters ring 3 with stdio bound to `terminal_id`.
+/// The kernel process blocks for the entire zsh session; on exit the
+/// terminal window is closed.
+fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
+    crate::process::spawn_process(
+        alloc::string::String::from("zsh"),
+        Some(terminal_id),
+        move || {
+            crate::window::terminal::set_current_output_terminal(terminal_id);
+
+            // Match the env the old `run` command set for zsh: PATH
+            // hits the virtual /bin namespace first (BusyBox applets +
+            // GUI app launchers), then /host for staged binaries.
+            // TERM=dumb dodges terminfo lookups (we don't ship a
+            // database). HOME/USER/LOGNAME/SHELL match the staged
+            // /etc/passwd entry.
+            let argv = [ZSH_HOST_PATH];
+            let envp: [&str; 7] = [
+                "PATH=/bin:/host",
+                "HOME=/root",
+                "USER=root",
+                "LOGNAME=root",
+                "SHELL=/bin/zsh",
+                "TERM=dumb",
+                "LANG=C",
+            ];
+
+            match crate::userland::launcher::launch_user_binary(ZSH_HOST_PATH, &argv, &envp) {
+                Ok((kind, code)) => {
+                    crate::debug_info!(
+                        "Terminal factory: zsh exited (kind={:?}, code={})",
+                        kind,
+                        code,
+                    );
+                }
+                Err(msg) => {
+                    crate::println!("zsh failed to launch: {}", msg);
+                    crate::debug_error!("Terminal factory: zsh launch failed: {}", msg);
+                }
+            }
+
+            crate::window::terminal::clear_current_output_terminal();
+            close_terminal(terminal_id);
+        },
+    )
 }
 
 /// Get the shell process ID for a terminal

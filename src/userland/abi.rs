@@ -228,6 +228,16 @@ pub mod nr {
     pub const TGKILL: u64 = 234;
     pub const RT_SIGRETURN: u64 = 15;
     pub const RT_SIGSUSPEND: u64 = 130;
+
+    // AgenticOS-internal syscalls. Numbers picked well above the Linux
+    // x86-64 range (currently ~450, growing) so a future Linux number
+    // never collides with ours. 5000+ is reserved for AgenticOS.
+    /// `sys_gui_launch(name_ptr: *const u8, name_len: usize) -> 0 | -errno`.
+    /// Looks `name` up in the kernel-side GUI applet table
+    /// (`src/commands/gui_launch_table.rs`) and spawns the matching
+    /// kernel-side GUI process. Called by `GLAUNCH.ELF` (ring 3) when
+    /// the user types e.g. `painting` in zsh.
+    pub const GUI_LAUNCH: u64 = 5000;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -332,6 +342,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::TGKILL => syscalls::tgkill_handler(args),
         nr::RT_SIGRETURN => syscalls::rt_sigreturn_handler(args),
         nr::RT_SIGSUSPEND => syscalls::rt_sigsuspend_handler(args),
+        nr::GUI_LAUNCH => syscalls::gui_launch_handler(args),
         _ => unhandled_syscall(args),
     };
 

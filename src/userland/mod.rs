@@ -10,6 +10,7 @@ pub mod error;
 pub mod fdtable;
 pub mod image;
 pub mod kernel_stack;
+pub mod launcher;
 pub mod lifecycle;
 pub mod loader;
 pub mod path;

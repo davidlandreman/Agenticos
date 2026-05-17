@@ -16,7 +16,9 @@ See `docs/ai-context-conventions.md` for the convention in detail (when to add a
 
 AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch with the eventual goal of supporting agent-based computing capabilities.
 
-**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. A window system provides hierarchical window management, event routing, and mouse support. The OS boots into a GUI desktop with a blue background and a windowed terminal application. A real ring-3 userland runs Linux static-musl binaries — `zsh` is the interactive shell, and a static BusyBox (`BB.ELF`) provides ~240 coreutils applets via a kernel-side virtual `/bin/<applet>` namespace (`src/userland/bin_namespace.rs`). Write-side applets (`cp`, `mv`, `rm`, …) surface `EROFS` at runtime because the FS is read-only. The "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
+**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. A window system provides hierarchical window management, event routing, and mouse support. The OS boots into a GUI desktop with a blue background; clicking Start → Terminal opens a windowed terminal that launches ring-3 `zsh` (`/host/ZSH.ELF`) directly as its shell. A real ring-3 userland runs Linux static-musl binaries: `zsh` is the interactive shell, a static BusyBox (`BB.ELF`) provides ~240 coreutils applets via a kernel-side virtual `/bin/<applet>` namespace (`src/userland/bin_namespace.rs`), and a small `GLAUNCH.ELF` multicall binary surfaces the kernel-side GUI apps (`painting`, `calc`, `notepad`, `tasks`, `explorer`) at `/bin/<name>` so zsh's PATH lookup spawns them via the AgenticOS-internal `sys_gui_launch` syscall. Write-side BusyBox applets (`cp`, `mv`, `rm`, …) surface `EROFS` at runtime because the FS is read-only. The "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
+
+The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.
 
 ## Common Commands
 
@@ -67,14 +69,14 @@ The project follows a modular monolithic kernel design with clear separation of 
 Each entry below points to the folder's own `CLAUDE.md`, which carries the detailed context for that subsystem. Folder files load on demand when Claude reads files in that directory.
 
 - `src/arch/` — Architecture-specific code (x86_64 IDT, interrupts). No folder file yet — currently thin.
-- `src/commands/` — Shell commands (18 implemented). See [`src/commands/CLAUDE.md`](src/commands/CLAUDE.md).
+- `src/commands/` — Kernel-side GUI app launchers (`painting`, `calc`, `notepad`, `tasks`, `explorer`) + `guishell` (desktop/taskbar manager). Invoked via `sys_gui_launch` from ring-3 (`GLAUNCH.ELF`) or directly from boot in the case of `guishell`. See [`src/commands/CLAUDE.md`](src/commands/CLAUDE.md).
 - `src/drivers/` — Hardware drivers (PCI, IDE, PS/2, VirtIO, framebuffer display). See [`src/drivers/CLAUDE.md`](src/drivers/CLAUDE.md).
 - `src/fs/` — Read-only FAT12/16/32 filesystem with `Arc`-based handles. See [`src/fs/CLAUDE.md`](src/fs/CLAUDE.md).
 - `src/graphics/` — Drawing primitives, text rendering, image loading, compositor. See [`src/graphics/CLAUDE.md`](src/graphics/CLAUDE.md).
 - `src/input/` — Lock-free input pipeline (SPSC queue, scancode state machines). See [`src/input/CLAUDE.md`](src/input/CLAUDE.md).
 - `src/lib/` — Custom `Arc`, debug logging, `Testable` trait. See [`src/lib/CLAUDE.md`](src/lib/CLAUDE.md).
 - `src/mm/` — Frame allocator, heap allocator, paging, page-fault demand mapping. See [`src/mm/CLAUDE.md`](src/mm/CLAUDE.md).
-- `src/process/` — Process traits and command dispatcher (scheduler scaffolding present, not active). See [`src/process/CLAUDE.md`](src/process/CLAUDE.md).
+- `src/process/` — Process traits and the live preemptive scheduler. (The shell-command registry that used to live here was removed when zsh became the default terminal.) See [`src/process/CLAUDE.md`](src/process/CLAUDE.md).
 - `src/stdlib/` — `Read`/`Write` traits, async waker. No folder file yet — currently thin.
 - `src/tests/` — In-kernel test modules. See [`src/tests/CLAUDE.md`](src/tests/CLAUDE.md).
 - `src/userland/` — Ring-3 ELF loader, Linux x86-64 ABI, lifecycle (`enter_user_mode`, `cleanup_user_process`, `BinaryLoadGuard`). No folder file yet; design lives in `docs/plans/2026-05-08-004-feat-userland-app-platform-plan.md` and `docs/plans/2026-05-09-001-feat-userland-linux-abi-cpp-hello-plan.md`.

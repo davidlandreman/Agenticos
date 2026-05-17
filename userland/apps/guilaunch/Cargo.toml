@@ -1,0 +1,13 @@
+[package]
+name = "guilaunch"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "guilaunch"
+path = "src/main.rs"
+
+[dependencies]
+runtime = { path = "../../runtime" }
