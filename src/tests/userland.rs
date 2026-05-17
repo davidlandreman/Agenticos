@@ -3921,12 +3921,208 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
     crate::arch::x86_64::msr::set_fs_base(saved_original);
 }
 
+// ---------- U3: ring-3 scheduling state ----------
+
+/// Helper: clear the ring-3 ready/blocked queues so tests start from a
+/// known state. Tests that rely on ordering can't trust the queues to
+/// be empty just because PROCESS_TABLE looks empty — earlier tests
+/// might have left entries.
+fn clear_ring3_queues() {
+    // Use the public APIs to drain the queues. pop_next_ring3 returns
+    // None once empty; remove_process clears blocked entries too, but
+    // the blocked map's keys aren't easy to enumerate publicly — for
+    // tests we use a synthetic insert/remove cycle.
+    while crate::userland::lifecycle::pop_next_ring3().is_some() {}
+    // Blocked entries get cleaned by mark_ring3_ready (which removes
+    // from blocked). Tests that create blocked entries clean them up
+    // explicitly via the same.
+}
+
+/// mark_ring3_ready pushes onto the back; pop_next_ring3 pops from the
+/// front. FIFO order matters because the U5 timer ISR relies on it
+/// for round-robin between concurrent ring-3 processes.
+fn test_ring3_ready_queue_is_fifo() {
+    clear_ring3_queues();
+    crate::userland::lifecycle::mark_ring3_ready(10);
+    crate::userland::lifecycle::mark_ring3_ready(11);
+    crate::userland::lifecycle::mark_ring3_ready(12);
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(10));
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(11));
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(12));
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), None);
+}
+
+/// Calling mark_ring3_ready twice with the same PID is idempotent —
+/// the PID appears once in the queue, not twice. Guards against
+/// duplicate scheduling slots if a wake path races with a ready
+/// path.
+fn test_ring3_ready_queue_dedups() {
+    clear_ring3_queues();
+    crate::userland::lifecycle::mark_ring3_ready(20);
+    crate::userland::lifecycle::mark_ring3_ready(20);
+    crate::userland::lifecycle::mark_ring3_ready(20);
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(20));
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), None);
+}
+
+/// mark_ring3_blocked removes from ready queue and records the reason.
+/// peek_next_ring3 sees the queue without the blocked PID.
+fn test_ring3_blocked_removes_from_ready() {
+    use crate::userland::lifecycle::Ring3BlockReason;
+    clear_ring3_queues();
+    crate::userland::lifecycle::mark_ring3_ready(30);
+    crate::userland::lifecycle::mark_ring3_ready(31);
+    crate::userland::lifecycle::mark_ring3_blocked(
+        30,
+        Ring3BlockReason::WaitingForChild { target: -1 },
+    );
+    // 30 is no longer ready; 31 still is.
+    assert_eq!(crate::userland::lifecycle::peek_next_ring3(), Some(31));
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(31));
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), None);
+    // Re-readying 30 puts it back.
+    crate::userland::lifecycle::mark_ring3_ready(30);
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(30));
+}
+
+/// wake_ring3_blocked_on_child moves a parent waiting for any child
+/// (target == -1) from blocked to ready.
+fn test_wake_ring3_blocked_on_child_any() {
+    use crate::userland::lifecycle::Ring3BlockReason;
+    clear_ring3_queues();
+    crate::userland::lifecycle::mark_ring3_blocked(
+        40,
+        Ring3BlockReason::WaitingForChild { target: -1 },
+    );
+    assert!(crate::userland::lifecycle::peek_next_ring3().is_none());
+    crate::userland::lifecycle::wake_ring3_blocked_on_child(40, 41);
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(40));
+}
+
+/// wake_ring3_blocked_on_child wakes a parent waiting for the
+/// specific child PID; doesn't wake for unrelated child exits.
+fn test_wake_ring3_blocked_on_child_specific() {
+    use crate::userland::lifecycle::Ring3BlockReason;
+    clear_ring3_queues();
+    crate::userland::lifecycle::mark_ring3_blocked(
+        50,
+        Ring3BlockReason::WaitingForChild { target: 55 },
+    );
+    // Unrelated child exit — parent stays blocked.
+    crate::userland::lifecycle::wake_ring3_blocked_on_child(50, 99);
+    assert!(crate::userland::lifecycle::peek_next_ring3().is_none());
+    // Matching child exit — parent wakes.
+    crate::userland::lifecycle::wake_ring3_blocked_on_child(50, 55);
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(50));
+}
+
+/// remove_process cleans the ring-3 ready and blocked entries so a
+/// removed PID can never resurface in a scheduling decision.
+fn test_remove_process_cleans_ring3_queues() {
+    use crate::userland::lifecycle::Ring3BlockReason;
+    clear_ring3_queues();
+
+    // Insert two processes into the table so remove_process can find them.
+    let p1 = crate::userland::lifecycle::Process {
+        pid: 60,
+        parent_pid: 0,
+        continuation: None,
+        image: None,
+        exit_kind: crate::userland::lifecycle::ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
+        fs_base: 0,
+        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+    };
+    let p2 = crate::userland::lifecycle::Process {
+        pid: 61,
+        parent_pid: 0,
+        continuation: None,
+        image: None,
+        exit_kind: crate::userland::lifecycle::ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
+        fs_base: 0,
+        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+    };
+    crate::userland::lifecycle::insert_process(p1);
+    crate::userland::lifecycle::insert_process(p2);
+
+    crate::userland::lifecycle::mark_ring3_ready(60);
+    crate::userland::lifecycle::mark_ring3_blocked(
+        61,
+        Ring3BlockReason::WaitingForChild { target: -1 },
+    );
+
+    // Removing 60 clears its ready entry.
+    drop(crate::userland::lifecycle::remove_process(60));
+    assert!(crate::userland::lifecycle::peek_next_ring3().is_none());
+    // Removing 61 clears its blocked entry — a subsequent wake call
+    // does nothing.
+    drop(crate::userland::lifecycle::remove_process(61));
+    crate::userland::lifecycle::wake_ring3_blocked_on_child(61, 99);
+    assert!(crate::userland::lifecycle::peek_next_ring3().is_none());
+}
+
+/// next_runnable prefers a ring-3 process when one is ready, falling
+/// back to the kernel-thread scheduler (idle) otherwise. This is the
+/// load-bearing decision the U5 timer ISR will consult.
+fn test_next_runnable_prefers_ring3() {
+    use crate::process::scheduler::{Runnable, SCHEDULER};
+    clear_ring3_queues();
+
+    crate::userland::lifecycle::mark_ring3_ready(70);
+    let pick = {
+        let mut sched = SCHEDULER.lock();
+        sched.next_runnable()
+    };
+    assert_eq!(pick, Runnable::RingThree(70));
+
+    // No more ring-3 ready — falls back to kernel-thread (idle PCB).
+    let pick = {
+        let mut sched = SCHEDULER.lock();
+        sched.next_runnable()
+    };
+    assert!(matches!(pick, Runnable::KernelThread(_)));
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_fpu_state_is_16_aligned,
         &test_fpu_state_fresh_has_default_mxcsr,
         &test_fpu_save_restore_preserves_xmm0,
         &test_save_restore_user_cpu_state_roundtrips_fs_base,
+        &test_ring3_ready_queue_is_fifo,
+        &test_ring3_ready_queue_dedups,
+        &test_ring3_blocked_removes_from_ready,
+        &test_wake_ring3_blocked_on_child_any,
+        &test_wake_ring3_blocked_on_child_specific,
+        &test_remove_process_cleans_ring3_queues,
+        &test_next_runnable_prefers_ring3,
         &test_set_stack_window_records_all_fields,
         &test_unmap_user_stack_sentinel_is_noop,
         &test_unmap_user_stack_releases_range,

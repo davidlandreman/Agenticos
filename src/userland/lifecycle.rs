@@ -21,7 +21,7 @@
 // long-jump. A second `run` while one is active is rejected by the run
 // command before `enter_user_mode` is reached.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
@@ -245,12 +245,38 @@ pub struct ProcessTable {
     /// CPU (its CR3, kernel stack, FS_BASE, FPU). `None` when the kernel
     /// is running and no ring-3 process is current.
     pub current_user_pid: Option<u32>,
+    /// U3: round-robin queue of ring-3 PIDs ready to be scheduled.
+    /// `Runnable::RingThree(pid)` decisions in `schedule_ring3_aware`
+    /// pop from the front; readying a process pushes to the back.
+    /// Excludes [`KERNEL_PID`] (the sentinel is never schedulable).
+    pub ring3_ready: VecDeque<u32>,
+    /// U3: PIDs currently blocked, with the reason they're waiting.
+    /// Wake paths (e.g., `wake_ring3_blocked_on_child`) look up by
+    /// reason and move matches into `ring3_ready`.
+    pub ring3_blocked: BTreeMap<u32, Ring3BlockReason>,
 }
 
 impl ProcessTable {
     const fn empty() -> Self {
-        Self { by_pid: BTreeMap::new(), current_user_pid: None }
+        Self {
+            by_pid: BTreeMap::new(),
+            current_user_pid: None,
+            ring3_ready: VecDeque::new(),
+            ring3_blocked: BTreeMap::new(),
+        }
     }
+}
+
+/// U3: why a ring-3 process is parked. Distinct from `pcb::BlockReason`
+/// (which is for kernel-thread blocking) because the keys differ —
+/// `WaitingForChild::target` carries the POSIX wait4 selector (`i32`,
+/// possibly `-1` for "any child"), not a kernel-thread PID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ring3BlockReason {
+    /// `wait4(target, ...)` with no matching zombie yet. Wakes when
+    /// any child of this process becomes a zombie (U6's child-exit
+    /// path calls `wake_ring3_blocked_on_child(parent_pid)`).
+    WaitingForChild { target: i32 },
 }
 
 static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::new(ProcessTable::empty());
@@ -388,6 +414,9 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     if g.current_user_pid == Some(pid) {
         g.current_user_pid = None;
     }
+    // U3: a removed process must not linger in the scheduler queues.
+    g.ring3_ready.retain(|p| *p != pid);
+    g.ring3_blocked.remove(&pid);
     g.by_pid.remove(&pid)
 }
 
@@ -400,6 +429,92 @@ pub fn remove_process(pid: u32) -> Option<Process> {
 pub fn reset_sentinel() {
     let mut g = PROCESS_TABLE.lock();
     g.by_pid.insert(KERNEL_PID, Process::sentinel());
+}
+
+// ---------- U3: ring-3 scheduling state ----------
+
+/// Mark `pid` ready to run. Removes it from the blocked map (if
+/// present) and pushes it onto the back of `ring3_ready` so the next
+/// `pop_next_ring3` decision picks it (round-robin order). No-op if
+/// `pid` is already in `ring3_ready`. Rejects [`KERNEL_PID`] — the
+/// sentinel is never schedulable.
+pub fn mark_ring3_ready(pid: u32) {
+    if pid == KERNEL_PID {
+        debug_assert!(false, "attempted to mark sentinel ring-3 ready");
+        return;
+    }
+    let mut g = PROCESS_TABLE.lock();
+    g.ring3_blocked.remove(&pid);
+    if !g.ring3_ready.iter().any(|p| *p == pid) {
+        g.ring3_ready.push_back(pid);
+    }
+}
+
+/// Mark `pid` blocked with `reason`. Removes it from `ring3_ready` if
+/// present so the scheduler decision skips it; records the reason so
+/// wake paths know whether to unblock it.
+pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
+    if pid == KERNEL_PID {
+        debug_assert!(false, "attempted to mark sentinel ring-3 blocked");
+        return;
+    }
+    let mut g = PROCESS_TABLE.lock();
+    g.ring3_ready.retain(|p| *p != pid);
+    g.ring3_blocked.insert(pid, reason);
+}
+
+/// Pop the front of the ring-3 ready queue, if any. Used by U5's
+/// timer-ISR-driven ring-3-aware scheduler when deciding what to
+/// resume after a ring-3 preemption.
+pub fn pop_next_ring3() -> Option<u32> {
+    PROCESS_TABLE.lock().ring3_ready.pop_front()
+}
+
+/// Peek at the front of the ring-3 ready queue without popping. Used
+/// by the U5 decision path to check whether any ring-3 process is
+/// runnable before falling back to the kernel-thread scheduler.
+pub fn peek_next_ring3() -> Option<u32> {
+    PROCESS_TABLE.lock().ring3_ready.front().copied()
+}
+
+/// Wake any ring-3 process blocked-on-wait4 whose target matches
+/// `child_pid` (positive `target == child_pid as i32`) or `target == -1`
+/// (any child) AND whose own PID equals `parent_pid`.
+///
+/// Called by `notify_parent_of_exit` and `notify_parent_of_signaled_exit`
+/// after filing the zombie. Today's pre-U5 callers run this as a no-op
+/// (no ring-3 process is ever blocked because the synchronous-fork
+/// pattern never reaches a "child running, parent blocked" state);
+/// once U5/U7 land, this is the actual wake.
+pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
+    if parent_pid == KERNEL_PID {
+        return;
+    }
+    let mut g = PROCESS_TABLE.lock();
+    let should_wake = match g.ring3_blocked.get(&parent_pid) {
+        Some(Ring3BlockReason::WaitingForChild { target }) => {
+            *target == -1 || *target == child_pid as i32
+        }
+        None => false,
+    };
+    if should_wake {
+        g.ring3_blocked.remove(&parent_pid);
+        if !g.ring3_ready.iter().any(|p| *p == parent_pid) {
+            g.ring3_ready.push_back(parent_pid);
+        }
+    }
+}
+
+/// Returns true if `pid` has any child currently tracked in
+/// `by_pid` (parent_pid match) OR any unreaped zombie. Used by `wait4`
+/// (U6) to distinguish "no children at all → ECHILD" from "has
+/// children but none zombie yet → block or EAGAIN".
+pub fn has_children(parent_pid: u32) -> bool {
+    let g = PROCESS_TABLE.lock();
+    let live = g.by_pid.values().any(|p| p.parent_pid == parent_pid && p.pid != KERNEL_PID);
+    drop(g);
+    let zombie = ZOMBIES.lock().values().any(|z| z.parent_pid == parent_pid);
+    live || zombie
 }
 
 // ---------- U2: per-process CPU state save/restore orchestrators ----------
@@ -823,6 +938,12 @@ pub fn notify_parent_of_exit(pid: u32, parent_pid: u32, exit_code: i64) {
     }
     record_zombie(pid, parent_pid, exit_code);
     raise_signal_on_stashed_parent(crate::userland::signal::SIGCHLD);
+    // U3: wake parent if it's blocked in wait4. No-op today (the
+    // pre-U5 synchronous-fork pattern never has parent blocked while
+    // child runs); load-bearing once U7 collapses fork so parent
+    // returns to user immediately after fork and may then wait4
+    // before the child has exited.
+    wake_ring3_blocked_on_child(parent_pid, pid);
 }
 
 /// Same as [`notify_parent_of_exit`] for children killed by a signal
@@ -838,6 +959,8 @@ pub fn notify_parent_of_signaled_exit(pid: u32, parent_pid: u32, signum: i32, ex
     }
     record_zombie_signaled(pid, parent_pid, signum, exit_code);
     raise_signal_on_stashed_parent(crate::userland::signal::SIGCHLD);
+    // U3: see notify_parent_of_exit for the wake rationale.
+    wake_ring3_blocked_on_child(parent_pid, pid);
 }
 
 /// Replace the currently-loaded process with `new`, returning the

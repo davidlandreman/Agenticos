@@ -35,6 +35,19 @@ pub struct ProcessInfo {
     pub cpu_percentage: u8,
 }
 
+/// What the scheduler can pick to run next. Kernel threads continue to
+/// use the existing PCB-backed flow; ring-3 user processes (U3) are a
+/// parallel kind that the U5 ring-3-aware timer ISR resumes via the U4
+/// switch primitive. The unifying surface is this enum + the decision
+/// in [`Scheduler::next_runnable`], NOT a shared queue inside the PCB
+/// table — keeping the kernel-thread side untouched lowers the risk of
+/// regression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Runnable {
+    KernelThread(ProcessId),
+    RingThree(u32),
+}
+
 /// Global scheduler instance
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
@@ -124,6 +137,33 @@ impl Scheduler {
     /// Get a mutable reference to a process by PID
     pub fn get_process_mut(&mut self, pid: ProcessId) -> Option<&mut ProcessControlBlock> {
         self.processes.get_mut(&pid)
+    }
+
+    /// U3: choose what runs next, considering both ring-3 user
+    /// processes and kernel threads.
+    ///
+    /// Strategy today: **strict ring-3 preference** — if any ring-3
+    /// process is in the ready queue, pop and return it. Otherwise
+    /// fall through to the existing kernel-thread `schedule()`.
+    /// Documented in the U10 follow-up (compositor as kernel thread):
+    /// if a tight-loop ring-3 process starves rendering, switch to
+    /// fair alternation here. For U5's first wiring, simple is
+    /// better.
+    ///
+    /// Called by U5's timer-ISR-driven decision path. The caller is
+    /// responsible for actually resuming the picked entity — for
+    /// `Runnable::RingThree(pid)` that's the U4 switch primitive;
+    /// for `Runnable::KernelThread(pid)` it's the existing
+    /// context_switch path.
+    pub fn next_runnable(&mut self) -> Runnable {
+        if let Some(pid) = crate::userland::lifecycle::pop_next_ring3() {
+            return Runnable::RingThree(pid);
+        }
+        let kt_pid = self
+            .schedule()
+            .or(self.idle_pid)
+            .expect("scheduler not initialized — no idle process");
+        Runnable::KernelThread(kt_pid)
     }
 
     /// Select the next process to run
