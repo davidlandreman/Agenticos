@@ -25,9 +25,12 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - `./build.sh -c` — Clean build (removes all artifacts first)
 - `./build.sh -d` — Build in debug mode (larger kernel, slower boot, more symbols)
 - `./build.sh -n` — Build only, don't run QEMU
+- `./build.sh --rebuild-userland` — Recompile prebuilt-managed userland apps (zsh, future Linux ports) from source instead of copying the committed `userland/prebuilt/<NAME>.ELF`. Same flag works on `test.sh`. Env equivalents: `REBUILD_USERLAND=1`, or per-app `REBUILD_ZSH=1`. See `userland/prebuilt/README.md`.
 - `./build.sh -h` — Show help and usage
 - `cargo build` — Build the kernel only (won't create disk images)
 - `cargo build --release` — Build optimized release version
+
+**Prebuilt userland ELFs**: `ZSH.ELF` (and any future Linux ports that fetch upstream tarballs) ship as committed binaries under `userland/prebuilt/`. Fresh clones boot a working zsh without the `x86_64-linux-musl-cross` toolchain installed. `HELLO.ELF` (Rust) and `HELLOCPP.ELF` (small C++ wrapper) are NOT prebuilt — they build from source on every run. After changing the upstream source / Makefile / patches of a prebuilt-managed app, run `./userland/refresh-prebuilt.sh` and commit the updated binary alongside the source change.
 
 **QEMU Configuration**: 128 MiB RAM, serial output, VirtIO tablet for seamless mouse, `isa-debug-exit` for test integration.
 
@@ -37,6 +40,7 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - `./test.sh 'arc::test_weak*'` — Glob within a module
 - `./test.sh -l` — List available modules and exit
 - `./test.sh --skip-userland` — Skip the userland prebuild (faster iteration)
+- `./test.sh --rebuild-userland` — Force-recompile prebuilt-managed userland apps (see Build and Run)
 - `cargo build --features test` — Build kernel with test features enabled
 
 Tests run automatically on kernel boot when built with the test feature. QEMU exits with success/failure codes via `isa-debug-exit`. The filter is delivered at runtime via QEMU `fw_cfg`, so changing it does not trigger a kernel rebuild. See `.claude/rules/testing-flow.md` for exit-code semantics and filter syntax, and `src/tests/CLAUDE.md` for how to add a new test or topic module.

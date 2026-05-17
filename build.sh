@@ -5,6 +5,7 @@ CLEAN=false
 RUN_QEMU=true
 HELP=false
 DEBUG=false
+REBUILD_USERLAND_FLAG=0
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -19,6 +20,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -d|--debug)
             DEBUG=true
+            shift
+            ;;
+        --rebuild-userland)
+            REBUILD_USERLAND_FLAG=1
             shift
             ;;
         -h|--help)
@@ -40,14 +45,26 @@ if [ "$HELP" = true ]; then
     echo "Build AgenticOS kernel and create bootloader images"
     echo ""
     echo "Options:"
-    echo "  -c, --clean     Clean build artifacts before building"
-    echo "  -d, --debug     Build in debug mode (larger kernel, slower boot)"
-    echo "  -n, --no-qemu   Build only, don't run QEMU"
-    echo "  -h, --help      Show this help message"
+    echo "  -c, --clean             Clean build artifacts before building"
+    echo "  -d, --debug             Build in debug mode (larger kernel, slower boot)"
+    echo "  -n, --no-qemu           Build only, don't run QEMU"
+    echo "      --rebuild-userland  Force rebuild of prebuilt-managed userland apps"
+    echo "                          (default: copy from userland/prebuilt/ when present)"
+    echo "                          Equivalent: REBUILD_USERLAND=1 env. Per-app:"
+    echo "                          REBUILD_ZSH=1."
+    echo "  -h, --help              Show this help message"
     echo ""
     echo "Default: Build in release mode, create images, and run in QEMU"
     exit 0
 fi
+
+# Translate the CLI flag into the env contract that prebuilt-lib.sh
+# consumes. Honor an existing REBUILD_USERLAND=1 from the caller too.
+if [ "$REBUILD_USERLAND_FLAG" = "1" ]; then
+    REBUILD_USERLAND=1
+fi
+REBUILD_USERLAND="${REBUILD_USERLAND:-0}"
+export REBUILD_USERLAND
 
 # Clean if requested
 if [ "$CLEAN" = true ]; then
@@ -135,43 +152,17 @@ else
     echo "   Override the binary name: MUSL_GXX=<path-to-musl-g++> ./build.sh"
 fi
 
-# zsh — first real userland shell. Built statically against musl + a
-# vendored ncurses-widec by userland/apps/zsh/Makefile. Same probe +
-# readelf hard-fail pattern as HELLOCPP. The Makefile fetches sources
-# from upstream on first build and caches them under
-# userland/apps/zsh/build/tarballs/, so subsequent builds are offline.
-echo "🛠  Building zsh userland (ZSH)..."
-MUSL_CC="${MUSL_CC:-x86_64-linux-musl-gcc}"
-if command -v "$MUSL_CC" >/dev/null 2>&1; then
-    if make -C userland/apps/zsh MUSL_CC="$MUSL_CC"; then
-        ZSH_BIN="userland/apps/zsh/build/zsh"
-        if [ -f "$ZSH_BIN" ]; then
-            MUSL_READELF="${MUSL_CC%gcc}readelf"
-            command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
-            ET_TYPE=$("$MUSL_READELF" -h "$ZSH_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
-            if [ "$ET_TYPE" != "EXEC" ]; then
-                echo "❌ $ZSH_BIN is $ET_TYPE, expected EXEC. Toolchain likely defaults to PIE."
-                echo "   Try: $MUSL_CC -static -no-pie -fno-pie ..."
-                exit 1
-            fi
-            STAGED="$HOST_SHARE_STAGE/ZSH.ELF"
-            TMP="$HOST_SHARE_STAGE/.ZSH.ELF.tmp.$$"
-            cp "$ZSH_BIN" "$TMP"
-            mv -f "$TMP" "$STAGED"
-            SIZE=$(wc -c < "$STAGED" | tr -d ' ')
-            echo "📦 Staged $STAGED ($SIZE bytes)"
-        else
-            echo "⚠️  zsh build succeeded but $ZSH_BIN not found; skipping stage"
-        fi
-    else
-        echo "❌ zsh userland build failed."
-        exit 1
-    fi
-else
-    echo "⚠️  $MUSL_CC not found on PATH — skipping ZSH.ELF."
-    echo "   Install hint (macOS): brew install x86_64-linux-musl-cross"
-    echo "   Override the binary name: MUSL_CC=<path-to-musl-gcc> ./build.sh"
-fi
+# zsh — first real userland shell. Prebuilt-managed: the committed
+# binary at userland/prebuilt/ZSH.ELF is copied into host_share/ by
+# default, so a fresh clone without the musl toolchain still gets a
+# working zsh. Pass --rebuild-userland (or REBUILD_USERLAND=1 /
+# REBUILD_ZSH=1) to compile from source via userland/apps/zsh/Makefile
+# and refresh the committed prebuilt. See userland/prebuilt/README.md.
+REPO_ROOT="$(pwd)"
+export REPO_ROOT HOST_SHARE_STAGE
+# shellcheck source=userland/prebuilt-lib.sh
+. "$REPO_ROOT/userland/prebuilt-lib.sh"
+stage_zsh || true  # soft-fail: kernel build + tests don't depend on ZSH.ELF
 
 # Determine build flags
 BUILD_FLAGS="--release"

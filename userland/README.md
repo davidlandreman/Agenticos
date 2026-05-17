@@ -39,6 +39,62 @@ projects, and the C++ build uses the host's musl-based g++ cross-compiler
 instead of the kernel's nightly Rust target. `build.sh` / `test.sh`
 invoke its `Makefile` separately.
 
+## Prebuilt ELFs
+
+Apps that fetch upstream tarballs and / or take long enough that
+rebuilding on every kernel iteration is friction ship as **committed
+binaries** under `userland/prebuilt/`. Today the only entry is
+`ZSH.ELF`; future Linux ports (bash, vim, coreutils, …) belong here
+too. The committed binary is what `build.sh` / `test.sh` copy into
+`host_share/` by default — fresh clones boot a working zsh without
+the `x86_64-linux-musl-cross` toolchain installed and without an
+outbound network fetch.
+
+Decision tree for adding a new app:
+
+| Property                                           | → Prebuilt? |
+|----------------------------------------------------|:-----------:|
+| Fetches an upstream tarball during build           | **Yes**     |
+| Build takes more than a few seconds                | **Yes**     |
+| Only-in-tree source + standard toolchain, fast     | No (build every run) |
+
+`HELLO.ELF` (Rust) and `HELLOCPP.ELF` (small C++ wrapper) are NOT
+prebuilt — both build quickly and have no upstream fetch.
+
+**Default**: `build.sh` / `test.sh` copy `userland/prebuilt/<NAME>.ELF`
+into `host_share/<NAME>.ELF`. They do NOT invoke `make` for the
+upstream app and do NOT probe for the musl toolchain.
+
+**Force rebuild**:
+
+```sh
+./build.sh --rebuild-userland     # all prebuilt-managed apps
+REBUILD_ZSH=1 ./build.sh          # just zsh
+```
+
+When the prebuilt ELF is missing, the scripts fall through to a rebuild
+automatically (this is the auto-bootstrap path on a fresh clone that
+*does* have the toolchain).
+
+**Refresh after a source change**:
+
+```sh
+./userland/refresh-prebuilt.sh
+git add userland/prebuilt/<NAME>.ELF userland/apps/<app>/
+git commit -m "userland(<app>): <change>; refresh prebuilt"
+```
+
+`refresh-prebuilt.sh` hard-fails on any build problem and prints
+`git status userland/prebuilt/` when finished. It does NOT auto-commit
+— stage and commit yourself, alongside any source/Makefile change.
+
+There is **no automatic staleness check**: if you change source under a
+prebuilt-managed app without running `refresh-prebuilt.sh`, the committed
+binary will lag the source. The reviewer's job is to flag a source-side
+change in `userland/apps/<app>/` without a matching diff in
+`userland/prebuilt/<NAME>.ELF`. See `userland/prebuilt/README.md` for the
+operational reference.
+
 ## Building
 
 `build.sh` and `test.sh` build both apps automatically when the host has
@@ -136,13 +192,18 @@ mirror `userland/apps/zsh/`:
    set, runs `make`, and copies a stripped binary to `build/<name>`.
 2. Pin both the source version and the SHA256 in the Makefile and the
    app's `README.md`. Bumping a version bumps the SHA in lockstep.
-3. Add a parallel staging block in `build.sh` and `test.sh` after the
-   HELLOCPP block — same `MUSL_CC` probe-and-warn pattern, same
-   `readelf` ET_EXEC verification, same tmp-file + `mv -f` staging into
-   `host_share/<NAME>.ELF`.
+3. Add a `stage_<name>` function in `userland/prebuilt-lib.sh` modeled
+   on `stage_zsh`: rebuild-or-copy decision, `readelf` ET_EXEC check,
+   atomic refresh of both `userland/prebuilt/<NAME>.ELF` and
+   `host_share/<NAME>.ELF`. Add the new `stage_<name>` call to
+   `build.sh`, `test.sh`, and `userland/refresh-prebuilt.sh`.
 4. Add `build/` to `userland/apps/<name>/.gitignore` — the build tree
    contains tarballs, extracted source, and intermediate artifacts that
    shouldn't be tracked.
+5. Run `./userland/refresh-prebuilt.sh` once, then `git add
+   userland/prebuilt/<NAME>.ELF` so the committed binary lands with
+   the rest of the change. Document the entry in
+   `userland/prebuilt/README.md`'s per-app table.
 
 The zsh app additionally vendors a build-time-only ncurses inside its
 own build tree because the cross-musl toolchain doesn't ship one. If
