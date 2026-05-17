@@ -26,7 +26,7 @@ set -u
 
 usage() {
     cat <<'EOF'
-Usage: ./test.sh [PATTERN ...] [--skip-userland] [-l|--list] [-h|--help]
+Usage: ./test.sh [PATTERN ...] [--skip-userland] [--rebuild-userland] [-l|--list] [-h|--help]
 
 Run kernel tests in QEMU. With no PATTERN, runs the entire suite.
 
@@ -38,10 +38,14 @@ at the start and/or end:
   ./test.sh '*scroll*'         # substring anywhere
 
 Flags:
-  --skip-userland   Skip building userland/ and hello-cpp (faster iteration
-                    when not exercising userland tests).
-  -l, --list        Print available modules and exit (no build/QEMU).
-  -h, --help        Show this help.
+  --skip-userland     Skip building userland/ and hello-cpp (faster iteration
+                      when not exercising userland tests). Wins over
+                      --rebuild-userland if both are passed.
+  --rebuild-userland  Force rebuild of prebuilt-managed userland apps (zsh).
+                      Default copies the committed userland/prebuilt/ELF into
+                      host_share/. Equivalent: REBUILD_USERLAND=1 env.
+  -l, --list          Print available modules and exit (no build/QEMU).
+  -h, --help          Show this help.
 EOF
 }
 
@@ -49,17 +53,26 @@ EOF
 PATTERNS=()
 SKIP_USERLAND=0
 LIST_ONLY=0
+REBUILD_USERLAND_FLAG=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
         -l|--list) LIST_ONLY=1; shift ;;
         --skip-userland) SKIP_USERLAND=1; shift ;;
+        --rebuild-userland) REBUILD_USERLAND_FLAG=1; shift ;;
         --) shift; while [ $# -gt 0 ]; do PATTERNS+=("$1"); shift; done ;;
         -*) echo "Unknown flag: $1" >&2; usage >&2; exit 2 ;;
         *) PATTERNS+=("$1"); shift ;;
     esac
 done
+
+# Translate CLI flag into the env contract prebuilt-lib.sh consumes.
+if [ "$REBUILD_USERLAND_FLAG" = "1" ]; then
+    REBUILD_USERLAND=1
+fi
+REBUILD_USERLAND="${REBUILD_USERLAND:-0}"
+export REBUILD_USERLAND
 
 if [ "$LIST_ONLY" -eq 1 ]; then
     echo "Available test modules (from src/tests/mod.rs MODULES registry):"
@@ -129,31 +142,15 @@ if [ "$SKIP_USERLAND" -eq 0 ]; then
         echo "Note: $MUSL_GXX not found; skipping HELLOCPP.ELF (install: brew install x86_64-linux-musl-cross)"
     fi
 
-    # zsh userland. Soft-fail mirrors HELLOCPP — kernel tests use embedded
-    # fixtures, so a missing zsh build only blocks the e2e zsh tests; other
-    # tests still run.
-    MUSL_CC="${MUSL_CC:-x86_64-linux-musl-gcc}"
-    if command -v "$MUSL_CC" >/dev/null 2>&1; then
-        if make -C userland/apps/zsh MUSL_CC="$MUSL_CC"; then
-            ZSH_BIN="userland/apps/zsh/build/zsh"
-            if [ -f "$ZSH_BIN" ]; then
-                MUSL_READELF="${MUSL_CC%gcc}readelf"
-                command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
-                ET_TYPE=$("$MUSL_READELF" -h "$ZSH_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
-                if [ "$ET_TYPE" = "EXEC" ]; then
-                    STAGED="$HOST_SHARE_STAGE/ZSH.ELF"
-                    TMP="$HOST_SHARE_STAGE/.ZSH.ELF.tmp.$$"
-                    cp "$ZSH_BIN" "$TMP"
-                    mv -f "$TMP" "$STAGED"
-                    echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
-                else
-                    echo "Warning: $ZSH_BIN is $ET_TYPE, expected EXEC; skipping stage"
-                fi
-            fi
-        fi
-    else
-        echo "Note: $MUSL_CC not found; skipping ZSH.ELF (install: brew install x86_64-linux-musl-cross)"
-    fi
+    # zsh — prebuilt-managed. By default the committed
+    # userland/prebuilt/ZSH.ELF is copied into host_share/; pass
+    # --rebuild-userland or set REBUILD_USERLAND=1 to recompile from
+    # source. See userland/prebuilt-lib.sh.
+    REPO_ROOT="$(pwd)"
+    export REPO_ROOT HOST_SHARE_STAGE
+    # shellcheck source=userland/prebuilt-lib.sh
+    . "$REPO_ROOT/userland/prebuilt-lib.sh"
+    stage_zsh || true  # soft-fail: kernel tests use embedded fixtures
 else
     echo "Skipping userland prebuild (--skip-userland)"
 fi
