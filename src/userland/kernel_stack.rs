@@ -17,10 +17,26 @@
 use alloc::boxed::Box;
 use x86_64::VirtAddr;
 
-/// Size of each per-process kernel stack. 16 KiB matches the global
-/// boot-time stack and is comfortable for the deepest path we have
-/// today (execve → load_elf → FAT cluster walk + IDE PIO).
-pub const KERNEL_STACK_BYTES: usize = 16 * 1024;
+/// Size of each per-process kernel stack. 64 KiB.
+///
+/// 16 KiB (the original budget) is not enough for the deepest paths the
+/// kernel reaches today: zsh's musl init drives nested syscalls
+/// (open → FAT chain walk → IDE PIO → allocator) that walk past the bottom
+/// of a 16 KiB stack and stomp adjacent heap memory. Because the kernel
+/// stack lives in the heap (boxed slice), the stomped memory is whatever
+/// the allocator placed next to this buffer — typically a free-list node
+/// or another live allocation. The corruption then surfaces non-locally:
+/// PR #22's "linked_list_allocator drops holes from its free list during
+/// zsh init" was this overflow trashing the allocator's free-chunk
+/// headers. Single-process tests like `test_fork_execve_badpath_returns_to_parent`
+/// fail in isolation for the same reason — whichever path happens to
+/// straddle the stack bottom.
+///
+/// 64 KiB gives 4× headroom — comfortable for current paths and the
+/// per-process cost is acceptable while the kernel runs one app at a time.
+/// A future improvement would be a guard page below the stack so the
+/// overflow faults immediately instead of corrupting silently.
+pub const KERNEL_STACK_BYTES: usize = 64 * 1024;
 
 /// A kernel-side stack buffer for one user process.
 ///

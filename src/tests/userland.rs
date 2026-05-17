@@ -1200,7 +1200,6 @@ fn test_run_fault_pf() {
 /// ENOSYS instead of terminating zsh. Returns `true` if the binary was
 /// staged and the run completed; `false` (skip) if not staged.
 #[cfg(feature = "test")]
-#[allow(dead_code)]
 fn drive_zsh(argv_after_path: &[&str]) -> bool {
     use alloc::string::String;
     use crate::userland::lifecycle::with_active_user;
@@ -1225,21 +1224,18 @@ fn drive_zsh(argv_after_path: &[&str]) -> bool {
 /// `zsh -f +m -c 'exit 0'` — proves the binary loads, musl init runs,
 /// the parser handles -c, the builtin exit dispatches, and the
 /// cooperative-exit path long-jumps back cleanly.
-#[allow(dead_code)]
 fn test_run_zsh_minimal_exit() {
     let _ran = drive_zsh(&["-f", "+m", "-c", "exit 0"]);
 }
 
 /// `zsh -f +m -c 'echo hi'` — exercises the print/write path and
 /// cooperative exit.
-#[allow(dead_code)]
 fn test_run_zsh_echo_command() {
     let _ran = drive_zsh(&["-f", "+m", "-c", "echo hi"]);
 }
 
 /// `zsh -f +m -c 'pwd'` — proves getcwd, the pwd builtin, and the
 /// envp-driven path resolution work.
-#[allow(dead_code)]
 fn test_run_zsh_pwd() {
     let _ran = drive_zsh(&["-f", "+m", "-c", "pwd"]);
 }
@@ -2862,11 +2858,10 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_run_happy_path_hello,
         &test_run_fault_ud,
         &test_kernel_ss_after_user_fault,
-        // U8: ZSH.ELF end-to-end tests are written but gated off pending
-        // a heap allocator fix (linked_list_allocator 0.10.6 returns Err
-        // for 4 KiB align-1 with 99 MiB free during zsh's init pattern).
-        // See the comment block above `drive_zsh` and the plan's
-        // "Deferred to Follow-Up Work" entry.
+        // U8: ZSH.ELF end-to-end tests.
+        &test_run_zsh_minimal_exit,
+        &test_run_zsh_echo_command,
+        &test_run_zsh_pwd,
         &test_run_fault_pf,
         &test_run_fault_gp,
         &test_run_bad_pointer_syscall,
