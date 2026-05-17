@@ -890,6 +890,18 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         // U3: child shares parent's exe path (fork doesn't change the
         // running binary; execve replaces it).
         exe_path: parent.exe_path.clone(),
+        // Demand-grown stack (U5): child inherits the parent's exact
+        // stack window. The parent's stack pages already copied into
+        // the child's L4 via AddressSpace::clone_for_child above, so
+        // these five fields together with the eager page copy reproduce
+        // the parent's stack state at fork time. growth_faults_remaining
+        // inherits the parent's remaining budget — matching Linux's
+        // RLIMIT_STACK semantics where children inherit the rlimit.
+        stack_top: parent.stack_top,
+        stack_bottom: parent.stack_bottom,
+        stack_mapped_bottom: parent.stack_mapped_bottom,
+        stack_max_growth_floor: parent.stack_max_growth_floor,
+        growth_faults_remaining: parent.growth_faults_remaining,
     });
 
     // 8. Stash the parent's Process and install the child as current.

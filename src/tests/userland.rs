@@ -2174,6 +2174,11 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
     };
     let child = Process {
         pid: 101,
@@ -2190,6 +2195,11 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
     };
 
     // Stash parent, install child as current — mirroring fork's state
@@ -3029,8 +3039,126 @@ fn test_run_leak_loop_fault() {
     }
 }
 
+// --- U1: stack-window fields + unmap_user_stack helper ---
+
+fn test_set_stack_window_records_all_fields() {
+    use crate::userland::lifecycle::with_current_process;
+
+    with_current_process(|p| {
+        // Snapshot and restore so a regression here doesn't strand the
+        // sentinel slot with junk values for any test that runs after.
+        let snap = (
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        );
+
+        p.set_stack_window(
+            0x80_0000,
+            0x80_0000 - 8 * 0x1000,
+            0x80_0000 - 8 * 0x1000,
+            0x80_0000 - 768 * 0x1000,
+            768,
+        );
+        assert_eq!(p.stack_top, 0x80_0000);
+        assert_eq!(p.stack_bottom, 0x80_0000 - 8 * 0x1000);
+        assert_eq!(p.stack_mapped_bottom, 0x80_0000 - 8 * 0x1000);
+        assert_eq!(p.stack_max_growth_floor, 0x80_0000 - 768 * 0x1000);
+        assert_eq!(p.growth_faults_remaining, 768);
+
+        p.stack_top = snap.0;
+        p.stack_bottom = snap.1;
+        p.stack_mapped_bottom = snap.2;
+        p.stack_max_growth_floor = snap.3;
+        p.growth_faults_remaining = snap.4;
+    });
+}
+
+fn test_unmap_user_stack_sentinel_is_noop() {
+    use crate::userland::lifecycle::{unmap_user_stack, with_current_process};
+
+    // Sentinel slot (PID 0 between processes) has all stack fields = 0.
+    // unmap_user_stack must not touch the mapper or panic.
+    with_current_process(|p| {
+        let snap = (
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        );
+        p.stack_top = 0;
+        p.stack_bottom = 0;
+        p.stack_mapped_bottom = 0;
+        p.stack_max_growth_floor = 0;
+        p.growth_faults_remaining = 0;
+        unmap_user_stack(p);
+        assert_eq!(p.stack_top, 0);
+        assert_eq!(p.stack_mapped_bottom, 0);
+        // Restore.
+        p.stack_top = snap.0;
+        p.stack_bottom = snap.1;
+        p.stack_mapped_bottom = snap.2;
+        p.stack_max_growth_floor = snap.3;
+        p.growth_faults_remaining = snap.4;
+    });
+}
+
+fn test_unmap_user_stack_releases_range() {
+    use crate::mm::memory::with_memory_mapper;
+    use crate::mm::paging::{UserPerms, USER_STACK_TOP};
+    use crate::userland::lifecycle::{unmap_user_stack, with_current_process};
+    use x86_64::VirtAddr;
+
+    // Map a small fake stack so we can assert unmap_user_stack frees it.
+    const N: u64 = 4;
+    let bottom = USER_STACK_TOP - N * 0x1000;
+    with_memory_mapper(|m| m.map_user_region(VirtAddr::new(bottom), N, UserPerms::ReadWrite))
+        .unwrap()
+        .unwrap();
+
+    with_current_process(|p| {
+        let snap = (
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        );
+        p.stack_top = USER_STACK_TOP;
+        p.stack_bottom = bottom;
+        p.stack_mapped_bottom = bottom;
+        p.stack_max_growth_floor = bottom - 0x1000;
+        p.growth_faults_remaining = 0;
+
+        unmap_user_stack(p);
+
+        assert_eq!(p.stack_top, 0);
+        assert_eq!(p.stack_mapped_bottom, 0);
+
+        // Re-mapping must succeed — the range is empty again.
+        with_memory_mapper(|m| m.map_user_region(VirtAddr::new(bottom), N, UserPerms::ReadWrite))
+            .unwrap()
+            .unwrap();
+        with_memory_mapper(|m| m.unmap_user_region(VirtAddr::new(bottom), N))
+            .unwrap()
+            .unwrap();
+
+        p.stack_top = snap.0;
+        p.stack_bottom = snap.1;
+        p.stack_mapped_bottom = snap.2;
+        p.stack_max_growth_floor = snap.3;
+        p.growth_faults_remaining = snap.4;
+    });
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
+        &test_set_stack_window_records_all_fields,
+        &test_unmap_user_stack_sentinel_is_noop,
+        &test_unmap_user_stack_releases_range,
         &test_gdt_kernel_selectors,
         &test_sse_enabled_before_ring3,
         &test_gdt_user_selectors,

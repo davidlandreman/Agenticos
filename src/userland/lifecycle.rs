@@ -145,6 +145,31 @@ pub struct Process {
     /// in-kernel test launches that bypass argv. `readlink` reads
     /// this for `/proc/self/exe` (see `readlink_handler`).
     pub exe_path: Option<String>,
+    /// Demand-grown stack — top of the user stack (exclusive). Constant
+    /// per-process; mirrors `image.stack_top` for fast access from the
+    /// ring-3 page-fault handler without dereferencing `image`. Zero for
+    /// the kernel-sentinel slot (PID 0).
+    pub stack_top: u64,
+    /// Demand-grown stack — current lowest committed page. Lowered on
+    /// each successful `try_grow_user_stack`. Compared against the
+    /// faulting address to classify ring-3 page faults.
+    pub stack_bottom: u64,
+    /// Demand-grown stack — lowest currently-mapped page. Equals
+    /// `stack_bottom` after every successful growth; kept separate so a
+    /// future shrink path can release frames without touching the
+    /// classification baseline. Teardown (`unmap_user_stack`) walks
+    /// `[stack_mapped_bottom, stack_top)` as a single range.
+    pub stack_mapped_bottom: u64,
+    /// Demand-grown stack — lowest page the stack may ever grow into.
+    /// `max(USER_STACK_TOP - USER_STACK_MAX_GROWTH_PAGES*0x1000,
+    /// highest_pt_load_end + 16-page guard)`. Faults below this are
+    /// true overflows.
+    pub stack_max_growth_floor: u64,
+    /// Demand-grown stack — remaining per-process growth budget. Starts
+    /// at `USER_STACK_MAX_GROWTH_PAGES`; decremented on each successful
+    /// growth. Guards against a fault-storm attack pattern exhausting
+    /// the bump-only frame allocator.
+    pub growth_faults_remaining: u64,
 }
 
 /// Compatibility alias retained for the long tail of callsites using
@@ -207,6 +232,11 @@ static CURRENT_PROCESS: Mutex<Process> = Mutex::new(Process {
     signal_state: SignalState::new(),
     kernel_stack: None,
     exe_path: None,
+    stack_top: 0,
+    stack_bottom: 0,
+    stack_mapped_bottom: 0,
+    stack_max_growth_floor: 0,
+    growth_faults_remaining: 0,
 });
 
 /// Acquire the current process slot for read/write. Used by syscall
@@ -272,8 +302,73 @@ pub fn install_new_process_opt(
         p.signal_state = SignalState::new();
         p.kernel_stack = Some(KernelStack::new());
         p.exe_path = None;
+        // Stack-window fields populated by U3 from the UserImage's
+        // stack metadata. Zero here so a re-install never inherits
+        // stale values from a previous process.
+        p.stack_top = 0;
+        p.stack_bottom = 0;
+        p.stack_mapped_bottom = 0;
+        p.stack_max_growth_floor = 0;
+        p.growth_faults_remaining = 0;
     });
     pid
+}
+
+impl Process {
+    /// Install the loader-computed stack window. Called from the
+    /// install path (U3) once `install_new_process_opt` has populated
+    /// the rest of the slot.
+    ///
+    /// `mapped_bottom` always equals `bottom` at install time (the
+    /// loader maps exactly the initial commit). Later, the ring-3
+    /// page-fault handler (U4) updates both fields on each successful
+    /// growth.
+    pub fn set_stack_window(
+        &mut self,
+        top: u64,
+        bottom: u64,
+        mapped_bottom: u64,
+        max_growth_floor: u64,
+        growth_faults_remaining: u64,
+    ) {
+        self.stack_top = top;
+        self.stack_bottom = bottom;
+        self.stack_mapped_bottom = mapped_bottom;
+        self.stack_max_growth_floor = max_growth_floor;
+        self.growth_faults_remaining = growth_faults_remaining;
+    }
+}
+
+/// Unmap the user stack range a process owns and zero its stack-window
+/// fields. Called from `cleanup_user_process` and `cooperative_exit`
+/// (U4) so grown stack pages are released regardless of which exit path
+/// runs.
+///
+/// No-op when the slot is the kernel sentinel (stack fields all `0`)
+/// or when teardown has already run.
+pub fn unmap_user_stack(p: &mut Process) {
+    if p.stack_top == 0 || p.stack_mapped_bottom == 0 {
+        return;
+    }
+    if p.stack_mapped_bottom >= p.stack_top {
+        // Defensive: nothing mapped, or fields inconsistent. Zero and
+        // return rather than asking the mapper for a zero-page unmap.
+        p.stack_top = 0;
+        p.stack_bottom = 0;
+        p.stack_mapped_bottom = 0;
+        p.stack_max_growth_floor = 0;
+        p.growth_faults_remaining = 0;
+        return;
+    }
+    let page_count = (p.stack_top - p.stack_mapped_bottom) / 0x1000;
+    let _ = crate::mm::memory::with_memory_mapper(|m| {
+        m.unmap_user_region(x86_64::VirtAddr::new(p.stack_mapped_bottom), page_count)
+    });
+    p.stack_top = 0;
+    p.stack_bottom = 0;
+    p.stack_mapped_bottom = 0;
+    p.stack_max_growth_floor = 0;
+    p.growth_faults_remaining = 0;
 }
 
 /// Returns the PID of the running process, or `KERNEL_PID` (0) if none.
