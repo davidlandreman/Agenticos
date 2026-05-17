@@ -226,6 +226,47 @@ pub fn auto_mount(device: &'static dyn BlockDevice, mount_path: &'static str) ->
     }
 }
 
+/// Auto-mount but gate the resulting FAT as writable. Performs the
+/// C-2 dirty-bit read-before-set check on the underlying disk; on a
+/// dirty-bit failure refuses to mount writable (caller can fall back
+/// to a read-only mount).
+pub fn auto_mount_writable(
+    device: &'static dyn BlockDevice,
+    mount_path: &'static str,
+    force_dirty_mount: bool,
+) -> Result<FilesystemType, FilesystemError> {
+    let fs_type = detect_filesystem(device)?;
+    if !matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) {
+        return Err(FilesystemError::UnsupportedOperation);
+    }
+    unsafe {
+        let wrappers_ptr = &raw mut MOUNTED_FAT_WRAPPERS;
+        let slot = (0..MAX_FAT_MOUNTS)
+            .find(|&i| (*wrappers_ptr)[i].is_none())
+            .ok_or(FilesystemError::DiskFull)?;
+        let fat_fs = FatFilesystem::new(device)
+            .map_err(|_| FilesystemError::InvalidFilesystem)?;
+        // C-2 dirty-bit gate. Errors here propagate as ReadOnly so
+        // the caller can choose to retry as a normal (read-only)
+        // mount with `auto_mount(...)`.
+        fat_fs
+            .enable_writes(force_dirty_mount)
+            .map_err(|_| FilesystemError::ReadOnly)?;
+        let fat_fs_static: FatFilesystem<'static> = core::mem::transmute(fat_fs);
+        let wrapper = crate::fs::fat::fat_filesystem::FatFilesystemWrapper::new_writable(fat_fs_static);
+        (*wrappers_ptr)[slot] = Some(wrapper);
+        if let Some(wrapper_ref) = (*&raw const MOUNTED_FAT_WRAPPERS)[slot].as_ref() {
+            let vfs = get_vfs();
+            vfs.mount(mount_path, wrapper_ref as &dyn Filesystem, device)?;
+            debug_info!("Mounted {} as WRITABLE at {} (slot {})", wrapper_ref.name(), mount_path, slot);
+            Ok(fs_type)
+        } else {
+            (*wrappers_ptr)[slot] = None;
+            Err(FilesystemError::InvalidFilesystem)
+        }
+    }
+}
+
 /// Mount the boot-root FAT as the LOWER layer of an overlay, with a
 /// fresh tmpfs as the UPPER, and register the overlay at `/`. The FAT
 /// itself is never publicly mounted — userland sees only the merged

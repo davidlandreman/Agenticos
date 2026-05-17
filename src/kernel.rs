@@ -77,6 +77,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // Host-disk probe is small (one MBR read on the slave drive) and the
     // filesystem tests assert /host is mounted, so we keep it in test mode.
     try_mount_host_disk();
+    try_mount_data_disk();
 
     if let Some(rsdp_addr) = rsdp_addr {
         debug_debug!("RSDP address: 0x{:016x}", rsdp_addr);
@@ -190,6 +191,10 @@ static mut PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>;
 // so the host disk's partitions don't alias the root disk's PARTITION_DEVICES.
 static mut PRIMARY_SLAVE_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
 static mut HOST_PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] = [None, None, None, None];
+
+/// Secondary Master = the writable /data disk. Whole-disk FAT32 (no
+/// MBR/partition table); the BPB lives at sector 0.
+static mut SECONDARY_MASTER_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
 
 fn init_filesystems() {
     use crate::drivers::ide::{IDE_CONTROLLER, IdeChannel, IdeDrive, IdeBlockDevice};
@@ -436,6 +441,69 @@ fn try_mount_host_disk() {
     }
 
     debug_info!("Host disk: no FAT partition found; /host not mounted");
+}
+
+/// Probe Secondary IDE Master and mount the whole-disk FAT32 image at
+/// `/data`. Phase C U7 plumbing — this is the persistent writable
+/// surface (Phase C U10 will flip it from read-only to writable once
+/// the FAT writer lands).
+///
+/// The image is a bare FAT32 volume (no MBR), minted by `build.rs`
+/// via `fatfs::format_volume`. Any failure (no drive, no BPB, mount
+/// error) logs and returns silently — the kernel boots fine without
+/// /data, just with no persistent writable mount.
+fn try_mount_data_disk() {
+    use crate::drivers::ide::{IDE_CONTROLLER, IdeBlockDevice, IdeChannel, IdeDrive};
+    use crate::fs::filesystem::FilesystemError;
+    use crate::fs::vfs::{auto_mount, auto_mount_writable};
+    use crate::fs::{detect_filesystem, FilesystemType};
+
+    let Some((model_bytes, sectors)) = IDE_CONTROLLER.get_disk_info(IdeChannel::Secondary, IdeDrive::Master) else {
+        debug_info!("No IDE disk found on secondary master (no persistent /data)");
+        return;
+    };
+
+    let size_mb = (sectors * 512) / (1024 * 1024);
+    let model_len = model_bytes.iter().position(|&c| c == 0).unwrap_or(40);
+    let model = core::str::from_utf8(&model_bytes[..model_len]).unwrap_or("Unknown").trim();
+    debug_info!("Found data IDE disk on secondary master: {} ({} MB)", model, size_mb);
+
+    unsafe {
+        SECONDARY_MASTER_DISK = Some(IdeBlockDevice::new(IdeChannel::Secondary, IdeDrive::Master));
+    }
+    let data_disk = unsafe { (*&raw const SECONDARY_MASTER_DISK).as_ref().unwrap() };
+
+    // Whole-disk FAT: no MBR, no partition table. Detect at sector 0.
+    match detect_filesystem(data_disk) {
+        Ok(fs_type) if matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) => {
+            debug_info!("Data disk: detected {:?}, mounting at /data WRITABLE", fs_type);
+            // Try writable first; on dirty-bit refusal (C-2) fall back
+            // to a read-only mount with a warning so userland still has
+            // a /data mount to inspect.
+            match auto_mount_writable(data_disk, "/data", false) {
+                Ok(_) => {
+                    debug_info!("Data disk mounted writable at /data");
+                }
+                Err(FilesystemError::ReadOnly) => {
+                    debug_warn!(
+                        "Data disk: dirty-bit gate refused writable mount; falling back to read-only"
+                    );
+                    if let Err(e) = auto_mount(data_disk, "/data") {
+                        debug_warn!("Read-only fallback also failed: {:?}", e);
+                    }
+                }
+                Err(e) => {
+                    debug_warn!("Failed to mount data disk at /data: {:?}", e);
+                }
+            }
+        }
+        Ok(fs_type) => {
+            debug_info!("Data disk: filesystem {:?} not supported", fs_type);
+        }
+        Err(_) => {
+            debug_info!("Data disk: filesystem detection failed (uninitialized?)");
+        }
+    }
 }
 
 

@@ -232,9 +232,12 @@ if [ "$RUN_QEMU" = true ]; then
             sleep 0.2
         done
     ) &
+    DATA_IMAGE="${AGENTICOS_DATA_IMAGE:-target/bootloader/data.img}"
+    echo "💽 Persistent data disk: $DATA_IMAGE"
     qemu-system-x86_64 \
         -drive format=raw,file="$BIOS_IMAGE",if=ide,index=0 \
         -drive file=fat:ro:"$HOST_SHARE",if=ide,index=1,snapshot=on \
+        -drive format=raw,file="$DATA_IMAGE",if=ide,index=2 \
         -serial stdio \
         -chardev socket,id=rpc,path="$RPC_SOCK",server=on,wait=off \
         -serial chardev:rpc \

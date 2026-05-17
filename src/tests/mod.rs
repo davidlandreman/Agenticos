@@ -16,6 +16,8 @@ pub mod arc;
 #[cfg(feature = "test")]
 pub mod filesystem;
 #[cfg(feature = "test")]
+pub mod fat_write;
+#[cfg(feature = "test")]
 pub mod tools;
 #[cfg(feature = "test")]
 pub mod userland;
@@ -87,6 +89,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("fat_lfn", crate::fs::fat::lfn::lfn_tests),
     ("tmpfs", crate::fs::tmpfs::filesystem::tmpfs_tests),
     ("overlay", crate::fs::overlay::filesystem::overlay_tests),
+    ("fat_write", fat_write::get_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
     ("path", crate::userland::path::path_tests),

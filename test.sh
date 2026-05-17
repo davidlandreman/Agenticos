@@ -185,9 +185,12 @@ echo "Host folder: $HOST_SHARE -> /host (read-only)"
 # reads `opt/agenticos/test_filter` at boot. Commas inside the filter must be
 # escaped as `,,` per QEMU option-parser rules; our filter syntax already uses
 # `,` as the pattern separator so we double them here.
+DATA_IMAGE="${AGENTICOS_DATA_IMAGE:-target/bootloader/data.img}"
+echo "Data disk: $DATA_IMAGE -> /data (writable, snapshot for tests)"
 QEMU_ARGS=(
     -drive "format=raw,file=$BIOS_IMAGE,if=ide,index=0"
     -drive "file=fat:ro:$HOST_SHARE,if=ide,index=1,snapshot=on"
+    -drive "format=raw,file=$DATA_IMAGE,if=ide,index=2,snapshot=on"
     -serial stdio
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
     -display none

@@ -517,6 +517,97 @@ fn test_lookup_case_insensitive_on_long_name() {
     }
 }
 
+// --- U7 / Phase C: /data mount present (Secondary Master, whole-disk FAT32) -----
+
+fn test_data_mount_present() {
+    let vfs = crate::fs::vfs::get_vfs();
+    let mut found = false;
+    for mount in vfs.list_mounts() {
+        if mount.path == "/data" {
+            found = true;
+            debug_info!("  /data is mounted with filesystem: {}", mount.filesystem.name());
+            // U10 makes /data writable.
+            assert!(
+                !mount.filesystem.is_read_only(),
+                "/data should be WRITABLE after Phase C U10"
+            );
+        }
+    }
+    assert!(found, "/data must be present in vfs.list_mounts()");
+}
+
+fn test_data_create_write_read_round_trip() {
+    debug_info!("U10: end-to-end /data write via the public File API");
+    let f = crate::fs::File::create("/data/u10-test.txt").expect("create");
+    let n = f.write(b"hello from /data\n").expect("write");
+    assert_eq!(n, "hello from /data\n".len());
+    drop(f);
+
+    let f2 = crate::fs::File::open_read("/data/u10-test.txt").expect("reopen");
+    let content = f2.read_to_string().expect("read");
+    assert_eq!(content, "hello from /data\n");
+}
+
+fn test_data_unlink() {
+    debug_info!("U10: unlink on /data via the VFS");
+    // Ensure a fresh file (the previous test may have left one).
+    let f = crate::fs::File::create("/data/u10-unlink.txt").expect("create");
+    f.write(b"x").expect("write");
+    drop(f);
+    assert!(crate::fs::exists("/data/u10-unlink.txt"));
+    crate::fs::vfs::vfs_unlink("/data/u10-unlink.txt").expect("unlink");
+    assert!(!crate::fs::exists("/data/u10-unlink.txt"));
+}
+
+fn test_data_write_larger_than_one_cluster() {
+    // /data is FAT32 with 1 sector per cluster (512 bytes), so 5 KiB
+    // forces multi-cluster chain extension. Exercises write_file_at's
+    // FAT-link-then-write loop.
+    debug_info!("U10: 5 KiB write to /data spans multiple clusters");
+    let data: alloc::vec::Vec<u8> = (0..5 * 1024).map(|i| (i & 0xFF) as u8).collect();
+    let f = crate::fs::File::create("/data/u10-big.bin").expect("create");
+    let mut written = 0;
+    while written < data.len() {
+        let n = f.write(&data[written..]).expect("write");
+        assert!(n > 0);
+        written += n;
+    }
+    drop(f);
+
+    let f2 = crate::fs::File::open_read("/data/u10-big.bin").expect("reopen");
+    assert_eq!(f2.size() as usize, data.len());
+    let content = f2.read_to_vec().expect("read");
+    assert_eq!(content, data);
+}
+
+fn test_data_mkdir_returns_unsupported() {
+    // U10 explicitly defers mkdir on FAT to a follow-up. Userland
+    // should see ENOSYS / UnsupportedOperation, not a misleading
+    // success.
+    let result = crate::fs::vfs::vfs_mkdir("/data/some-dir");
+    assert!(matches!(
+        result,
+        Err(crate::fs::filesystem::FilesystemError::UnsupportedOperation)
+    ));
+}
+
+fn test_data_mount_root_dir_enumerable() {
+    // Just-formatted FAT32 has an empty root dir (no entries beyond
+    // the volume label, which is filtered out). Enumeration must
+    // succeed cleanly.
+    let entries = crate::fs::vfs::get_vfs()
+        .find_filesystem("/data")
+        .expect("/data resolvable")
+        .0
+        .enumerate_dir("/")
+        .expect("enumerate /data");
+    debug_info!("  /data contains {} entries", entries.len());
+    // QEMU's snapshot=on layer means we don't see writes from earlier
+    // test boots; assert empty OR small (just in case the volume label
+    // surfaces in some edge case).
+    assert!(entries.len() < 4, "/data should be near-empty post-mkfs");
+}
+
 // --- U6 / Phase B: writable / mount via overlay(tmpfs, FAT) ----------
 //
 // These tests exercise the real boot mount, where / is the overlay
@@ -599,5 +690,11 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_overlay_root_write_then_read,
         &test_overlay_root_mkdir_unlink_via_vfs,
         &test_overlay_root_unlink_lower_creates_whiteout,
+        &test_data_mount_present,
+        &test_data_mount_root_dir_enumerable,
+        &test_data_create_write_read_round_trip,
+        &test_data_unlink,
+        &test_data_write_larger_than_one_cluster,
+        &test_data_mkdir_returns_unsupported,
     ]
 }

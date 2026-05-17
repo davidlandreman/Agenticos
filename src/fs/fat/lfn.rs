@@ -271,6 +271,242 @@ pub const LCASE_BASENAME: u8 = 0x08;
 /// Lowercase-attr bit for the extension portion.
 pub const LCASE_EXTENSION: u8 = 0x10;
 
+// ---------- LFN write (Phase C U9) ----------
+
+/// Compute how many LFN slots a UTF-8 name needs when laid out in
+/// VFAT 13-UCS-2-units-per-slot format. Includes the trailing 0x0000
+/// terminator if there's room, else implicit. Returns 0 for empty
+/// names.
+pub fn lfn_slot_count(name_utf8: &str) -> usize {
+    // Count UTF-16 code units (UCS-2 + surrogate pairs).
+    let mut units: usize = 0;
+    for c in name_utf8.chars() {
+        units += if (c as u32) > 0xFFFF { 2 } else { 1 };
+    }
+    if units == 0 {
+        return 0;
+    }
+    // Slots hold 13 units each. When the name's unit count is an
+    // exact multiple of 13, NO terminator is needed (per the VFAT
+    // spec and Linux fs/fat/dir.c behavior) — the decoder treats a
+    // run with no 0x0000 as fully populated. Only when there's
+    // partial space in the final slot do we write a 0x0000
+    // terminator + 0xFFFF padding.
+    (units + 12) / 13 // = ceil(units / 13)
+}
+
+/// Encode a single LFN slot's 32-byte on-disk representation.
+///
+/// `seq` is the 1-based sequence number in name order (slot 1 is
+/// adjacent to the SFN stub, with the lowest 13 UTF-16 units).
+/// `is_first_on_disk` means this slot will be the first on disk (the
+/// one with the highest sequence number) — sets the `0x40` marker.
+/// `chars` holds the 13 UTF-16 code units for this slot, with
+/// trailing `0x0000` then `0xFFFF` padding per the VFAT spec.
+/// `checksum` is the SFN checksum for the trailing 8.3 stub.
+pub fn encode_lfn_slot(
+    seq: u8,
+    is_first_on_disk: bool,
+    chars: &[u16; 13],
+    checksum: u8,
+) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[0] = if is_first_on_disk { seq | 0x40 } else { seq };
+    // name1: chars[0..5] at offsets 1..11
+    for i in 0..5 {
+        out[1 + i * 2] = (chars[i] & 0xFF) as u8;
+        out[2 + i * 2] = (chars[i] >> 8) as u8;
+    }
+    out[11] = 0x0F; // LFN attr
+    out[12] = 0; // type (reserved)
+    out[13] = checksum;
+    // name2: chars[5..11] at offsets 14..26
+    for i in 0..6 {
+        out[14 + i * 2] = (chars[5 + i] & 0xFF) as u8;
+        out[15 + i * 2] = (chars[5 + i] >> 8) as u8;
+    }
+    // first_cluster (offset 26..28) MUST be 0 per spec
+    // name3: chars[11..13] at offsets 28..32
+    for i in 0..2 {
+        out[28 + i * 2] = (chars[11 + i] & 0xFF) as u8;
+        out[29 + i * 2] = (chars[11 + i] >> 8) as u8;
+    }
+    out
+}
+
+/// Encode a full LFN run for `name_utf8`, returning a `Vec` of 32-byte
+/// slots in DISK ORDER (last-in-name-order first, with the `0x40`
+/// marker on slot 0). Caller writes them sequentially followed by the
+/// 8.3 stub.
+///
+/// Returns `None` if the name is empty or doesn't fit (>20 slots).
+pub fn encode_lfn_run(name_utf8: &str, sfn_short_11: &[u8; 11]) -> Option<alloc::vec::Vec<[u8; 32]>> {
+    let slot_count = lfn_slot_count(name_utf8);
+    if slot_count == 0 || slot_count > 20 {
+        return None;
+    }
+
+    // Convert UTF-8 → UTF-16 buffer, padded with 0x0000 (terminator)
+    // + 0xFFFF (slot padding) only when the name doesn't fill the
+    // final slot exactly.
+    let mut buf: alloc::vec::Vec<u16> = alloc::vec::Vec::with_capacity(slot_count * 13);
+    for c in name_utf8.chars() {
+        let cp = c as u32;
+        if cp > 0xFFFF {
+            // Surrogate pair encode.
+            let adjusted = cp - 0x10000;
+            buf.push(0xD800 | ((adjusted >> 10) & 0x3FF) as u16);
+            buf.push(0xDC00 | (adjusted & 0x3FF) as u16);
+        } else {
+            buf.push(cp as u16);
+        }
+    }
+    let total_capacity = slot_count * 13;
+    if buf.len() < total_capacity {
+        // Room for a terminator; place it then pad.
+        buf.push(0x0000);
+        while buf.len() < total_capacity {
+            buf.push(0xFFFF);
+        }
+    }
+    // Else: name exactly fills `slot_count` slots — no terminator,
+    // no padding. The decoder handles "no 0x0000 within total_slots * 13"
+    // by treating the full buffer as the name.
+
+    let checksum = short_name_checksum(sfn_short_11);
+    let mut out = alloc::vec::Vec::with_capacity(slot_count);
+    // Disk order: highest seq first. Slot N has chars[(N-1)*13..N*13].
+    for disk_idx in 0..slot_count {
+        let seq = (slot_count - disk_idx) as u8; // N..1
+        let base = (seq as usize - 1) * 13;
+        let mut chars = [0u16; 13];
+        chars.copy_from_slice(&buf[base..base + 13]);
+        let is_first_on_disk = disk_idx == 0;
+        out.push(encode_lfn_slot(seq, is_first_on_disk, &chars, checksum));
+    }
+    Some(out)
+}
+
+/// Generate the 11-byte 8.3 short name for `long_name`, honoring the
+/// `~N` collision suffix.
+///
+/// `next_n` is the lowest `~N` known to be free in the target
+/// directory; the generator stamps that value. Caller is responsible
+/// for ensuring the resulting short name doesn't collide (using a
+/// per-directory cache; see `ShortNameCache`).
+///
+/// Returns the 11-byte name (8 basename + 3 ext, space-padded).
+/// Illegal chars are mapped to `_`. Case is normalized to upper.
+pub fn generate_short_name(long_name: &str, next_n: u32) -> [u8; 11] {
+    // Strip leading dots and spaces; uppercase; drop illegal chars.
+    let mut basename: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut extension: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // Find the last '.' to split (extension is whatever follows).
+    let last_dot = long_name.rfind('.');
+    let (base_str, ext_str) = match last_dot {
+        Some(i) if i > 0 => (&long_name[..i], &long_name[i + 1..]),
+        _ => (long_name, ""),
+    };
+    for c in base_str.chars() {
+        if c == ' ' || c == '.' {
+            continue; // strip spaces, ignore extra dots in basename
+        }
+        let b = c as u32;
+        let u = if b < 128 {
+            let ch = c.to_ascii_uppercase() as u8;
+            if matches!(ch, b'+' | b',' | b';' | b'=' | b'[' | b']' | b'/' | b'\\' | b':' | b'"' | b'*' | b'?' | b'<' | b'>' | b'|') {
+                b'_'
+            } else {
+                ch
+            }
+        } else {
+            b'_' // non-ASCII becomes underscore in SFN
+        };
+        basename.push(u);
+    }
+    for c in ext_str.chars() {
+        let b = c as u32;
+        let u = if b < 128 {
+            let ch = c.to_ascii_uppercase() as u8;
+            if matches!(ch, b'+' | b',' | b';' | b'=' | b'[' | b']' | b'/' | b'\\' | b':' | b'"' | b'*' | b'?' | b'<' | b'>' | b'|' | b'.') {
+                b'_'
+            } else {
+                ch
+            }
+        } else {
+            b'_'
+        };
+        extension.push(u);
+    }
+
+    // Build "~N" suffix string (e.g., "~1", "~10", "~100").
+    let mut suffix: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    suffix.push(b'~');
+    let mut n_str: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut nn = next_n.max(1);
+    if nn == 0 { n_str.push(b'0'); }
+    while nn > 0 {
+        n_str.push(b'0' + (nn % 10) as u8);
+        nn /= 10;
+    }
+    n_str.reverse();
+    suffix.extend_from_slice(&n_str);
+
+    // Truncate basename so basename + suffix fits in 8 bytes.
+    let max_base_len = 8usize.saturating_sub(suffix.len());
+    if basename.len() > max_base_len {
+        basename.truncate(max_base_len);
+    }
+    basename.extend_from_slice(&suffix);
+
+    // Truncate extension to 3 bytes.
+    if extension.len() > 3 {
+        extension.truncate(3);
+    }
+
+    // Assemble the 11-byte short name (space-padded).
+    let mut out = [b' '; 11];
+    for (i, &b) in basename.iter().take(8).enumerate() {
+        out[i] = b;
+    }
+    for (i, &b) in extension.iter().take(3).enumerate() {
+        out[8 + i] = b;
+    }
+    out
+}
+
+/// True if the long name fits cleanly in an 8.3 short name without
+/// requiring an LFN run. Used by short-name generation to skip the
+/// `~N` suffix for simple cases.
+pub fn fits_short_name(long_name: &str) -> bool {
+    let last_dot = long_name.rfind('.');
+    let (base, ext) = match last_dot {
+        Some(i) if i > 0 => (&long_name[..i], &long_name[i + 1..]),
+        _ => (long_name, ""),
+    };
+    if base.is_empty() || base.len() > 8 || ext.len() > 3 {
+        return false;
+    }
+    // Every char must be a legal 8.3 char (uppercase ASCII letters,
+    // digits, and a few symbols). Lowercase letters are technically
+    // illegal in 8.3 but the case-bit fallback can carry them.
+    for c in base.chars().chain(ext.chars()) {
+        if c == '.' {
+            return false; // extra dot in basename
+        }
+        if (c as u32) > 127 {
+            return false;
+        }
+        let b = c as u8;
+        if !(b.is_ascii_alphanumeric()
+            || matches!(b, b'_' | b'~' | b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'(' | b')' | b'-' | b'@' | b'^' | b'`' | b'{' | b'}'))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Format a short-name entry as a 13-byte slice `name.ext\0` honoring
 /// the lowercase-attr bits in `entry.reserved` (NT byte at offset 12).
 ///

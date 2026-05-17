@@ -15,6 +15,7 @@ test = []
 [build-dependencies]
 bootloader = "=0.11.10"
 bootloader_linker = "0.1.7"
+fatfs = { version = "=0.3.6", default-features = false, features = ["std", "alloc"] }
 
 [dependencies]
 bootloader_api = "=0.11.10"
