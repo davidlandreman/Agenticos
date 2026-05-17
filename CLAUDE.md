@@ -104,7 +104,7 @@ These are cross-cutting (not subsystem-local). Subsystem-specific known issues l
 
 ### Current Limitations
 1. **No Multitasking** — Everything runs synchronously in kernel space.
-2. **Read-Only Filesystem** — No write support yet (in-progress per `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md`). LFN read + mixed-case lookup shipped 2026-05-16.
+2. **Filesystem writes are RAM-only.** `/` is mounted as `overlay(tmpfs, boot-FAT)`. Reads pass through to FAT; writes (create/mkdir/unlink/rename/ftruncate) land in tmpfs and don't survive reboot. Persistence is Phase D of `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md`. LFN read + mixed-case + Phase A/B shipped 2026-05-16.
 3. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
 4. **Global State** — Heavy use of `static mut` and `lazy_static`.
 5. **No User Space** — Everything runs in ring 0 (kernel mode).

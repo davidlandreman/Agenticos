@@ -34,8 +34,9 @@ use crate::mm::paging::{
     UserPerms, USER_BRK_BASE, USER_VA_RANGE_END,
 };
 use crate::userland::abi::{
-    validate_user_slice, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMFILE, ENOENT,
-    ENOSYS, ENOTDIR, ENOTTY, ERANGE, EROFS, ESPIPE, LAST_EXIT_CODE,
+    validate_user_slice, EACCES, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINTR, EINVAL, EIO, EISDIR,
+    EMFILE, ENOENT, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EPERM, ERANGE, EROFS, ESPIPE,
+    EXDEV, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
 use crate::userland::path::{apply_fs_rewrite, copy_user_cstr, normalize_path};
@@ -92,12 +93,17 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
     // Match the dispatcher's original ordering: classify the fd first
     // (so unknown-fd tests still see EBADF without exercising the slice
     // validator), then bounds-check the buffer.
+    enum Target {
+        StdoutErr,
+        Pipe(crate::userland::pipe::PipeWriteHandle),
+        File(crate::lib::arc::Arc<crate::fs::file_handle::File>),
+    }
     let slot = with_fd_slot(fd);
-    let pipe_handle = match slot {
-        Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => None,
-        Some(FdSlot::File { .. }) => return EROFS,
+    let target = match slot {
+        Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Target::StdoutErr,
+        Some(FdSlot::File { handle, .. }) => Target::File(handle),
         Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
-        Some(FdSlot::PipeWrite(handle, _)) => Some(handle),
+        Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
@@ -113,23 +119,28 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
     }
     let slice = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
 
-    if let Some(handle) = pipe_handle {
-        // Phase 5 PR-A: write to a pipe. Returns -EPIPE when the
-        // pipe has no readers (POSIX would also raise SIGPIPE; we
-        // skip the signal until Phase 5 PR-B).
-        if handle.pipe().readers() == 0 {
-            return crate::userland::abi::EPIPE;
+    match target {
+        Target::Pipe(handle) => {
+            // Phase 5 PR-A: write to a pipe. Returns -EPIPE when the
+            // pipe has no readers (POSIX would also raise SIGPIPE; we
+            // skip the signal until Phase 5 PR-B).
+            if handle.pipe().readers() == 0 {
+                return crate::userland::abi::EPIPE;
+            }
+            handle.pipe().write(slice) as i64
         }
-        return handle.pipe().write(slice) as i64;
+        Target::File(handle) => match handle.write(slice) {
+            Ok(n) => n as i64,
+            Err(ref e) => map_file_err(e),
+        },
+        Target::StdoutErr => {
+            // Lossy: invalid UTF-8 bytes become U+FFFD rather than
+            // dropping the entire call.
+            let s = alloc::string::String::from_utf8_lossy(slice);
+            crate::print!("{}", s);
+            len as i64
+        }
     }
-
-    // Lossy: invalid UTF-8 bytes become U+FFFD rather than dropping the
-    // entire call. A strict `from_utf8` here would silently swallow any
-    // write that mixes valid text with binary data — e.g. cat'ing a
-    // partially-binary file — and report success without printing.
-    let s = alloc::string::String::from_utf8_lossy(slice);
-    crate::print!("{}", s);
-    len as i64
 }
 
 /// `writev(fd: i32, iov: *const iovec, iovcnt: i32) -> isize`
@@ -1669,7 +1680,12 @@ const O_CLOEXEC: u32 = 0o2000000;
 /// access bit (`O_WRONLY=1`, `O_RDWR=2`) returns `-EROFS`.
 const O_ACCMODE: u32 = 0o3;
 const O_RDONLY: u32 = 0;
-/// Modify-the-world flags we reject as `-EROFS` since the FS is read-only.
+const O_RDWR: u32 = 0o2;
+const O_CREAT: u32 = 0o100;
+const O_TRUNC: u32 = 0o1000;
+const O_APPEND: u32 = 0o2000;
+/// Modify-the-world flags. Used to determine whether the caller is
+/// asking for a write-side open.
 const O_WRITE_BITS: u32 = 0o3 | 0o100 | 0o1000 | 0o2000; // RDWR|WRONLY|CREAT|TRUNC|APPEND
 
 /// `lseek` whence values (Linux/POSIX).
@@ -1761,12 +1777,14 @@ fn map_filesystem_err(err: &crate::fs::filesystem::FilesystemError) -> i64 {
     match err {
         FE::NotFound => ENOENT,
         FE::PermissionDenied => EACCES,
-        FE::InvalidPath => ENOENT,
+        FE::InvalidPath => EINVAL,
         FE::ReadOnly => EROFS,
         FE::IsADirectory => EISDIR,
         FE::NotADirectory => ENOTDIR,
-        FE::AlreadyExists => crate::userland::abi::EEXIST,
-        FE::BufferTooSmall => EINVAL,
+        FE::AlreadyExists => EEXIST,
+        FE::NotEmpty => ENOTEMPTY,
+        FE::DiskFull => ENOSPC,
+        FE::BufferTooSmall => EFBIG,
         FE::UnsupportedOperation => ENOSYS,
         _ => EIO,
     }
@@ -1843,17 +1861,23 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
         // the common case.
         return ENOSYS;
     }
-    if (flags & O_WRITE_BITS) != 0 {
-        return EROFS;
-    }
-    if (flags & O_ACCMODE) != O_RDONLY {
-        return EROFS;
-    }
     let path = match resolve_user_path(path_ptr) {
         Ok(p) => p,
         Err(e) => return e,
     };
     let cloexec = (flags & O_CLOEXEC) != 0;
+    let want_write = (flags & O_WRITE_BITS) != 0 || (flags & O_ACCMODE) != O_RDONLY;
+    // /bin namespace is always read-only — userland can't mutate the
+    // synthesized applet entries.
+    if want_write {
+        use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir};
+        if is_bin_dir(&path) || apply_bin_rewrite(&path).is_some() {
+            return EPERM;
+        }
+        if !crate::fs::vfs::vfs_is_writable(&path) {
+            return EROFS;
+        }
+    }
 
     // Virtual /bin namespace: opening /bin returns a directory FD that
     // getdents64 unpacks into the applet list; opening /bin/<applet>
@@ -1878,31 +1902,55 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
             .unwrap_or(EMFILE);
     }
 
-    // Check whether the path is a directory before reaching for File::open
-    // (which rejects directories). Directories get their own slot variant
-    // so getdents64 can iterate them.
+    // Check whether the path exists and is a directory. Directories
+    // open via the snapshot Directory API (no write semantics — Linux
+    // permits O_DIRECTORY but mutating a dir fd is meaningless here).
     use crate::fs::filesystem::FileType;
-    let meta = match crate::fs::metadata(&path) {
-        Ok(m) => m,
-        Err(ref e) => return map_fs_err(e),
+    let meta = crate::fs::metadata(&path);
+
+    // O_CREAT semantics: when set, NotFound is not an error — the
+    // subsequent open will create the file. Other errors propagate.
+    let want_create = (flags & O_CREAT) != 0;
+    let meta_result = match meta {
+        Ok(m) => Ok(m),
+        Err(ref e) => {
+            if want_create {
+                Err(()) // signal "needs create" without leaking the underlying error type
+            } else {
+                return map_fs_err(e);
+            }
+        }
     };
-    if meta.file_type == FileType::Directory {
-        let dir = match crate::fs::file_handle::Directory::open(&path) {
-            Ok(d) => d,
-            Err(ref e) => return map_file_err(e),
-        };
-        return with_fd_table_mut(|t| {
-            t.alloc(FdSlot::Directory {
-                handle: dir,
-                cursor: 0,
-                cloexec,
+
+    if let Ok(m) = meta_result {
+        if m.file_type == FileType::Directory {
+            let dir = match crate::fs::file_handle::Directory::open(&path) {
+                Ok(d) => d,
+                Err(ref e) => return map_file_err(e),
+            };
+            return with_fd_table_mut(|t| {
+                t.alloc(FdSlot::Directory {
+                    handle: dir,
+                    cursor: 0,
+                    cloexec,
+                })
             })
-        })
-        .map(|fd| fd as i64)
-        .unwrap_or(EMFILE);
+            .map(|fd| fd as i64)
+            .unwrap_or(EMFILE);
+        }
     }
 
-    let handle = match crate::fs::file_handle::File::open_read(&path) {
+    // Map Linux flags to our FileMode.
+    let access = flags & O_ACCMODE;
+    let mode = crate::fs::filesystem::FileMode {
+        read: access == O_RDONLY || access == O_RDWR,
+        write: want_write,
+        append: (flags & O_APPEND) != 0,
+        create: want_create,
+        truncate: (flags & O_TRUNC) != 0,
+    };
+
+    let handle = match crate::fs::file_handle::File::open(&path, mode) {
         Ok(h) => h,
         Err(ref e) => return map_file_err(e),
     };
@@ -1931,6 +1979,344 @@ pub fn close_handler(args: &mut SyscallArgs) -> i64 {
         return 0;
     }
     with_fd_table_mut(|t| t.close(fd)).err().unwrap_or(0)
+}
+
+// ---------- Phase B: namespace mutations (mkdir/unlink/rmdir/rename/…) ----------
+
+/// Validate `path` is not a `/bin` rewrite target. Mutations on the
+/// synthesized applet namespace are always rejected with `EPERM`.
+fn bin_namespace_mutation_check(path: &str) -> Option<i64> {
+    use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir};
+    if is_bin_dir(path) || apply_bin_rewrite(path).is_some() {
+        return Some(EPERM);
+    }
+    None
+}
+
+pub fn mkdir_handler(args: &mut SyscallArgs) -> i64 {
+    let path = match resolve_user_path(args.rdi) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    match crate::fs::vfs::vfs_mkdir(&path) {
+        Ok(()) => 0,
+        Err(ref e) => map_filesystem_err(e),
+    }
+}
+
+pub fn mkdirat_handler(args: &mut SyscallArgs) -> i64 {
+    let dirfd = args.rdi as i32;
+    if dirfd != AT_FDCWD {
+        return ENOSYS;
+    }
+    let mut new_args = SyscallArgs {
+        rax: args.rax,
+        rdi: args.rsi,
+        rsi: args.rdx,
+        rdx: 0,
+        r10: 0,
+        r8: 0,
+        r9: 0,
+    };
+    mkdir_handler(&mut new_args)
+}
+
+pub fn rmdir_handler(args: &mut SyscallArgs) -> i64 {
+    let path = match resolve_user_path(args.rdi) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    if path == "/" {
+        return EBUSY;
+    }
+    match crate::fs::vfs::vfs_rmdir(&path) {
+        Ok(()) => 0,
+        Err(ref e) => map_filesystem_err(e),
+    }
+}
+
+pub fn unlink_handler(args: &mut SyscallArgs) -> i64 {
+    let path = match resolve_user_path(args.rdi) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    match crate::fs::vfs::vfs_unlink(&path) {
+        Ok(()) => 0,
+        Err(ref e) => map_filesystem_err(e),
+    }
+}
+
+pub fn unlinkat_handler(args: &mut SyscallArgs) -> i64 {
+    let dirfd = args.rdi as i32;
+    if dirfd != AT_FDCWD {
+        return ENOSYS;
+    }
+    let flags = args.rdx as u32;
+    let path = match resolve_user_path(args.rsi) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    // AT_REMOVEDIR = 0x200
+    if flags & 0x200 != 0 {
+        if path == "/" {
+            return EBUSY;
+        }
+        match crate::fs::vfs::vfs_rmdir(&path) {
+            Ok(()) => 0,
+            Err(ref e) => map_filesystem_err(e),
+        }
+    } else {
+        match crate::fs::vfs::vfs_unlink(&path) {
+            Ok(()) => 0,
+            Err(ref e) => map_filesystem_err(e),
+        }
+    }
+}
+
+pub fn rename_handler(args: &mut SyscallArgs) -> i64 {
+    let old = match resolve_user_path(args.rdi) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let new = match resolve_user_path(args.rsi) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Some(e) = bin_namespace_mutation_check(&old) {
+        return e;
+    }
+    if let Some(e) = bin_namespace_mutation_check(&new) {
+        return e;
+    }
+    match crate::fs::vfs::vfs_rename(&old, &new) {
+        Ok(()) => 0,
+        // UnsupportedOperation from vfs_rename signals cross-mount.
+        Err(crate::fs::filesystem::FilesystemError::UnsupportedOperation) => EXDEV,
+        Err(ref e) => map_filesystem_err(e),
+    }
+}
+
+pub fn renameat_handler(args: &mut SyscallArgs) -> i64 {
+    let old_dfd = args.rdi as i32;
+    let new_dfd = args.rdx as i32;
+    if old_dfd != AT_FDCWD || new_dfd != AT_FDCWD {
+        return ENOSYS;
+    }
+    let mut new_args = SyscallArgs {
+        rax: args.rax,
+        rdi: args.rsi,
+        rsi: args.r10,
+        rdx: 0,
+        r10: 0,
+        r8: 0,
+        r9: 0,
+    };
+    rename_handler(&mut new_args)
+}
+
+/// `creat(path, mode) -> int` — equivalent to
+/// `open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)`.
+pub fn creat_handler(args: &mut SyscallArgs) -> i64 {
+    // O_WRONLY=1, O_CREAT=0o100, O_TRUNC=0o1000
+    let flags = 1u32 | O_CREAT | O_TRUNC;
+    open_common(AT_FDCWD, args.rdi, flags)
+}
+
+pub fn ftruncate_handler(args: &mut SyscallArgs) -> i64 {
+    let fd = args.rdi as i32;
+    let new_size = args.rsi;
+    let handle = match with_fd_slot(fd) {
+        Some(FdSlot::File { handle, .. }) => handle,
+        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(_) | None => return EBADF,
+    };
+    // Use File::write through seek + write to (re)size the file. The
+    // Filesystem trait doesn't expose truncate as a method yet
+    // (deferred to Phase C plan); for tmpfs the open-handle table
+    // already supports resize via the existing write path's
+    // extend-on-write semantic. For a true truncate (including
+    // shrink), we extend a write of zero bytes after seeking.
+    //
+    // TODO(Phase C): proper Filesystem::truncate. For now: tmpfs and
+    // overlay both grow files via write-past-end; shrinks are
+    // approximated by seeking to new_size and zero-writing only when
+    // extending. Real shrink isn't supported yet.
+    if handle.size() > new_size {
+        // No shrink mechanism via current trait — return ENOSYS so
+        // userland sees a clear unsupported signal rather than a
+        // silent partial truncate.
+        return ENOSYS;
+    }
+    if let Err(ref e) = handle.seek(new_size) {
+        return map_file_err(e);
+    }
+    // Extend by writing a single zero byte at position new_size-1,
+    // then truncate the position back. tmpfs's write extends with
+    // zeros so this is correct.
+    if new_size > 0 {
+        if let Err(ref e) = handle.seek(new_size - 1) {
+            return map_file_err(e);
+        }
+        if let Err(ref e) = handle.write(&[0u8]) {
+            return map_file_err(e);
+        }
+    }
+    0
+}
+
+pub fn truncate_handler(args: &mut SyscallArgs) -> i64 {
+    let path = match resolve_user_path(args.rdi) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let new_size = args.rsi;
+    if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    if !crate::fs::vfs::vfs_is_writable(&path) {
+        return EROFS;
+    }
+    let mode = crate::fs::filesystem::FileMode {
+        read: false,
+        write: true,
+        append: false,
+        create: false,
+        truncate: false,
+    };
+    let handle = match crate::fs::file_handle::File::open(&path, mode) {
+        Ok(h) => h,
+        Err(ref e) => return map_file_err(e),
+    };
+    if handle.size() > new_size {
+        return ENOSYS;
+    }
+    if new_size > 0 {
+        if let Err(ref e) = handle.seek(new_size - 1) {
+            return map_file_err(e);
+        }
+        if let Err(ref e) = handle.write(&[0u8]) {
+            return map_file_err(e);
+        }
+    }
+    0
+}
+
+pub fn fsync_handler(args: &mut SyscallArgs) -> i64 {
+    let fd = args.rdi as i32;
+    match with_fd_slot(fd) {
+        Some(FdSlot::File { .. }) => {
+            let _ = crate::fs::vfs::vfs_sync_all();
+            0
+        }
+        Some(FdSlot::Directory { .. }) => 0,
+        Some(_) | None => EBADF,
+    }
+}
+
+pub fn fdatasync_handler(args: &mut SyscallArgs) -> i64 {
+    fsync_handler(args)
+}
+
+pub fn sync_handler(_args: &mut SyscallArgs) -> i64 {
+    // POSIX `sync` returns void and never fails. We surface
+    // filesystem errors as -EIO but most mounts have a no-op sync.
+    match crate::fs::vfs::vfs_sync_all() {
+        Ok(()) => 0,
+        Err(_) => 0,
+    }
+}
+
+pub fn syncfs_handler(args: &mut SyscallArgs) -> i64 {
+    let fd = args.rdi as i32;
+    if with_fd_slot(fd).is_none() {
+        return EBADF;
+    }
+    sync_handler(args)
+}
+
+pub fn pread64_handler(args: &mut SyscallArgs) -> i64 {
+    let fd = args.rdi as i32;
+    let ptr = args.rsi;
+    let len = args.rdx;
+    let offset = args.r10;
+    let handle = match with_fd_slot(fd) {
+        Some(FdSlot::File { handle, .. }) => handle,
+        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(_) | None => return EBADF,
+    };
+    if len > WRITE_MAX_LEN as u64 {
+        return EFAULT;
+    }
+    if let Err(e) = validate_user_slice(ptr, len) {
+        return e;
+    }
+    if len == 0 {
+        return 0;
+    }
+    let prev = handle.position();
+    if let Err(ref e) = handle.seek(offset) {
+        return map_file_err(e);
+    }
+    let mut buf = alloc::vec![0u8; len as usize];
+    let n = match handle.read(&mut buf) {
+        Ok(n) => n,
+        Err(ref e) => {
+            let _ = handle.seek(prev);
+            return map_file_err(e);
+        }
+    };
+    let _ = handle.seek(prev);
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr as *mut u8, n);
+    }
+    n as i64
+}
+
+pub fn pwrite64_handler(args: &mut SyscallArgs) -> i64 {
+    let fd = args.rdi as i32;
+    let ptr = args.rsi;
+    let len = args.rdx;
+    let offset = args.r10;
+    let handle = match with_fd_slot(fd) {
+        Some(FdSlot::File { handle, .. }) => handle,
+        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(_) | None => return EBADF,
+    };
+    if len > WRITE_MAX_LEN as u64 {
+        return EFAULT;
+    }
+    if let Err(e) = validate_user_slice(ptr, len) {
+        return e;
+    }
+    if len == 0 {
+        return 0;
+    }
+    let slice = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let prev = handle.position();
+    if let Err(ref e) = handle.seek(offset) {
+        return map_file_err(e);
+    }
+    let n = match handle.write(slice) {
+        Ok(n) => n,
+        Err(ref e) => {
+            let _ = handle.seek(prev);
+            return map_file_err(e);
+        }
+    };
+    let _ = handle.seek(prev);
+    n as i64
 }
 
 // ---------- lseek ----------

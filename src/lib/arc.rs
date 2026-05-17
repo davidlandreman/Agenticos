@@ -130,10 +130,27 @@ impl<T: ?Sized> Arc<T> {
     fn inner(&self) -> &ArcInner<T> {
         unsafe { self.ptr.as_ref() }
     }
-    
+
     fn is_unique(&self) -> bool {
         self.inner().strong.load(Ordering::Acquire) == 1 &&
         self.inner().weak.load(Ordering::Acquire) == 1
+    }
+
+    /// Returns a raw pointer to the inner `T`. Used for pointer
+    /// identity comparisons; do NOT deref or mutate through it.
+    pub fn as_ptr(this: &Self) -> *const T {
+        // SAFETY: `inner()` yields a stable `&ArcInner<T>` for the
+        // life of `this`; we project the address of its `data` field.
+        // The returned pointer is valid for reads while any `Arc<T>`
+        // referencing this allocation lives.
+        unsafe { &raw const (*this.ptr.as_ptr()).data }
+    }
+
+    /// True iff `a` and `b` refer to the same allocation. Compares
+    /// the inner pointers directly; semantically equivalent to
+    /// `std::sync::Arc::ptr_eq`.
+    pub fn ptr_eq(a: &Self, b: &Self) -> bool {
+        a.ptr.as_ptr() as *const () == b.ptr.as_ptr() as *const ()
     }
 }
 

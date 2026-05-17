@@ -39,11 +39,29 @@ Cleanup is automatic when the last `Arc` reference drops.
 
 ## Current limitations
 
-- **Read-only.** No write support is implemented anywhere in the stack.
-- **FAT only.** No other filesystem implementation.
-- **No subdirectory traversal yet** in the higher-level API.
+- **`/` writes are RAM-only.** The boot root is mounted as `overlay(upper=tmpfs, lower=FAT)`. Reads pass through to FAT; writes land in the tmpfs upper and **do not survive reboot**. Persistence (flush the upper to a writable disk on `sync`) is Phase D.
+- **No persistent on-disk writes yet.** Phase C (FAT writes at `/data` on a separate disk) and Phase D (overlay persistence) are not implemented.
+- **FAT only on disk.** No other on-disk filesystem implementation.
+- **No subdirectory traversal yet** in some higher-level APIs (FAT subdir reads work via `walk_directory`; some legacy paths still assume single-level).
 
-These are scope decisions, not bugs — write support is a future track (see `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md`).
+See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for the full plan.
+
+## Mount topology
+
+```
+  /          → overlay(upper = Tmpfs, lower = boot FAT partition)
+  /host      → FAT (vvfat-backed, read-only)
+  /bin/<applet> → synthesized at syscall layer (src/userland/bin_namespace.rs)
+```
+
+The overlay's upper is a fresh `Tmpfs` constructed at boot in `vfs::mount_overlay_root`; the lower is the bootloader-built FAT image. `/bin` is invisible to the FS layer — the syscall dispatcher intercepts opens/access/stat before reaching the VFS.
+
+Writes under `/` go through copy-up: opening a lower-only file for write reads the whole file into RAM, creates it in upper, and operates from there. Copy-up is size-capped at 64 KiB (`overlay::filesystem::MAX_COPY_UP_BYTES`) to bound the heap-burst risk — bigger files surface as `EFBIG`.
+
+## tmpfs and overlay
+
+- `tmpfs/` — `BTreeMap<String, TmpNode>` directories with `Arc<Mutex<Vec<u8>>>` file bodies. Open handles are anchored in a per-FS side table so `unlink` doesn't drop data out from under live readers (POSIX unlink-while-open).
+- `overlay/` — merge upper writable FS over lower read-only FS. Whiteouts are `.wh.<name>` sentinel files; opaque dir markers are `.wh..wh..opq`. Reads check upper first, fall through to lower unless whiteouted. Writes copy-up if needed, then mutate upper.
 
 ## Long filenames (VFAT LFN)
 

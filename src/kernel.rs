@@ -195,8 +195,8 @@ fn init_filesystems() {
     use crate::drivers::ide::{IDE_CONTROLLER, IdeChannel, IdeDrive, IdeBlockDevice};
     use crate::drivers::block::BlockDevice;
     use crate::fs::{detect_filesystem, read_partitions, PartitionBlockDevice};
-    use crate::fs::vfs::auto_mount;
-    
+    use crate::fs::vfs::{auto_mount, mount_overlay_root};
+
     debug_info!("Detecting and mounting filesystems...");
     
     // Check primary master disk
@@ -264,15 +264,23 @@ fn init_filesystems() {
                                 }
                             }
                             
-                            // Mount the first valid partition as root
+                            // Mount the first valid partition as root, wrapped in
+                            // an overlay(tmpfs over FAT) so userland sees a
+                            // writable namespace without mutating the immutable
+                            // boot image.
                             if let Some(part_idx) = first_valid_partition {
                                 let part_device = unsafe { PARTITION_DEVICES[part_idx].as_ref().unwrap() };
-                                match auto_mount(part_device, "/") {
+                                match mount_overlay_root(part_device) {
                                     Ok(_) => {
-                                        debug_info!("Mounted partition {} as root filesystem", part_idx + 1);
+                                        debug_info!("Mounted overlay(tmpfs over FAT partition {}) at /", part_idx + 1);
                                     }
                                     Err(e) => {
-                                        debug_warn!("Failed to mount partition {}: {:?}", part_idx + 1, e);
+                                        // Per doc-review #A-5: panic loudly rather than
+                                        // silently downgrading to a read-only FAT mount.
+                                        // Userland after Phase B expects / to be writable;
+                                        // silent degradation would have zsh / scripts
+                                        // appear to succeed then EROFS halfway through.
+                                        panic!("FATAL: overlay root mount failed: {:?}", e);
                                     }
                                 }
                             }
@@ -286,12 +294,12 @@ fn init_filesystems() {
                                         // Only mount if it's a supported FAT filesystem
                                         use crate::fs::FilesystemType;
                                         if matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) {
-                                            match auto_mount(primary_master, "/") {
+                                            match mount_overlay_root(primary_master) {
                                                 Ok(_) => {
-                                                    debug_info!("Mounted whole disk as root filesystem");
+                                                    debug_info!("Mounted overlay(tmpfs over whole-disk FAT) at /");
                                                 }
                                                 Err(e) => {
-                                                    debug_warn!("Failed to mount disk: {:?}", e);
+                                                    panic!("FATAL: overlay root mount (whole disk) failed: {:?}", e);
                                                 }
                                             }
                                         } else {
@@ -317,12 +325,12 @@ fn init_filesystems() {
                             // Only mount if it's a supported FAT filesystem
                             use crate::fs::FilesystemType;
                             if matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) {
-                                match auto_mount(primary_master, "/") {
+                                match mount_overlay_root(primary_master) {
                                     Ok(_) => {
-                                        debug_info!("Mounted disk as root filesystem");
+                                        debug_info!("Mounted overlay(tmpfs over whole disk) at /");
                                     }
                                     Err(e) => {
-                                        debug_warn!("Failed to mount: {:?}", e);
+                                        panic!("FATAL: overlay root mount (no MBR) failed: {:?}", e);
                                     }
                                 }
                             } else {

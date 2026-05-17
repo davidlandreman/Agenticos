@@ -517,6 +517,64 @@ fn test_lookup_case_insensitive_on_long_name() {
     }
 }
 
+// --- U6 / Phase B: writable / mount via overlay(tmpfs, FAT) ----------
+//
+// These tests exercise the real boot mount, where / is the overlay
+// merged view. Reads must still fall through to the FAT lower, and
+// writes must land in the tmpfs upper without disturbing lower.
+
+fn test_overlay_root_lower_files_still_readable() {
+    // /system.ttf lives only in lower (FAT). Reads must work.
+    let file = crate::fs::File::open_read("/system.ttf").expect("open /system.ttf");
+    assert!(file.size() > 0);
+}
+
+fn test_overlay_root_write_then_read() {
+    // Create + write + read a fresh file at /; must not touch lower.
+    let f = crate::fs::File::create("/u6-test.txt").expect("create /u6-test.txt");
+    let n = f.write(b"hello overlay").expect("write");
+    assert_eq!(n, b"hello overlay".len());
+    drop(f);
+
+    let f2 = crate::fs::File::open_read("/u6-test.txt").expect("open /u6-test.txt");
+    let content = f2.read_to_string().expect("read_to_string");
+    assert_eq!(content, "hello overlay");
+}
+
+fn test_overlay_root_mkdir_unlink_via_vfs() {
+    // mkdir → file inside → unlink the file → rmdir the dir.
+    crate::fs::vfs::vfs_mkdir("/u6-dir").expect("mkdir /u6-dir");
+
+    let f = crate::fs::File::create("/u6-dir/inner.txt").expect("create nested");
+    f.write(b"x").expect("write");
+    drop(f);
+
+    crate::fs::vfs::vfs_unlink("/u6-dir/inner.txt").expect("unlink");
+    crate::fs::vfs::vfs_rmdir("/u6-dir").expect("rmdir");
+
+    // Verify gone.
+    assert!(!crate::fs::exists("/u6-dir"));
+}
+
+fn test_overlay_root_unlink_lower_creates_whiteout() {
+    // Unlink a lower-only file. Subsequent stat must return NotFound,
+    // but the lower FAT image is untouched (next test confirms by
+    // remounting? Not possible mid-test — we just verify the merged
+    // view).
+    //
+    // Use test.txt which is small and present in lower.
+    assert!(crate::fs::exists("/test.txt"), "/test.txt must exist in lower");
+    crate::fs::vfs::vfs_unlink("/test.txt").expect("unlink /test.txt");
+    assert!(!crate::fs::exists("/test.txt"));
+    // Re-create with new content; whiteout should clear.
+    let f = crate::fs::File::create("/test.txt").expect("recreate");
+    f.write(b"fresh").expect("write");
+    drop(f);
+    let f2 = crate::fs::File::open_read("/test.txt").expect("open");
+    let content = f2.read_to_string().expect("read");
+    assert_eq!(content, "fresh");
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_filesystem_basic_exists,
@@ -537,5 +595,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_stat_returns_long_name,
         &test_lookup_resolves_long_lowercase_name,
         &test_lookup_case_insensitive_on_long_name,
+        &test_overlay_root_lower_files_still_readable,
+        &test_overlay_root_write_then_read,
+        &test_overlay_root_mkdir_unlink_via_vfs,
+        &test_overlay_root_unlink_lower_creates_whiteout,
     ]
 }
