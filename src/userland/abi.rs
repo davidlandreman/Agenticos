@@ -52,6 +52,12 @@ pub const ECHILD: i64 = -10;
 pub const EAGAIN: i64 = -11;
 pub const EPIPE: i64 = -32;
 pub const EINTR: i64 = -4;
+pub const EPERM: i64 = -1;
+pub const ENOSPC: i64 = -28;
+pub const EBUSY: i64 = -16;
+pub const EXDEV: i64 = -18;
+pub const EFBIG: i64 = -27;
+pub const ENOTEMPTY: i64 = -39;
 
 /// Active user-VA bounds (inclusive lower, exclusive upper). Populated by
 /// `enter_user_mode` before `iretq`-to-ring-3, cleared on exit. Pointer
@@ -214,6 +220,23 @@ pub mod nr {
     pub const PRLIMIT64: u64 = 302;
     pub const GETDENTS64: u64 = 217;
     pub const GETRANDOM: u64 = 318;
+    // Phase B (FS writes): mutations on the now-writable namespace.
+    pub const TRUNCATE: u64 = 76;
+    pub const FTRUNCATE: u64 = 77;
+    pub const RENAME: u64 = 82;
+    pub const MKDIR: u64 = 83;
+    pub const RMDIR: u64 = 84;
+    pub const CREAT: u64 = 85;
+    pub const UNLINK: u64 = 87;
+    pub const FSYNC: u64 = 74;
+    pub const FDATASYNC: u64 = 75;
+    pub const SYNC: u64 = 162;
+    pub const PREAD64: u64 = 17;
+    pub const PWRITE64: u64 = 18;
+    pub const MKDIRAT: u64 = 258;
+    pub const UNLINKAT: u64 = 263;
+    pub const RENAMEAT: u64 = 264;
+    pub const SYNCFS: u64 = 306;
     // Phase 4 PR-C: process management
     pub const FORK: u64 = 57;
     pub const VFORK: u64 = 58;
@@ -343,6 +366,23 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::RT_SIGRETURN => syscalls::rt_sigreturn_handler(args),
         nr::RT_SIGSUSPEND => syscalls::rt_sigsuspend_handler(args),
         nr::GUI_LAUNCH => syscalls::gui_launch_handler(args),
+        // Phase B: namespace mutations
+        nr::MKDIR => syscalls::mkdir_handler(args),
+        nr::MKDIRAT => syscalls::mkdirat_handler(args),
+        nr::RMDIR => syscalls::rmdir_handler(args),
+        nr::UNLINK => syscalls::unlink_handler(args),
+        nr::UNLINKAT => syscalls::unlinkat_handler(args),
+        nr::RENAME => syscalls::rename_handler(args),
+        nr::RENAMEAT => syscalls::renameat_handler(args),
+        nr::CREAT => syscalls::creat_handler(args),
+        nr::FTRUNCATE => syscalls::ftruncate_handler(args),
+        nr::TRUNCATE => syscalls::truncate_handler(args),
+        nr::FSYNC => syscalls::fsync_handler(args),
+        nr::FDATASYNC => syscalls::fdatasync_handler(args),
+        nr::SYNC => syscalls::sync_handler(args),
+        nr::SYNCFS => syscalls::syncfs_handler(args),
+        nr::PREAD64 => syscalls::pread64_handler(args),
+        nr::PWRITE64 => syscalls::pwrite64_handler(args),
         _ => unhandled_syscall(args),
     };
 

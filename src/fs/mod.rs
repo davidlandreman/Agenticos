@@ -2,6 +2,8 @@ pub mod filesystem;
 pub mod partition;
 pub mod vfs;
 pub mod fat;
+pub mod tmpfs;
+pub mod overlay;
 pub mod fs_manager;
 pub mod file_handle;
 

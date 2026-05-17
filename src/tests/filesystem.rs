@@ -438,6 +438,367 @@ fn test_run_hellocpp_end_to_end() {
     );
 }
 
+// --- VFAT long-filename integration coverage (U2) -----------------------
+//
+// The bundled bootloader's FAT writer (the `bootloader` 0.11 crate)
+// emits VFAT LFN entries for every asset. Before U2 the kernel
+// silently discarded them and returned only the SFN (e.g.
+// `AGENTI~1.BMP` for `agentic-banner.bmp`). These tests pin the
+// post-U2 behavior: enumeration surfaces the decoded long names and
+// lookups resolve against them.
+
+fn test_enumerate_root_contains_long_lowercase_names() {
+    debug_info!("Enumerating / and looking for long/lowercase names...");
+
+    let dir = match crate::fs::Directory::open("/") {
+        Ok(d) => d,
+        Err(e) => panic!("Directory::open(/) failed: {:?}", e),
+    };
+    let entries = dir.entries();
+
+    let mut names = alloc::vec::Vec::new();
+    for entry in &entries {
+        names.push(alloc::string::ToString::to_string(entry.name_str()));
+    }
+    debug_info!("Root entries ({}): {:?}", names.len(), names);
+
+    // `system.ttf` is in the assets/ source as lowercase 8.3 — the
+    // bootloader emits an LFN that decodes to `system.ttf` AND sets
+    // the lowercase-attr bits. Either path should surface lowercase.
+    assert!(
+        names.iter().any(|n| n == "system.ttf"),
+        "expected lowercase `system.ttf` in root enumeration; got {:?}",
+        names
+    );
+
+    // `agentic-banner.bmp` is too long for 8.3 (basename > 8 chars,
+    // contains a hyphen). Before U2 the kernel saw `AGENTI~1.BMP`.
+    assert!(
+        names.iter().any(|n| n == "agentic-banner.bmp"),
+        "expected `agentic-banner.bmp` in root enumeration; got {:?}",
+        names
+    );
+}
+
+fn test_stat_returns_long_name() {
+    debug_info!("Stat /agentic-banner.bmp must return long name...");
+    match crate::fs::metadata("/agentic-banner.bmp") {
+        Ok(md) => {
+            assert_eq!(md.name_str(), "agentic-banner.bmp");
+            assert!(md.size > 0);
+        }
+        Err(e) => panic!("metadata(/agentic-banner.bmp) failed: {:?}", e),
+    }
+}
+
+fn test_lookup_resolves_long_lowercase_name() {
+    // Existing test_file_open_arial uses /system.ttf which already
+    // worked via case-insensitive 8.3 lookup pre-U2. This one
+    // exercises a name that REQUIRES LFN decoding (basename > 8
+    // chars), so it fails outright without U2.
+    debug_info!("Open /agentic-banner.bmp (LFN-only path)...");
+    match crate::fs::File::open_read("/agentic-banner.bmp") {
+        Ok(f) => {
+            assert!(f.size() > 0);
+        }
+        Err(e) => panic!("open_read(/agentic-banner.bmp) failed: {:?}", e),
+    }
+}
+
+fn test_lookup_case_insensitive_on_long_name() {
+    // Path lookup should still be case-insensitive against the
+    // decoded long name — `/AGENTIC-BANNER.BMP` should resolve to
+    // `agentic-banner.bmp`.
+    match crate::fs::File::open_read("/AGENTIC-BANNER.BMP") {
+        Ok(f) => {
+            assert!(f.size() > 0);
+        }
+        Err(e) => panic!("case-insensitive long-name lookup failed: {:?}", e),
+    }
+}
+
+// --- U7 / Phase C: /data mount present (Secondary Master, whole-disk FAT32) -----
+
+fn test_data_mount_present() {
+    let vfs = crate::fs::vfs::get_vfs();
+    let mut found = false;
+    for mount in vfs.list_mounts() {
+        if mount.path == "/data" {
+            found = true;
+            debug_info!("  /data is mounted with filesystem: {}", mount.filesystem.name());
+            // U10 makes /data writable.
+            assert!(
+                !mount.filesystem.is_read_only(),
+                "/data should be WRITABLE after Phase C U10"
+            );
+        }
+    }
+    assert!(found, "/data must be present in vfs.list_mounts()");
+}
+
+fn test_data_create_write_read_round_trip() {
+    debug_info!("U10: end-to-end /data write via the public File API");
+    let f = crate::fs::File::create("/data/u10-test.txt").expect("create");
+    let n = f.write(b"hello from /data\n").expect("write");
+    assert_eq!(n, "hello from /data\n".len());
+    drop(f);
+
+    let f2 = crate::fs::File::open_read("/data/u10-test.txt").expect("reopen");
+    let content = f2.read_to_string().expect("read");
+    assert_eq!(content, "hello from /data\n");
+}
+
+fn test_data_unlink() {
+    debug_info!("U10: unlink on /data via the VFS");
+    // Ensure a fresh file (the previous test may have left one).
+    let f = crate::fs::File::create("/data/u10-unlink.txt").expect("create");
+    f.write(b"x").expect("write");
+    drop(f);
+    assert!(crate::fs::exists("/data/u10-unlink.txt"));
+    crate::fs::vfs::vfs_unlink("/data/u10-unlink.txt").expect("unlink");
+    assert!(!crate::fs::exists("/data/u10-unlink.txt"));
+}
+
+fn test_data_write_larger_than_one_cluster() {
+    // /data is FAT32 with 1 sector per cluster (512 bytes), so 5 KiB
+    // forces multi-cluster chain extension. Exercises write_file_at's
+    // FAT-link-then-write loop.
+    debug_info!("U10: 5 KiB write to /data spans multiple clusters");
+    let data: alloc::vec::Vec<u8> = (0..5 * 1024).map(|i| (i & 0xFF) as u8).collect();
+    let f = crate::fs::File::create("/data/u10-big.bin").expect("create");
+    let mut written = 0;
+    while written < data.len() {
+        let n = f.write(&data[written..]).expect("write");
+        assert!(n > 0);
+        written += n;
+    }
+    drop(f);
+
+    let f2 = crate::fs::File::open_read("/data/u10-big.bin").expect("reopen");
+    assert_eq!(f2.size() as usize, data.len());
+    let content = f2.read_to_vec().expect("read");
+    assert_eq!(content, data);
+}
+
+// --- U11 / Phase D: overlay persistence to /data ---------------------
+
+fn test_u11_serialize_deserialize_round_trip() {
+    use crate::fs::overlay::sync::{deserialize_blob, serialize_upper};
+    use crate::fs::tmpfs::Tmpfs;
+    use crate::fs::filesystem::{FileMode, Filesystem};
+
+    let upper = Tmpfs::new();
+    upper.mkdir("/etc").expect("mkdir /etc");
+    // Put a file in.
+    let mut h = upper
+        .open(
+            "/etc/hello",
+            FileMode {
+                read: true,
+                write: true,
+                append: false,
+                create: true,
+                truncate: true,
+            },
+        )
+        .expect("open create");
+    upper.write(&mut h, b"persistent\n").expect("write");
+    upper.close(&mut h).expect("close");
+    // Whiteout marker.
+    let mut wh = upper
+        .open(
+            "/.wh.system.ttf",
+            FileMode {
+                read: false,
+                write: true,
+                append: false,
+                create: true,
+                truncate: true,
+            },
+        )
+        .expect("create whiteout");
+    upper.close(&mut wh).expect("close wh");
+
+    let blob = serialize_upper(&upper);
+    let entries = deserialize_blob(&blob).expect("deserialize");
+    debug_info!("  serialized {} bytes, {} entries", blob.len(), entries.len());
+    assert!(entries.len() >= 2);
+}
+
+fn test_u11_corrupted_blob_rejected() {
+    use crate::fs::overlay::sync::deserialize_blob;
+    let mut bad = alloc::vec::Vec::from(&b"XXXX\x01\x00\x00\x00\x00\x00"[..]);
+    while bad.len() < 32 {
+        bad.push(0);
+    }
+    assert!(deserialize_blob(&bad).is_err());
+}
+
+fn test_u11_flush_then_restore_on_live_data() {
+    // End-to-end: write a file under `/`, sync (flushes to /data),
+    // construct a fresh tmpfs, restore from /data — fresh tmpfs
+    // should now contain the file.
+    use crate::fs::overlay::sync::{flush_upper_to_disk, restore_upper_from_disk};
+    use crate::fs::filesystem::{FileMode, Filesystem};
+    use crate::fs::tmpfs::Tmpfs;
+
+    // Get the live overlay's upper layer.
+    let vfs = crate::fs::vfs::get_vfs();
+    let root = vfs.find_filesystem("/").expect("/ resolvable").0;
+    if root.name() != "overlay" {
+        debug_info!("  / is not overlay; skipping");
+        return;
+    }
+    let overlay_ptr =
+        root as *const dyn Filesystem as *const crate::fs::overlay::Overlay;
+    let overlay: &crate::fs::overlay::Overlay = unsafe { &*overlay_ptr };
+    let upper_dyn = overlay.upper();
+    let upper_ptr = upper_dyn as *const dyn Filesystem as *const Tmpfs;
+    let upper: &Tmpfs = unsafe { &*upper_ptr };
+
+    // Write a marker via the public File API (lands in the overlay
+    // upper → tmpfs).
+    let f = crate::fs::File::create("/u11-marker.txt").expect("create");
+    f.write(b"survived a reboot\n").expect("write");
+    drop(f);
+
+    flush_upper_to_disk(upper).expect("flush");
+
+    // Fresh tmpfs; restore from /data; verify our marker shows up.
+    let fresh = Tmpfs::new();
+    let count = restore_upper_from_disk(&fresh).expect("restore");
+    debug_info!("  restore loaded {} entries", count);
+    assert!(count >= 1);
+
+    // The marker file should be present in the fresh tmpfs.
+    let mut h = fresh
+        .open("/u11-marker.txt", FileMode::READ)
+        .expect("open marker in fresh tmpfs");
+    let mut buf = [0u8; 32];
+    let n = fresh.read(&mut h, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"survived a reboot\n");
+}
+
+fn test_u11_pointer_flip_is_atomic() {
+    // Two successive flushes should land in alternating slots so the
+    // commit is single-byte atomic.
+    use crate::fs::overlay::sync::flush_upper_to_disk;
+    use crate::fs::filesystem::Filesystem;
+    use crate::fs::tmpfs::Tmpfs;
+
+    let vfs = crate::fs::vfs::get_vfs();
+    let root = vfs.find_filesystem("/").expect("/ resolvable").0;
+    if root.name() != "overlay" { return; }
+    let overlay_ptr =
+        root as *const dyn Filesystem as *const crate::fs::overlay::Overlay;
+    let overlay: &crate::fs::overlay::Overlay = unsafe { &*overlay_ptr };
+    let upper_dyn = overlay.upper();
+    let upper_ptr = upper_dyn as *const dyn Filesystem as *const Tmpfs;
+    let upper: &Tmpfs = unsafe { &*upper_ptr };
+
+    flush_upper_to_disk(upper).expect("first flush");
+    let ptr1 = crate::fs::File::open_read("/data/overlay-state.ptr")
+        .expect("open ptr")
+        .read_to_vec()
+        .expect("read ptr");
+    flush_upper_to_disk(upper).expect("second flush");
+    let ptr2 = crate::fs::File::open_read("/data/overlay-state.ptr")
+        .expect("open ptr")
+        .read_to_vec()
+        .expect("read ptr");
+    // The pointer must have flipped.
+    assert_ne!(ptr1, ptr2, "ptr must alternate slots on successive flushes");
+    // And must be exactly 1 byte ('0' or '1').
+    assert_eq!(ptr2.len(), 1);
+    assert!(ptr2[0] == b'0' || ptr2[0] == b'1');
+}
+
+fn test_data_mkdir_returns_unsupported() {
+    // U10 explicitly defers mkdir on FAT to a follow-up. Userland
+    // should see ENOSYS / UnsupportedOperation, not a misleading
+    // success.
+    let result = crate::fs::vfs::vfs_mkdir("/data/some-dir");
+    assert!(matches!(
+        result,
+        Err(crate::fs::filesystem::FilesystemError::UnsupportedOperation)
+    ));
+}
+
+fn test_data_mount_root_dir_enumerable() {
+    // Just-formatted FAT32 has an empty root dir (no entries beyond
+    // the volume label, which is filtered out). Enumeration must
+    // succeed cleanly.
+    let entries = crate::fs::vfs::get_vfs()
+        .find_filesystem("/data")
+        .expect("/data resolvable")
+        .0
+        .enumerate_dir("/")
+        .expect("enumerate /data");
+    debug_info!("  /data contains {} entries", entries.len());
+    // QEMU's snapshot=on layer means we don't see writes from earlier
+    // test boots; assert empty OR small (just in case the volume label
+    // surfaces in some edge case).
+    assert!(entries.len() < 4, "/data should be near-empty post-mkfs");
+}
+
+// --- U6 / Phase B: writable / mount via overlay(tmpfs, FAT) ----------
+//
+// These tests exercise the real boot mount, where / is the overlay
+// merged view. Reads must still fall through to the FAT lower, and
+// writes must land in the tmpfs upper without disturbing lower.
+
+fn test_overlay_root_lower_files_still_readable() {
+    // /system.ttf lives only in lower (FAT). Reads must work.
+    let file = crate::fs::File::open_read("/system.ttf").expect("open /system.ttf");
+    assert!(file.size() > 0);
+}
+
+fn test_overlay_root_write_then_read() {
+    // Create + write + read a fresh file at /; must not touch lower.
+    let f = crate::fs::File::create("/u6-test.txt").expect("create /u6-test.txt");
+    let n = f.write(b"hello overlay").expect("write");
+    assert_eq!(n, b"hello overlay".len());
+    drop(f);
+
+    let f2 = crate::fs::File::open_read("/u6-test.txt").expect("open /u6-test.txt");
+    let content = f2.read_to_string().expect("read_to_string");
+    assert_eq!(content, "hello overlay");
+}
+
+fn test_overlay_root_mkdir_unlink_via_vfs() {
+    // mkdir → file inside → unlink the file → rmdir the dir.
+    crate::fs::vfs::vfs_mkdir("/u6-dir").expect("mkdir /u6-dir");
+
+    let f = crate::fs::File::create("/u6-dir/inner.txt").expect("create nested");
+    f.write(b"x").expect("write");
+    drop(f);
+
+    crate::fs::vfs::vfs_unlink("/u6-dir/inner.txt").expect("unlink");
+    crate::fs::vfs::vfs_rmdir("/u6-dir").expect("rmdir");
+
+    // Verify gone.
+    assert!(!crate::fs::exists("/u6-dir"));
+}
+
+fn test_overlay_root_unlink_lower_creates_whiteout() {
+    // Unlink a lower-only file. Subsequent stat must return NotFound,
+    // but the lower FAT image is untouched (next test confirms by
+    // remounting? Not possible mid-test — we just verify the merged
+    // view).
+    //
+    // Use test.txt which is small and present in lower.
+    assert!(crate::fs::exists("/test.txt"), "/test.txt must exist in lower");
+    crate::fs::vfs::vfs_unlink("/test.txt").expect("unlink /test.txt");
+    assert!(!crate::fs::exists("/test.txt"));
+    // Re-create with new content; whiteout should clear.
+    let f = crate::fs::File::create("/test.txt").expect("recreate");
+    f.write(b"fresh").expect("write");
+    drop(f);
+    let f2 = crate::fs::File::open_read("/test.txt").expect("open");
+    let content = f2.read_to_string().expect("read");
+    assert_eq!(content, "fresh");
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_filesystem_basic_exists,
@@ -454,5 +815,23 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_read_to_vec_vs_pre_zero_baseline,
         &test_fat_read_throughput_host_hellocpp,
         &test_run_hellocpp_end_to_end,
+        &test_enumerate_root_contains_long_lowercase_names,
+        &test_stat_returns_long_name,
+        &test_lookup_resolves_long_lowercase_name,
+        &test_lookup_case_insensitive_on_long_name,
+        &test_overlay_root_lower_files_still_readable,
+        &test_overlay_root_write_then_read,
+        &test_overlay_root_mkdir_unlink_via_vfs,
+        &test_overlay_root_unlink_lower_creates_whiteout,
+        &test_data_mount_present,
+        &test_data_mount_root_dir_enumerable,
+        &test_data_create_write_read_round_trip,
+        &test_data_unlink,
+        &test_data_write_larger_than_one_cluster,
+        &test_data_mkdir_returns_unsupported,
+        &test_u11_serialize_deserialize_round_trip,
+        &test_u11_corrupted_blob_rejected,
+        &test_u11_flush_then_restore_on_live_data,
+        &test_u11_pointer_flip_is_atomic,
     ]
 }
