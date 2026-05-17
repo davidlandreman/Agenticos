@@ -77,7 +77,21 @@ pub struct UserImage {
     /// `e_phnum` from the ELF header — paired with `phdr_bytes` for
     /// `AT_PHNUM` and to size the on-stack phdr copy.
     pub e_phnum: u16,
-    /// Every region the loader mapped, in mapping order.
+    /// Demand-grown stack — VA of the lowest initially-committed stack
+    /// page. The loader maps `USER_STACK_INITIAL_PAGES` pages at this
+    /// address and stops; growth is driven from the page-fault handler.
+    /// Consumed by U3 (`install_new_process_opt`) to populate Process's
+    /// `stack_bottom` / `stack_mapped_bottom`.
+    pub stack_initial_bottom: u64,
+    /// Demand-grown stack — lowest address the stack may grow into for
+    /// this binary. `max(USER_STACK_TOP - USER_STACK_MAX_GROWTH_PAGES *
+    /// 0x1000, highest_pt_load_end + USER_STACK_GUARD_PAGES * 0x1000)`.
+    /// Consumed by U3.
+    pub stack_max_growth_floor: u64,
+    /// Every region the loader mapped, in mapping order. The user stack
+    /// is **not** recorded here — Process owns stack teardown via
+    /// `unmap_user_stack` so the per-fault growth path doesn't need to
+    /// push to a heap-allocated `Vec` from interrupt context.
     mappings: Vec<MappingRange>,
     /// Set to `false` by the destructor to make Drop idempotent in case a
     /// future refactor tries to drop twice.
@@ -99,9 +113,22 @@ impl UserImage {
             tls_fs_base: None,
             phdr_bytes: Vec::new(),
             e_phnum: 0,
+            stack_initial_bottom: 0,
+            stack_max_growth_floor: 0,
             mappings: Vec::new(),
             dropped: false,
         }
+    }
+
+    /// Record the loader-computed stack window. Consumed by U3 to
+    /// install the values on `Process`.
+    pub fn set_stack_window(
+        &mut self,
+        initial_bottom: u64,
+        max_growth_floor: u64,
+    ) {
+        self.stack_initial_bottom = initial_bottom;
+        self.stack_max_growth_floor = max_growth_floor;
     }
 
     /// Record the FS_BASE address for the TCB the loader allocated. Called
@@ -175,5 +202,30 @@ impl Drop for UserImage {
             );
         }
         self.mappings.clear();
+
+        // Demand-grown stack: the initial commit lives outside `mappings`
+        // so the ring-3 page-fault growth path doesn't need to push to a
+        // heap-allocated Vec. Clean it up here when nobody else already
+        // has (the runtime exit path clears `stack_initial_bottom` to
+        // signal "Process already handled the stack range" so we don't
+        // double-unmap).
+        if self.stack_initial_bottom != 0 && self.stack_top.as_u64() > self.stack_initial_bottom {
+            let page_count =
+                (self.stack_top.as_u64() - self.stack_initial_bottom) / 0x1000;
+            let res = crate::mm::memory::with_memory_mapper(|m| {
+                m.unmap_user_region(
+                    x86_64::VirtAddr::new(self.stack_initial_bottom),
+                    page_count,
+                )
+            });
+            if let Some(Err(e)) = res {
+                if !matches!(e, UserMapError::PageNotMapped) {
+                    crate::debug_warn!(
+                        "UserImage::drop: stack unmap failed: {:?}",
+                        e
+                    );
+                }
+            }
+        }
     }
 }

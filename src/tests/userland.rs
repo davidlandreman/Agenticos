@@ -733,8 +733,26 @@ fn test_loader_happy_path() {
     assert_eq!(image.entry.as_u64(), 0x40_0000);
     assert_eq!(image.stack_top.as_u64(), crate::mm::paging::USER_STACK_TOP);
 
-    assert_eq!(image.mapping_count(), 2);
-    assert_eq!(image.total_pages(), 1 + 8);
+    // U2: stack is no longer recorded in image.mappings — Process
+    // owns stack teardown. The only mapping for this fixture is the
+    // single PT_LOAD page (no TLS).
+    assert_eq!(image.mapping_count(), 1);
+    assert_eq!(image.total_pages(), 1);
+
+    // U2: stack window is exposed on the image for U3 to install on Process.
+    assert_eq!(
+        image.stack_initial_bottom,
+        crate::mm::paging::USER_STACK_TOP
+            - crate::mm::paging::USER_STACK_INITIAL_PAGES * 0x1000
+    );
+    // For a one-page PT_LOAD at USER_LOAD_BASE, the global cap binds:
+    // USER_STACK_TOP - 768*0x1000 = 0x50_0000 (3 MiB of stack room),
+    // which is above the per-binary floor (0x40_1000 + 16*0x1000).
+    assert_eq!(
+        image.stack_max_growth_floor,
+        crate::mm::paging::USER_STACK_TOP
+            - crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES * 0x1000
+    );
 
     unsafe {
         let p = 0x40_0000u64 as *const u8;
@@ -745,6 +763,9 @@ fn test_loader_happy_path() {
             assert_eq!(*p.add(i as usize), i);
         }
     }
+    // Stack cleanup is handled by `UserImage::Drop` when `image` goes
+    // out of scope — the loader recorded `stack_initial_bottom` and Drop
+    // unmaps `[initial_bottom, USER_STACK_TOP)`.
 }
 
 fn test_loader_bad_magic() {
@@ -3039,6 +3060,125 @@ fn test_run_leak_loop_fault() {
     }
 }
 
+// --- U2: loader growth-floor + bounds_start + per-binary floor ---
+
+/// The per-binary floor (`highest_pt_load_end + 16-page guard`) is what
+/// caps stack growth in practice today — the global cap saturates at
+/// USER_LOAD_BASE because the 4 MiB user-VA slice is too small to host
+/// the intent-level 3 MiB cap. Once the user-VA layout is repartitioned,
+/// the global cap may bind for small binaries.
+fn test_loader_per_binary_floor_from_pt_load_end() {
+    use crate::mm::paging::{
+        USER_STACK_GUARD_PAGES, USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP,
+    };
+
+    // Global floor is `USER_STACK_TOP - 768*0x1000 = 0x50_0000`. Place
+    // the PT_LOAD so its end + 16-page guard exceeds the global cap and
+    // the per-binary floor binds.
+    let p_vaddr = 0x60_0000u64; // one page, ends at 0x60_1000
+    let payload: alloc::vec::Vec<u8> = (0..16u8).collect();
+    let p_offset = 0x1000u64;
+    let phdr = fix::PhdrSpec {
+        p_type: fix::PT_LOAD,
+        p_flags: fix::PF_R | fix::PF_X,
+        p_offset,
+        p_vaddr,
+        p_filesz: payload.len() as u64,
+        p_memsz: 0x100,
+        p_align: 0x1000,
+    };
+    let bytes = fix::Fixture {
+        e_type: fix::ET_EXEC,
+        e_machine: fix::EM_X86_64,
+        ei_class: fix::ELFCLASS64,
+        ei_data: fix::ELFDATA2LSB,
+        e_entry: p_vaddr,
+        phdrs: alloc::vec![phdr],
+        payloads: alloc::vec![(p_offset, payload)],
+        truncate_to: None,
+    }
+    .build();
+
+    let image = load_elf(&bytes).expect("load_elf per-binary floor");
+    let pt_load_end = 0x60_1000u64;
+    let per_binary = pt_load_end + USER_STACK_GUARD_PAGES * 0x1000;
+    let global_floor = USER_STACK_TOP - USER_STACK_MAX_GROWTH_PAGES * 0x1000;
+    assert!(per_binary > global_floor, "test premise broken");
+    assert_eq!(image.stack_max_growth_floor, per_binary);
+}
+
+/// Reject a binary whose PT_LOAD reaches so high that the per-binary
+/// growth floor would land above the initial stack commit — i.e.,
+/// there's no room left even for the small initial mapping. This is
+/// also the only PT_LOAD-vs-stack overlap case we need to enforce, since
+/// the per-binary floor formula keeps the deepest stack page above
+/// every PT_LOAD's end by construction.
+fn test_loader_rejects_binary_too_big_for_initial_stack() {
+    use crate::mm::paging::{USER_STACK_GUARD_PAGES, USER_STACK_INITIAL_PAGES, USER_STACK_TOP};
+
+    // PT_LOAD ending at 0x7F_F000 forces floor = 0x7F_F000 + 16*0x1000
+    // = 0x80_F000 > USER_STACK_TOP, which is also > initial_stack_bottom
+    // (0x7F_8000). Loader must refuse.
+    let initial_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 0x1000;
+    let p_vaddr = 0x7F_E000u64; // 1 page, ends at 0x7F_F000
+    let projected_floor = 0x7F_F000u64 + USER_STACK_GUARD_PAGES * 0x1000;
+    assert!(projected_floor > initial_bottom, "test premise broken");
+
+    let payload: alloc::vec::Vec<u8> = (0..16u8).collect();
+    let p_offset = 0x1000u64;
+    let phdr = fix::PhdrSpec {
+        p_type: fix::PT_LOAD,
+        p_flags: fix::PF_R | fix::PF_X,
+        p_offset,
+        p_vaddr,
+        p_filesz: payload.len() as u64,
+        p_memsz: 0x100,
+        p_align: 0x1000,
+    };
+    let bytes = fix::Fixture {
+        e_type: fix::ET_EXEC,
+        e_machine: fix::EM_X86_64,
+        ei_class: fix::ELFCLASS64,
+        ei_data: fix::ELFDATA2LSB,
+        e_entry: p_vaddr,
+        phdrs: alloc::vec![phdr],
+        payloads: alloc::vec![(p_offset, payload)],
+        truncate_to: None,
+    }
+    .build();
+
+    assert_eq!(load_elf(&bytes).unwrap_err(), LoaderError::VaOutOfRange);
+}
+
+/// bounds_start reflects what's actually mapped — the lowest of the
+/// PT_LOAD pages and the initial stack commit. It is NOT pushed down
+/// to the growth floor; the fault handler widens bounds via
+/// set_user_va_bounds on each successful growth so validate_user_slice
+/// never accepts a pointer into a page that has never been mapped.
+fn test_loader_bounds_start_at_initial_commit() {
+    use crate::mm::paging::{USER_STACK_INITIAL_PAGES, USER_STACK_TOP};
+
+    let bytes = fix::happy_path_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+
+    let initial_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 0x1000;
+    // bounds_start = min(PT_LOAD start, initial_stack_bottom, USER_BRK_BASE).
+    // PT_LOAD wins for this fixture (0x40_0000 < 0x7F_8000 <
+    // USER_BRK_BASE 0x200_0000).
+    assert_eq!(image.bounds_start, 0x40_0000);
+
+    // The pre-grown-stack invariant we care about: bounds_start is
+    // NOT lowered all the way to `stack_max_growth_floor`. (If it
+    // were, validate_user_slice would accept pointers into pages that
+    // have never been mapped, and an in-kernel deref of such a pointer
+    // would fault under the mapper lock — re-introducing the bug
+    // the wide-bounds rejection avoids.) For this fixture the growth
+    // floor is just above the PT_LOAD end + 16-page guard, but well
+    // below initial_bottom; bounds_start must NOT match it.
+    assert!(image.stack_max_growth_floor < initial_bottom);
+    assert_ne!(image.bounds_start, image.stack_max_growth_floor);
+}
+
 // --- U1: stack-window fields + unmap_user_stack helper ---
 
 fn test_set_stack_window_records_all_fields() {
@@ -3159,6 +3299,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_set_stack_window_records_all_fields,
         &test_unmap_user_stack_sentinel_is_noop,
         &test_unmap_user_stack_releases_range,
+        &test_loader_per_binary_floor_from_pt_load_end,
+        &test_loader_rejects_binary_too_big_for_initial_stack,
+        &test_loader_bounds_start_at_initial_commit,
         &test_gdt_kernel_selectors,
         &test_sse_enabled_before_ring3,
         &test_gdt_user_selectors,

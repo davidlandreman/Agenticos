@@ -358,12 +358,20 @@ pub fn unmap_user_stack(p: &mut Process) {
         p.stack_mapped_bottom = 0;
         p.stack_max_growth_floor = 0;
         p.growth_faults_remaining = 0;
+        if let Some(img) = p.image.as_mut() {
+            img.stack_initial_bottom = 0;
+        }
         return;
     }
     let page_count = (p.stack_top - p.stack_mapped_bottom) / 0x1000;
     let _ = crate::mm::memory::with_memory_mapper(|m| {
         m.unmap_user_region(x86_64::VirtAddr::new(p.stack_mapped_bottom), page_count)
     });
+    // Tell `UserImage::Drop` we already handled the stack so it doesn't
+    // try to unmap the (now unmapped) initial commit again.
+    if let Some(img) = p.image.as_mut() {
+        img.stack_initial_bottom = 0;
+    }
     p.stack_top = 0;
     p.stack_bottom = 0;
     p.stack_mapped_bottom = 0;
