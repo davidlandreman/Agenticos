@@ -68,8 +68,15 @@ const SHT_STRTAB: u32 = 3;
 const R_X86_64_GLOB_DAT: u32 = 6;
 const R_X86_64_JUMP_SLOT: u32 = 7;
 
-// User stack: 8 pages = 32 KiB. Plus one guard page below.
-const USER_STACK_PAGES: u64 = 8;
+// User stack: 64 pages = 256 KiB. Plus one guard page below.
+// Was 8 (32 KiB), but zsh's post-fork prep (musl __post_fork callbacks +
+// zsh's internal fork bookkeeping) blows past that and the child page-
+// faults ~12 KiB below the stack bottom before reaching execve. 256 KiB
+// gives ~8× headroom over what we've observed. Real fix is demand-grown
+// stack on faults below the current bottom (matching Linux's behavior up
+// to RLIMIT_STACK); deferred until we have more than one binary that
+// needs more than the bump.
+const USER_STACK_PAGES: u64 = 64;
 
 /// Maximum supported PT_TLS image size for this milestone.
 ///

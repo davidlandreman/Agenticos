@@ -548,6 +548,31 @@ fn test_dispatch_prlimit64_null_old_returns_zero() {
     assert_eq!(ret, 0);
 }
 
+/// `getrusage(RUSAGE_SELF, &usage)` zero-fills the 144-byte rusage struct
+/// and returns 0; `getrusage(99, ...)` rejects an unknown `who` with EINVAL.
+fn test_dispatch_getrusage_self_zero_fills_and_rejects_unknown_who() {
+    let mut out = [0xffu8; 144];
+    let ptr = out.as_mut_ptr() as u64;
+    let bytes = out.len() as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr, end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::GETRUSAGE;
+    args.rdi = 0; // RUSAGE_SELF
+    args.rsi = ptr;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    assert!(out.iter().all(|&b| b == 0));
+
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::GETRUSAGE;
+    args.rdi = 99; // not a valid `who`
+    args.rsi = ptr;
+    assert_eq!(syscall_dispatch(&mut args), crate::userland::abi::EINVAL);
+
+    crate::userland::abi::clear_user_va_bounds();
+}
+
 /// `setitimer(ITIMER_REAL, &new, NULL)` and `nanosleep(&req, NULL)`
 /// both return 0 without touching unspecified memory (the stub paths).
 fn test_dispatch_setitimer_and_nanosleep_stubs_return_zero() {
@@ -1904,6 +1929,38 @@ fn test_dispatch_rt_sigaction_round_trip() {
     teardown_phase2_active_user();
 }
 
+/// `rt_sigaction(NSIG, ...)` (signal 64 = SIGRTMAX) must not panic.
+/// The actions table is sized `NSIG + 1`; an earlier off-by-one sized
+/// it `NSIG` so `table[64]` blew up the kernel when zsh installed
+/// handlers across the full RT-signal range at startup.
+fn test_dispatch_rt_sigaction_sigrtmax_does_not_panic() {
+    use crate::userland::signal::{SigAction, NSIG};
+    setup_phase2_active_user();
+
+    let act = SigAction {
+        sa_handler: 0xAABB_CCDD_EEFF_0011,
+        ..SigAction::default()
+    };
+    let mut oldact = SigAction::default();
+    let act_ptr = &act as *const SigAction as u64;
+    let oldact_ptr = &mut oldact as *mut SigAction as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: core::cmp::min(act_ptr, oldact_ptr),
+        end: core::cmp::max(act_ptr, oldact_ptr) + 32,
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::RT_SIGACTION;
+    args.rdi = NSIG as u64; // signal 64
+    args.rsi = act_ptr;
+    args.rdx = oldact_ptr;
+    args.r10 = 8;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
 /// SIGKILL and SIGSTOP must not be settable (POSIX). The syscall
 /// returns 0 (no error) but the action stays as default.
 fn test_dispatch_rt_sigaction_rejects_sigkill_sigstop() {
@@ -1970,6 +2027,60 @@ fn test_dispatch_rt_sigprocmask_block_strips_kill_stop() {
     teardown_phase2_active_user();
 }
 
+/// `rt_sigsuspend(&mask, 8)` installs the new mask on the current
+/// process and returns `-EINTR`. SIGKILL/SIGSTOP must be stripped from
+/// the installed mask even if the user requests blocking them.
+fn test_dispatch_rt_sigsuspend_installs_mask_and_returns_eintr() {
+    use crate::userland::signal::{SIGKILL, SIGSTOP, SIGCHLD};
+    setup_phase2_active_user();
+
+    // Pre-set an arbitrary "old" mask so we can confirm sigsuspend
+    // replaces it wholesale, not OR-merges.
+    crate::userland::lifecycle::with_current_process(|p| {
+        p.signal_state.blocked = 0xFFFF_FFFF_FFFF_FFFF;
+    });
+
+    let new_mask: u64 =
+        (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1)) | (1u64 << (SIGCHLD - 1));
+    let mask_ptr = &new_mask as *const u64 as u64;
+    abi::set_user_va_bounds(UserVaBounds { start: mask_ptr, end: mask_ptr + 8 });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::RT_SIGSUSPEND;
+    args.rdi = mask_ptr;
+    args.rsi = 8;
+    assert_eq!(syscall_dispatch(&mut args), abi::EINTR);
+
+    let blocked = crate::userland::lifecycle::with_current_process(|p| p.signal_state.blocked);
+    assert_eq!(
+        blocked,
+        1u64 << (SIGCHLD - 1),
+        "expected only SIGCHLD bit; KILL/STOP must be stripped",
+    );
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// `rt_sigsuspend(ptr, 7)` rejects a non-canonical sigset size.
+fn test_dispatch_rt_sigsuspend_invalid_sigsetsize() {
+    let mut args = SyscallArgs::default();
+    args.rax = nr::RT_SIGSUSPEND;
+    args.rdi = 0xdead_beef;
+    args.rsi = 7;
+    assert_eq!(syscall_dispatch(&mut args), abi::EINVAL);
+}
+
+/// `rt_sigsuspend(NULL, 8)` rejects a null mask pointer with -EFAULT.
+fn test_dispatch_rt_sigsuspend_null_mask_efaults() {
+    abi::clear_user_va_bounds();
+    let mut args = SyscallArgs::default();
+    args.rax = nr::RT_SIGSUSPEND;
+    args.rdi = 0;
+    args.rsi = 8;
+    assert_eq!(syscall_dispatch(&mut args), abi::EFAULT);
+}
+
 /// `kill(self, SIGUSR1)` sets SIGUSR1 pending on the current process.
 fn test_dispatch_kill_self_sets_pending() {
     use crate::userland::signal::SIGUSR1;
@@ -2029,6 +2140,133 @@ fn test_fork_child_exit_sets_sigchld_on_parent() {
         pending & (1 << (SIGCHLD - 1)) != 0,
         "expected SIGCHLD pending after child exit, got mask {:#x}",
         pending,
+    );
+}
+
+/// `notify_parent_of_exit` is the shared helper that `exit_group`,
+/// `cleanup_user_process`, and `unimplemented_syscall_exit` all route
+/// through. It must (a) file a zombie the parent's `wait4` can find
+/// and (b) raise SIGCHLD on the stashed parent. Regression guard for
+/// the bug where ring-3 faults skipped both, leaving zsh hung in
+/// `rt_sigsuspend` after `ls` crashed.
+fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
+    use crate::userland::lifecycle::{
+        notify_parent_of_exit, reap_zombie, stash_parent, swap_current_process,
+        take_stashed_parent, Process, ExitKind,
+    };
+    use crate::userland::signal::SIGCHLD;
+
+    // Build minimal parent + "dying child" Processes. PIDs are
+    // arbitrary; the helper doesn't validate against the live PID
+    // allocator.
+    let parent = Process {
+        pid: 100,
+        parent_pid: 0,
+        continuation: None,
+        image: None,
+        exit_kind: ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+    };
+    let child = Process {
+        pid: 101,
+        parent_pid: 100,
+        continuation: None,
+        image: None,
+        exit_kind: ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+    };
+
+    // Stash parent, install child as current — mirroring fork's state
+    // when the child is mid-execution.
+    let saved = swap_current_process(child);
+    stash_parent(parent);
+
+    notify_parent_of_exit(101, 100, 139);
+
+    // The parent (still in PARENT_STASH) now has SIGCHLD pending.
+    let stashed = take_stashed_parent().expect("parent stash populated");
+    assert!(
+        stashed.signal_state.pending & (1 << (SIGCHLD - 1)) != 0,
+        "expected SIGCHLD pending on stashed parent, got mask {:#x}",
+        stashed.signal_state.pending,
+    );
+
+    // A zombie record exists for pid 101 → parent 100, exit code 139.
+    let reaped = reap_zombie(101, 100).expect("zombie filed for child 101");
+    assert_eq!(reaped, (101, 139));
+
+    // Cleanup: restore original current process.
+    let _ = swap_current_process(saved);
+}
+
+/// When `parent_pid == 0` (top-level kernel-launched binary, no
+/// userland parent), `notify_parent_of_exit` must be a no-op: no
+/// zombie filed, no signal raised. Guards against the helper
+/// accidentally creating phantom zombies for the run-command launch.
+fn test_notify_parent_of_exit_skips_when_no_parent() {
+    use crate::userland::lifecycle::{notify_parent_of_exit, reap_zombie};
+
+    notify_parent_of_exit(202, 0, 7);
+    // Try to reap with any plausible reaper; should find nothing.
+    assert!(reap_zombie(202, 0).is_none());
+    assert!(reap_zombie(202, 1).is_none());
+    assert!(reap_zombie(-1, 0).is_none());
+}
+
+/// Regression guard: after `fork()` returns to the parent, the
+/// parent's `user_va_bounds` must be restored so syscalls that
+/// validate user pointers (write, wait4 with non-null status, read,
+/// etc.) work. The child's long-jump back goes through
+/// `long_jump_to_run_or_halt`, which calls `clear_user_va_bounds`;
+/// `fork_handler` must save and restore the parent's bounds across
+/// that boundary.
+///
+/// The fixture's parent calls `wait4(child, &status, 0, NULL)` with
+/// `&status` pointing into its own stack. If bounds aren't restored,
+/// `validate_user_slice` returns `-EFAULT` and the parent exits with
+/// sentinel 99 instead of `WEXITSTATUS(status) == 42`.
+fn test_fork_post_resume_user_va_bounds_restored() {
+    use crate::userland::lifecycle::ExitKind;
+    reset_active_user();
+
+    let aspace = crate::userland::address_space::AddressSpace::new()
+        .expect("AddressSpace::new");
+    unsafe { aspace.activate(); }
+
+    let bytes = fix::fork_then_wait_with_status_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let result = crate::userland::enter_user_mode_with_aspace(
+        image,
+        &["agenticos-app"],
+        &[],
+        Some(aspace),
+    )
+    .expect("enter_user_mode_with_aspace");
+
+    let _ = crate::userland::release_active_image();
+
+    assert!(matches!(result.0, ExitKind::Cooperative));
+    assert_eq!(
+        result.1, 42,
+        "expected parent to exit WEXITSTATUS=42 (child's exit code), got {} \
+         (99 means wait4 returned -EFAULT — bounds not restored)",
+        result.1,
     );
 }
 
@@ -2822,6 +3060,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_getrlimit_returns_infinity,
         &test_dispatch_prlimit64_old_value_writes_infinity,
         &test_dispatch_prlimit64_null_old_returns_zero,
+        &test_dispatch_getrusage_self_zero_fills_and_rejects_unknown_who,
         &test_dispatch_setitimer_and_nanosleep_stubs_return_zero,
         &test_write_handler_valid_slice,
         &test_write_handler_rejects_unknown_fd,
@@ -2935,10 +3174,17 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_pipe2_round_trip,
         // Phase 5 PR-B: signal foundation
         &test_dispatch_rt_sigaction_round_trip,
+        &test_dispatch_rt_sigaction_sigrtmax_does_not_panic,
         &test_dispatch_rt_sigaction_rejects_sigkill_sigstop,
         &test_dispatch_rt_sigprocmask_block_strips_kill_stop,
+        &test_dispatch_rt_sigsuspend_installs_mask_and_returns_eintr,
+        &test_dispatch_rt_sigsuspend_invalid_sigsetsize,
+        &test_dispatch_rt_sigsuspend_null_mask_efaults,
         &test_dispatch_kill_self_sets_pending,
         &test_fork_child_exit_sets_sigchld_on_parent,
+        &test_notify_parent_of_exit_files_zombie_and_raises_sigchld,
+        &test_notify_parent_of_exit_skips_when_no_parent,
+        &test_fork_post_resume_user_va_bounds_restored,
         // Phase 5 PR-B2: real signal delivery
         &test_signal_delivery_handler_runs,
     ]

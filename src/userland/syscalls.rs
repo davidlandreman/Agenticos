@@ -34,7 +34,7 @@ use crate::mm::paging::{
     UserPerms, USER_BRK_BASE, USER_VA_RANGE_END,
 };
 use crate::userland::abi::{
-    validate_user_slice, EACCES, EBADF, EFAULT, EINVAL, EIO, EISDIR, EMFILE, ENOENT,
+    validate_user_slice, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMFILE, ENOENT,
     ENOSYS, ENOTDIR, ENOTTY, ERANGE, EROFS, ESPIPE, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
@@ -700,6 +700,52 @@ pub fn rt_sigprocmask_handler(args: &mut SyscallArgs) -> i64 {
     0
 }
 
+/// `rt_sigsuspend(*mask, sigsetsize) -> int` — always returns `-EINTR`.
+///
+/// POSIX: atomically replace the signal mask with `*mask`, suspend
+/// until a deliverable signal arrives, run its handler, then return
+/// with the original mask restored.
+///
+/// Our kernel can't truly suspend (no scheduler that blocks user
+/// processes mid-syscall). Pragmatic implementation that works for
+/// zsh's `waitjobs` loop: install the new mask on the current process,
+/// return `-EINTR`. The dispatcher tail's `maybe_deliver_signal` then
+/// finds any pending handler-installed signal that the new mask
+/// unblocks (notably SIGCHLD, which our synchronous fork has already
+/// raised by the time zsh enters sigsuspend) and `iretq`s into the
+/// handler. The handler runs `waitpid`, reaps the zombie, returns via
+/// `rt_sigreturn`, and zsh sees the syscall returned `-EINTR`.
+///
+/// Known gap: the original mask is not restored after the handler
+/// returns. `rt_sigreturn` only restores `UserState`, not `blocked`.
+/// Same gap exists for `sa_mask` on regular signal delivery. zsh
+/// re-asserts its mask via `rt_sigprocmask` on every `waitjobs`
+/// iteration, so this doesn't bite in practice. Real fix lands when we
+/// teach `deliver_signal` / `rt_sigreturn` to save and restore the
+/// blocked mask alongside `UserState`.
+pub fn rt_sigsuspend_handler(args: &mut SyscallArgs) -> i64 {
+    use crate::userland::signal::{SIGKILL, SIGSTOP};
+    let mask_ptr = args.rdi;
+    let sigsetsize = args.rsi as usize;
+
+    if sigsetsize != 8 {
+        return EINVAL;
+    }
+    if let Err(e) = validate_user_slice(mask_ptr, 8) {
+        return e;
+    }
+    let mask = unsafe { core::ptr::read_unaligned(mask_ptr as *const u64) };
+    // POSIX: SIGKILL and SIGSTOP can never be blocked. Strip them so
+    // the new mask doesn't accidentally swallow a pending KILL/STOP
+    // bit during the (zero-duration) suspension window.
+    let kill_stop_mask = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
+    let sanitized = mask & !kill_stop_mask;
+    crate::userland::lifecycle::with_current_process(|p| {
+        p.signal_state.blocked = sanitized;
+    });
+    EINTR
+}
+
 // ---------- credentials ----------
 
 pub fn getuid_handler(_: &mut SyscallArgs) -> i64 { 0 }
@@ -864,6 +910,16 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         }
     });
 
+    // 9a. Save the parent's pointer-validation bounds. The child's
+    //     long-jump back (cooperative or abnormal) flows through
+    //     `long_jump_to_run_or_halt`, which calls `clear_user_va_bounds`
+    //     unconditionally. Without restoring here, the parent's next
+    //     syscall with any user pointer would fail `-EFAULT` because
+    //     `validate_user_slice` would see `None` bounds. Symptom: zsh
+    //     hangs after a child crash because its post-fork sigsuspend /
+    //     waitpid / write all reject their user pointers.
+    let saved_user_va_bounds = crate::userland::abi::user_va_bounds();
+
     // 9b. Phase 5 PR-C1: point both TSS.rsp0 and the SYSCALL stub's
     //     `gs:[0]` slot at the *child's* freshly-allocated kernel
     //     stack so its syscalls don't share rsp0 with the parent's
@@ -928,6 +984,13 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
             unsafe { a.activate(); }
         }
     });
+
+    // 12b. Restore the parent's pointer-validation bounds (paired with
+    //      step 9a). If we somehow entered fork without bounds set
+    //      (test path with no `enter_user_mode`), leave bounds cleared.
+    if let Some(bounds) = saved_user_va_bounds {
+        crate::userland::abi::set_user_va_bounds(bounds);
+    }
 
     // 13. The zombie was already recorded by the child's exit_group.
     //     Sanity-check that we can find it (if not, _exit didn't run
@@ -1451,18 +1514,13 @@ pub fn exit_group_handler(args: &mut SyscallArgs) -> i64 {
         return 0;
     }
 
-    // Forked-child path: park a zombie so the parent's wait4 finds it.
-    // parent_pid != 0 distinguishes children from the top-level "kernel
-    // launched the binary" case (parent_pid == 0).
+    // Forked-child path: park a zombie so the parent's wait4 finds it
+    // and raise SIGCHLD on the stashed parent. `notify_parent_of_exit`
+    // is a no-op when parent_pid == 0 (top-level kernel-launched
+    // binary). The abnormal-exit and unimplemented-syscall paths in
+    // `lifecycle.rs` route through the same helper so all three exit
+    // paths surface a consistent SIGCHLD + zombie to the parent.
     if parent_pid != 0 {
-        crate::userland::lifecycle::record_zombie(pid, parent_pid, code);
-        // Phase 5 PR-B: raise SIGCHLD on the stashed parent so the
-        // parent's pending mask reflects the child's death. With
-        // synchronous fork the parent's wait4 reaps anyway, but the
-        // pending bit lets `sigprocmask` queries observe SIGCHLD.
-        crate::userland::lifecycle::raise_signal_on_stashed_parent(
-            crate::userland::signal::SIGCHLD,
-        );
         crate::debug_info!(
             "USERLAND: child pid={} exit_group({}) — long-jumping to fork()",
             pid,
@@ -1471,6 +1529,7 @@ pub fn exit_group_handler(args: &mut SyscallArgs) -> i64 {
     } else {
         crate::debug_info!("USERLAND: exit_group({}) — long-jumping to run command", code);
     }
+    crate::userland::lifecycle::notify_parent_of_exit(pid, parent_pid, code);
     crate::userland::lifecycle::cooperative_exit(code);
 }
 
@@ -2599,6 +2658,65 @@ fn write_rlim_infinity(out_ptr: u64) -> i64 {
     unsafe {
         core::ptr::copy_nonoverlapping(
             &r as *const LinuxRlimit as *const u8,
+            out_ptr as *mut u8,
+            size as usize,
+        );
+    }
+    0
+}
+
+/// Linux `struct rusage` layout (x86-64): two `timeval` pairs followed by
+/// 14 `long` counters. 144 bytes total. zsh reads it at startup for the
+/// `times` builtin / shell timing init.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct LinuxRusage {
+    ru_utime_sec: i64,
+    ru_utime_usec: i64,
+    ru_stime_sec: i64,
+    ru_stime_usec: i64,
+    ru_maxrss: i64,
+    ru_ixrss: i64,
+    ru_idrss: i64,
+    ru_isrss: i64,
+    ru_minflt: i64,
+    ru_majflt: i64,
+    ru_nswap: i64,
+    ru_inblock: i64,
+    ru_oublock: i64,
+    ru_msgsnd: i64,
+    ru_msgrcv: i64,
+    ru_nsignals: i64,
+    ru_nvcsw: i64,
+    ru_nivcsw: i64,
+}
+
+/// `getrusage(who: i32, *usage) -> int`
+///
+/// Stub: zero the `rusage` struct and return 0. We don't track per-process
+/// CPU time or fault counters, so a zero report is the honest answer.
+/// `who` is validated against the documented set (RUSAGE_SELF=0,
+/// RUSAGE_CHILDREN=-1, RUSAGE_THREAD=1) — anything else returns -EINVAL,
+/// matching Linux.
+pub fn getrusage_handler(args: &mut SyscallArgs) -> i64 {
+    const RUSAGE_CHILDREN: i32 = -1;
+    const RUSAGE_SELF: i32 = 0;
+    const RUSAGE_THREAD: i32 = 1;
+
+    let who = args.rdi as i32;
+    let out_ptr = args.rsi;
+
+    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
+        return EINVAL;
+    }
+    let size = core::mem::size_of::<LinuxRusage>() as u64;
+    if let Err(e) = validate_user_slice(out_ptr, size) {
+        return e;
+    }
+    let zero = LinuxRusage::default();
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &zero as *const LinuxRusage as *const u8,
             out_ptr as *mut u8,
             size as usize,
         );

@@ -589,6 +589,125 @@ pub fn fork_then_wait_elf() -> Vec<u8> {
     runnable_elf_rx(&code)
 }
 
+/// Fork-then-wait with a **non-null status pointer**.
+///
+/// Regression guard for the "post-fork bounds restoration" bug: after
+/// the child long-jumps back to fork, the parent's
+/// `validate_user_slice` must accept user pointers (i.e.
+/// `user_va_bounds` is restored). If it isn't, `wait4(child, &status,
+/// 0, NULL)` returns `-EFAULT` instead of writing the status, and the
+/// parent's exit code diverges from `WEXITSTATUS(status)`.
+///
+/// ```asm
+/// _start:
+///   sub  rsp, 8                  ; room for `int status`
+///   mov  eax, 57                 ; fork
+///   syscall
+///   test eax, eax
+///   jz   child
+///
+///   ; parent: edi = child pid (returned by fork)
+///   mov  edi, eax
+///   mov  rsi, rsp                ; status_ptr → stack local
+///   xor  edx, edx                ; options = 0
+///   xor  r10, r10                ; rusage = NULL
+///   mov  eax, 61                 ; wait4
+///   syscall
+///   test eax, eax
+///   js   wait_err                ; eax < 0 → -EFAULT or similar
+///   mov  edi, [rsp]              ; read status word (low 32 bits)
+///   shr  edi, 8                  ; WEXITSTATUS → 42 if child exited 42
+///   jmp  do_exit
+/// wait_err:
+///   mov  edi, 99                 ; sentinel: wait4 failed
+/// do_exit:
+///   mov  eax, 231                ; exit_group
+///   syscall
+///   hlt
+///
+/// child:
+///   mov  edi, 42
+///   mov  eax, 231
+///   syscall
+///   hlt
+/// ```
+pub fn fork_then_wait_with_status_elf() -> Vec<u8> {
+    let mut code: Vec<u8> = Vec::new();
+
+    // sub rsp, 8 (48 83 EC 08)
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x08]);
+    // mov eax, 57
+    code.extend_from_slice(&[0xB8, 0x39, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // test eax, eax
+    code.extend_from_slice(&[0x85, 0xC0]);
+    // jz child
+    code.extend_from_slice(&[0x74, 0x00]);
+    let jz_at = code.len() - 1;
+
+    // ----- parent -----
+    // mov edi, eax (child pid)
+    code.extend_from_slice(&[0x89, 0xC7]);
+    // mov rsi, rsp (48 89 E6)
+    code.extend_from_slice(&[0x48, 0x89, 0xE6]);
+    // xor edx, edx
+    code.extend_from_slice(&[0x31, 0xD2]);
+    // xor r10, r10
+    code.extend_from_slice(&[0x4D, 0x31, 0xD2]);
+    // mov eax, 61 (wait4)
+    code.extend_from_slice(&[0xB8, 0x3D, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // test eax, eax
+    code.extend_from_slice(&[0x85, 0xC0]);
+    // js wait_err
+    code.extend_from_slice(&[0x78, 0x00]);
+    let js_at = code.len() - 1;
+    // mov edi, dword ptr [rsp] (8B 3C 24)
+    code.extend_from_slice(&[0x8B, 0x3C, 0x24]);
+    // shr edi, 8 (C1 EF 08)
+    code.extend_from_slice(&[0xC1, 0xEF, 0x08]);
+    // jmp do_exit (EB nn)
+    code.extend_from_slice(&[0xEB, 0x00]);
+    let jmp_at = code.len() - 1;
+
+    let wait_err_target = code.len();
+    // mov edi, 99
+    code.extend_from_slice(&[0xBF, 0x63, 0x00, 0x00, 0x00]);
+
+    let do_exit_target = code.len();
+    // mov eax, 231
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt
+    code.push(0xF4);
+
+    // ----- child -----
+    let child_target = code.len();
+    // mov edi, 42
+    code.extend_from_slice(&[0xBF, 0x2A, 0x00, 0x00, 0x00]);
+    // mov eax, 231
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // hlt
+    code.push(0xF4);
+
+    // Patch jumps (rel8 from the byte after the displacement).
+    let patch_rel8 = |code: &mut [u8], at: usize, target: usize| {
+        let off = target as i32 - (at + 1) as i32;
+        assert!(off >= -128 && off <= 127, "rel8 out of range: {}", off);
+        code[at] = off as i8 as u8;
+    };
+    patch_rel8(&mut code, jz_at, child_target);
+    patch_rel8(&mut code, js_at, wait_err_target);
+    patch_rel8(&mut code, jmp_at, do_exit_target);
+
+    runnable_elf_rx(&code)
+}
+
 /// Fixture B — Linux initial-stack contract.
 ///
 /// Verifies the kernel built `argc/argv/envp/auxv` correctly. The binary:

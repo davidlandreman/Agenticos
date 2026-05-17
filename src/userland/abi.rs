@@ -51,6 +51,7 @@ pub const ENOTSUP: i64 = -95;
 pub const ECHILD: i64 = -10;
 pub const EAGAIN: i64 = -11;
 pub const EPIPE: i64 = -32;
+pub const EINTR: i64 = -4;
 
 /// Active user-VA bounds (inclusive lower, exclusive upper). Populated by
 /// `enter_user_mode` before `iretq`-to-ring-3, cleared on exit. Pointer
@@ -198,6 +199,7 @@ pub mod nr {
     pub const GETPPID: u64 = 110;
     pub const GETTIMEOFDAY: u64 = 96;
     pub const GETRLIMIT: u64 = 97;
+    pub const GETRUSAGE: u64 = 98;
     pub const READLINK: u64 = 89;
     pub const SET_TID_ADDRESS: u64 = 218;
     pub const CLOCK_GETTIME: u64 = 228;
@@ -225,6 +227,7 @@ pub mod nr {
     pub const TKILL: u64 = 200;
     pub const TGKILL: u64 = 234;
     pub const RT_SIGRETURN: u64 = 15;
+    pub const RT_SIGSUSPEND: u64 = 130;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -271,6 +274,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::READLINK => syscalls::readlink_handler(args),
         nr::READLINKAT => syscalls::readlinkat_handler(args),
         nr::GETRLIMIT => syscalls::getrlimit_handler(args),
+        nr::GETRUSAGE => syscalls::getrusage_handler(args),
         nr::PRLIMIT64 => syscalls::prlimit64_handler(args),
         nr::SETITIMER => syscalls::setitimer_handler(args),
         nr::NANOSLEEP => syscalls::nanosleep_handler(args),
@@ -327,6 +331,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::TKILL => syscalls::tkill_handler(args),
         nr::TGKILL => syscalls::tgkill_handler(args),
         nr::RT_SIGRETURN => syscalls::rt_sigreturn_handler(args),
+        nr::RT_SIGSUSPEND => syscalls::rt_sigsuspend_handler(args),
         _ => unhandled_syscall(args),
     };
 

@@ -15,6 +15,8 @@
 
 /// Number of signals tracked. Linux defines 64 (1..=64); we store
 /// actions[0] unused so the index matches the signal number directly.
+/// The actions table is therefore sized `NSIG + 1` to make index `NSIG`
+/// (SIGRTMAX) valid.
 pub const NSIG: usize = 64;
 
 // ---- well-known signal numbers (subset Linux exposes) ----
@@ -32,6 +34,8 @@ pub const SIGPIPE: i32 = 13;
 pub const SIGALRM: i32 = 14;
 pub const SIGTERM: i32 = 15;
 pub const SIGCHLD: i32 = 17;
+pub const SIGBUS: i32 = 7;
+pub const SIGSYS: i32 = 31;
 pub const SIGCONT: i32 = 18;
 pub const SIGSTOP: i32 = 19;
 pub const SIGTSTP: i32 = 20;
@@ -71,7 +75,7 @@ pub struct SignalState {
     /// Lazy actions table. `None` means "all actions default to
     /// `SIG_DFL`"; the table is materialized on first `set_action` /
     /// `action` call that actually needs custom dispositions.
-    pub actions: Option<alloc::boxed::Box<[SigAction; NSIG]>>,
+    pub actions: Option<alloc::boxed::Box<[SigAction; NSIG + 1]>>,
     /// Blocked-signal mask. Bit `i-1` set means signal `i` is
     /// blocked from delivery (not from being recorded as pending).
     pub blocked: u64,
@@ -89,14 +93,14 @@ impl SignalState {
         }
     }
 
-    fn ensure_actions(&mut self) -> &mut [SigAction; NSIG] {
+    fn ensure_actions(&mut self) -> &mut [SigAction; NSIG + 1] {
         if self.actions.is_none() {
             self.actions = Some(alloc::boxed::Box::new([SigAction {
                 sa_handler: SIG_DFL,
                 sa_flags: 0,
                 sa_restorer: 0,
                 sa_mask: 0,
-            }; NSIG]));
+            }; NSIG + 1]));
         }
         self.actions.as_deref_mut().unwrap()
     }
