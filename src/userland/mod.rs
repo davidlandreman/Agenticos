@@ -704,22 +704,39 @@ pub unsafe extern "C" fn enter_user_mode_with_regs_asm(
 /// Drop the active `UserImage`, if any. Called by the run command after
 /// `enter_user_mode` returns. Separated out so tests can inspect the
 /// active-user state before the image is released.
+///
+/// Under the U1 process-table refactor, this removes the current entry
+/// from `PROCESS_TABLE.by_pid` entirely rather than zeroing it in place
+/// — the next `with_current_process` from a kernel-only path then sees
+/// the sentinel naturally because `current_user_pid` is `None`.
 pub fn release_active_image() -> (Option<UserImage>, Option<crate::userland::address_space::AddressSpace>) {
-    let pair = with_active_user(|p| {
-        p.fd_table.clear();
-        p.cwd.clear();
-        // Reset PID accounting so the next `with_current_process` from
-        // a kernel-only path observes the kernel sentinel rather than a
-        // stale child PID. (PR-C will track parent/child distinctly.)
-        p.pid = 0;
-        p.parent_pid = 0;
-        let img = p.image.take();
-        let aspace = p.address_space.take();
-        // Phase 5 PR-C1: drop the per-process kernel stack now that
-        // the process is gone. Heap memory is freed automatically.
-        p.kernel_stack = None;
-        (img, aspace)
-    });
+    let pair = match crate::userland::lifecycle::current_user_pid() {
+        Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID => {
+            let mut process = crate::userland::lifecycle::remove_process(pid)
+                .expect("current_user_pid set but entry missing from process table");
+            let img = process.image.take();
+            let aspace = process.address_space.take();
+            // Heap-backed fields (fd_table, cwd, kernel_stack, signal_state)
+            // are released when `process` drops at the end of this block.
+            (img, aspace)
+        }
+        Some(_) => {
+            // current_user_pid points at the sentinel (PID 0) — this
+            // happens when test helpers re-install the sentinel via
+            // `swap_current_process` after a synthetic fork dance. Just
+            // clear current_user_pid; the sentinel itself is reset below.
+            crate::userland::lifecycle::set_current_user_pid(None);
+            (None, None)
+        }
+        None => (None, None),
+    };
+    // Reset the sentinel's fields. Some test helpers write to the
+    // sentinel (via `with_active_user`) while no real process is
+    // loaded, then expect a subsequent `reset_active_user` to clean it
+    // up — the pre-PR-C singleton design did this implicitly by
+    // resetting fields in place; the table design needs the explicit
+    // reset since the sentinel persists across releases.
+    crate::userland::lifecycle::reset_sentinel();
     crate::userland::stdin::clear();
     // Phase 5 PR-C1: revert the per-CPU rsp0 pointer to the global
     // boot stack so any kernel-side activity until the next user
@@ -734,23 +751,23 @@ pub fn release_active_image() -> (Option<UserImage>, Option<crate::userland::add
 
 /// Force-clear continuation/exit state without touching the image. Test-only
 /// — used by the U7 test driver to recover after a synthetic `enter_user_mode`.
+///
+/// Under the U1 process-table refactor: removes the current entry from
+/// the table (if any) so the next `with_current_process` observes the
+/// sentinel. Equivalent to dropping `release_active_image`'s outputs
+/// and clearing pointer-validation bounds + stdin.
 #[cfg(feature = "test")]
 pub fn force_clear_active_for_test() {
-    with_active_user(|p| {
-        p.pid = 0;
-        p.parent_pid = 0;
-        p.continuation = None;
-        p.image = None;
-        p.exit_kind = ExitKind::None;
-        p.exit_code = 0;
-        p.brk_current = 0;
-        p.mmap_next = 0;
-        p.fd_table.clear();
-        p.cwd.clear();
-        p.address_space = None;
-        p.signal_state = crate::userland::signal::SignalState::new();
-        p.kernel_stack = None;
-    });
+    match crate::userland::lifecycle::current_user_pid() {
+        Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID => {
+            drop(crate::userland::lifecycle::remove_process(pid));
+        }
+        Some(_) => {
+            crate::userland::lifecycle::set_current_user_pid(None);
+        }
+        None => {}
+    }
+    crate::userland::lifecycle::reset_sentinel();
     crate::userland::abi::clear_user_va_bounds();
     crate::userland::stdin::clear();
 }
