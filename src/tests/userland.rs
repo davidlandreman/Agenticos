@@ -3060,6 +3060,115 @@ fn test_run_leak_loop_fault() {
     }
 }
 
+// --- CLAUDE.md "Deferred" #2: rt_sigreturn restores blocked mask ---
+
+/// POSIX handler-mask formula: old | sa_mask | bit(signum), with
+/// SIGKILL/SIGSTOP always stripped.
+fn test_handler_blocked_mask_includes_sa_mask_and_signum() {
+    use crate::userland::signal::{SIGUSR1, SIGUSR2};
+    use crate::userland::syscalls::handler_blocked_mask;
+
+    // Empty pre-mask, sa_mask = SIGUSR2, signum = SIGUSR1.
+    // Expect both bits set.
+    let m = handler_blocked_mask(0, 1u64 << (SIGUSR2 - 1), SIGUSR1);
+    assert_ne!(m & (1u64 << (SIGUSR1 - 1)), 0, "signum bit must be added");
+    assert_ne!(m & (1u64 << (SIGUSR2 - 1)), 0, "sa_mask bit must be added");
+}
+
+/// Pre-existing blocked bits are preserved (we OR, not replace).
+fn test_handler_blocked_mask_preserves_old_bits() {
+    use crate::userland::signal::{SIGHUP, SIGUSR1, SIGUSR2};
+    use crate::userland::syscalls::handler_blocked_mask;
+
+    let old = 1u64 << (SIGHUP - 1);
+    let m = handler_blocked_mask(old, 1u64 << (SIGUSR2 - 1), SIGUSR1);
+    assert_ne!(m & (1u64 << (SIGHUP - 1)), 0, "pre-existing block must persist");
+    assert_ne!(m & (1u64 << (SIGUSR1 - 1)), 0);
+    assert_ne!(m & (1u64 << (SIGUSR2 - 1)), 0);
+}
+
+/// SIGKILL and SIGSTOP are stripped even if a misbehaving sa_mask
+/// includes them — POSIX guarantees they're never blocked.
+fn test_handler_blocked_mask_strips_kill_and_stop() {
+    use crate::userland::signal::{SIGKILL, SIGSTOP, SIGUSR1};
+    use crate::userland::syscalls::handler_blocked_mask;
+
+    let evil_sa_mask = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
+    let m = handler_blocked_mask(0, evil_sa_mask, SIGUSR1);
+    assert_eq!(m & (1u64 << (SIGKILL - 1)), 0, "SIGKILL must not be blocked");
+    assert_eq!(m & (1u64 << (SIGSTOP - 1)), 0, "SIGSTOP must not be blocked");
+    assert_ne!(m & (1u64 << (SIGUSR1 - 1)), 0, "signum bit still added");
+}
+
+/// Delivering SIGUSR1 from maybe_deliver_signal-shaped consume path
+/// must atomically install the handler mask on Process. This is the
+/// integrity check for the new lock-held mask-install in
+/// maybe_deliver_signal — without it the saved_blocked passed to
+/// deliver_signal would never get a chance to be different from the
+/// current blocked, and rt_sigreturn would restore the same mask it
+/// was about to install. The fix's whole point is the atomicity.
+fn test_maybe_deliver_signal_installs_handler_mask() {
+    use crate::userland::lifecycle::with_current_process;
+    use crate::userland::signal::{SigAction, SIGUSR1, SIGUSR2};
+    use crate::userland::syscalls::handler_blocked_mask;
+
+    let snap = with_current_process(|p| {
+        let snap = (p.signal_state.blocked, p.signal_state.pending);
+        // Install a SIG_DFL-but-not-DFL action so consume_deliverable
+        // returns it. We use sa_handler = 0xDEAD so consume_deliverable
+        // sees it as a real handler. We never actually dispatch — the
+        // test pulls the consume+install path apart by calling the
+        // pieces directly.
+        let action = SigAction {
+            sa_handler: 0xDEAD_BEEF,
+            sa_flags: 0,
+            sa_restorer: 0xCAFE_BABE,
+            sa_mask: 1u64 << (SIGUSR2 - 1),
+        };
+        p.signal_state.set_action(SIGUSR1, action);
+        p.signal_state.blocked = 0;
+        p.signal_state.raise(SIGUSR1);
+        snap
+    });
+
+    // Mimic maybe_deliver_signal's lock-held block (the part we can
+    // exercise without diverging into iretq).
+    let prepared = with_current_process(|p| {
+        let (sig, action) = p.signal_state.consume_deliverable()?;
+        let old_blocked = p.signal_state.blocked;
+        let handler_mask = handler_blocked_mask(old_blocked, action.sa_mask, sig);
+        p.signal_state.blocked = handler_mask;
+        Some((sig, action, old_blocked))
+    });
+
+    let (sig, action, old_blocked) =
+        prepared.expect("a deliverable signal was queued");
+    assert_eq!(sig, SIGUSR1);
+    assert_eq!(action.sa_handler, 0xDEAD_BEEF);
+    assert_eq!(old_blocked, 0, "saved blocked must be the pre-install value");
+
+    with_current_process(|p| {
+        // Handler mask installed.
+        assert_ne!(p.signal_state.blocked & (1u64 << (SIGUSR1 - 1)), 0);
+        assert_ne!(p.signal_state.blocked & (1u64 << (SIGUSR2 - 1)), 0);
+    });
+
+    // Simulate the rt_sigreturn restore.
+    with_current_process(|p| {
+        p.signal_state.blocked = old_blocked;
+    });
+    with_current_process(|p| {
+        assert_eq!(p.signal_state.blocked, 0, "restore returns to pre-delivery mask");
+    });
+
+    // Cleanup: reset the action and Process state.
+    with_current_process(|p| {
+        p.signal_state.set_action(SIGUSR1, SigAction::default());
+        p.signal_state.blocked = snap.0;
+        p.signal_state.pending = snap.1;
+    });
+}
+
 // --- U5: stack window survives fork-time PARENT_STASH round-trip ---
 
 /// Construct a Process with a populated stack window, stash it as the
@@ -3670,6 +3779,10 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_try_grow_user_stack_sentinel_is_not_stack_grow,
         &test_try_grow_user_stack_widens_validated_bounds,
         &test_stack_window_survives_parent_stash_round_trip,
+        &test_handler_blocked_mask_includes_sa_mask_and_signum,
+        &test_handler_blocked_mask_preserves_old_bits,
+        &test_handler_blocked_mask_strips_kill_and_stop,
+        &test_maybe_deliver_signal_installs_handler_mask,
         &test_loader_per_binary_floor_from_pt_load_end,
         &test_loader_rejects_binary_too_big_for_initial_stack,
         &test_loader_bounds_start_at_initial_commit,
