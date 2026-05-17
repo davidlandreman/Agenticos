@@ -170,6 +170,17 @@ pub struct Process {
     /// growth. Guards against a fault-storm attack pattern exhausting
     /// the bump-only frame allocator.
     pub growth_faults_remaining: u64,
+    /// U2: per-process FS_BASE MSR value. The SYSCALL fast path does
+    /// NOT save/restore this on every syscall (would cost two MSR ops
+    /// per call); instead, U4's ring-3 switch primitive saves/restores
+    /// it when actually swapping processes. `arch_prctl(ARCH_SET_FS)`
+    /// updates this field via `with_current_process`.
+    pub fs_base: u64,
+    /// U2: per-process x87/SSE state buffer (FXSAVE area). Saved on
+    /// switch-out, restored on switch-in by U4. Fresh processes start
+    /// with the architectural reset state via
+    /// [`crate::arch::x86_64::fpu::FpuState::fresh`].
+    pub fpu_state: crate::arch::x86_64::fpu::FpuState,
 }
 
 /// Compatibility alias retained for the long tail of callsites using
@@ -282,6 +293,8 @@ impl Process {
             stack_mapped_bottom: 0,
             stack_max_growth_floor: 0,
             growth_faults_remaining: 0,
+            fs_base: 0,
+            fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         }
     }
 }
@@ -389,6 +402,35 @@ pub fn reset_sentinel() {
     g.by_pid.insert(KERNEL_PID, Process::sentinel());
 }
 
+// ---------- U2: per-process CPU state save/restore orchestrators ----------
+
+/// Capture the live CPU's per-process state (FS_BASE + FPU/SSE) into
+/// `p`. Called by U4's ring-3 switch primitive on switch-out, after the
+/// trap-frame GPRs have already been copied into `p.saved_user_state`.
+///
+/// Must be called from CPL=0 with the CPU still running on `p`'s state
+/// — i.e., before any kernel code below this has clobbered FS_BASE or
+/// touched XMM. Today the kernel never touches XMM (the target spec
+/// carries `+soft-float`), so the timing window is generous; if a
+/// future kernel routine emits SSE, the save must move earlier in the
+/// switch path.
+pub fn save_user_cpu_state(p: &mut Process) {
+    p.fs_base = crate::arch::x86_64::msr::read_fs_base();
+    crate::arch::x86_64::fpu::save_fpu(&mut p.fpu_state);
+}
+
+/// Reload the per-process CPU state (FS_BASE + FPU/SSE) from `p`.
+/// Called by U4's ring-3 switch primitive on switch-in, before
+/// constructing the iretq frame.
+///
+/// Must be called from CPL=0. The CR3 swap to `p`'s address space
+/// happens separately (via [`crate::userland::address_space::AddressSpace::activate`])
+/// — this function only touches MSRs and the FPU register file.
+pub fn restore_user_cpu_state(p: &Process) {
+    crate::arch::x86_64::msr::set_fs_base(p.fs_base);
+    crate::arch::x86_64::fpu::restore_fpu(&p.fpu_state);
+}
+
 /// Allocate a fresh PID. Used by `enter_user_mode_with` and (future)
 /// `fork`.
 pub fn alloc_pid() -> u32 {
@@ -442,6 +484,8 @@ pub fn install_new_process_opt(
         stack_mapped_bottom: 0,
         stack_max_growth_floor: 0,
         growth_faults_remaining: 0,
+        fs_base: 0,
+        fpu_state: crate::arch::x86_64::fpu::FpuState::fresh(),
     };
     // Demand-grown stack (U3): install the loader-computed window.
     // `stack_bottom == stack_mapped_bottom == initial_bottom` at

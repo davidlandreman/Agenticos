@@ -2208,6 +2208,8 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         stack_mapped_bottom: 0,
         stack_max_growth_floor: 0,
         growth_faults_remaining: 0,
+        fs_base: 0,
+        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
     };
     let child = Process {
         pid: 101,
@@ -2229,6 +2231,8 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         stack_mapped_bottom: 0,
         stack_max_growth_floor: 0,
         growth_faults_remaining: 0,
+        fs_base: 0,
+        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
     };
 
     // Stash parent, install child as current — mirroring fork's state
@@ -3211,6 +3215,8 @@ fn test_stack_window_survives_parent_stash_round_trip() {
         stack_mapped_bottom: 0x7E_0000,
         stack_max_growth_floor: 0x50_0000,
         growth_faults_remaining: 555,
+        fs_base: 0,
+        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
     };
     let placeholder = Process {
         pid: 501,
@@ -3232,6 +3238,8 @@ fn test_stack_window_survives_parent_stash_round_trip() {
         stack_mapped_bottom: 0,
         stack_max_growth_floor: 0,
         growth_faults_remaining: 0,
+        fs_base: 0,
+        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
     };
     assert!(!parent_stashed(), "stash must be empty at test start");
 
@@ -3776,8 +3784,149 @@ fn test_unmap_user_stack_releases_range() {
     });
 }
 
+// ---------- U2: FPU/FS_BASE save/restore primitives ----------
+
+/// `FpuState::default()` and `FpuState::fresh()` are 16-byte aligned.
+/// `fxsave`/`fxrstor` would `#GP` if the buffer's effective address is
+/// misaligned; the `repr(C, align(16))` attribute on the type is the
+/// load-bearing guarantee.
+fn test_fpu_state_is_16_aligned() {
+    use crate::arch::x86_64::fpu::FpuState;
+    let s = FpuState::default();
+    assert_eq!((&s as *const FpuState as usize) & 0xF, 0);
+    let f = FpuState::fresh();
+    assert_eq!((&f as *const FpuState as usize) & 0xF, 0);
+}
+
+/// `FpuState::fresh()` carries the architectural reset MXCSR
+/// (0x1F80 — all FP exceptions masked, round-to-nearest) at offset
+/// 24..28. A fresh process inherits this via the install path so
+/// musl's `__init_tls` sees the SDM-default FP environment.
+fn test_fpu_state_fresh_has_default_mxcsr() {
+    use crate::arch::x86_64::fpu::FpuState;
+    let f = FpuState::fresh();
+    let bytes = f.bytes();
+    assert_eq!(bytes[24], 0x80);
+    assert_eq!(bytes[25], 0x1F);
+    assert_eq!(bytes[26], 0x00);
+    assert_eq!(bytes[27], 0x00);
+}
+
+/// Round-trip: write a known 128-bit pattern into XMM0, capture FPU
+/// state, scribble XMM0, restore FPU state, observe the pattern again.
+/// This is the load-bearing proof for U4 — without it, ring-3 switches
+/// would silently corrupt the XMM register file across processes.
+fn test_fpu_save_restore_preserves_xmm0() {
+    use crate::arch::x86_64::fpu::{save_fpu, restore_fpu, FpuState};
+
+    // The kernel is built with `+soft-float` so Rust codegen never
+    // touches XMM. We use inline asm with memory operands to stage and
+    // observe register values — `movdqu` doesn't need the operand
+    // aligned, which keeps the test self-contained.
+    let pattern: [u8; 16] = [
+        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+        0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+    ];
+    let mut readback: [u8; 16] = [0; 16];
+
+    // Stage: load pattern into XMM0.
+    unsafe {
+        core::arch::asm!(
+            "movdqu xmm0, [{0}]",
+            in(reg) pattern.as_ptr(),
+            options(nostack, preserves_flags),
+        );
+    }
+
+    // Save the FPU/SSE state — captures XMM0 = pattern.
+    let mut saved = FpuState::default();
+    save_fpu(&mut saved);
+
+    // Scribble: write all-zeros into XMM0.
+    let zero: [u8; 16] = [0; 16];
+    unsafe {
+        core::arch::asm!(
+            "movdqu xmm0, [{0}]",
+            in(reg) zero.as_ptr(),
+            options(nostack, preserves_flags),
+        );
+    }
+
+    // Restore — XMM0 should be `pattern` again.
+    restore_fpu(&saved);
+
+    // Read XMM0 back into a buffer.
+    unsafe {
+        core::arch::asm!(
+            "movdqu [{0}], xmm0",
+            in(reg) readback.as_mut_ptr(),
+            options(nostack, preserves_flags),
+        );
+    }
+
+    assert_eq!(readback, pattern);
+}
+
+/// `save_user_cpu_state` / `restore_user_cpu_state` orchestrators bundle
+/// FS_BASE save + FPU save. Stages an FS_BASE value via the MSR
+/// directly, saves into a Process, clobbers FS_BASE, restores, and
+/// verifies the original value is back.
+fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
+    use crate::userland::lifecycle::{
+        save_user_cpu_state, restore_user_cpu_state, Process, ExitKind,
+    };
+
+    let saved_original = crate::arch::x86_64::msr::read_fs_base();
+
+    let mut p = Process {
+        pid: 9000,
+        parent_pid: 0,
+        continuation: None,
+        image: None,
+        exit_kind: ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
+        fs_base: 0,
+        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+    };
+
+    // Stage a recognizable FS_BASE value. The kernel half of the
+    // address space is mapped at 0xffff800000000000+, so any canonical
+    // value works as a marker — we never dereference it.
+    let staged_fs_base: u64 = 0x0000_7FFF_DEAD_0000;
+    crate::arch::x86_64::msr::set_fs_base(staged_fs_base);
+
+    save_user_cpu_state(&mut p);
+    assert_eq!(p.fs_base, staged_fs_base);
+
+    // Clobber.
+    crate::arch::x86_64::msr::set_fs_base(0xDEAD_BEEF);
+
+    restore_user_cpu_state(&p);
+    assert_eq!(crate::arch::x86_64::msr::read_fs_base(), staged_fs_base);
+
+    // Restore the original FS_BASE so subsequent tests aren't affected.
+    crate::arch::x86_64::msr::set_fs_base(saved_original);
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
+        &test_fpu_state_is_16_aligned,
+        &test_fpu_state_fresh_has_default_mxcsr,
+        &test_fpu_save_restore_preserves_xmm0,
+        &test_save_restore_user_cpu_state_roundtrips_fs_base,
         &test_set_stack_window_records_all_fields,
         &test_unmap_user_stack_sentinel_is_noop,
         &test_unmap_user_stack_releases_range,

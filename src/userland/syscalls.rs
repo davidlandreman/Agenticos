@@ -902,6 +902,17 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         stack_mapped_bottom: parent.stack_mapped_bottom,
         stack_max_growth_floor: parent.stack_max_growth_floor,
         growth_faults_remaining: parent.growth_faults_remaining,
+        // U2: child inherits parent's TLS pointer (FS_BASE). musl in
+        // the child may later re-call arch_prctl after fork to install
+        // its own TCB, but the initial inherit matches Linux's
+        // copy-on-fork semantics.
+        fs_base: parent.fs_base,
+        // U2: fresh FPU state for the child. POSIX-Linux semantics:
+        // FPU state is NOT inherited across fork — children start with
+        // a clean register file. (The parent's pre-fork XMM values
+        // don't leak in because the SYSCALL fast path zeros them, and
+        // U4's switch primitive saves/restores.)
+        fpu_state: crate::arch::x86_64::fpu::FpuState::fresh(),
     });
 
     // 8. Stash the parent's Process and install the child as current.
