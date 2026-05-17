@@ -1171,6 +1171,11 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     };
     let phdr_bytes = image.phdr_bytes.clone();
     let e_phnum = image.e_phnum;
+    // Demand-grown stack (U3): the new image carries its own stack
+    // window. The old image's grown stack pages leak with the old
+    // AddressSpace (bump allocator never reclaims anyway).
+    let stack_initial_bottom = image.stack_initial_bottom;
+    let stack_max_growth_floor = image.stack_max_growth_floor;
 
     // 9. Build the new initial stack with the supplied argv/envp.
     //    `argv[0]` is the program name; if the user passed an empty
@@ -1210,6 +1215,15 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         p.signal_state = crate::userland::signal::SignalState::new();
         p.signal_state.blocked = preserved_blocked;
         p.signal_state.pending = preserved_pending;
+        // Demand-grown stack (U3): replace the stack window with the
+        // new image's. exec resets the full growth budget.
+        p.set_stack_window(
+            stack_top,
+            stack_initial_bottom,
+            stack_initial_bottom,
+            stack_max_growth_floor,
+            crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES,
+        );
     });
     set_user_va_bounds(bounds);
     // Phase 3 termios: a freshly exec'd process gets a default tty.

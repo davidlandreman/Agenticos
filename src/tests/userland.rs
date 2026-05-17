@@ -3060,6 +3060,70 @@ fn test_run_leak_loop_fault() {
     }
 }
 
+// --- U3: install_new_process_opt populates Process stack-window ---
+
+/// After install_new_process_opt the Process slot reports the loader's
+/// stack window: top = USER_STACK_TOP, bottom == mapped_bottom ==
+/// initial commit bottom, and a full growth budget.
+fn test_install_new_process_populates_stack_window() {
+    use crate::mm::paging::{
+        USER_BRK_BASE, USER_MMAP_BASE, USER_STACK_INITIAL_PAGES,
+        USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP,
+    };
+    use crate::userland::lifecycle::{install_new_process_opt, with_current_process};
+
+    // Snapshot and restore Process state so this test stays a leaf.
+    let snap = with_current_process(|p| {
+        (
+            p.pid,
+            p.parent_pid,
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        )
+    });
+
+    let bytes = fix::happy_path_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let _pid = install_new_process_opt(image, USER_BRK_BASE, USER_MMAP_BASE, None);
+
+    let expected_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 0x1000;
+    with_current_process(|p| {
+        assert_eq!(p.stack_top, USER_STACK_TOP);
+        assert_eq!(p.stack_bottom, expected_bottom);
+        assert_eq!(p.stack_mapped_bottom, expected_bottom);
+        // happy_path_elf has a one-page PT_LOAD at USER_LOAD_BASE; the
+        // global cap binds.
+        assert_eq!(
+            p.stack_max_growth_floor,
+            USER_STACK_TOP - USER_STACK_MAX_GROWTH_PAGES * 0x1000
+        );
+        assert_eq!(p.growth_faults_remaining, USER_STACK_MAX_GROWTH_PAGES);
+    });
+
+    // Teardown the stack pages the loader installed and restore Process
+    // state so the next test starts clean.
+    with_current_process(|p| {
+        crate::userland::lifecycle::unmap_user_stack(p);
+        // Take the image out so it doesn't try to unmap the (already
+        // unmapped) stack on Drop. unmap_user_stack cleared the
+        // image's stack_initial_bottom, so Drop will skip the stack
+        // anyway — but explicitly take it so the PT_LOAD mapping it
+        // does still own gets unmapped too.
+        let _img = p.image.take();
+        drop(_img);
+        p.pid = snap.0;
+        p.parent_pid = snap.1;
+        p.stack_top = snap.2;
+        p.stack_bottom = snap.3;
+        p.stack_mapped_bottom = snap.4;
+        p.stack_max_growth_floor = snap.5;
+        p.growth_faults_remaining = snap.6;
+    });
+}
+
 // --- U2: loader growth-floor + bounds_start + per-binary floor ---
 
 /// The per-binary floor (`highest_pt_load_end + 16-page guard`) is what
@@ -3299,6 +3363,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_set_stack_window_records_all_fields,
         &test_unmap_user_stack_sentinel_is_noop,
         &test_unmap_user_stack_releases_range,
+        &test_install_new_process_populates_stack_window,
         &test_loader_per_binary_floor_from_pt_load_end,
         &test_loader_rejects_binary_too_big_for_initial_stack,
         &test_loader_bounds_start_at_initial_commit,

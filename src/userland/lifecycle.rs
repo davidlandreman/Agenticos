@@ -287,6 +287,9 @@ pub fn install_new_process_opt(
     address_space: Option<AddressSpace>,
 ) -> u32 {
     let pid = alloc_pid();
+    let stack_top = image.stack_top.as_u64();
+    let stack_initial_bottom = image.stack_initial_bottom;
+    let stack_max_growth_floor = image.stack_max_growth_floor;
     with_current_process(|p| {
         p.pid = pid;
         p.parent_pid = KERNEL_PID;
@@ -302,14 +305,18 @@ pub fn install_new_process_opt(
         p.signal_state = SignalState::new();
         p.kernel_stack = Some(KernelStack::new());
         p.exe_path = None;
-        // Stack-window fields populated by U3 from the UserImage's
-        // stack metadata. Zero here so a re-install never inherits
-        // stale values from a previous process.
-        p.stack_top = 0;
-        p.stack_bottom = 0;
-        p.stack_mapped_bottom = 0;
-        p.stack_max_growth_floor = 0;
-        p.growth_faults_remaining = 0;
+        // Demand-grown stack (U3): install the loader-computed window.
+        // `stack_bottom == stack_mapped_bottom == initial_bottom` at
+        // install time — the loader has mapped exactly those pages.
+        // The fault handler (U4) lowers both fields together on every
+        // successful growth. Full growth budget at install.
+        p.set_stack_window(
+            stack_top,
+            stack_initial_bottom,
+            stack_initial_bottom,
+            stack_max_growth_floor,
+            crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES,
+        );
     });
     pid
 }
