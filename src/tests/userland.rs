@@ -3060,6 +3060,77 @@ fn test_run_leak_loop_fault() {
     }
 }
 
+// --- U5: stack window survives fork-time PARENT_STASH round-trip ---
+
+/// Construct a Process with a populated stack window, stash it as the
+/// "parent" the way fork_handler does, then pull it back via
+/// take_stashed_parent and verify the five stack-window fields survived.
+/// This is the integrity check for the field copy in fork_handler.
+fn test_stack_window_survives_parent_stash_round_trip() {
+    use crate::userland::lifecycle::{
+        parent_stashed, stash_parent, swap_current_process, take_stashed_parent,
+        ExitKind, Process,
+    };
+
+    let parent = Process {
+        pid: 500,
+        parent_pid: 0,
+        continuation: None,
+        image: None,
+        exit_kind: ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+        stack_top: 0x80_0000,
+        stack_bottom: 0x7E_0000,
+        stack_mapped_bottom: 0x7E_0000,
+        stack_max_growth_floor: 0x50_0000,
+        growth_faults_remaining: 555,
+    };
+    let placeholder = Process {
+        pid: 501,
+        parent_pid: 500,
+        continuation: None,
+        image: None,
+        exit_kind: ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
+    };
+    assert!(!parent_stashed(), "stash must be empty at test start");
+
+    let real_parent = swap_current_process(placeholder);
+    stash_parent(parent);
+    assert!(parent_stashed());
+
+    let stashed = take_stashed_parent().expect("parent stashed");
+    assert_eq!(stashed.stack_top, 0x80_0000);
+    assert_eq!(stashed.stack_bottom, 0x7E_0000);
+    assert_eq!(stashed.stack_mapped_bottom, 0x7E_0000);
+    assert_eq!(stashed.stack_max_growth_floor, 0x50_0000);
+    assert_eq!(stashed.growth_faults_remaining, 555);
+
+    // Restore real CURRENT_PROCESS.
+    let _ = swap_current_process(real_parent);
+}
+
 // --- U4: try_grow_user_stack classification + mutation ---
 
 /// Helper: drop into Process and stage a stack window. Returns the
@@ -3598,6 +3669,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_try_grow_user_stack_not_stack_grow_above_bottom,
         &test_try_grow_user_stack_sentinel_is_not_stack_grow,
         &test_try_grow_user_stack_widens_validated_bounds,
+        &test_stack_window_survives_parent_stash_round_trip,
         &test_loader_per_binary_floor_from_pt_load_end,
         &test_loader_rejects_binary_too_big_for_initial_stack,
         &test_loader_bounds_start_at_initial_commit,
