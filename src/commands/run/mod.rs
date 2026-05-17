@@ -178,10 +178,12 @@ impl RunProcess {
         // musl's getpwuid_r would resolve so zsh doesn't have to do the
         // lookup at startup; SHELL=/bin/zsh keeps zsh's $SHELL accurate;
         // TERM=dumb dodges terminfo lookups (we don't ship a database
-        // yet). PATH=/host so zsh can exec other userland binaries
-        // staged in host_share/.
+        // yet). PATH=/bin:/host so zsh's command lookup finds BusyBox
+        // applets via the virtual /bin namespace
+        // (src/userland/bin_namespace.rs) first, then falls back to
+        // /host for other staged userland binaries.
         let envp: [&str; 7] = [
-            "PATH=/host",
+            "PATH=/bin:/host",
             "HOME=/root",
             "USER=root",
             "LOGNAME=root",

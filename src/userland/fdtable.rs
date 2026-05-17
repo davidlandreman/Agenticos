@@ -48,6 +48,11 @@ pub enum FdSlot {
     PipeRead(PipeReadHandle, bool /* cloexec */),
     /// Write end of an anonymous pipe.
     PipeWrite(PipeWriteHandle, bool /* cloexec */),
+    /// The virtual `/bin` directory backed by the BusyBox applet list.
+    /// `cursor` is the per-fd index into `bin_namespace::APPLETS`;
+    /// `getdents64` reads and advances it. See
+    /// `crate::userland::bin_namespace` for the namespace model.
+    VirtualBinDir { cursor: usize, cloexec: bool },
 }
 
 impl FdSlot {
@@ -161,6 +166,7 @@ impl FdTable {
             FdSlot::File { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::Directory { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::PipeRead(_, ce) | FdSlot::PipeWrite(_, ce) => *ce = cloexec,
+            FdSlot::VirtualBinDir { cloexec: ce, .. } => *ce = cloexec,
             _ => {}
         }
         Ok(())
@@ -172,6 +178,7 @@ impl FdTable {
         Ok(match slot {
             FdSlot::File { cloexec, .. } | FdSlot::Directory { cloexec, .. } => *cloexec,
             FdSlot::PipeRead(_, ce) | FdSlot::PipeWrite(_, ce) => *ce,
+            FdSlot::VirtualBinDir { cloexec, .. } => *cloexec,
             _ => false,
         })
     }

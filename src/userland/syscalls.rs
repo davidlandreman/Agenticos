@@ -96,7 +96,7 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
     let pipe_handle = match slot {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => None,
         Some(FdSlot::File { .. }) => return EROFS,
-        Some(FdSlot::Directory { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
         Some(FdSlot::PipeWrite(handle, _)) => Some(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
@@ -148,7 +148,7 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
     match with_fd_slot(fd) {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => {}
         Some(FdSlot::File { .. }) => return EROFS,
-        Some(FdSlot::Directory { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
         Some(FdSlot::PipeWrite(_, _)) => return ENOSYS,
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
@@ -226,7 +226,7 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
     match slot {
         Some(FdSlot::Stdin) => read_stdin_blocking(ptr, cap),
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => EBADF,
-        Some(FdSlot::Directory { .. }) => EISDIR,
+        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => EISDIR,
         Some(FdSlot::PipeRead(handle, _)) => {
             // Phase 5 PR-A: drain bytes from the pipe. EOF when empty
             // *and* no writers remain. EAGAIN when empty but writers
@@ -1052,15 +1052,29 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let resolved_path = {
-        let normalized = crate::userland::lifecycle::with_current_process(|p| {
-            crate::userland::path::normalize_path(&p.cwd, &raw_path)
-        });
+    // Normalize once; both the /bin namespace rewrite and the /etc
+    // rewrite need the canonical form. The rewrites are mutually
+    // exclusive in practice (one matches /bin/<applet>, the other
+    // /etc/<name>) but the ordering still matters for security: `..`
+    // segments MUST be collapsed before either prefix check.
+    let normalized_path = crate::userland::lifecycle::with_current_process(|p| {
+        crate::userland::path::normalize_path(&p.cwd, &raw_path)
+    });
+    // Virtual /bin namespace: rewrite the load path to BB.ELF AND
+    // override argv[0] so BusyBox's multicall dispatcher selects the
+    // requested applet. Linux preserves the caller's argv[0] verbatim;
+    // we deviate here because a multicall binary needs argv[0] to
+    // carry the applet name. Documented in src/userland/bin_namespace.rs.
+    let bin_applet =
+        crate::userland::bin_namespace::apply_bin_rewrite(&normalized_path).map(|(_, n)| n);
+    let resolved_path = if bin_applet.is_some() {
+        String::from(crate::userland::bin_namespace::BB_HOST_PATH)
+    } else {
         // U4: same `/etc/...` rewrite that resolve_user_path applies — if
         // someone ever does `execve("/etc/something")` it lands at the
         // FAT-staged location. Cosmetic for execve in practice (zsh
         // execs binaries under /HOST/, not /etc/), but consistent.
-        crate::userland::path::apply_fs_rewrite(&normalized)
+        crate::userland::path::apply_fs_rewrite(&normalized_path)
     };
     let argv_strings: Vec<String> = match copy_user_cstr_array(argv_ptr) {
         Ok(v) => v,
@@ -1150,11 +1164,16 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     //    `argv[0]` is the program name; if the user passed an empty
     //    argv we synthesize one from the path so musl's
     //    `program_invocation_name` isn't NULL.
-    let argv_refs: Vec<&str> = if argv_strings.is_empty() {
+    let mut argv_refs: Vec<&str> = if argv_strings.is_empty() {
         alloc::vec![resolved_path.as_str()]
     } else {
         argv_strings.iter().map(|s| s.as_str()).collect()
     };
+    // BusyBox multicall: argv[0] picks the applet, regardless of what
+    // the caller passed. See bin_applet computation above.
+    if let Some(applet) = bin_applet {
+        argv_refs[0] = applet;
+    }
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
     let user_rsp = super::build_initial_stack(stack_top, &phdr_bytes, e_phnum, &argv_refs, &envp_refs);
 
@@ -1735,6 +1754,28 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
     };
     let cloexec = (flags & O_CLOEXEC) != 0;
 
+    // Virtual /bin namespace: opening /bin returns a directory FD that
+    // getdents64 unpacks into the applet list; opening /bin/<applet>
+    // returns a regular File backed by BB.ELF (so tools that read or
+    // mmap their argv[0] see the BusyBox binary).
+    use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir, BB_HOST_PATH};
+    if is_bin_dir(&path) {
+        return with_fd_table_mut(|t| {
+            t.alloc(FdSlot::VirtualBinDir { cursor: 0, cloexec })
+        })
+        .map(|fd| fd as i64)
+        .unwrap_or(EMFILE);
+    }
+    if apply_bin_rewrite(&path).is_some() {
+        let handle = match crate::fs::file_handle::File::open_read(BB_HOST_PATH) {
+            Ok(h) => h,
+            Err(ref e) => return map_file_err(e),
+        };
+        return with_fd_table_mut(|t| t.alloc(FdSlot::File { handle, cloexec }))
+            .map(|fd| fd as i64)
+            .unwrap_or(EMFILE);
+    }
+
     // Check whether the path is a directory before reaching for File::open
     // (which rejects directories). Directories get their own slot variant
     // so getdents64 can iterate them.
@@ -1948,12 +1989,50 @@ pub fn stat_handler(args: &mut SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if let Some(st) = stat_virtual_bin(&path) {
+        return write_stat(out_ptr, &st);
+    }
     let meta = match crate::fs::metadata(&path) {
         Ok(m) => m,
         Err(ref e) => return map_fs_err(e),
     };
     let st = fill_stat(&meta, None);
     write_stat(out_ptr, &st)
+}
+
+/// Synthesize a `LinuxStat` for the virtual `/bin` namespace. Returns
+/// `Some(st)` if `path` is `/bin` (a directory) or `/bin/<applet>` (a
+/// regular file shadowing `BB.ELF`); `None` for any other path.
+fn stat_virtual_bin(path: &str) -> Option<LinuxStat> {
+    use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir, APPLETS, BB_HOST_PATH};
+    if is_bin_dir(path) {
+        let mut st = LinuxStat::default();
+        st.st_mode = S_IFDIR | PERM_RX_ALL;
+        // `.` and `..` plus one for each applet entry — Linux directory
+        // st_nlink semantics. Coreutils tools that branch on st_nlink ==
+        // 2 for "empty" expect the count to reflect subdirs; we have
+        // none, so 2 is correct. We expose applets as regular files,
+        // not subdirectories.
+        st.st_nlink = 2;
+        st.st_blksize = 4096;
+        return Some(st);
+    }
+    if apply_bin_rewrite(path).is_some() {
+        // Stat shadows BB.ELF. Pull its size off the FAT mount so tools
+        // that mmap their argv[0] see a sensible length. If BB.ELF isn't
+        // staged the kernel returns a zero-size record rather than
+        // failing — applet PATH lookup still works (access() returns 0)
+        // and execve() will report the real error when it fails to load.
+        let size = crate::fs::metadata(BB_HOST_PATH).map(|m| m.size).unwrap_or(0);
+        let mut st = LinuxStat::default();
+        st.st_mode = S_IFREG | PERM_RX_ALL;
+        st.st_nlink = APPLETS.len() as u64;
+        st.st_size = size as i64;
+        st.st_blksize = 4096;
+        st.st_blocks = (st.st_size + 511) / 512;
+        return Some(st);
+    }
+    None
 }
 
 pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
@@ -2011,6 +2090,11 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
             };
             write_stat(out_ptr, &st)
         }
+        Some(FdSlot::VirtualBinDir { .. }) => {
+            // Synthesized /bin — same shape stat() reports for the path.
+            let st = stat_virtual_bin("/bin").expect("/bin is always virtual");
+            write_stat(out_ptr, &st)
+        }
         None => EBADF,
     }
 }
@@ -2030,6 +2114,9 @@ pub fn newfstatat_handler(args: &mut SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if let Some(st) = stat_virtual_bin(&path) {
+        return write_stat(out_ptr, &st);
+    }
     let meta = match crate::fs::metadata(&path) {
         Ok(m) => m,
         Err(ref e) => return map_fs_err(e),
@@ -2059,6 +2146,14 @@ fn access_common(path_ptr: u64) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
+    // Virtual /bin namespace. Both the directory itself and every known
+    // applet entry are addressable for access(): X_OK on /bin/<applet>
+    // is what zsh's PATH lookup probes.
+    if crate::userland::bin_namespace::is_bin_dir(&path)
+        || crate::userland::bin_namespace::apply_bin_rewrite(&path).is_some()
+    {
+        return 0;
+    }
     if crate::fs::exists(&path) {
         0
     } else {
@@ -2284,6 +2379,74 @@ fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
 /// snapshotted entries from the per-fd cursor, emitting as many full
 /// records as fit in `count` bytes. Returns the bytes written, or 0
 /// when the cursor has reached the end (libc treats that as EOF).
+/// `getdents64` dispatch for the synthesized `/bin` directory. Returns
+/// `Some(bytes_written)` if `fd` is a `VirtualBinDir` slot (including
+/// `Some(0)` at EOF); `None` to fall through to the FAT path.
+///
+/// Emits `.` and `..` once at cursor 0, then one record per applet in
+/// the order they appear in `APPLETS`. Cursor encoding:
+///   - 0           → not yet started; emit `.` and `..` then applets
+///   - 1..=APPLETS.len() → next applet index to emit (1 = first applet)
+///   - APPLETS.len() + 1 → EOF
+fn getdents64_virtual_bin(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
+    use crate::userland::bin_namespace::APPLETS;
+
+    let start = with_fd_table_mut(|t| match t.get(fd) {
+        Some(FdSlot::VirtualBinDir { cursor, .. }) => Some(*cursor),
+        _ => None,
+    })?;
+    let total_records = APPLETS.len() + 2; // ".", ".." + applets
+    if start >= total_records {
+        // EOF on this directory.
+        return Some(0);
+    }
+
+    let mut staging: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(cap);
+    let mut cursor = start;
+    // Synthetic inode numbers — keep them deterministic and non-zero.
+    let parent_seed = fnv1a_64(0xcbf2_9ce4_8422_2325, b"/bin");
+
+    while cursor < total_records {
+        let (name, d_type) = match cursor {
+            0 => (".".as_bytes(), DT_DIR),
+            1 => ("..".as_bytes(), DT_DIR),
+            n => (APPLETS[n - 2].as_bytes(), DT_REG),
+        };
+        let reclen = align_up_8(DIRENT_HEADER_SIZE + name.len() + 1);
+        if staging.len() + reclen > cap {
+            break;
+        }
+        let d_ino = fnv1a_64(parent_seed, name);
+        let next_cursor = (cursor + 1) as u64;
+        staging.extend_from_slice(&d_ino.to_ne_bytes());
+        staging.extend_from_slice(&next_cursor.to_ne_bytes());
+        staging.extend_from_slice(&(reclen as u16).to_ne_bytes());
+        staging.push(d_type);
+        staging.extend_from_slice(name);
+        staging.push(0);
+        while staging.len() % 8 != 0 {
+            staging.push(0);
+        }
+        cursor += 1;
+    }
+
+    if staging.is_empty() {
+        // Buffer too small for even one record.
+        return Some(EINVAL);
+    }
+
+    // Commit cursor + copy to user.
+    with_fd_table_mut(|t| {
+        if let Some(FdSlot::VirtualBinDir { cursor: c, .. }) = t.get_mut(fd) {
+            *c = cursor;
+        }
+    });
+    unsafe {
+        core::ptr::copy_nonoverlapping(staging.as_ptr(), dirp as *mut u8, staging.len());
+    }
+    Some(staging.len() as i64)
+}
+
 pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
     use crate::fs::filesystem::FileType;
     let fd = args.rdi as i32;
@@ -2296,6 +2459,12 @@ pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
     let cap = core::cmp::min(count, 64 * 1024);
     if let Err(e) = validate_user_slice(dirp, cap) {
         return e;
+    }
+
+    // Virtual /bin dispatches before the FAT directory path because its
+    // FD slot is a different variant — no FAT entries to read.
+    if let Some(written) = getdents64_virtual_bin(fd, dirp, cap as usize) {
+        return written;
     }
 
     // Snapshot the entries + parent path under the active-user mutex.
@@ -2613,6 +2782,7 @@ fn resolve_proc_self_fd(fd: i32) -> Option<String> {
         FdSlot::File { handle, .. } => handle.path(),
         FdSlot::Directory { handle, .. } => handle.path(),
         FdSlot::PipeRead(_, _) | FdSlot::PipeWrite(_, _) => String::from("pipe:[0]"),
+        FdSlot::VirtualBinDir { .. } => String::from("/bin"),
     })
 }
 

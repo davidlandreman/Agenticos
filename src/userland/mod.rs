@@ -5,6 +5,7 @@
 
 pub mod abi;
 pub mod address_space;
+pub mod bin_namespace;
 pub mod error;
 pub mod fdtable;
 pub mod image;
