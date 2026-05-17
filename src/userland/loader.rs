@@ -30,8 +30,9 @@ use core::mem::size_of;
 use x86_64::VirtAddr;
 
 use crate::mm::paging::{
-    UserPerms, USER_BRK_BASE, USER_LOAD_BASE, USER_MMAP_BASE, USER_STACK_TOP,
-    USER_TCB_VA, USER_TLS_IMAGE_VA, USER_VA_RANGE_END, USER_VA_RANGE_START,
+    UserPerms, USER_BRK_BASE, USER_LOAD_BASE, USER_MMAP_BASE, USER_STACK_GUARD_PAGES,
+    USER_STACK_INITIAL_PAGES, USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP, USER_TCB_VA,
+    USER_TLS_IMAGE_VA, USER_VA_RANGE_END, USER_VA_RANGE_START,
 };
 use crate::userland::error::LoaderError;
 use crate::userland::image::UserImage;
@@ -68,15 +69,12 @@ const SHT_STRTAB: u32 = 3;
 const R_X86_64_GLOB_DAT: u32 = 6;
 const R_X86_64_JUMP_SLOT: u32 = 7;
 
-// User stack: 64 pages = 256 KiB. Plus one guard page below.
-// Was 8 (32 KiB), but zsh's post-fork prep (musl __post_fork callbacks +
-// zsh's internal fork bookkeeping) blows past that and the child page-
-// faults ~12 KiB below the stack bottom before reaching execve. 256 KiB
-// gives ~8× headroom over what we've observed. Real fix is demand-grown
-// stack on faults below the current bottom (matching Linux's behavior up
-// to RLIMIT_STACK); deferred until we have more than one binary that
-// needs more than the bump.
-const USER_STACK_PAGES: u64 = 64;
+// Demand-grown stack — the loader maps only `USER_STACK_INITIAL_PAGES`
+// (currently 8 / 32 KiB) at process creation. The ring-3 page-fault
+// handler (`lifecycle::try_grow_user_stack`, U4) maps additional pages
+// downward up to `USER_STACK_MAX_GROWTH_PAGES`. A 16-page guard region
+// between the highest PT_LOAD and the deepest possible stack page keeps
+// a Stack-Clash-style overrun from silently clobbering code.
 
 /// Maximum supported PT_TLS image size for this milestone.
 ///
@@ -291,16 +289,60 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
 
     // ---- Phase 2: allocate + copy ----
 
-    // bounds: union over PT_LOADs, the stack range, and (when present) the
-    // TLS region. Stack top is fixed at USER_STACK_TOP per D4/U4.
-    let stack_pages = USER_STACK_PAGES;
-    let stack_bottom = USER_STACK_TOP - stack_pages * 0x1000;
+    // Demand-grown stack. Compute the growth floor per-binary first —
+    // it's the deepest the stack may EVER grow into, so the bounds-
+    // and PT_LOAD-spill checks below must use it (not the initial
+    // commit bottom).
+    //
+    // The global cap (`USER_STACK_MAX_GROWTH_PAGES`) expresses *intent*
+    // — "if the binary leaves room, we'd allow up to this much stack."
+    // The user-VA slice (`USER_LOAD_BASE..USER_STACK_TOP`) is only 4
+    // MiB today, so `USER_STACK_TOP - cap*0x1000` can land below
+    // `USER_LOAD_BASE` (or underflow). We saturate at `USER_LOAD_BASE`;
+    // the per-binary floor below is the real enforcement when the
+    // saturation kicks in.
+    let highest_pt_load_end = pt_loads
+        .iter()
+        .map(|s| s.page_va + s.page_count * 0x1000)
+        .max()
+        .unwrap_or(USER_LOAD_BASE);
+    let global_floor = USER_STACK_TOP
+        .saturating_sub(USER_STACK_MAX_GROWTH_PAGES * 0x1000)
+        .max(USER_LOAD_BASE);
+    let per_binary_floor = highest_pt_load_end + USER_STACK_GUARD_PAGES * 0x1000;
+    let stack_max_growth_floor = if per_binary_floor > global_floor {
+        per_binary_floor
+    } else {
+        global_floor
+    };
+    // The per-binary floor must leave at least the initial commit
+    // mappable below USER_STACK_TOP. If the binary is so large that
+    // even the initial 8-page stack would collide with code (or worse,
+    // the floor lands above USER_STACK_TOP itself), refuse the load —
+    // the developer needs to shrink the binary or repartition user VA.
+    //
+    // Note: this is also what prevents PT_LOADs from overlapping the
+    // grown stack range, because by construction
+    // `stack_max_growth_floor >= highest_pt_load_end +
+    // USER_STACK_GUARD_PAGES * 0x1000`. A separate "no PT_LOAD in
+    // grown-stack range" post-pass would always be a no-op.
+    let initial_stack_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 0x1000;
+    if stack_max_growth_floor > initial_stack_bottom {
+        return Err(LoaderError::VaOutOfRange);
+    }
+
+    // bounds: union over PT_LOADs, the *initial* stack commit, and
+    // (when present) the TLS region. bounds_start tracks what is
+    // currently MAPPED so `validate_user_slice` never accepts a user
+    // pointer into an unmapped page. `try_grow_user_stack` (U4)
+    // widens bounds on every successful growth via
+    // `set_user_va_bounds`.
     let mut bounds_start = pt_loads
         .iter()
         .map(|s| s.page_va)
         .min()
         .unwrap_or(USER_LOAD_BASE)
-        .min(stack_bottom);
+        .min(initial_stack_bottom);
     let mut bounds_end = pt_loads
         .iter()
         .map(|s| s.page_va + s.page_count * 0x1000)
@@ -325,6 +367,7 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
         bounds_start,
         bounds_end,
     );
+    image.set_stack_window(initial_stack_bottom, stack_max_growth_floor);
 
     // Capture the raw phdr bytes for the initial-stack builder's AT_PHDR.
     // Bounds were already validated against bytes.len() above.
@@ -355,15 +398,27 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
         copy_segment_into_user_va(seg, bytes)?;
     }
 
-    // Map user stack: USER_STACK_PAGES at [USER_STACK_TOP - stack_pages*0x1000, USER_STACK_TOP).
-    // The page below stack_bottom is the guard — simply unmapped. Any
-    // ring-3 access faults; U2 routes the fault to cleanup.
+    // Demand-grown stack: map only the initial commit at
+    // [initial_stack_bottom, USER_STACK_TOP). The ring-3 page-fault
+    // handler grows the stack downward on demand, up to
+    // `stack_max_growth_floor`. Pages between the floor and the
+    // current bottom are unmapped; faulting into them grows the stack
+    // (and updates `Process.stack_bottom`). Faulting below the floor
+    // is a true overflow and routes to `cleanup_user_process`.
+    //
+    // We deliberately do NOT call `image.record_mapping` for the
+    // stack: Process owns stack teardown via `unmap_user_stack` so
+    // the per-fault growth path doesn't need to push to a
+    // heap-allocated `Vec` from interrupt context.
     crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(stack_bottom), stack_pages, UserPerms::ReadWrite)
+        m.map_user_region(
+            VirtAddr::new(initial_stack_bottom),
+            USER_STACK_INITIAL_PAGES,
+            UserPerms::ReadWrite,
+        )
     })
     .ok_or(LoaderError::OutOfFrames)?
     .map_err(LoaderError::from)?;
-    image.record_mapping(VirtAddr::new(stack_bottom), stack_pages);
 
     // ---- Phase 2b: TLS image + TCB (when PT_TLS present) ----
     if let Some(tls) = pt_tls {
@@ -535,13 +590,9 @@ fn parse_pt_load(ph: &Elf64Phdr, bytes: &[u8]) -> Result<ParsedPtLoad, LoaderErr
     if page_va < USER_VA_RANGE_START || region_end > USER_VA_RANGE_END {
         return Err(LoaderError::VaOutOfRange);
     }
-    // Also must not extend into the user stack area; the loader reserves
-    // [stack_bottom, USER_STACK_TOP). A PT_LOAD that spilled into that range
-    // would clash with the stack mapping.
-    let stack_bottom = USER_STACK_TOP - USER_STACK_PAGES * 0x1000;
-    if region_end > stack_bottom && page_va < USER_STACK_TOP {
-        return Err(LoaderError::VaOutOfRange);
-    }
+    // Stack-overlap check moved to `check_no_pt_load_in_grown_stack`
+    // (post-pass) because the stack growth floor depends on the union
+    // over all PT_LOADs, not just this one.
 
     let _ = mem_end; // silence unused warning if optimization elides the read
     Ok(ParsedPtLoad {

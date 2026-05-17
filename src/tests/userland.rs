@@ -733,8 +733,26 @@ fn test_loader_happy_path() {
     assert_eq!(image.entry.as_u64(), 0x40_0000);
     assert_eq!(image.stack_top.as_u64(), crate::mm::paging::USER_STACK_TOP);
 
-    assert_eq!(image.mapping_count(), 2);
-    assert_eq!(image.total_pages(), 1 + 8);
+    // U2: stack is no longer recorded in image.mappings — Process
+    // owns stack teardown. The only mapping for this fixture is the
+    // single PT_LOAD page (no TLS).
+    assert_eq!(image.mapping_count(), 1);
+    assert_eq!(image.total_pages(), 1);
+
+    // U2: stack window is exposed on the image for U3 to install on Process.
+    assert_eq!(
+        image.stack_initial_bottom,
+        crate::mm::paging::USER_STACK_TOP
+            - crate::mm::paging::USER_STACK_INITIAL_PAGES * 0x1000
+    );
+    // For a one-page PT_LOAD at USER_LOAD_BASE, the global cap binds:
+    // USER_STACK_TOP - 768*0x1000 = 0x50_0000 (3 MiB of stack room),
+    // which is above the per-binary floor (0x40_1000 + 16*0x1000).
+    assert_eq!(
+        image.stack_max_growth_floor,
+        crate::mm::paging::USER_STACK_TOP
+            - crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES * 0x1000
+    );
 
     unsafe {
         let p = 0x40_0000u64 as *const u8;
@@ -745,6 +763,9 @@ fn test_loader_happy_path() {
             assert_eq!(*p.add(i as usize), i);
         }
     }
+    // Stack cleanup is handled by `UserImage::Drop` when `image` goes
+    // out of scope — the loader recorded `stack_initial_bottom` and Drop
+    // unmaps `[initial_bottom, USER_STACK_TOP)`.
 }
 
 fn test_loader_bad_magic() {
@@ -2174,6 +2195,11 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
     };
     let child = Process {
         pid: 101,
@@ -2190,6 +2216,11 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
     };
 
     // Stash parent, install child as current — mirroring fork's state
@@ -3029,8 +3060,732 @@ fn test_run_leak_loop_fault() {
     }
 }
 
+// --- CLAUDE.md "Deferred" #2: rt_sigreturn restores blocked mask ---
+
+/// POSIX handler-mask formula: old | sa_mask | bit(signum), with
+/// SIGKILL/SIGSTOP always stripped.
+fn test_handler_blocked_mask_includes_sa_mask_and_signum() {
+    use crate::userland::signal::{SIGUSR1, SIGUSR2};
+    use crate::userland::syscalls::handler_blocked_mask;
+
+    // Empty pre-mask, sa_mask = SIGUSR2, signum = SIGUSR1.
+    // Expect both bits set.
+    let m = handler_blocked_mask(0, 1u64 << (SIGUSR2 - 1), SIGUSR1);
+    assert_ne!(m & (1u64 << (SIGUSR1 - 1)), 0, "signum bit must be added");
+    assert_ne!(m & (1u64 << (SIGUSR2 - 1)), 0, "sa_mask bit must be added");
+}
+
+/// Pre-existing blocked bits are preserved (we OR, not replace).
+fn test_handler_blocked_mask_preserves_old_bits() {
+    use crate::userland::signal::{SIGHUP, SIGUSR1, SIGUSR2};
+    use crate::userland::syscalls::handler_blocked_mask;
+
+    let old = 1u64 << (SIGHUP - 1);
+    let m = handler_blocked_mask(old, 1u64 << (SIGUSR2 - 1), SIGUSR1);
+    assert_ne!(m & (1u64 << (SIGHUP - 1)), 0, "pre-existing block must persist");
+    assert_ne!(m & (1u64 << (SIGUSR1 - 1)), 0);
+    assert_ne!(m & (1u64 << (SIGUSR2 - 1)), 0);
+}
+
+/// SIGKILL and SIGSTOP are stripped even if a misbehaving sa_mask
+/// includes them — POSIX guarantees they're never blocked.
+fn test_handler_blocked_mask_strips_kill_and_stop() {
+    use crate::userland::signal::{SIGKILL, SIGSTOP, SIGUSR1};
+    use crate::userland::syscalls::handler_blocked_mask;
+
+    let evil_sa_mask = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
+    let m = handler_blocked_mask(0, evil_sa_mask, SIGUSR1);
+    assert_eq!(m & (1u64 << (SIGKILL - 1)), 0, "SIGKILL must not be blocked");
+    assert_eq!(m & (1u64 << (SIGSTOP - 1)), 0, "SIGSTOP must not be blocked");
+    assert_ne!(m & (1u64 << (SIGUSR1 - 1)), 0, "signum bit still added");
+}
+
+/// Delivering SIGUSR1 from maybe_deliver_signal-shaped consume path
+/// must atomically install the handler mask on Process. This is the
+/// integrity check for the new lock-held mask-install in
+/// maybe_deliver_signal — without it the saved_blocked passed to
+/// deliver_signal would never get a chance to be different from the
+/// current blocked, and rt_sigreturn would restore the same mask it
+/// was about to install. The fix's whole point is the atomicity.
+fn test_maybe_deliver_signal_installs_handler_mask() {
+    use crate::userland::lifecycle::with_current_process;
+    use crate::userland::signal::{SigAction, SIGUSR1, SIGUSR2};
+    use crate::userland::syscalls::handler_blocked_mask;
+
+    let snap = with_current_process(|p| {
+        let snap = (p.signal_state.blocked, p.signal_state.pending);
+        // Install a SIG_DFL-but-not-DFL action so consume_deliverable
+        // returns it. We use sa_handler = 0xDEAD so consume_deliverable
+        // sees it as a real handler. We never actually dispatch — the
+        // test pulls the consume+install path apart by calling the
+        // pieces directly.
+        let action = SigAction {
+            sa_handler: 0xDEAD_BEEF,
+            sa_flags: 0,
+            sa_restorer: 0xCAFE_BABE,
+            sa_mask: 1u64 << (SIGUSR2 - 1),
+        };
+        p.signal_state.set_action(SIGUSR1, action);
+        p.signal_state.blocked = 0;
+        p.signal_state.raise(SIGUSR1);
+        snap
+    });
+
+    // Mimic maybe_deliver_signal's lock-held block (the part we can
+    // exercise without diverging into iretq).
+    let prepared = with_current_process(|p| {
+        let (sig, action) = p.signal_state.consume_deliverable()?;
+        let old_blocked = p.signal_state.blocked;
+        let handler_mask = handler_blocked_mask(old_blocked, action.sa_mask, sig);
+        p.signal_state.blocked = handler_mask;
+        Some((sig, action, old_blocked))
+    });
+
+    let (sig, action, old_blocked) =
+        prepared.expect("a deliverable signal was queued");
+    assert_eq!(sig, SIGUSR1);
+    assert_eq!(action.sa_handler, 0xDEAD_BEEF);
+    assert_eq!(old_blocked, 0, "saved blocked must be the pre-install value");
+
+    with_current_process(|p| {
+        // Handler mask installed.
+        assert_ne!(p.signal_state.blocked & (1u64 << (SIGUSR1 - 1)), 0);
+        assert_ne!(p.signal_state.blocked & (1u64 << (SIGUSR2 - 1)), 0);
+    });
+
+    // Simulate the rt_sigreturn restore.
+    with_current_process(|p| {
+        p.signal_state.blocked = old_blocked;
+    });
+    with_current_process(|p| {
+        assert_eq!(p.signal_state.blocked, 0, "restore returns to pre-delivery mask");
+    });
+
+    // Cleanup: reset the action and Process state.
+    with_current_process(|p| {
+        p.signal_state.set_action(SIGUSR1, SigAction::default());
+        p.signal_state.blocked = snap.0;
+        p.signal_state.pending = snap.1;
+    });
+}
+
+// --- U5: stack window survives fork-time PARENT_STASH round-trip ---
+
+/// Construct a Process with a populated stack window, stash it as the
+/// "parent" the way fork_handler does, then pull it back via
+/// take_stashed_parent and verify the five stack-window fields survived.
+/// This is the integrity check for the field copy in fork_handler.
+fn test_stack_window_survives_parent_stash_round_trip() {
+    use crate::userland::lifecycle::{
+        parent_stashed, stash_parent, swap_current_process, take_stashed_parent,
+        ExitKind, Process,
+    };
+
+    let parent = Process {
+        pid: 500,
+        parent_pid: 0,
+        continuation: None,
+        image: None,
+        exit_kind: ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+        stack_top: 0x80_0000,
+        stack_bottom: 0x7E_0000,
+        stack_mapped_bottom: 0x7E_0000,
+        stack_max_growth_floor: 0x50_0000,
+        growth_faults_remaining: 555,
+    };
+    let placeholder = Process {
+        pid: 501,
+        parent_pid: 500,
+        continuation: None,
+        image: None,
+        exit_kind: ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        mmap_next: 0,
+        fd_table: crate::userland::fdtable::FdTable::new(),
+        cwd: alloc::string::String::from("/"),
+        address_space: None,
+        signal_state: crate::userland::signal::SignalState::new(),
+        kernel_stack: None,
+        exe_path: None,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
+    };
+    assert!(!parent_stashed(), "stash must be empty at test start");
+
+    let real_parent = swap_current_process(placeholder);
+    stash_parent(parent);
+    assert!(parent_stashed());
+
+    let stashed = take_stashed_parent().expect("parent stashed");
+    assert_eq!(stashed.stack_top, 0x80_0000);
+    assert_eq!(stashed.stack_bottom, 0x7E_0000);
+    assert_eq!(stashed.stack_mapped_bottom, 0x7E_0000);
+    assert_eq!(stashed.stack_max_growth_floor, 0x50_0000);
+    assert_eq!(stashed.growth_faults_remaining, 555);
+
+    // Restore real CURRENT_PROCESS.
+    let _ = swap_current_process(real_parent);
+}
+
+// --- U4: try_grow_user_stack classification + mutation ---
+
+/// Helper: drop into Process and stage a stack window. Returns the
+/// snapshot so the caller can restore after the test.
+fn stage_stack_window(
+    top: u64,
+    bottom: u64,
+    floor: u64,
+    budget: u64,
+) -> (u64, u64, u64, u64, u64) {
+    use crate::userland::lifecycle::with_current_process;
+    with_current_process(|p| {
+        let snap = (
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        );
+        p.stack_top = top;
+        p.stack_bottom = bottom;
+        p.stack_mapped_bottom = bottom;
+        p.stack_max_growth_floor = floor;
+        p.growth_faults_remaining = budget;
+        snap
+    })
+}
+
+fn restore_stack_window(snap: (u64, u64, u64, u64, u64)) {
+    use crate::userland::lifecycle::with_current_process;
+    with_current_process(|p| {
+        p.stack_top = snap.0;
+        p.stack_bottom = snap.1;
+        p.stack_mapped_bottom = snap.2;
+        p.stack_max_growth_floor = snap.3;
+        p.growth_faults_remaining = snap.4;
+    });
+}
+
+/// A fault one page below the current bottom, well above the floor and
+/// with budget remaining, returns `Grew` and updates stack_bottom.
+fn test_try_grow_user_stack_grew() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::lifecycle::{
+        try_grow_user_stack, with_current_process, GrowOutcome,
+    };
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 64 * 0x1000;
+    // Map the initial commit so the fault handler's lookup of an existing
+    // mapping (when it'd grow into it) doesn't surprise us. Then test the
+    // grow path on the page below it.
+    crate::mm::memory::with_memory_mapper(|m| {
+        m.map_user_region(
+            VirtAddr::new(bottom),
+            8,
+            crate::mm::paging::UserPerms::ReadWrite,
+        )
+    })
+    .unwrap()
+    .unwrap();
+
+    let snap = stage_stack_window(top, bottom, floor, 100);
+
+    let fault_addr = VirtAddr::new(bottom - 0x800); // mid-page below bottom
+    let outcome = try_grow_user_stack(fault_addr);
+    assert_eq!(outcome, GrowOutcome::Grew);
+
+    with_current_process(|p| {
+        let expected_new_page = (bottom - 0x800) & !0xFFF;
+        assert_eq!(p.stack_bottom, expected_new_page);
+        assert_eq!(p.stack_mapped_bottom, expected_new_page);
+        assert_eq!(p.growth_faults_remaining, 99);
+    });
+
+    // Cleanup: unmap the grown stack.
+    crate::userland::lifecycle::with_current_process(
+        crate::userland::lifecycle::unmap_user_stack,
+    );
+    restore_stack_window(snap);
+}
+
+/// A fault below the growth floor returns `Overflow` and does not
+/// mutate stack_bottom or call the mapper.
+fn test_try_grow_user_stack_overflow_below_floor() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::lifecycle::{
+        try_grow_user_stack, with_current_process, GrowOutcome,
+    };
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 16 * 0x1000;
+    let snap = stage_stack_window(top, bottom, floor, 100);
+
+    let fault_addr = VirtAddr::new(floor - 0x100);
+    assert_eq!(try_grow_user_stack(fault_addr), GrowOutcome::Overflow);
+
+    // Bookkeeping unchanged.
+    with_current_process(|p| {
+        assert_eq!(p.stack_bottom, bottom);
+        assert_eq!(p.stack_mapped_bottom, bottom);
+        assert_eq!(p.growth_faults_remaining, 100);
+    });
+
+    restore_stack_window(snap);
+}
+
+/// A fault inside the window but with budget==0 returns
+/// `BudgetExhausted` and does not call the mapper.
+fn test_try_grow_user_stack_budget_exhausted() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::lifecycle::{
+        try_grow_user_stack, with_current_process, GrowOutcome,
+    };
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 64 * 0x1000;
+    let snap = stage_stack_window(top, bottom, floor, 0);
+
+    let fault_addr = VirtAddr::new(bottom - 0x800);
+    assert_eq!(try_grow_user_stack(fault_addr), GrowOutcome::BudgetExhausted);
+
+    with_current_process(|p| {
+        assert_eq!(p.stack_bottom, bottom);
+        assert_eq!(p.growth_faults_remaining, 0);
+    });
+
+    restore_stack_window(snap);
+}
+
+/// A fault at or above stack_bottom returns `NotStackGrow` —
+/// already-mapped pages aren't this handler's problem.
+fn test_try_grow_user_stack_not_stack_grow_above_bottom() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::lifecycle::{try_grow_user_stack, GrowOutcome};
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 64 * 0x1000;
+    let snap = stage_stack_window(top, bottom, floor, 100);
+
+    // Above the current bottom.
+    assert_eq!(
+        try_grow_user_stack(VirtAddr::new(bottom + 0x100)),
+        GrowOutcome::NotStackGrow,
+    );
+    // Above stack_top entirely.
+    assert_eq!(
+        try_grow_user_stack(VirtAddr::new(top + 0x10000)),
+        GrowOutcome::NotStackGrow,
+    );
+
+    restore_stack_window(snap);
+}
+
+/// Sentinel slot (no active process): try_grow returns NotStackGrow so
+/// the caller routes through its normal heap/stack path.
+fn test_try_grow_user_stack_sentinel_is_not_stack_grow() {
+    use crate::userland::lifecycle::{try_grow_user_stack, GrowOutcome};
+    use x86_64::VirtAddr;
+
+    // Sentinel state — all stack fields zero.
+    let snap = stage_stack_window(0, 0, 0, 0);
+
+    assert_eq!(
+        try_grow_user_stack(VirtAddr::new(0x7F_0000)),
+        GrowOutcome::NotStackGrow,
+    );
+
+    restore_stack_window(snap);
+}
+
+/// After a successful growth, set_user_va_bounds widens the start so
+/// validate_user_slice accepts pointers into the freshly mapped page.
+fn test_try_grow_user_stack_widens_validated_bounds() {
+    use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::abi::{
+        clear_user_va_bounds, set_user_va_bounds, user_va_bounds,
+        validate_user_slice, UserVaBounds,
+    };
+    use crate::userland::lifecycle::{
+        try_grow_user_stack, with_current_process, GrowOutcome,
+    };
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 64 * 0x1000;
+    // Map the initial commit so growth can lower below it cleanly.
+    crate::mm::memory::with_memory_mapper(|m| {
+        m.map_user_region(
+            VirtAddr::new(bottom),
+            8,
+            crate::mm::paging::UserPerms::ReadWrite,
+        )
+    })
+    .unwrap()
+    .unwrap();
+    let stack_snap = stage_stack_window(top, bottom, floor, 100);
+    set_user_va_bounds(UserVaBounds {
+        start: bottom,
+        end: top,
+    });
+
+    let new_page = (bottom - 0x800) & !0xFFF;
+    // Before grow: a pointer at new_page is rejected.
+    assert!(validate_user_slice(new_page, 8).is_err());
+
+    let outcome = try_grow_user_stack(VirtAddr::new(bottom - 0x800));
+    assert_eq!(outcome, GrowOutcome::Grew);
+
+    // After grow: bounds.start is new_page; the pointer passes.
+    let b = user_va_bounds().expect("bounds set");
+    assert_eq!(b.start, new_page);
+    assert!(validate_user_slice(new_page, 8).is_ok());
+
+    with_current_process(crate::userland::lifecycle::unmap_user_stack);
+    restore_stack_window(stack_snap);
+    clear_user_va_bounds();
+}
+
+// --- U3: install_new_process_opt populates Process stack-window ---
+
+/// After install_new_process_opt the Process slot reports the loader's
+/// stack window: top = USER_STACK_TOP, bottom == mapped_bottom ==
+/// initial commit bottom, and a full growth budget.
+fn test_install_new_process_populates_stack_window() {
+    use crate::mm::paging::{
+        USER_BRK_BASE, USER_MMAP_BASE, USER_STACK_INITIAL_PAGES,
+        USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP,
+    };
+    use crate::userland::lifecycle::{install_new_process_opt, with_current_process};
+
+    // Snapshot and restore Process state so this test stays a leaf.
+    let snap = with_current_process(|p| {
+        (
+            p.pid,
+            p.parent_pid,
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        )
+    });
+
+    let bytes = fix::happy_path_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+    let _pid = install_new_process_opt(image, USER_BRK_BASE, USER_MMAP_BASE, None);
+
+    let expected_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 0x1000;
+    with_current_process(|p| {
+        assert_eq!(p.stack_top, USER_STACK_TOP);
+        assert_eq!(p.stack_bottom, expected_bottom);
+        assert_eq!(p.stack_mapped_bottom, expected_bottom);
+        // happy_path_elf has a one-page PT_LOAD at USER_LOAD_BASE; the
+        // global cap binds.
+        assert_eq!(
+            p.stack_max_growth_floor,
+            USER_STACK_TOP - USER_STACK_MAX_GROWTH_PAGES * 0x1000
+        );
+        assert_eq!(p.growth_faults_remaining, USER_STACK_MAX_GROWTH_PAGES);
+    });
+
+    // Teardown the stack pages the loader installed and restore Process
+    // state so the next test starts clean.
+    with_current_process(|p| {
+        crate::userland::lifecycle::unmap_user_stack(p);
+        // Take the image out so it doesn't try to unmap the (already
+        // unmapped) stack on Drop. unmap_user_stack cleared the
+        // image's stack_initial_bottom, so Drop will skip the stack
+        // anyway — but explicitly take it so the PT_LOAD mapping it
+        // does still own gets unmapped too.
+        let _img = p.image.take();
+        drop(_img);
+        p.pid = snap.0;
+        p.parent_pid = snap.1;
+        p.stack_top = snap.2;
+        p.stack_bottom = snap.3;
+        p.stack_mapped_bottom = snap.4;
+        p.stack_max_growth_floor = snap.5;
+        p.growth_faults_remaining = snap.6;
+    });
+}
+
+// --- U2: loader growth-floor + bounds_start + per-binary floor ---
+
+/// The per-binary floor (`highest_pt_load_end + 16-page guard`) is what
+/// caps stack growth in practice today — the global cap saturates at
+/// USER_LOAD_BASE because the 4 MiB user-VA slice is too small to host
+/// the intent-level 3 MiB cap. Once the user-VA layout is repartitioned,
+/// the global cap may bind for small binaries.
+fn test_loader_per_binary_floor_from_pt_load_end() {
+    use crate::mm::paging::{
+        USER_STACK_GUARD_PAGES, USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP,
+    };
+
+    // Global floor is `USER_STACK_TOP - 768*0x1000 = 0x50_0000`. Place
+    // the PT_LOAD so its end + 16-page guard exceeds the global cap and
+    // the per-binary floor binds.
+    let p_vaddr = 0x60_0000u64; // one page, ends at 0x60_1000
+    let payload: alloc::vec::Vec<u8> = (0..16u8).collect();
+    let p_offset = 0x1000u64;
+    let phdr = fix::PhdrSpec {
+        p_type: fix::PT_LOAD,
+        p_flags: fix::PF_R | fix::PF_X,
+        p_offset,
+        p_vaddr,
+        p_filesz: payload.len() as u64,
+        p_memsz: 0x100,
+        p_align: 0x1000,
+    };
+    let bytes = fix::Fixture {
+        e_type: fix::ET_EXEC,
+        e_machine: fix::EM_X86_64,
+        ei_class: fix::ELFCLASS64,
+        ei_data: fix::ELFDATA2LSB,
+        e_entry: p_vaddr,
+        phdrs: alloc::vec![phdr],
+        payloads: alloc::vec![(p_offset, payload)],
+        truncate_to: None,
+    }
+    .build();
+
+    let image = load_elf(&bytes).expect("load_elf per-binary floor");
+    let pt_load_end = 0x60_1000u64;
+    let per_binary = pt_load_end + USER_STACK_GUARD_PAGES * 0x1000;
+    let global_floor = USER_STACK_TOP - USER_STACK_MAX_GROWTH_PAGES * 0x1000;
+    assert!(per_binary > global_floor, "test premise broken");
+    assert_eq!(image.stack_max_growth_floor, per_binary);
+}
+
+/// Reject a binary whose PT_LOAD reaches so high that the per-binary
+/// growth floor would land above the initial stack commit — i.e.,
+/// there's no room left even for the small initial mapping. This is
+/// also the only PT_LOAD-vs-stack overlap case we need to enforce, since
+/// the per-binary floor formula keeps the deepest stack page above
+/// every PT_LOAD's end by construction.
+fn test_loader_rejects_binary_too_big_for_initial_stack() {
+    use crate::mm::paging::{USER_STACK_GUARD_PAGES, USER_STACK_INITIAL_PAGES, USER_STACK_TOP};
+
+    // PT_LOAD ending at 0x7F_F000 forces floor = 0x7F_F000 + 16*0x1000
+    // = 0x80_F000 > USER_STACK_TOP, which is also > initial_stack_bottom
+    // (0x7F_8000). Loader must refuse.
+    let initial_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 0x1000;
+    let p_vaddr = 0x7F_E000u64; // 1 page, ends at 0x7F_F000
+    let projected_floor = 0x7F_F000u64 + USER_STACK_GUARD_PAGES * 0x1000;
+    assert!(projected_floor > initial_bottom, "test premise broken");
+
+    let payload: alloc::vec::Vec<u8> = (0..16u8).collect();
+    let p_offset = 0x1000u64;
+    let phdr = fix::PhdrSpec {
+        p_type: fix::PT_LOAD,
+        p_flags: fix::PF_R | fix::PF_X,
+        p_offset,
+        p_vaddr,
+        p_filesz: payload.len() as u64,
+        p_memsz: 0x100,
+        p_align: 0x1000,
+    };
+    let bytes = fix::Fixture {
+        e_type: fix::ET_EXEC,
+        e_machine: fix::EM_X86_64,
+        ei_class: fix::ELFCLASS64,
+        ei_data: fix::ELFDATA2LSB,
+        e_entry: p_vaddr,
+        phdrs: alloc::vec![phdr],
+        payloads: alloc::vec![(p_offset, payload)],
+        truncate_to: None,
+    }
+    .build();
+
+    assert_eq!(load_elf(&bytes).unwrap_err(), LoaderError::VaOutOfRange);
+}
+
+/// bounds_start reflects what's actually mapped — the lowest of the
+/// PT_LOAD pages and the initial stack commit. It is NOT pushed down
+/// to the growth floor; the fault handler widens bounds via
+/// set_user_va_bounds on each successful growth so validate_user_slice
+/// never accepts a pointer into a page that has never been mapped.
+fn test_loader_bounds_start_at_initial_commit() {
+    use crate::mm::paging::{USER_STACK_INITIAL_PAGES, USER_STACK_TOP};
+
+    let bytes = fix::happy_path_elf();
+    let image = load_elf(&bytes).expect("load_elf");
+
+    let initial_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 0x1000;
+    // bounds_start = min(PT_LOAD start, initial_stack_bottom, USER_BRK_BASE).
+    // PT_LOAD wins for this fixture (0x40_0000 < 0x7F_8000 <
+    // USER_BRK_BASE 0x200_0000).
+    assert_eq!(image.bounds_start, 0x40_0000);
+
+    // The pre-grown-stack invariant we care about: bounds_start is
+    // NOT lowered all the way to `stack_max_growth_floor`. (If it
+    // were, validate_user_slice would accept pointers into pages that
+    // have never been mapped, and an in-kernel deref of such a pointer
+    // would fault under the mapper lock — re-introducing the bug
+    // the wide-bounds rejection avoids.) For this fixture the growth
+    // floor is just above the PT_LOAD end + 16-page guard, but well
+    // below initial_bottom; bounds_start must NOT match it.
+    assert!(image.stack_max_growth_floor < initial_bottom);
+    assert_ne!(image.bounds_start, image.stack_max_growth_floor);
+}
+
+// --- U1: stack-window fields + unmap_user_stack helper ---
+
+fn test_set_stack_window_records_all_fields() {
+    use crate::userland::lifecycle::with_current_process;
+
+    with_current_process(|p| {
+        // Snapshot and restore so a regression here doesn't strand the
+        // sentinel slot with junk values for any test that runs after.
+        let snap = (
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        );
+
+        p.set_stack_window(
+            0x80_0000,
+            0x80_0000 - 8 * 0x1000,
+            0x80_0000 - 8 * 0x1000,
+            0x80_0000 - 768 * 0x1000,
+            768,
+        );
+        assert_eq!(p.stack_top, 0x80_0000);
+        assert_eq!(p.stack_bottom, 0x80_0000 - 8 * 0x1000);
+        assert_eq!(p.stack_mapped_bottom, 0x80_0000 - 8 * 0x1000);
+        assert_eq!(p.stack_max_growth_floor, 0x80_0000 - 768 * 0x1000);
+        assert_eq!(p.growth_faults_remaining, 768);
+
+        p.stack_top = snap.0;
+        p.stack_bottom = snap.1;
+        p.stack_mapped_bottom = snap.2;
+        p.stack_max_growth_floor = snap.3;
+        p.growth_faults_remaining = snap.4;
+    });
+}
+
+fn test_unmap_user_stack_sentinel_is_noop() {
+    use crate::userland::lifecycle::{unmap_user_stack, with_current_process};
+
+    // Sentinel slot (PID 0 between processes) has all stack fields = 0.
+    // unmap_user_stack must not touch the mapper or panic.
+    with_current_process(|p| {
+        let snap = (
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        );
+        p.stack_top = 0;
+        p.stack_bottom = 0;
+        p.stack_mapped_bottom = 0;
+        p.stack_max_growth_floor = 0;
+        p.growth_faults_remaining = 0;
+        unmap_user_stack(p);
+        assert_eq!(p.stack_top, 0);
+        assert_eq!(p.stack_mapped_bottom, 0);
+        // Restore.
+        p.stack_top = snap.0;
+        p.stack_bottom = snap.1;
+        p.stack_mapped_bottom = snap.2;
+        p.stack_max_growth_floor = snap.3;
+        p.growth_faults_remaining = snap.4;
+    });
+}
+
+fn test_unmap_user_stack_releases_range() {
+    use crate::mm::memory::with_memory_mapper;
+    use crate::mm::paging::{UserPerms, USER_STACK_TOP};
+    use crate::userland::lifecycle::{unmap_user_stack, with_current_process};
+    use x86_64::VirtAddr;
+
+    // Map a small fake stack so we can assert unmap_user_stack frees it.
+    const N: u64 = 4;
+    let bottom = USER_STACK_TOP - N * 0x1000;
+    with_memory_mapper(|m| m.map_user_region(VirtAddr::new(bottom), N, UserPerms::ReadWrite))
+        .unwrap()
+        .unwrap();
+
+    with_current_process(|p| {
+        let snap = (
+            p.stack_top,
+            p.stack_bottom,
+            p.stack_mapped_bottom,
+            p.stack_max_growth_floor,
+            p.growth_faults_remaining,
+        );
+        p.stack_top = USER_STACK_TOP;
+        p.stack_bottom = bottom;
+        p.stack_mapped_bottom = bottom;
+        p.stack_max_growth_floor = bottom - 0x1000;
+        p.growth_faults_remaining = 0;
+
+        unmap_user_stack(p);
+
+        assert_eq!(p.stack_top, 0);
+        assert_eq!(p.stack_mapped_bottom, 0);
+
+        // Re-mapping must succeed — the range is empty again.
+        with_memory_mapper(|m| m.map_user_region(VirtAddr::new(bottom), N, UserPerms::ReadWrite))
+            .unwrap()
+            .unwrap();
+        with_memory_mapper(|m| m.unmap_user_region(VirtAddr::new(bottom), N))
+            .unwrap()
+            .unwrap();
+
+        p.stack_top = snap.0;
+        p.stack_bottom = snap.1;
+        p.stack_mapped_bottom = snap.2;
+        p.stack_max_growth_floor = snap.3;
+        p.growth_faults_remaining = snap.4;
+    });
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
+        &test_set_stack_window_records_all_fields,
+        &test_unmap_user_stack_sentinel_is_noop,
+        &test_unmap_user_stack_releases_range,
+        &test_install_new_process_populates_stack_window,
+        &test_try_grow_user_stack_grew,
+        &test_try_grow_user_stack_overflow_below_floor,
+        &test_try_grow_user_stack_budget_exhausted,
+        &test_try_grow_user_stack_not_stack_grow_above_bottom,
+        &test_try_grow_user_stack_sentinel_is_not_stack_grow,
+        &test_try_grow_user_stack_widens_validated_bounds,
+        &test_stack_window_survives_parent_stash_round_trip,
+        &test_handler_blocked_mask_includes_sa_mask_and_signum,
+        &test_handler_blocked_mask_preserves_old_bits,
+        &test_handler_blocked_mask_strips_kill_and_stop,
+        &test_maybe_deliver_signal_installs_handler_mask,
+        &test_loader_per_binary_floor_from_pt_load_end,
+        &test_loader_rejects_binary_too_big_for_initial_stack,
+        &test_loader_bounds_start_at_initial_commit,
         &test_gdt_kernel_selectors,
         &test_sse_enabled_before_ring3,
         &test_gdt_user_selectors,

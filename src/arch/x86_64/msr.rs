@@ -82,3 +82,15 @@ pub fn init_gs_base(percpu_addr: u64) {
 pub fn set_fs_base(addr: u64) {
     FsBase::write(VirtAddr::new(addr));
 }
+
+/// Read `IA32_FS_BASE` — used by `fork_handler` to snapshot the
+/// parent's FS_BASE before the child runs, since musl in the child
+/// (especially after execve) reinstalls its own FS_BASE pointing at
+/// the child's musl-allocated TCB. Without a save/restore around the
+/// child's run, the parent resumes with FS_BASE still aimed at an
+/// address that exists in parent's L4 but contains unrelated data —
+/// `%fs:0` returns garbage and the next `__errno_location`-style
+/// access faults.
+pub fn read_fs_base() -> u64 {
+    FsBase::read().as_u64()
+}

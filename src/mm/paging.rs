@@ -17,6 +17,42 @@ pub const USER_LOAD_BASE: u64 = 0x0000_0000_0040_0000;
 /// Top of the user stack (exclusive). The stack grows down from here.
 pub const USER_STACK_TOP: u64 = 0x0000_0000_0080_0000;
 
+/// Demand-grown stack — pages committed at process creation. The loader
+/// maps exactly this many pages immediately below `USER_STACK_TOP`; the
+/// rest is filled in on demand by the ring-3 page-fault handler (see
+/// `lifecycle::try_grow_user_stack`).
+///
+/// 8 pages / 32 KiB matches the pre-zsh default. Common programs
+/// amortize at most a few stack-grow faults at startup; zsh's
+/// post-fork prep takes ~10-14, which the growth path handles
+/// transparently.
+pub const USER_STACK_INITIAL_PAGES: u64 = 8;
+
+/// Demand-grown stack — hard per-process cap on total mapped pages.
+/// Once a process has grown its stack by this many pages, any further
+/// fault into the growth window is treated as overflow and the process
+/// is terminated.
+///
+/// 768 pages / 3 MiB leaves ~1 MiB of the 4 MiB user-VA slice
+/// (`USER_LOAD_BASE..USER_STACK_TOP`) for the binary's text/data/bss
+/// plus the 64 KiB code-vs-stack guard. The plan calls for measuring
+/// real stack peaks on zsh / BusyBox / future ports before treating
+/// this constant as settled; revisit if any real workload approaches
+/// the cap.
+pub const USER_STACK_MAX_GROWTH_PAGES: u64 = 768;
+
+/// Demand-grown stack — guard region between the highest mapped PT_LOAD
+/// page and the deepest the stack may ever grow into. A Stack-Clash-
+/// style write that steps past the current stack bottom must land in
+/// unmapped territory and #PF, not silently corrupt a PT_LOAD page.
+///
+/// 16 pages / 64 KiB is the minimum-viable bar — Linux post-CVE-
+/// 2017-1000364 defaults to a 1 MiB `STACK_GUARD_GAP`, but our 4 MiB
+/// user-VA slice can't accommodate that today. Revisit when untrusted
+/// binaries become a real concern, or when a VA repartition gives the
+/// stack more headroom.
+pub const USER_STACK_GUARD_PAGES: u64 = 16;
+
 /// Base virtual address of the per-process TLS region.
 ///
 /// Layout (x86-64 TLS variant II):

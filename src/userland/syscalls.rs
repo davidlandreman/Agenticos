@@ -890,6 +890,18 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         // U3: child shares parent's exe path (fork doesn't change the
         // running binary; execve replaces it).
         exe_path: parent.exe_path.clone(),
+        // Demand-grown stack (U5): child inherits the parent's exact
+        // stack window. The parent's stack pages already copied into
+        // the child's L4 via AddressSpace::clone_for_child above, so
+        // these five fields together with the eager page copy reproduce
+        // the parent's stack state at fork time. growth_faults_remaining
+        // inherits the parent's remaining budget — matching Linux's
+        // RLIMIT_STACK semantics where children inherit the rlimit.
+        stack_top: parent.stack_top,
+        stack_bottom: parent.stack_bottom,
+        stack_mapped_bottom: parent.stack_mapped_bottom,
+        stack_max_growth_floor: parent.stack_max_growth_floor,
+        growth_faults_remaining: parent.growth_faults_remaining,
     });
 
     // 8. Stash the parent's Process and install the child as current.
@@ -933,6 +945,15 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
             options(nomem, preserves_flags, nostack),
         );
     }
+
+    // 9c. Save the parent's IA32_FS_BASE. The child (especially after
+    //     execve) reinstalls its own FS_BASE pointing at the child's
+    //     musl-allocated TCB. Without this save/restore, the parent
+    //     resumes with FS_BASE still pointing at a VA that exists in
+    //     parent's L4 but contains unrelated data — `__errno_location`
+    //     style accesses then fault. (See CLAUDE.md "Deferred from the
+    //     zsh-interactive bring-up" follow-up.)
+    let saved_fs_base = crate::arch::x86_64::msr::read_fs_base();
     let child_top = crate::userland::lifecycle::with_current_process(|child| {
         child.kernel_stack.as_ref().expect("child kernel stack").top()
     });
@@ -959,6 +980,9 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         crate::arch::x86_64::syscall::set_percpu_kernel_rsp_top(saved_kernel_rsp_top);
         crate::arch::x86_64::gdt::set_kernel_rsp0(VirtAddr::new(saved_kernel_rsp_top));
     }
+
+    // 10c. Restore the parent's FS_BASE. Paired with step 9c.
+    crate::arch::x86_64::msr::set_fs_base(saved_fs_base);
 
     // 11. Child has exited and long-jumped back. Capture the recorded
     //     zombie info (the child's `exit_group` already filed it into
@@ -1159,6 +1183,11 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     };
     let phdr_bytes = image.phdr_bytes.clone();
     let e_phnum = image.e_phnum;
+    // Demand-grown stack (U3): the new image carries its own stack
+    // window. The old image's grown stack pages leak with the old
+    // AddressSpace (bump allocator never reclaims anyway).
+    let stack_initial_bottom = image.stack_initial_bottom;
+    let stack_max_growth_floor = image.stack_max_growth_floor;
 
     // 9. Build the new initial stack with the supplied argv/envp.
     //    `argv[0]` is the program name; if the user passed an empty
@@ -1198,6 +1227,15 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         p.signal_state = crate::userland::signal::SignalState::new();
         p.signal_state.blocked = preserved_blocked;
         p.signal_state.pending = preserved_pending;
+        // Demand-grown stack (U3): replace the stack window with the
+        // new image's. exec resets the full growth budget.
+        p.set_stack_window(
+            stack_top,
+            stack_initial_bottom,
+            stack_initial_bottom,
+            stack_max_growth_floor,
+            crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES,
+        );
     });
     set_user_va_bounds(bounds);
     // Phase 3 termios: a freshly exec'd process gets a default tty.
@@ -1291,8 +1329,8 @@ pub fn tgkill_handler(args: &mut SyscallArgs) -> i64 {
 /// stash via `r12` — points just past the popped restorer, i.e. at
 /// the saved `UserState` we wrote when delivering the signal.
 ///
-/// Read the frame, restore the user state, and `iretq` back to the
-/// pre-signal RIP/regs.
+/// Read the frame, restore the user state AND the pre-delivery
+/// signal mask, then `iretq` back to the pre-signal RIP/regs.
 pub fn rt_sigreturn_handler(_args: &mut SyscallArgs) -> i64 {
     use crate::userland::user_state::UserState;
     // The syscall stub stashed user RSP into r12 before calling the
@@ -1305,10 +1343,24 @@ pub fn rt_sigreturn_handler(_args: &mut SyscallArgs) -> i64 {
     }
 
     // The frame layout matches `deliver_signal` below: at user_rsp
-    // we wrote the saved UserState, immediately following the (now
-    // popped) sa_restorer pointer. signum follows after UserState
-    // but we don't need it on the return path.
+    // we wrote the saved UserState (128 bytes), immediately following
+    // the (now popped) sa_restorer pointer. The pre-delivery blocked
+    // mask sits at +128; signum at +136 (not needed on return).
     let saved: UserState = unsafe { core::ptr::read_unaligned(user_rsp as *const UserState) };
+    let saved_blocked: u64 =
+        unsafe { core::ptr::read_unaligned((user_rsp + 128) as *const u64) };
+
+    // POSIX: restore the pre-delivery mask before resuming the
+    // interrupted instruction. Without this, sa_mask (and the
+    // implicitly-blocked signum-bit) leak into the rest of the
+    // program's execution, corrupting subsequent signal delivery
+    // decisions. zsh's parent post-fork was the load-bearing case:
+    // SIGCHLD bit stayed blocked after the handler returned, so a
+    // later check ran with the wrong mask and walked into a wild
+    // pointer.
+    crate::userland::lifecycle::with_current_process(|p| {
+        p.signal_state.blocked = saved_blocked;
+    });
 
     let user_cs = crate::arch::x86_64::gdt::selectors().user_code.0 as u64;
     let user_ss = crate::arch::x86_64::gdt::selectors().user_data.0 as u64;
@@ -1324,14 +1376,20 @@ pub fn rt_sigreturn_handler(_args: &mut SyscallArgs) -> i64 {
 ///
 /// Frame layout on user stack (low → high address):
 /// ```text
-///   user_rsp_at_handler_entry → [ sa_restorer        ]   8 bytes
-///                                [ saved UserState   ]  128 bytes
-///                                [ signum (i64)      ]   8 bytes
+///   user_rsp_at_handler_entry → [ sa_restorer            ]   8 bytes
+///                                [ saved UserState       ]  128 bytes
+///                                [ saved blocked mask    ]   8 bytes
+///                                [ signum (i64)          ]   8 bytes
 /// ```
-/// Total 144 bytes, frame address aligned to 16.
+/// Total 152 bytes, padded to 160 for 16-byte handler-entry RSP
+/// alignment. The mask is saved here so `rt_sigreturn_handler` can
+/// restore the pre-delivery `signal_state.blocked` — POSIX requires
+/// the temporary handler mask (`sa_mask | bit(signum)`) installed
+/// by the caller of `deliver_signal` to be reverted on handler
+/// return.
 ///
 /// SAFETY: `user_rsp_orig` must be a writable user-mapped address;
-/// we write 144 bytes downward from there. The caller (the dispatcher)
+/// we write 152 bytes downward from there. The caller (the dispatcher)
 /// reads it from the syscall stub's stashed `r12`, which is the
 /// user's stack pointer at the point of the syscall — guaranteed
 /// writable because the user just used it.
@@ -1341,6 +1399,7 @@ unsafe fn deliver_signal(
     callee: crate::userland::user_state::CalleeSavedSnapshot,
     args: &SyscallArgs,
     syscall_ret: i64,
+    saved_blocked: u64,
 ) -> ! {
     use crate::userland::user_state::UserState;
 
@@ -1374,10 +1433,11 @@ unsafe fn deliver_signal(
         rip: user_rip, rflags: user_rflags,
     };
 
-    // 2. Allocate space on the user stack, 16-aligned. 144 bytes for
-    //    [sa_restorer | UserState | signum]; round up to 160 for the
-    //    next 16-byte boundary so the handler entry RSP is aligned.
-    const FRAME_SIZE: u64 = 8 + 128 + 8;
+    // 2. Allocate space on the user stack, 16-aligned. 152 bytes for
+    //    [sa_restorer | UserState | saved_blocked | signum]; round up
+    //    to 160 for the next 16-byte boundary so the handler entry RSP
+    //    is aligned.
+    const FRAME_SIZE: u64 = 8 + 128 + 8 + 8;
     let frame_total = (FRAME_SIZE + 15) & !15; // 160
     let frame_addr = user_rsp - frame_total;
 
@@ -1386,14 +1446,16 @@ unsafe fn deliver_signal(
     //    right pages.
     *(frame_addr as *mut u64) = action.sa_restorer;
     core::ptr::write_unaligned((frame_addr + 8) as *mut UserState, saved);
-    *((frame_addr + 8 + 128) as *mut u64) = signum as u64;
+    *((frame_addr + 8 + 128) as *mut u64) = saved_blocked;
+    *((frame_addr + 8 + 128 + 8) as *mut u64) = signum as u64;
 
     crate::debug_info!(
-        "deliver_signal: sig={} handler={:#x} restorer={:#x} frame={:#x}",
+        "deliver_signal: sig={} handler={:#x} restorer={:#x} frame={:#x} saved_blocked={:#x}",
         signum,
         action.sa_handler,
         action.sa_restorer,
         frame_addr,
+        saved_blocked,
     );
 
     // 4. Build a fresh UserState for the handler invocation.
@@ -1417,16 +1479,41 @@ unsafe fn deliver_signal(
 
 /// Public wrapper so the dispatcher in `abi.rs` can call into the
 /// delivery path without exposing the internal asm dance.
+///
+/// Atomically (under the Process lock) consumes a deliverable signal,
+/// snapshots the pre-delivery `blocked` mask, and installs the POSIX
+/// handler mask: `old_blocked | action.sa_mask | (1 << (sig-1))`,
+/// stripping SIGKILL/SIGSTOP per POSIX. The snapshot is handed to
+/// `deliver_signal` which writes it into the signal frame so
+/// `rt_sigreturn_handler` can restore it when the handler returns.
+/// Compute the blocked mask that should be active while a signal
+/// handler runs: the pre-delivery mask, plus `sa_mask`, plus the
+/// signum bit itself (POSIX default: a handler does not interrupt
+/// itself unless `SA_NODEFER`, which we don't support yet). SIGKILL
+/// and SIGSTOP are always stripped — POSIX guarantees they can never
+/// be blocked.
+pub fn handler_blocked_mask(old_blocked: u64, sa_mask: u64, signum: i32) -> u64 {
+    use crate::userland::signal::{SIGKILL, SIGSTOP};
+    let kill_stop_mask = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
+    (old_blocked | sa_mask | (1u64 << (signum - 1))) & !kill_stop_mask
+}
+
 pub fn maybe_deliver_signal(
     callee: crate::userland::user_state::CalleeSavedSnapshot,
     args: &SyscallArgs,
     syscall_ret: i64,
 ) -> Option<i64> {
-    let candidate = crate::userland::lifecycle::with_current_process(|p| {
-        p.signal_state.consume_deliverable()
+    let prepared = crate::userland::lifecycle::with_current_process(|p| {
+        let (sig, action) = p.signal_state.consume_deliverable()?;
+        let old_blocked = p.signal_state.blocked;
+        let handler_mask = handler_blocked_mask(old_blocked, action.sa_mask, sig);
+        p.signal_state.blocked = handler_mask;
+        Some((sig, action, old_blocked))
     });
-    if let Some((sig, action)) = candidate {
-        unsafe { deliver_signal(sig, action, callee, args, syscall_ret); }
+    if let Some((sig, action, old_blocked)) = prepared {
+        unsafe {
+            deliver_signal(sig, action, callee, args, syscall_ret, old_blocked);
+        }
     }
     None
 }
