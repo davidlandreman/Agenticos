@@ -9,6 +9,161 @@ depth: deep
 
 # feat: Filesystem write support and long/mixed-case filenames
 
+## Phase A+B Status (2026-05-16)
+
+Phase A (VFAT LFN read + mixed case) and Phase B (tmpfs + overlay + write syscall surface, writable `/` via `overlay(tmpfs, FAT)`) shipped. Three commits on `davidlandreman/fs-rw-lfn`:
+
+```
+b60cbf6  feat(fs): writable / via overlay(tmpfs, FAT) + write syscall surface
+8b8bc4f  feat(fs): VFAT LFN read parsing + mixed-case name surfacing
+53da461  docs(plans): filesystem write + LFN + overlay (4-phase delivery)
+```
+
+Test coverage: 12 tmpfs + 11 overlay + 11 LFN + 22 filesystem integration tests, all green. 158 tests across 16 non-userland modules pass.
+
+Phase C (FAT on-disk writes at `/data`) and Phase D (overlay persistence) are still to come. **Corrections below MUST be applied to U8/U9/U11 before implementing.** They came out of the ce-doc-review pass and address real correctness gaps in the original plan body.
+
+---
+
+## Corrections (post-Phase-B doc review)
+
+Five doc-review findings (A-1, A-4, A-6, A-7, plus one Phase D atomicity gap) identified concrete correctness bugs in the original U8/U9/U11 design. The plan body below has been updated in place; this section summarizes the changes so a reviewer can scan them quickly.
+
+### C-1. Per-op flush ordering (was: universal "FAT before directory")
+
+**The bug.** D11 and U9's original "FAT writes before directory entry writes" rule is correct only for `create` / `extend_chain`. Applied uniformly to `unlink` and `rename`, it produces the exact cross-link corruption it claims to prevent.
+
+**Concrete failure:**
+
+- *Unlink under "FAT-first" rule:* free the cluster chain → crash before tombstoning the directory entry → on reboot, the dir entry still points at clusters now marked free; the next allocate hands those clusters to a new file; the original entry and the new entry now share data → silent cross-link.
+- *Cross-directory rename under "create-dest-first" rule:* write the new directory entry pointing at the same cluster chain → crash before deleting the source → reboot leaves two directory entries pointing at the same chain → cross-link.
+
+**The fix.** Make flush ordering operation-specific:
+
+| Op | Correct order | Crash outcome |
+|---|---|---|
+| `create` / `extend` | FAT first, then directory entry | Leaked cluster (recoverable by fsck) |
+| `unlink` / `free_chain` | Directory entry tombstone first, then free FAT chain | Leaked cluster (recoverable by fsck) |
+| `rename` same-dir | In-place rewrite of the existing entry (single sector write) | Either old or new name; both point at the same chain — no cross-link |
+| `rename` cross-dir | Atomic-ish 3-step: (1) write dest entry pointing at chain, (2) flush, (3) tombstone source entry. Crash between (1) and (3) leaves both entries pointing at one chain — RECOVERABLE by fsck as "duplicate entry" but still surfaces as cross-link. Mark this op as REQUIRES_FSCK in `src/fs/CLAUDE.md`. |
+| `mkdir` | Allocate cluster, write `.`/`..`, flush, then write parent's new entry | Leaked cluster on crash |
+| `rmdir` | Same as `unlink` (tombstone first, free chain second) | Leaked cluster |
+
+**Implementation impact on U9:** delete the universal "FAT writes before directory entry writes" sentence in the Approach; add a per-op subsection that names the order for each. Update U9 test scenarios to include a crash-simulator unit test per operation that confirms the in-progress crash produces a leaked cluster (and never a cross-link) on next mount.
+
+**Scope decision for cross-dir rename:** because cross-dir rename inherently has a window where two entries share a chain, mark it as requiring an `fsck` pass to recover. Until the deferred fsck lands, document the gap and recommend users prefer same-dir renames on `/data` for non-test data.
+
+### C-2. Dirty bit must be read before set
+
+**The bug.** U8's original Approach says "Dirty bit: clear bit 15 (FAT16) / bit 27 (FAT32) of FAT[1] on first write; restore on `sync`." It never says mount-for-write should *read* the bit first. As written, every boot sets the bit; every clean shutdown clears it; the bit value at any moment is just "is the FS mounted writable" — not "did the previous shutdown crash."
+
+**The fix.** Two-step mount-for-write:
+
+```
+mount_for_write():
+    1. Read FAT[1].
+    2. If the dirty-clean bit is already cleared (i.e., the FS was
+       not cleanly unmounted), record `previous_unclean = true` in
+       per-mount state and emit a loud log line:
+       "WARNING: /data was not cleanly unmounted; fsck recommended".
+    3. Until the deferred fsck lands: refuse to mount writable when
+       `previous_unclean = true` UNLESS `AGENTICOS_FORCE_DIRTY_MOUNT=1`
+       is set in the kernel's env / boot args (a developer escape
+       hatch). The default-safe stance prevents a corrupted /data
+       from being silently mutated further.
+    4. Clear the dirty-clean bit, then proceed.
+```
+
+`sync` re-sets the dirty-clean bit after flushing all pending writes.
+
+**Implementation impact on U8:** update Approach with the read-first flow; add a test scenario "mount-for-write with pre-set dirty bit refuses without override" and "after clean sync, next mount-for-write sees clean bit."
+
+### C-3. Short-name collision cache (in-memory `~N` hint)
+
+**The bug.** U9's original short-name alias generator says "scan target directory for collision and bump `~N`." Each create is O(directory size). Creating N files into the same directory is O(N²) — for a `/data` directory with thousands of similarly-named files (build artifacts, dated log files), each create reads every existing directory entry through the FAT chain follower. Combined with the absent FAT chain cache (already a known deferred item), this is multi-second per create at modest scale.
+
+**The fix.** Per-directory in-memory `~N` hint table:
+
+```
+struct DirCollisionCache {
+    // (basename_prefix_8 -> highest_N_seen)
+    // basename_prefix is the first 6 chars of the short-name basename
+    // (the part that precedes ~N in the alias). Indexing by this
+    // bounded key means scans only happen for genuinely new basenames.
+    cache: BTreeMap<[u8; 6], u32>,
+}
+```
+
+- On first short-name generation in a directory, populate by scanning the directory once.
+- On subsequent generations with a basename that's already in the cache: `next_N = cache[prefix] + 1`; bump and use.
+- On unlink: leave the cache alone (it's a lower-bound hint; gaps are fine).
+- Cache lives in `FatFilesystemWrapper` keyed by parent cluster, with an LRU cap (16 entries) to bound memory.
+
+This converts the worst case from O(N²) to O(N) total across N creates in the same directory.
+
+**Implementation impact on U9:** add the cache type + lookup-then-scan pattern to the Approach; add a test scenario that creates 100 files with the same long-name basename and asserts time-per-create stays roughly constant (not linear in count).
+
+### C-4. Atomic persistence flush (rename-into-place + manifest)
+
+**The bug.** U11's original Approach says "walk upper tmpfs depth-first, mkdir + create-and-write at the mirror location on `/data`." Non-atomic: a panic, power loss, or Ctrl-C mid-flush leaves a partial state directory. Subsequent boot's `restore_upper_from_disk` reads garbage; the "logs and continues" stance is wishful, not a recovery contract. The optional panic-handler sync makes it worse — the panic-time sync is least likely to complete cleanly.
+
+**The fix.** Atomic-via-rename pattern:
+
+```
+sync():
+    1. Build a manifest: list of (relative_path, size, sha256-or-crc32)
+       for every file in the upper tmpfs, plus whiteout markers.
+    2. Write the manifest LAST to /data/overlay-state.new/MANIFEST.
+    3. Write all data files first into /data/overlay-state.new/
+       (sibling of the live state).
+    4. fsync /data so the writes are durable.
+    5. Atomically replace: rename /data/overlay-state -> /data/.overlay-state.old
+       and /data/overlay-state.new -> /data/overlay-state.
+       (FAT rename of a directory entry is a single sector write — as
+       atomic as we get without a journal. Cross-directory atomicity
+       isn't guaranteed; same-parent rename of two siblings is.)
+    6. fsync /data.
+    7. unlink /data/.overlay-state.old.
+
+restore_upper_from_disk():
+    1. If /data/overlay-state.new/ exists AND has a complete MANIFEST,
+       it's a partial flush from a previous crash that almost finished.
+       Complete it: rename .new -> live, delete .old if present.
+    2. If /data/overlay-state.new/ exists but lacks a complete MANIFEST,
+       it's a partial flush. Delete it and use /data/overlay-state.
+    3. If /data/overlay-state/ exists, validate against its MANIFEST. On
+       checksum mismatch for any file: refuse to restore that file
+       individually, log loudly, continue with the rest.
+    4. If /data/overlay-state/ does not exist, boot with a fresh tmpfs.
+```
+
+**Implementation impact on U11:**
+- New `MANIFEST` format (small textual: line per entry with `path\tsize\tcrc32`).
+- New helper functions for atomic-directory-rename and manifest validation.
+- Test scenarios: simulate panic between each step (write-data, write-manifest, rename-live, rename-new, unlink-old) and verify recovery on next boot.
+
+**Implementation impact on the optional panic-handler sync:** defer it until the atomic flush is proven by tests. The panic path can leave a `.overlay-state.new/` half-written; restore-on-boot is the only correct recovery path; the panic handler should NOT try to "help" by issuing a half-baked sync that will then itself fail.
+
+### C-5. Heap copy-up cap (already addressed in Phase B code)
+
+The original plan accepted unbounded copy-up of lower files into the tmpfs upper. Doc-review #A-2 flagged the heap exhaustion risk for multi-MiB ELFs. **Already addressed** in `src/fs/overlay/filesystem.rs::MAX_COPY_UP_BYTES = 64 * 1024`. Files larger than that surface as `EFBIG` on write-open. Update Phase D's restore path to apply the same cap when re-hydrating files.
+
+### Decision-level updates
+
+**D7 (FAT writer) — replace text after "discipline lifted":**
+
+> Dirty-bit handling is read-before-set: mount-for-write reads FAT[1]'s clean bit first; if cleared, refuses to mount writable without an explicit override (see C-2 above). Cluster allocation is next-fit with FSINFO hint, both FAT copies mirrored on every entry write. Flush ordering is operation-specific, not universal — see C-1 for the per-op table.
+
+**D11 — replace entirely:**
+
+> **D11. Crash-safety position: read-before-set dirty bit, per-op flush ordering, sweeper recommended.** FAT[1]'s dirty bit signals "previous shutdown was not clean"; mount-for-write reads it first and refuses to mount writable without override. Flush ordering is operation-specific (see C-1). Cross-directory rename inherently has a cross-link window and is documented as REQUIRES_FSCK in `src/fs/CLAUDE.md`. The deferred fsck sweeper (cluster-leak detection, cross-link repair, FAT mirror reconciliation) is the recovery story for everything else.
+
+**R5 (Risk Analysis) — replace entirely:**
+
+> **R5. No crash safety means corruption on power-loss.** Mitigation: read-before-set dirty bit refuses writable mount on detected uncleanness; per-op flush ordering minimizes corruption shape (leaks rather than cross-links for most operations); cross-dir rename has a documented cross-link window and recommends fsck. Documented in `src/fs/CLAUDE.md` and root `CLAUDE.md` "Known Issues". The deferred fsck sweeper is the actual recovery mechanism.
+
+---
+
 ## Summary
 
 Take the AgenticOS filesystem layer from "read-only FAT, 8.3 uppercase" to "read+write FAT with long mixed-case names, plus a RAM overlay that makes the root writable from day one." Delivered in four sequenced phases so the high-risk on-disk-write code lands only after every prerequisite (mixed-case round-trip, overlay-backed writable namespace, complete syscall surface) is already tested and shipped.
@@ -118,8 +273,8 @@ The bootloader crate's FAT writer can't be configured for LFN/case preservation.
 **D6. LFN read in Phase A; LFN write deferred inside Phase C.**
 LFN reading is ~300 LOC with low risk: collect contiguous `0x0F`-attr slots, validate sequence + checksum, decode UCS-2. LFN *writing* is materially harder (short-name alias collision scan, slot allocation, atomicity vs the trailing 8.3 stub) and is properly part of the FAT writer in Phase C. Until then, the writable mount only at `/data` accepts 8.3-fitting names; userland sees lowercase + long names everywhere they're physically present on disk (boot image, `/host`) but new files created on `/data` initially get short names. Phase C closes the gap.
 
-**D7. FAT writer: next-fit allocation, both FATs mirrored, FSINFO honored as hint, dirty bit set on mount-for-write.**
-Standard discipline lifted from the Microsoft FAT spec and `rafalh/rust-fatfs`. Next-fit with `FSI_Nxt_Free` hint matches Windows' behavior and avoids the O(n) FAT scan on every allocate. Mirroring both FAT copies matches what every other FAT writer does and prevents `chkdsk` from yelling on a host. Dirty bit (FAT16 bit 15 of FAT[1], FAT32 bit 27) lets a future fsck pass detect unclean shutdown.
+**D7. FAT writer: next-fit allocation, both FATs mirrored, FSINFO honored as hint, dirty bit READ-then-set on mount-for-write.**
+Standard discipline lifted from the Microsoft FAT spec and `rafalh/rust-fatfs`. Next-fit with `FSI_Nxt_Free` hint matches Windows' behavior and avoids the O(n) FAT scan on every allocate. Mirroring both FAT copies matches what every other FAT writer does and prevents `chkdsk` from yelling on a host. **Dirty-bit handling is read-before-set (see C-2 in Corrections):** mount-for-write reads FAT[1]'s clean bit first; if cleared (signaling previous shutdown was unclean), refuses to mount writable without `AGENTICOS_FORCE_DIRTY_MOUNT=1` override. Flush ordering is operation-specific, not universal — see C-1 for the per-op table.
 
 **D8. Open the syscall write gate exactly once, in Phase B, behind a `vfs_is_writable_at(path)` check.**
 The `EROFS` short-circuit at `src/userland/syscalls.rs:1833` becomes a VFS query. A path is writable iff its resolving mount supports writes. Phase B makes `/` writable via the overlay; Phase C makes `/data` writable via FAT; `/host` and `/bin` (synthesized) stay non-writable forever. Single decision point, no per-syscall sprinkling.
@@ -130,8 +285,8 @@ The `EROFS` short-circuit at `src/userland/syscalls.rs:1833` becomes a VFS query
 **D10. The `/bin` namespace stays as syscall-layer interception.**
 Despite the file system becoming writable, the `/bin/<applet>` rewrite (`src/userland/bin_namespace.rs`) remains a syscall-handler-level mechanism. It is intentionally invisible to the FS layer. Migrating it to "real" FS entries would mean either symlinking the ~240 merged applets (BusyBox + GUI launchers; no symlink support today) or duplicating `BB.ELF`/`GLAUNCH.ELF` per applet. Both are worse than the current synthesis. New write-side syscalls (Phase B U5) must explicitly reject mutations under `/bin` with `EPERM` — the namespace is read-only by construction.
 
-**D11. Documented crash position: "no journal, sweeper on next mount, best-effort flush ordering."**
-Phase C orders FAT-table writes before directory-entry writes (so a crash leaks a cluster rather than cross-linking one). Phase D documents the gap. Real `fsck` is deferred. Acceptable for a hobby kernel; users are warned.
+**D11. Crash-safety position: read-before-set dirty bit + per-op flush ordering + fsck-on-detected-uncleanness.**
+FAT[1]'s dirty bit signals "previous shutdown was not clean"; mount-for-write reads it first and refuses to mount writable without override. Flush ordering is operation-specific (see C-1): create/extend use FAT-first (crash leaks a cluster), unlink/rmdir use directory-first (crash leaks a cluster). `rename` same-dir is a single-sector atomic rewrite. `rename` cross-dir inherently has a cross-link window and is documented as REQUIRES_FSCK in `src/fs/CLAUDE.md`; users are advised to prefer same-dir renames on `/data` until the deferred fsck sweeper lands. The deferred fsck (cluster-leak detection, cross-link repair, FAT mirror reconciliation) is the recovery story for everything else. Acceptable for a hobby kernel; users are warned and the dirty-bit gate prevents silent compounding of corruption.
 
 ---
 
@@ -599,7 +754,7 @@ This is a scope declaration. Per-unit `Files:` sections remain authoritative.
 - `extend_chain(start, n)`: allocate n free clusters, link them to the chain via `write_entry`, return new tail.
 - `free_chain(start)`: walk chain, mark each entry `0x00000000` (free).
 - FSINFO update on `sync`: write back `FSI_Free_Count` and `FSI_Nxt_Free`. Honor as hint, never as truth — recompute free count from FAT on mount.
-- Dirty bit: clear bit 15 (FAT16) / bit 27 (FAT32) of FAT[1] on first write; restore on `sync`.
+- **Dirty bit handling (see C-2 in Corrections):** mount-for-write READS the dirty-clean bit (bit 15 of FAT[1] on FAT16, bit 27 on FAT32) FIRST. If already cleared (signaling the previous shutdown was unclean), refuse to mount writable unless `AGENTICOS_FORCE_DIRTY_MOUNT=1` is set; emit a loud log. Otherwise clear the bit and proceed. `sync` re-sets the clean bit after flushing pending writes. The bit's value during mount is the *only* signal that distinguishes clean from crashed, so it MUST be read before being mutated — never just unconditionally set.
 
 **Patterns to follow:**
 - IRQ-disabled-window discipline from `docs/solutions/learnings/2026-05-09-multi-mib-user-binary-load.md`: every IDE write call already wraps `InterruptGuard::disable()` per `src/drivers/ide.rs`. New callers chain through `PartitionBlockDevice::write_blocks` which delegates — no extra guarding needed at this layer.
@@ -610,7 +765,9 @@ This is a scope declaration. Per-unit `Files:` sections remain authoritative.
 - Happy: allocate 1 cluster, write to FAT, read back via existing `read_entry` returns the new value.
 - Happy: `extend_chain(start, 5)` produces a chain of length 5+previous; cluster IDs returned are all marked allocated; chain is linked correctly (walk via `follow_chain`).
 - Happy: `free_chain(start)` after extend leaves all clusters marked free.
-- Happy: dirty bit is clear after `mount_for_write`; set again after `sync`.
+- Happy: mount-for-write reads dirty bit, finds clean (previous sync set it back), clears it, proceeds. After `sync`, bit is set back to clean.
+- Edge (C-2): mount-for-write reads dirty bit, finds ALREADY cleared (signaling previous unclean shutdown), refuses to mount writable unless `AGENTICOS_FORCE_DIRTY_MOUNT=1` is set; emits the documented warning log line.
+- Edge (C-2): with the override set, mount-for-write proceeds despite a dirty bit; subsequent successful sync re-establishes the clean state.
 - Edge: FAT12 entry at odd cluster (high nibble in first byte, low byte in second): read-modify-write preserves the neighbor entry.
 - Edge: mirroring writes both FAT copies (verify by reading the second FAT directly via partition layer).
 - Edge: full disk — `find_free_cluster` returns `DiskFull` after a full scan.
@@ -639,13 +796,16 @@ This is a scope declaration. Per-unit `Files:` sections remain authoritative.
 - `src/fs/CLAUDE.md` (modify — document remaining gaps: root-dir size limit on FAT12/16, no `utimensat`)
 
 **Approach:**
-- Short-name alias generation: strip illegal chars (`*?<>|"/\\:`), uppercase, basename → 6 chars + `~1`, ext → 3 chars; scan target directory for collision and bump `~N`; past `~9`, truncate basename further and use `~10`/`~100`. Match the documented Microsoft algorithm.
+- Short-name alias generation: strip illegal chars (`*?<>|"/\\:`), uppercase, basename → 6 chars + `~1`, ext → 3 chars. **Use a per-directory in-memory collision-hint cache (see C-3 in Corrections)** keyed by basename prefix (first 6 chars), value = highest `~N` seen. On first generation in a directory, scan once to populate. On subsequent generations sharing a prefix: `next_N = cache[prefix] + 1`. Cache lives in `FatFilesystemWrapper` keyed by parent cluster with an LRU cap (16 entries). Converts the worst case from O(N²) (per-create directory scan) to O(N) total across N creates in the same directory.
 - LFN slot allocation: count needed slots (`ceil(name_len_in_utf16 / 13)` + 1 for the 8.3 stub), find that many consecutive free entries (tombstone or end-marker), write the run + stub.
 - Directory growth: if no consecutive free slots exist, extend the directory chain via `extend_chain` (U8). Root directory on FAT12/16 is fixed-size — fail with `ENOSPC` rather than extend.
-- Delete: walk back from the 8.3 stub through preceding LFN slots, tombstone each (`0xE5`).
-- mkdir: allocate a free cluster (U8), write `.` and `.` entries into it, then create the directory entry in the parent.
-- Rename: equivalent to create + delete, ordered carefully (create in destination first; only delete source if create succeeded; if dest and source are same dir and lengths fit in one slot, in-place is faster but optional).
-- Flush ordering for crash safety: FAT writes before directory entry writes (so a crash leaks a cluster, not a cross-link).
+- **Per-op flush ordering (see C-1 in Corrections — replaces the original universal "FAT before directory" rule, which was wrong for unlink/rename):**
+  - `create` / `extend_chain`: FAT entries first, then directory entry. Crash leaks a cluster.
+  - `unlink` / `free_chain`: directory entry tombstone (`0xE5`) FIRST, flush, THEN free the FAT chain. The inverted ordering avoids the cross-link bug where a freed-then-reallocated cluster ends up referenced by both an old (un-tombstoned) dir entry and a new file.
+  - `rename` same-dir: in-place rewrite of the existing entry (a single sector write — as atomic as we get without a journal). Either old or new name visible on crash; chain pointer unchanged.
+  - `rename` cross-dir: documented REQUIRES_FSCK operation. 3-step (write dest entry pointing at chain → flush → tombstone source). Crash between steps leaves a cross-link recoverable only by fsck. Until the deferred fsck lands, document this in `src/fs/CLAUDE.md` and recommend users prefer same-dir renames for non-test data on `/data`.
+  - `mkdir`: allocate cluster (U8), write `.` and `..` entries into it, flush, then write the parent directory's new entry. Crash leaks the cluster.
+  - `rmdir`: tombstone first, free chain second (same as unlink).
 
 **Patterns to follow:**
 - Match the slot-discipline of existing read path in `directory.rs` — preserve the `0x00` end marker semantics (never overwrite without clearing the next entry to `0x00`).
@@ -666,7 +826,12 @@ This is a scope declaration. Per-unit `Files:` sections remain authoritative.
 - Edge: rename across directories within `/data` works.
 - Edge: rename across mount points (`/scratch/a` → `/data/a`) returns `EXDEV` (per U5 semantics).
 - Failure: invalid filename (embedded `/`) returns `EINVAL`.
-- Failure: crash simulation (kernel panic mid-write) — on next mount, dirty bit is set, FAT scan reveals leaked cluster but no cross-link (document the recovery gap; full fsck deferred).
+- Crash recovery (per-op, see C-1 in Corrections):
+  - `create` mid-write — FAT extended but directory entry not written → next mount, dirty bit detected, scan finds a leaked cluster. NEVER a cross-link.
+  - `unlink` mid-write — directory entry tombstoned but FAT chain not yet freed → next mount, leaked cluster. NEVER a cross-link.
+  - `rename` same-dir mid-write — single-sector write was either fully applied or not. Either old or new name visible. NEVER a cross-link.
+  - `rename` cross-dir mid-write — dest entry written, source not yet tombstoned → next mount has TWO entries pointing at same chain. Documented as REQUIRES_FSCK; the failing test scenario should LOG the cross-link and continue (until the deferred fsck lands).
+- Performance (see C-3): create 100 files named `log-001.markdown` … `log-100.markdown` in a single directory; assert time-per-create stays roughly constant after the first 5 (the in-memory short-name cache should eliminate per-create directory scans).
 - Integration: full round-trip — userland `touch /data/test.txt`, reboot, `cat /data/test.txt` finds the file.
 
 **Verification:** `./test.sh fat_write` passes; manual: dismount `/data`, mount on host with `fsck.fat -n` — clean.
@@ -717,30 +882,46 @@ This is a scope declaration. Per-unit `Files:` sections remain authoritative.
 **Dependencies:** U10.
 
 **Files:**
-- `src/fs/overlay/sync.rs` (new — `flush_upper_to_disk(overlay, target_fs, target_path)`; `restore_upper_from_disk(overlay, source_fs, source_path)`)
+- `src/fs/overlay/sync.rs` (new — `flush_upper_to_disk(overlay, target_fs, target_path)`; `restore_upper_from_disk(overlay, source_fs, source_path)`; `MANIFEST` reader/writer; CRC32 helper)
 - `src/fs/overlay/filesystem.rs` (modify — `Filesystem::sync` invokes flush)
-- `src/userland/syscalls.rs` (modify — implement the POSIX `sync` syscall (nr 162) and `syncfs` (nr 306) calling `vfs::sync_all()` / per-mount sync. BusyBox already ships a `sync` applet that issues this syscall, so `/bin/sync` becomes the user-facing entry point with zero kernel-side shell code. Note: the old kernel-side shell was removed by PR #28; the kernel has no command interpreter to register a `sync` command in.)
+- `src/userland/syscalls.rs` (modify — `sync` (nr 162) and `syncfs` (nr 306) handlers already shipped in Phase B U5 as no-ops; Phase D extends them to route to overlay flush. `/bin/sync` is the user-facing entry point.)
 - `src/kernel.rs` (modify — after `/data` is mounted writable, call `restore_upper_from_disk` for the `/` overlay)
-- `src/panic.rs` (modify — optional best-effort sync in panic path, behind a feature flag; the test-build panic handler bypasses it)
-- `src/tests/overlay.rs` (modify — flush + restore round-trip test)
-- `src/fs/CLAUDE.md` (modify — document the persistence model and its limits)
+- `src/tests/overlay.rs` (modify — flush + restore round-trip test, plus crash-recovery tests per step)
+- `src/fs/CLAUDE.md` (modify — document the persistence model, its atomicity guarantees, and its limits)
+
+Note: `src/panic.rs` is NOT in this Files list (was previously). See C-4: the panic-path sync was wishful and is removed in favor of trusting restore-on-boot.
 
 **Approach:**
-- Dump format: a directory tree on `/data` mirroring the upper-layer namespace. Whiteouts represented as `.wh.<name>` files (same sentinel as in-memory). Opaque markers as `.wh..wh..opq`. Plain files copy 1:1.
-- `sync`: walk upper tmpfs depth-first, mkdir + create-and-write at the mirror location on `/data`.
-- On boot, if `/data/overlay-state/` exists, walk it back into a fresh tmpfs before mounting the overlay.
-- This is simple and survivable; cost is a full write-out per sync rather than incremental. Optimize later if it bites.
-- Sync is invoked: from userland via `/bin/sync` (BusyBox applet → `sync(2)` → kernel `sync_handler` → `vfs::sync_all()`); on graceful shutdown (future, once orderly shutdown exists); optionally in the panic handler (feature-gated).
+- Dump format: a directory tree on `/data` mirroring the upper-layer namespace. Whiteouts as `.wh.<name>` files (same sentinel as in-memory). Opaque markers as `.wh..wh..opq`. Plain files copy 1:1. **A `MANIFEST` file at the root** of the dump lists every entry as `<relative_path>\t<size>\t<crc32>` for boot-time integrity validation.
+- **Atomic flush via rename-into-place (see C-4 in Corrections — replaces the original non-atomic depth-first walk that left half-written state on crash):**
+  1. Write everything (data files + whiteouts + opaque markers + MANIFEST) into `/data/overlay-state.new/`. MANIFEST written LAST so its presence marks "all data files complete."
+  2. fsync `/data` for durability.
+  3. Atomically replace: rename `/data/overlay-state` → `/data/.overlay-state.old`, then rename `/data/overlay-state.new` → `/data/overlay-state`. Same-parent directory-entry renames on FAT are single-sector writes (as atomic as we get without a journal). Cross-directory atomicity is NOT relied on.
+  4. fsync `/data`.
+  5. unlink `/data/.overlay-state.old`.
+- **Restore on boot:** the kernel's mount path runs `restore_upper_from_disk` AFTER `/data` is mounted writable. Four cases:
+  1. `/data/overlay-state.new/` exists AND has a complete MANIFEST → previous sync crashed AFTER writing all data but BEFORE the rename. Complete the rename and continue.
+  2. `/data/overlay-state.new/` exists but lacks a complete MANIFEST → previous sync crashed mid-write. Delete `.new` and use the live `/data/overlay-state` (last good state).
+  3. `/data/overlay-state/` exists → validate every file against its MANIFEST crc. On mismatch, log loudly and skip THAT FILE only; continue with the rest. This is the "logs and continues" path, now with a concrete validation gate rather than wishful "we hope it's ok."
+  4. Nothing on disk → boot with a fresh empty tmpfs.
+- **Apply the C-5 copy-up cap on restore too:** files larger than `MAX_COPY_UP_BYTES` from Phase B don't rehydrate (they shouldn't exist in a sync output since copy-up rejected them, but a corrupted `/data` could have one). Skip with a loud log.
+- **Sync invocation:** from userland via `/bin/sync` (BusyBox applet → `sync(2)` → kernel `sync_handler` → `vfs::sync_all()`); on graceful shutdown (future, once orderly shutdown exists).
+- **Panic-handler sync REMOVED from this unit.** The original optional panic-time sync was wishful — the panic path is the least likely to complete cleanly, and a partial `.overlay-state.new/` it leaves behind is exactly what step 1 above is designed to recover from. The panic handler MUST NOT issue a sync. The restore-on-boot path is the only correct recovery mechanism.
 
 **Test scenarios:**
-- Happy: write `/etc/foo`, run sync, verify `/data/overlay-state/etc/foo` exists with same content.
-- Happy: write `/etc/foo`, run sync, reboot, `/etc/foo` is still readable.
-- Happy: unlink lower file `/system.ttf`, sync, reboot — `/system.ttf` still gone (whiteout restored).
-- Happy: re-create whiteout-shadowed file, sync, reboot — file persists.
-- Edge: sync with empty upper layer creates `/data/overlay-state/` (empty) or no-ops cleanly.
-- Edge: sync when `/data` is full returns `ENOSPC`; in-RAM state untouched; next sync after freeing space succeeds.
-- Edge: restore from corrupt `/data/overlay-state/` (a file appears where a dir should be) logs and continues with partial restore — does not refuse to boot.
-- Failure: sync called when `/data` is unmounted returns error; in-RAM state untouched.
+- Happy: write `/etc/foo`, run sync, verify `/data/overlay-state/etc/foo` exists with same content and MANIFEST entry checksum matches.
+- Happy: write `/etc/foo`, run sync, reboot, `/etc/foo` is still readable with original content.
+- Happy: unlink lower file `/system.ttf`, sync, reboot — `/system.ttf` still gone (whiteout restored via `.wh.system.ttf` in overlay-state).
+- Happy: re-create whiteout-shadowed file, sync, reboot — file persists, whiteout cleared.
+- Edge: sync with empty upper layer creates `/data/overlay-state/` with just an empty MANIFEST.
+- Edge: sync when `/data` is full returns `ENOSPC`; in-RAM state untouched; live `/data/overlay-state` from previous sync still valid; next sync after freeing space succeeds.
+- Crash recovery (per-step, see C-4):
+  - Crash during data-file write phase → next boot finds `.new/` without MANIFEST → delete `.new`, use live state. Verify all changes since last sync are lost (expected).
+  - Crash after MANIFEST written but before rename → next boot finds `.new/` WITH MANIFEST → complete the rename, all changes from that sync survive.
+  - Crash between the two renames → next boot finds `.overlay-state.old/` and `overlay-state.new/` → use `.new`, complete cleanup. (Or alternatively if `.overlay-state` is missing.) Both should yield the new state.
+  - Crash after rename but before `.old` unlink → boot finds `.old/` alongside live state; delete `.old`, use live.
+- Edge: restore validates MANIFEST checksums. Corrupted file in `/data/overlay-state/` is logged and skipped individually (boot continues with the rest).
+- Failure: sync called when `/data` is unmounted returns `EROFS`; in-RAM state untouched.
 - Integration: full lifecycle — boot, modify root, sync, reboot, verify modifications persisted, modify again, sync, reboot.
 
 **Verification:** `./test.sh overlay` passes; manual reboot-cycle test.
@@ -811,7 +992,7 @@ Would unify the FS story by making `/bin/<applet>` first-class on-disk entries. 
 
 **R4. IRQ-disabled-window during FAT writes causes mouse jitter or kernel-stack overflows.** Mitigation: writes already use the `InterruptGuard` discipline (per the learning). Chunk multi-cluster operations.
 
-**R5. No crash safety means corruption on power-loss.** Mitigation: dirty bit on mount-for-write so future fsck can detect; flush ordering (FAT before directory) so a crash leaks a cluster rather than cross-linking; documented in `src/fs/CLAUDE.md` and root `CLAUDE.md` "Known Issues".
+**R5. Crash on power-loss corrupts `/data` if writes are in flight.** Mitigation (see C-1, C-2, C-4 in Corrections): (a) read-before-set dirty bit refuses to mount writable on detected uncleanness, preventing silent compounding; (b) per-op flush ordering minimizes corruption shape (leaks rather than cross-links for create / unlink / mkdir / rmdir / same-dir-rename); (c) cross-dir rename has a documented cross-link window and is recommended-against until the deferred fsck lands; (d) Phase D persistence uses rename-into-place + MANIFEST so a mid-flush crash never corrupts the live overlay state. Documented in `src/fs/CLAUDE.md` and root `CLAUDE.md` "Known Issues". The deferred fsck sweeper (cluster-leak detection, cross-link repair, FAT mirror reconciliation) is the actual recovery mechanism for the cases above.
 
 **R6. Scope creep from "while we're here" cleanups (FAT cluster cache, streaming `DirectoryIterator`, RTC for timestamps).** Mitigation: all listed under Deferred. Resist incorporating into active units.
 
@@ -827,23 +1008,25 @@ Would unify the FS story by making `/bin/<applet>` first-class on-disk entries. 
 
 Each phase is independently mergeable, shippable, and reversible.
 
-| Phase | Units | Net delta | Cost (rough) |
+| Phase | Units | Net delta | Status |
 |---|---|---|---|
-| **A — Read correctness** | U1, U2 | Mixed case + long names visible everywhere | 1–2 days |
-| **B — RAM writes** | U3, U4, U5, U6 | Full userland write semantics, RAM-backed | 3–5 days |
-| **C — Disk writes** | U7, U8, U9, U10 | `/data` persistent across reboots | 5–10 days |
-| **D — Persistence of `/`** | U11 | `/` overlay survives reboots via flush-on-sync | 2–3 days |
+| **A — Read correctness** | U2 (U1 SKIPPED) | Mixed case + long names visible everywhere | ✅ SHIPPED 2026-05-16 (`8b8bc4f`) |
+| **B — RAM writes** | U3, U4, U5, U6 | Full userland write semantics, RAM-backed | ✅ SHIPPED 2026-05-16 (`b60cbf6`) |
+| **C — Disk writes** | U7, U8, U9, U10 | `/data` persistent across reboots | ⏸️ blocked on Corrections C-1/C-2/C-3 being applied at implementation |
+| **D — Persistence of `/`** | U11 | `/` overlay survives reboots via flush-on-sync | ⏸️ blocked on Corrections C-4 being applied at implementation |
 
-Phase boundaries are deliberate sync points — each one ends with a green `./test.sh`, an updated `src/fs/CLAUDE.md`, and a working interactive boot. Phases A and B together (mixed case + RAM writes) are the highest-ROI subset and can ship before deciding on C/D.
+Phase boundaries are deliberate sync points — each one ends with a green `./test.sh`, an updated `src/fs/CLAUDE.md`, and a working interactive boot. Phases A+B together delivered the highest-ROI subset (mixed case + RAM writes). Phases C and D remain optional and depend on whether persistent on-disk writes become a real workload need.
 
 ---
 
 ## Dependencies / Prerequisites
 
-- **`fatfs` Rust crate** — used host-side in xtask. Pin to a known-good version. No kernel-side dependency.
+- **`fatfs` Rust crate** — used host-side in xtask (Phase C only; Phase A no longer needs it since the bootloader crate already emits LFN entries). Pin to a known-good version. No kernel-side dependency.
 - **`InterruptGuard` discipline** — already enforced in `src/drivers/ide.rs`; new code inherits via `PartitionBlockDevice::write_blocks`.
-- **`bin_namespace::apply_bin_rewrite`** — must continue to fire before any new write-side handler in `src/userland/syscalls.rs` so `/bin` paths can't be mutated.
-- **`READ_MAX_LEN` and `WRITE_MAX_LEN` (both currently 4096 in `src/userland/syscalls.rs`)** — already enforced for the existing pipe/stdout write path. Phase B's new file-write handlers reuse `WRITE_MAX_LEN` and loop at the handler level for larger writes.
+- **`bin_namespace::apply_bin_rewrite`** — must continue to fire before any new write-side handler in `src/userland/syscalls.rs` so `/bin` paths can't be mutated. (Already integrated in Phase B U5.)
+- **`READ_MAX_LEN` and `WRITE_MAX_LEN`** — both 4096 in `src/userland/syscalls.rs`, already enforced. (Phase B done.)
+- **`AGENTICOS_FORCE_DIRTY_MOUNT` (Phase C, see C-2)** — developer escape hatch env var the kernel reads from QEMU `fw_cfg` or a boot arg. Allows mounting `/data` writable even when the FAT[1] dirty bit indicates the previous shutdown was unclean. Default off. Production / interactive boots should never set it; the deferred fsck sweeper is the proper recovery path.
+- **CRC32 helper (Phase D, see C-4)** — small `no_std` CRC32 implementation needed for the persistence MANIFEST. Roll our own (~50 LOC IEEE polynomial table); avoid adding a crate dependency just for this.
 
 ---
 
