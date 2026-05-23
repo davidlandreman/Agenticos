@@ -233,6 +233,7 @@ pub mod nr {
     pub const SYNC: u64 = 162;
     pub const PREAD64: u64 = 17;
     pub const PWRITE64: u64 = 18;
+    pub const SENDFILE: u64 = 40;
     pub const MKDIRAT: u64 = 258;
     pub const UNLINKAT: u64 = 263;
     pub const RENAMEAT: u64 = 264;
@@ -383,6 +384,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::SYNCFS => syscalls::syncfs_handler(args),
         nr::PREAD64 => syscalls::pread64_handler(args),
         nr::PWRITE64 => syscalls::pwrite64_handler(args),
+        nr::SENDFILE => syscalls::sendfile_handler(args),
         _ => unhandled_syscall(args),
     };
 

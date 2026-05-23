@@ -313,7 +313,10 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
         // appeared as a hang under interactive load.
         if handle.position == 0 && buffer.len() >= handle.size as usize {
             return match self.inner.read_file(&fat_handle, buffer) {
-                Ok(_) => Ok(handle.size as usize),
+                Ok(_) => {
+                    handle.position += handle.size as u64;
+                    Ok(handle.size as usize)
+                }
                 Err(_) => Err(FilesystemError::IoError),
             };
         }
@@ -338,6 +341,7 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
                     &file_buffer
                         [handle.position as usize..handle.position as usize + to_copy],
                 );
+                handle.position += to_copy as u64;
                 Ok(to_copy)
             }
             Err(_) => Err(FilesystemError::IoError),

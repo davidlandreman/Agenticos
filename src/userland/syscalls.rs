@@ -153,17 +153,21 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
     let iov_ptr = args.rsi;
     let iovcnt = args.rdx as i64;
 
-    // Phase 5 PR-A: writev on pipes is rare in practice (libc uses
-    // single-buffer write for pipe stdio); reject for now to keep
-    // the pipe path simple. Stdout/stderr keep going to print!.
-    match with_fd_slot(fd) {
-        Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => {}
-        Some(FdSlot::File { .. }) => return EROFS,
+    enum Target {
+        StdoutErr,
+        File(crate::lib::arc::Arc<crate::fs::file_handle::File>),
+    }
+    let target = match with_fd_slot(fd) {
+        Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Target::StdoutErr,
+        Some(FdSlot::File { handle, .. }) => Target::File(handle),
         Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        // Phase 5 PR-A: writev on pipes is rare in practice (libc uses
+        // single-buffer write for pipe stdio); reject for now to keep
+        // the pipe path simple.
         Some(FdSlot::PipeWrite(_, _)) => return ENOSYS,
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
-    }
+    };
     if iovcnt < 0 || iovcnt as usize > WRITEV_MAX_IOV {
         return EINVAL;
     }
@@ -188,7 +192,8 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         }
     }
 
-    // Now emit every iov in order.
+    // Now emit every iov in order. Short writes break the loop so
+    // POSIX writev's "stop at the first short write" semantics hold.
     let mut written: u64 = 0;
     for i in 0..iovcnt as u64 {
         let entry = iov_ptr + i * 16;
@@ -198,9 +203,27 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
             continue;
         }
         let slice = unsafe { core::slice::from_raw_parts(base as *const u8, len as usize) };
-        let s = alloc::string::String::from_utf8_lossy(slice);
-        crate::print!("{}", s);
-        written += len;
+        match &target {
+            Target::StdoutErr => {
+                let s = alloc::string::String::from_utf8_lossy(slice);
+                crate::print!("{}", s);
+                written += len;
+            }
+            Target::File(handle) => match handle.write(slice) {
+                Ok(n) => {
+                    written += n as u64;
+                    if (n as u64) < len {
+                        break;
+                    }
+                }
+                Err(ref e) => {
+                    if written > 0 {
+                        return written as i64;
+                    }
+                    return map_file_err(e);
+                }
+            },
+        }
     }
     written as i64
 }
@@ -2372,6 +2395,122 @@ pub fn pwrite64_handler(args: &mut SyscallArgs) -> i64 {
     };
     let _ = handle.seek(prev);
     n as i64
+}
+
+/// `sendfile(out_fd, in_fd, *offset, count) -> isize`
+///
+/// Copies up to `count` bytes from `in_fd` to `out_fd` inside the kernel,
+/// avoiding the read/write/user-buffer round-trip. BusyBox's
+/// `bb_full_fd_action` calls this with `offset == NULL` when copying from
+/// a regular file (e.g. `cat`, `cp`'s read path), so the most important
+/// shape to support is "in_fd is a regular file, out_fd is stdout/pipe".
+///
+/// Semantics:
+/// - `in_fd` must be a regular file. Streams/pipes/dirs are rejected.
+/// - `out_fd` may be stdout/stderr, a pipe write end, or a regular file.
+/// - When `offset == NULL`, reads from `in_fd`'s current position and
+///   advances it; when non-NULL, reads from `*offset`, leaves `in_fd`'s
+///   position unchanged, and writes the next read position back to
+///   `*offset`.
+/// - Returns bytes copied (possibly less than `count` on short writes,
+///   EOF, or a mid-transfer error); only returns `-errno` when nothing
+///   was copied.
+pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
+    let out_fd = args.rdi as i32;
+    let in_fd = args.rsi as i32;
+    let offset_ptr = args.rdx;
+    let count = args.r10;
+
+    let in_handle = match with_fd_slot(in_fd) {
+        Some(FdSlot::File { handle, .. }) => handle,
+        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(_) => return EINVAL,
+        None => return EBADF,
+    };
+
+    enum Out {
+        StdoutErr,
+        File(crate::lib::arc::Arc<crate::fs::file_handle::File>),
+        Pipe(crate::userland::pipe::PipeWriteHandle),
+    }
+    let out = match with_fd_slot(out_fd) {
+        Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Out::StdoutErr,
+        Some(FdSlot::File { handle, .. }) => Out::File(handle),
+        Some(FdSlot::PipeWrite(h, _)) => Out::Pipe(h),
+        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(_) | None => return EBADF,
+    };
+
+    let saved_pos = in_handle.position();
+    if offset_ptr != 0 {
+        if let Err(e) = validate_user_slice(offset_ptr, 8) {
+            return e;
+        }
+        let off = unsafe { core::ptr::read_unaligned(offset_ptr as *const u64) };
+        if let Err(ref e) = in_handle.seek(off) {
+            return map_file_err(e);
+        }
+    }
+
+    const CHUNK: usize = 4096;
+    let mut buf = vec![0u8; CHUNK];
+    let mut remaining = count;
+    let mut total: u64 = 0;
+    let mut error: Option<i64> = None;
+
+    while remaining > 0 {
+        let want = core::cmp::min(remaining as usize, CHUNK);
+        let n = match in_handle.read(&mut buf[..want]) {
+            Ok(n) => n,
+            Err(ref e) => {
+                error = Some(map_file_err(e));
+                break;
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        let written = match &out {
+            Out::StdoutErr => {
+                let s = alloc::string::String::from_utf8_lossy(&buf[..n]);
+                crate::print!("{}", s);
+                n
+            }
+            Out::File(handle) => match handle.write(&buf[..n]) {
+                Ok(w) => w,
+                Err(ref e) => {
+                    error = Some(map_file_err(e));
+                    0
+                }
+            },
+            Out::Pipe(handle) => {
+                if handle.pipe().readers() == 0 {
+                    error = Some(crate::userland::abi::EPIPE);
+                    0
+                } else {
+                    handle.pipe().write(&buf[..n])
+                }
+            }
+        };
+        total += written as u64;
+        remaining = remaining.saturating_sub(written as u64);
+        if error.is_some() || written < n {
+            break;
+        }
+    }
+
+    if offset_ptr != 0 {
+        let new_off = in_handle.position();
+        let _ = in_handle.seek(saved_pos);
+        unsafe {
+            core::ptr::write_unaligned(offset_ptr as *mut u64, new_off);
+        }
+    }
+
+    if total > 0 {
+        return total as i64;
+    }
+    error.unwrap_or(0)
 }
 
 // ---------- lseek ----------
