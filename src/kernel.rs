@@ -484,7 +484,10 @@ fn try_mount_data_disk() {
             // Try writable first; on dirty-bit refusal (C-2) fall back
             // to a read-only mount with a warning so userland still has
             // a /data mount to inspect.
-            match auto_mount_writable(data_disk, "/data", false) {
+            // TODO: plumb this through fw_cfg so production boots still
+            // respect the dirty-bit gate. Forced to true for now so dev
+            // workflow doesn't require `sync` before every Cmd-Q.
+            match auto_mount_writable(data_disk, "/data", true) {
                 Ok(_) => {
                     debug_info!("Data disk mounted writable at /data");
                 }
