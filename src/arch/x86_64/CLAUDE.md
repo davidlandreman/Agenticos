@@ -8,7 +8,7 @@ Low-level x86_64 plumbing: GDT/TSS, IDT, naked-asm context switching, preemption
 - `fpu.rs` — `enable_sse()` configures CR0/CR4 for SSE/SSE2 execution. Required before any ring-3 transition; musl + libstdc++ binaries emit SSE2 in `__init_tls` before reaching `main` and would `#UD` without it. The kernel target spec uses `+soft-float`, so the kernel itself never needs SSE — but ring 3 does.
 - `interrupts.rs` — IDT setup, all exception handlers, PIC/PIT configuration, hardware-IRQ entry points.
 - `context_switch.rs` — naked-asm `switch_*` functions used by the cooperative scheduler.
-- `preemption.rs` — naked-asm `timer_interrupt_handler_preemptive` and Rust-side `timer_handler_inner`. Round-robin preemptive scheduler.
+- `preemption.rs` — naked-asm `timer_interrupt_handler_preemptive` and Rust-side `timer_handler_inner`. Round-robin preemptive scheduler. The CPL=3 branch (U5) calls `lifecycle::try_preempt_ring3` and, if another ring-3 process is runnable, diverges via `switch::resume_ring3`; otherwise it iretq's back to the same process. CPL=0 branch handles kernel-thread preemption via the existing `CpuContext` / `KERNEL_CONTEXT` switch path.
 - `interrupt_guard.rs` — RAII guard for `cli`/`sti` regions. Use anywhere a sequence must be atomic with respect to the scheduler — most importantly inside IDE PIO transactions (see `src/drivers/CLAUDE.md`).
 
 ## GDT layout (load-bearing)
@@ -27,7 +27,7 @@ The kernel CS=0x08 / SS=0x10 selectors are hard-coded as literal pushes inside t
 
 ## TSS
 
-Single static instance. `privilege_stack_table[0]` (`rsp0`) holds the kernel stack to which the CPU switches on a ring 3 → ring 0 transition (interrupt or exception). For single-app-at-a-time, `rsp0` is set once before each `run` and not updated again until the next user app. `interrupt_stack_table[0]` is the dedicated `#DF` stack — kernel-stack overflow during user-mode work would otherwise triple-fault.
+Single static instance. `privilege_stack_table[0]` (`rsp0`) holds the kernel stack to which the CPU switches on a ring 3 → ring 0 transition (interrupt or exception). U5 (multi-ring-3 scheduling) updates `rsp0` to point at the currently-loaded process's per-process kernel stack on every ring-3 switch via `gdt::set_kernel_rsp0` — historically (single-app-synchronous) it was set once per `run`. `interrupt_stack_table[0]` is the dedicated `#DF` stack — kernel-stack overflow during user-mode work would otherwise triple-fault.
 
 ## Boot ordering
 

@@ -86,6 +86,16 @@ pub fn selectors() -> &'static Selectors {
     &GDT.1
 }
 
+/// Ring-3 (CS, SS) pair, with RPL=3, ready to push onto an iretq frame.
+/// Today's GDT layout yields `(0x23, 0x1B)`; deriving from `selectors()`
+/// keeps the call site honest if the layout ever shifts. Used by U4's
+/// `resume_ring3` wrapper and any other code building a ring-3 iretq
+/// frame from scratch.
+pub fn user_selectors() -> (u64, u64) {
+    let s = selectors();
+    (u64::from(s.user_code.0), u64::from(s.user_data.0))
+}
+
 /// Top of the static kernel rsp0 stack — the value the userland subsystem
 /// stamps into `TSS.privilege_stack_table[0]` before entering ring 3 (D6).
 ///

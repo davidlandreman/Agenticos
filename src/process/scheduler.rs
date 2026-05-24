@@ -238,6 +238,36 @@ impl Scheduler {
         }
     }
 
+    /// U8: wake any kernel thread blocked on `WaitingForRing3Exit(ring3_pid)`.
+    /// Called from the ring-3 exit path so the launching kernel thread
+    /// (which called `enter_user_mode_with_aspace` and then blocked on
+    /// the scheduler) becomes runnable and can run its cleanup +
+    /// return.
+    ///
+    /// The set of kernel threads is small; the linear scan is fine.
+    pub fn wake_threads_waiting_for_ring3_exit(&mut self, ring3_pid: u32) {
+        let waking: alloc::vec::Vec<ProcessId> = self
+            .processes
+            .iter()
+            .filter_map(|(p, pcb)| {
+                if pcb.state == ProcessState::Blocked
+                    && matches!(
+                        pcb.block_reason,
+                        Some(BlockReason::WaitingForRing3Exit(awaited))
+                            if awaited == ring3_pid
+                    )
+                {
+                    Some(*p)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for pid in waking {
+            self.wake(pid);
+        }
+    }
+
     /// Terminate the current process
     pub fn terminate_current(&mut self) {
         if let Some(current_pid) = self.current.take() {

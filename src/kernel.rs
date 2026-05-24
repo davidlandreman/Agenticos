@@ -448,17 +448,22 @@ pub fn run() -> ! {
     debug_info!("Spawning GUIShell background process...");
     crate::commands::guishell::spawn_guishell_process();
 
-    // Create input processor for event handling
-    // This processes raw scancodes/mouse bytes into typed events
-    let mut input_processor = crate::input::InputProcessor::new(1280, 720);
-    debug_info!("Input processor initialized");
+    // U10: spawn the compositor kernel thread that owns input
+    // processing + terminal output + rendering. Pre-U10 the kernel
+    // main loop did this inline; with multi-ring-3 scheduling
+    // (U5-U8) a busy ring-3 process would otherwise monopolize the
+    // CPU and freeze the desktop. The compositor gets a regular
+    // round-robin slice from the kernel-thread scheduler, so input
+    // and rendering keep progressing alongside ring-3 work.
+    debug_info!("Spawning compositor kernel thread...");
+    crate::process::spawn_process(
+        alloc::string::String::from("compositor"),
+        None,
+        crate::window::compositor::run,
+    );
 
-    // Main kernel loop
-    debug_info!("Entering idle loop with window rendering...");
-    let using_virtio = crate::drivers::mouse::is_virtio_tablet();
-    if using_virtio {
-        debug_info!("VirtIO tablet active - mouse will not grab QEMU window");
-    }
+    // Main kernel loop (U10: pure scheduler housekeeping + idle).
+    debug_info!("Entering idle loop...");
 
     loop {
         // === PREEMPTION HANDLING ===
@@ -513,56 +518,33 @@ pub fn run() -> ! {
         // Processes that call sleep_ticks/sleep_until_event return here
         crate::process::try_run_scheduled_processes();
 
-        // While the run command is loading or executing a user binary
-        // (D5: single-user-app-synchronous), skip the rest of the kernel main
-        // loop's housekeeping. The run process gets the CPU end-to-end
-        // (file read, ELF load, ring-3 exec, syscall handling); mouse
-        // polling, input event routing, shell polling, and compositor
-        // rendering all pause until the binary exits. Without this gate,
-        // `render_frame`'s ~3.7 MiB-per-repaint framebuffer writes contend
-        // with PIO IDE reads and heap demand-paging, stretching what's a
-        // 0.6 s job in test mode into many seconds.
-        //
-        // We use `binary_load_in_progress()` rather than `user_active()`
-        // because the slow phase precedes the active-user slot being filled —
-        // user_active() only flips after enter_user_mode has completed the
-        // load.
-        //
-        // Terminal-output processing keeps running so the user app's `write`
-        // syscall bytes still reach the terminal buffer; the compositing
-        // catches up after the binary exits.
-        let user_active = crate::userland::lifecycle::binary_load_in_progress();
-
-        if !user_active {
-            // === INPUT PROCESSING ===
-            // VirtIO tablet (seamless mouse in QEMU) requires polling
-            if using_virtio {
-                crate::drivers::mouse::poll();
-                if let Some(event) = input_processor.check_virtio_tablet() {
-                    window::process_event(event);  // Signals processes on input
+        // U8: dispatch any ring-3 process that's Ready. Saves the
+        // kernel main loop's context into KERNEL_CONTEXT and diverges
+        // into resume_ring3; control returns here when the ring-3
+        // process yields back via yield_to_kernel_main_loop (which
+        // switch_to_context's KERNEL_CONTEXT). Only fires when no
+        // ring-3 process is currently loaded (the loaded one is
+        // either running or running its kernel-side syscall handler).
+        if crate::userland::lifecycle::current_user_pid().is_none() {
+            if let Some(pid) = crate::userland::lifecycle::pop_next_ring3() {
+                unsafe {
+                    crate::userland::switch::save_kernel_and_resume_ring3(
+                        pid,
+                        &raw mut crate::arch::x86_64::preemption::KERNEL_CONTEXT,
+                    );
                 }
-            }
-
-            // Process keyboard/mouse events from interrupt-driven queue
-            // Each event signals relevant sleeping processes
-            for event in input_processor.process_pending(&crate::input::INPUT_QUEUE) {
-                window::process_event(event);
+                // Resumed via KERNEL_CONTEXT restoration. Continue
+                // the main-loop iteration below.
             }
         }
 
-        // === RENDERING ===
-        // Process pending terminal output (early exit if none) — runs even
-        // while a user app is active so the binary's `write` syscalls
-        // accumulate visible output once compositing resumes.
-        window::process_terminal_output();
-        if !user_active {
-            // Render frame (early exit if compositor has no dirty regions)
-            window::render_frame();
-        }
+        // U10: input + terminal output + render moved to the
+        // `compositor` kernel thread (spawned at boot). Main loop
+        // is now pure scheduler housekeeping + idle.
 
         // === IDLE ===
-        // Halt CPU until next interrupt (keyboard, mouse, timer)
-        // Timer fires at 100Hz, waking processes from sleep_queue
+        // Halt CPU until next interrupt (keyboard, mouse, timer).
+        // Timer fires at 100 Hz, waking processes from sleep_queue.
         x86_64::instructions::hlt();
     }
 }

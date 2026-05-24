@@ -2180,18 +2180,17 @@ fn test_fork_child_exit_sets_sigchld_on_parent() {
 /// `rt_sigsuspend` after `ls` crashed.
 fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
     use crate::userland::lifecycle::{
-        notify_parent_of_exit, reap_zombie, stash_parent, swap_current_process,
-        take_stashed_parent, Process, ExitKind,
+        insert_process, notify_parent_of_exit, reap_zombie, remove_process, with_process,
+        Process, ExitKind,
     };
     use crate::userland::signal::SIGCHLD;
 
-    // Build minimal parent + "dying child" Processes. PIDs are
-    // arbitrary; the helper doesn't validate against the live PID
-    // allocator.
+    // U7: both parent and child live in PROCESS_TABLE simultaneously.
+    // The old PARENT_STASH dance is gone; SIGCHLD is raised on the
+    // parent's regular entry via `with_process`.
     let parent = Process {
         pid: 100,
         parent_pid: 0,
-        continuation: None,
         image: None,
         exit_kind: ExitKind::None,
         exit_code: 0,
@@ -2210,54 +2209,27 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         growth_faults_remaining: 0,
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+        saved_user_state: crate::userland::user_state::UserState::default(),
+        terminal_id: None,
     };
-    let child = Process {
-        pid: 101,
-        parent_pid: 100,
-        continuation: None,
-        image: None,
-        exit_kind: ExitKind::None,
-        exit_code: 0,
-        brk_current: 0,
-        mmap_next: 0,
-        fd_table: crate::userland::fdtable::FdTable::new(),
-        cwd: alloc::string::String::from("/"),
-        address_space: None,
-        signal_state: crate::userland::signal::SignalState::new(),
-        kernel_stack: None,
-        exe_path: None,
-        stack_top: 0,
-        stack_bottom: 0,
-        stack_mapped_bottom: 0,
-        stack_max_growth_floor: 0,
-        growth_faults_remaining: 0,
-        fs_base: 0,
-        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
-    };
-
-    // Stash parent, install child as current — mirroring fork's state
-    // when the child is mid-execution.
-    let saved = swap_current_process(child);
-    stash_parent(parent);
+    insert_process(parent);
 
     notify_parent_of_exit(101, 100, 139);
 
-    // The parent (still in PARENT_STASH) now has SIGCHLD pending.
-    let stashed = take_stashed_parent().expect("parent stash populated");
+    // SIGCHLD pending on parent's signal_state.
+    let pending = with_process(100, |p| p.signal_state.pending).unwrap();
     assert!(
-        stashed.signal_state.pending & (1 << (SIGCHLD - 1)) != 0,
-        "expected SIGCHLD pending on stashed parent, got mask {:#x}",
-        stashed.signal_state.pending,
+        pending & (1 << (SIGCHLD - 1)) != 0,
+        "expected SIGCHLD pending on parent, got mask {:#x}",
+        pending,
     );
 
-    // A zombie record exists for pid 101 → parent 100, exit code 139.
-    // (No signal_termination here — this test exercises the
-    // cooperative-exit path via notify_parent_of_exit.)
+    // Zombie filed for pid 101 → parent 100, exit code 139.
     let reaped = reap_zombie(101, 100).expect("zombie filed for child 101");
     assert_eq!(reaped, (101, 139, None));
 
-    // Cleanup: restore original current process.
-    let _ = swap_current_process(saved);
+    // Cleanup.
+    remove_process(100);
 }
 
 /// When `parent_pid == 0` (top-level kernel-launched binary, no
@@ -3183,81 +3155,6 @@ fn test_maybe_deliver_signal_installs_handler_mask() {
     });
 }
 
-// --- U5: stack window survives fork-time PARENT_STASH round-trip ---
-
-/// Construct a Process with a populated stack window, stash it as the
-/// "parent" the way fork_handler does, then pull it back via
-/// take_stashed_parent and verify the five stack-window fields survived.
-/// This is the integrity check for the field copy in fork_handler.
-fn test_stack_window_survives_parent_stash_round_trip() {
-    use crate::userland::lifecycle::{
-        parent_stashed, stash_parent, swap_current_process, take_stashed_parent,
-        ExitKind, Process,
-    };
-
-    let parent = Process {
-        pid: 500,
-        parent_pid: 0,
-        continuation: None,
-        image: None,
-        exit_kind: ExitKind::None,
-        exit_code: 0,
-        brk_current: 0,
-        mmap_next: 0,
-        fd_table: crate::userland::fdtable::FdTable::new(),
-        cwd: alloc::string::String::from("/"),
-        address_space: None,
-        signal_state: crate::userland::signal::SignalState::new(),
-        kernel_stack: None,
-        exe_path: None,
-        stack_top: 0x80_0000,
-        stack_bottom: 0x7E_0000,
-        stack_mapped_bottom: 0x7E_0000,
-        stack_max_growth_floor: 0x50_0000,
-        growth_faults_remaining: 555,
-        fs_base: 0,
-        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
-    };
-    let placeholder = Process {
-        pid: 501,
-        parent_pid: 500,
-        continuation: None,
-        image: None,
-        exit_kind: ExitKind::None,
-        exit_code: 0,
-        brk_current: 0,
-        mmap_next: 0,
-        fd_table: crate::userland::fdtable::FdTable::new(),
-        cwd: alloc::string::String::from("/"),
-        address_space: None,
-        signal_state: crate::userland::signal::SignalState::new(),
-        kernel_stack: None,
-        exe_path: None,
-        stack_top: 0,
-        stack_bottom: 0,
-        stack_mapped_bottom: 0,
-        stack_max_growth_floor: 0,
-        growth_faults_remaining: 0,
-        fs_base: 0,
-        fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
-    };
-    assert!(!parent_stashed(), "stash must be empty at test start");
-
-    let real_parent = swap_current_process(placeholder);
-    stash_parent(parent);
-    assert!(parent_stashed());
-
-    let stashed = take_stashed_parent().expect("parent stashed");
-    assert_eq!(stashed.stack_top, 0x80_0000);
-    assert_eq!(stashed.stack_bottom, 0x7E_0000);
-    assert_eq!(stashed.stack_mapped_bottom, 0x7E_0000);
-    assert_eq!(stashed.stack_max_growth_floor, 0x50_0000);
-    assert_eq!(stashed.growth_faults_remaining, 555);
-
-    // Restore real CURRENT_PROCESS.
-    let _ = swap_current_process(real_parent);
-}
-
 // --- U4: try_grow_user_stack classification + mutation ---
 
 /// Helper: drop into Process and stage a stack window. Returns the
@@ -3881,7 +3778,6 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
     let mut p = Process {
         pid: 9000,
         parent_pid: 0,
-        continuation: None,
         image: None,
         exit_kind: ExitKind::None,
         exit_code: 0,
@@ -3900,6 +3796,8 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         growth_faults_remaining: 0,
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+        saved_user_state: crate::userland::user_state::UserState::default(),
+        terminal_id: None,
     };
 
     // Stage a recognizable FS_BASE value. The kernel half of the
@@ -3936,7 +3834,6 @@ fn test_has_children_sees_live_child() {
     let child = Process {
         pid: 8001,
         parent_pid: 8000,
-        continuation: None,
         image: None,
         exit_kind: ExitKind::None,
         exit_code: 0,
@@ -3955,6 +3852,8 @@ fn test_has_children_sees_live_child() {
         growth_faults_remaining: 0,
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+        saved_user_state: crate::userland::user_state::UserState::default(),
+        terminal_id: None,
     };
     insert_process(child);
     assert!(crate::userland::lifecycle::has_children(8000));
@@ -4077,7 +3976,6 @@ fn test_remove_process_cleans_ring3_queues() {
     let p1 = crate::userland::lifecycle::Process {
         pid: 60,
         parent_pid: 0,
-        continuation: None,
         image: None,
         exit_kind: crate::userland::lifecycle::ExitKind::None,
         exit_code: 0,
@@ -4096,11 +3994,12 @@ fn test_remove_process_cleans_ring3_queues() {
         growth_faults_remaining: 0,
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+        saved_user_state: crate::userland::user_state::UserState::default(),
+        terminal_id: None,
     };
     let p2 = crate::userland::lifecycle::Process {
         pid: 61,
         parent_pid: 0,
-        continuation: None,
         image: None,
         exit_kind: crate::userland::lifecycle::ExitKind::None,
         exit_code: 0,
@@ -4119,6 +4018,8 @@ fn test_remove_process_cleans_ring3_queues() {
         growth_faults_remaining: 0,
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+        saved_user_state: crate::userland::user_state::UserState::default(),
+        terminal_id: None,
     };
     crate::userland::lifecycle::insert_process(p1);
     crate::userland::lifecycle::insert_process(p2);
@@ -4187,7 +4088,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_try_grow_user_stack_not_stack_grow_above_bottom,
         &test_try_grow_user_stack_sentinel_is_not_stack_grow,
         &test_try_grow_user_stack_widens_validated_bounds,
-        &test_stack_window_survives_parent_stash_round_trip,
         &test_handler_blocked_mask_includes_sa_mask_and_signum,
         &test_handler_blocked_mask_preserves_old_bits,
         &test_handler_blocked_mask_strips_kill_and_stop,

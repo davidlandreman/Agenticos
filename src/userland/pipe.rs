@@ -8,21 +8,20 @@
 //! Behavior follows POSIX:
 //! - `read(read_fd, …)` drains as many bytes as are available, up to
 //!   `count`. Returns `0` (EOF) when the buffer is empty *and* no
-//!   writer fds remain. Returns `-EAGAIN` when empty but writers
-//!   exist (POSIX would block; we don't have a real scheduler yet so
-//!   for now we fail-fast — see `read_handler`).
+//!   writer fds remain. Blocks the ring-3 process when empty but
+//!   writers exist (see `read_handler` and
+//!   [`crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeRead`]).
 //! - `write(write_fd, …)` accepts as many bytes as fit in the
-//!   remaining capacity. Returns `-EPIPE` when the buffer is full
-//!   and no reader fds remain.
+//!   remaining capacity. Blocks when the buffer is full but readers
+//!   exist; returns `-EPIPE` when no reader fds remain.
 //! - `close` drops the fd; when the last reader closes, writers see
 //!   `-EPIPE` on the next write; when the last writer closes,
 //!   readers see EOF.
 //!
-//! With our synchronous-fork model this is enough for short-output
-//! pipelines (`echo foo | cat`): the parent forks the writer, the
-//! writer's output fits in the 4 KiB buffer, the writer exits, then
-//! the parent forks the reader which drains the buffer. Pipelines
-//! that need both halves running concurrently wait for Phase 5 PR-B.
+//! Wake hooks: `Pipe::write` calls
+//! [`crate::userland::lifecycle::wake_ring3_blocked_on_pipe_readable`]
+//! when bytes are appended, and the handle `Drop`s wake their
+//! counterparts so EOF / EPIPE are observed promptly.
 
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -62,24 +61,44 @@ impl Pipe {
     }
 
     /// Try to push as many bytes as fit into the ring buffer. Returns
-    /// the count actually written (may be 0 if buffer is full).
+    /// the count actually written (may be 0 if buffer is full). If any
+    /// bytes were written, wakes ring-3 readers blocked in
+    /// [`Ring3BlockReason::WaitingForPipeRead`].
+    ///
+    /// [`Ring3BlockReason::WaitingForPipeRead`]: crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeRead
     pub fn write(&self, src: &[u8]) -> usize {
-        let mut buf = self.inner.lock();
-        let room = PIPE_CAPACITY.saturating_sub(buf.len());
-        let take = core::cmp::min(room, src.len());
-        for &b in &src[..take] {
-            buf.push_back(b);
+        let take = {
+            let mut buf = self.inner.lock();
+            let room = PIPE_CAPACITY.saturating_sub(buf.len());
+            let take = core::cmp::min(room, src.len());
+            for &b in &src[..take] {
+                buf.push_back(b);
+            }
+            take
+        };
+        if take > 0 {
+            crate::userland::lifecycle::wake_ring3_blocked_on_pipe_readable();
         }
         take
     }
 
     /// Pop up to `dst.len()` bytes from the buffer into `dst`.
-    /// Returns the number of bytes copied.
+    /// Returns the number of bytes copied. If any bytes were drained,
+    /// wakes ring-3 writers blocked in
+    /// [`Ring3BlockReason::WaitingForPipeWrite`].
+    ///
+    /// [`Ring3BlockReason::WaitingForPipeWrite`]: crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeWrite
     pub fn read(&self, dst: &mut [u8]) -> usize {
-        let mut buf = self.inner.lock();
-        let n = core::cmp::min(dst.len(), buf.len());
-        for slot in dst.iter_mut().take(n) {
-            *slot = buf.pop_front().unwrap();
+        let n = {
+            let mut buf = self.inner.lock();
+            let n = core::cmp::min(dst.len(), buf.len());
+            for slot in dst.iter_mut().take(n) {
+                *slot = buf.pop_front().unwrap();
+            }
+            n
+        };
+        if n > 0 {
+            crate::userland::lifecycle::wake_ring3_blocked_on_pipe_writable();
         }
         n
     }
@@ -121,7 +140,13 @@ impl Clone for PipeReadHandle {
 
 impl Drop for PipeReadHandle {
     fn drop(&mut self) {
-        self.pipe.reader_count.fetch_sub(1, Ordering::Release);
+        let prev = self.pipe.reader_count.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            // Last reader gone — any writer currently blocked on a full
+            // buffer must re-fire so it can observe `readers() == 0` and
+            // return `EPIPE` instead of waiting forever.
+            crate::userland::lifecycle::wake_ring3_blocked_on_pipe_writable();
+        }
     }
 }
 
@@ -150,6 +175,12 @@ impl Clone for PipeWriteHandle {
 
 impl Drop for PipeWriteHandle {
     fn drop(&mut self) {
-        self.pipe.writer_count.fetch_sub(1, Ordering::Release);
+        let prev = self.pipe.writer_count.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            // Last writer gone — any reader currently blocked on an
+            // empty buffer must re-fire so it can observe EOF (the
+            // `writers() == 0` branch in `read_handler`).
+            crate::userland::lifecycle::wake_ring3_blocked_on_pipe_readable();
+        }
     }
 }

@@ -896,13 +896,9 @@ fn open_file(path: &str) {
             crate::debug_info!("explorer: spawn notepad result={:?}", result);
         }
         OpenAction::LaunchRun => {
-            if crate::userland::lifecycle::user_active() {
-                show_error(
-                    "Cannot run",
-                    "Another user app is already running. Wait for it to exit before launching this one.",
-                );
-                return;
-            }
+            // U8: multi-ring-3 lifted the single-app restriction.
+            // Concurrent ring-3 launches are now expected — each gets
+            // its own kernel-thread launcher.
             // Launch the ELF on a fresh kernel process so explorer's UI
             // loop doesn't block for the user binary's lifetime.
             let owned_path = alloc::string::String::from(path);

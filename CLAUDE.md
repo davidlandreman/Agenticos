@@ -95,7 +95,7 @@ Each entry below points to the folder's own `CLAUDE.md`, which carries the detai
 - `docs/conductor-workflow.md` — Conductor workspace lifecycle reference
 - `docs/window_system_design.md` — Window system architecture and implementation status
 - `docs/shell_window_integration.md` — Shell/terminal window integration design
-- `docs/solutions/learnings/` — Post-mortems and patterns from prior debugging journeys. Read the relevant one before touching adjacent code. The `2026-05-09-multi-mib-user-binary-load.md` learning covers the seven-issue chain that made multi-MiB user binaries appear to hang under interactive boot (frame allocator, hot-path logging, `read_to_vec` zero-fill, FAT temp buffer, SSE enable, GUI/render contention, IDE PIO atomicity).
+- `docs/solutions/learnings/` — Post-mortems and patterns from prior debugging journeys. Read the relevant one before touching adjacent code. The `2026-05-09-multi-mib-user-binary-load.md` learning covers the seven-issue chain that made multi-MiB user binaries appear to hang under interactive boot. The `2026-05-24-syscall-stub-callee-saved-leak.md` learning covers the SYSCALL stub bug that segfaulted zsh on the first interactive `ls` — kernel scratch leaked into user `rbx` across blocking syscalls because the stub didn't push user callee-saved registers and the Rust-side capture helper read clobbered live registers.
 - `README.md` — Project README
 
 ## Known Issues and Technical Debt
@@ -103,13 +103,12 @@ Each entry below points to the folder's own `CLAUDE.md`, which carries the detai
 These are cross-cutting (not subsystem-local). Subsystem-specific known issues live in the relevant folder file (e.g., the graphics refactor list lives in `src/graphics/CLAUDE.md`).
 
 ### Current Limitations
-1. **No Multitasking** — Everything runs synchronously in kernel space.
+1. **No SMP** — Single CPU. The scheduler is preemptive (PIT @ 100 Hz) and multitasks kernel threads + ring-3 processes (U5-U8 in `docs/plans/2026-05-16-005-feat-multi-ring3-process-scheduling-plan.md`), but doesn't exploit multiple cores.
 2. **Read-Only Filesystem** — No write support implemented.
 3. **8.3 Filenames Only** — No long filename support.
 4. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
 5. **Global State** — Heavy use of `static mut` and `lazy_static`.
-6. **No User Space** — Everything runs in ring 0 (kernel mode).
-7. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.
+6. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.
 
 ### Areas Needing Refactoring
 1. **Graphics Subsystem** — Complex relationships between display modules. (Detail in `src/graphics/CLAUDE.md`.)

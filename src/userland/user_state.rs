@@ -38,42 +38,87 @@ pub struct UserState {
 
 const _SIZE_CHECK: () = assert!(core::mem::size_of::<UserState>() == 16 * 8);
 
-/// Six callee-saved user registers, captured at the very start of a
-/// syscall handler before any Rust code clobbers them. Layout matches
-/// the order `capture_callee_saved` writes into the buffer.
+/// Six callee-saved user registers, returned by
+/// [`read_user_callee_saved`]. The `r12_register` field carries the
+/// user's RSP (the SYSCALL stub stashes user RSP into `r12` before
+/// calling the dispatcher); the original user R12 is read separately
+/// via [`read_user_r12`].
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 pub struct CalleeSavedSnapshot {
     pub rbx: u64,
     pub rbp: u64,
-    /// `r12` register at handler entry. The SYSCALL stub stashed user
-    /// RSP here before calling the dispatcher, so this slot actually
-    /// carries the user RSP, not user R12. The original user R12 is
-    /// on the kernel stack at a known offset relative to `SyscallArgs`.
     pub r12_register: u64,
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
 }
 
-/// Naked-asm helper: write rbx/rbp/r12-r15 into the buffer. Must be
-/// called as the very first thing in a syscall handler that needs to
-/// see user-mode register values, before the Rust compiler has had a
-/// chance to spill or reuse those registers.
+/// Read the user's callee-saved registers from the slots the SYSCALL
+/// stub pushed onto the kernel stack. Layout (relative to `args` ptr):
 ///
-/// SAFETY: `out` must point to a writable, suitably-aligned buffer of
-/// at least 6 * 8 bytes. The function follows the System V calling
-/// convention — first arg in RDI.
-#[unsafe(naked)]
-#[no_mangle]
-pub unsafe extern "sysv64" fn capture_callee_saved(_out: *mut CalleeSavedSnapshot) {
-    core::arch::naked_asm!(
-        "mov [rdi + 0], rbx",
-        "mov [rdi + 8], rbp",
-        "mov [rdi + 16], r12",
-        "mov [rdi + 24], r13",
-        "mov [rdi + 32], r14",
-        "mov [rdi + 40], r15",
-        "ret",
+/// ```text
+///   args +  72: user RBX
+///   args +  80: user RBP
+///   args +  88: user R13
+///   args +  96: user R14
+///   args + 104: user R15
+///   args + 112: original user R12
+/// ```
+///
+/// User RSP is captured separately — it lives in gs:[8]
+/// (`PERCPU.user_rsp_scratch`) from SYSCALL entry until the iretq
+/// epilogue, and we expose it via [`read_user_rsp`] below. The
+/// `r12_register` field on the returned snapshot holds **user RSP**.
+///
+/// An earlier implementation used a naked-asm `capture_callee_saved`
+/// helper that read live registers. By the time a syscall handler
+/// invoked it, the Rust dispatcher's prologue had already clobbered
+/// `rbx` (and potentially other callee-saved regs) with locals — so
+/// the snapshot recorded kernel scratch values as "user state".
+/// Saving those bogus values into `Process.saved_user_state` and
+/// restoring them across a blocking syscall corrupted user rbx with
+/// a kernel-heap pointer, which then faulted on the next dereference.
+/// Reading from explicit stub-pushed slots is the only reliable path.
+///
+/// SAFETY: `args` must point at the SyscallArgs struct the stub built
+/// on the kernel stack; the function dereferences slots above it.
+pub unsafe fn read_user_callee_saved(
+    args: *const crate::arch::x86_64::syscall::SyscallArgs,
+) -> CalleeSavedSnapshot {
+    let p = args as *const u64;
+    CalleeSavedSnapshot {
+        rbx: core::ptr::read(p.add(9)),
+        rbp: core::ptr::read(p.add(10)),
+        r12_register: read_user_rsp(),
+        r13: core::ptr::read(p.add(11)),
+        r14: core::ptr::read(p.add(12)),
+        r15: core::ptr::read(p.add(13)),
+    }
+}
+
+/// Read the user's original R12 register from the kernel-stack slot
+/// the SYSCALL stub pushed (at `args + 112`).
+///
+/// SAFETY: as for [`read_user_callee_saved`].
+pub unsafe fn read_user_r12(
+    args: *const crate::arch::x86_64::syscall::SyscallArgs,
+) -> u64 {
+    let p = args as *const u64;
+    core::ptr::read(p.add(14))
+}
+
+/// Read the user's RSP from the per-CPU SYSCALL scratch slot. The
+/// SYSCALL stub writes it there with `mov gs:[8], rsp` before
+/// switching stacks; the value persists for the syscall body because
+/// `FMASK` masks `IF` and no nested SYSCALL can overwrite it.
+#[inline(always)]
+pub unsafe fn read_user_rsp() -> u64 {
+    let rsp: u64;
+    core::arch::asm!(
+        "mov {}, gs:[8]",
+        out(reg) rsp,
+        options(nostack, preserves_flags),
     );
+    rsp
 }

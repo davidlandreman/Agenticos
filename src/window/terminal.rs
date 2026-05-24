@@ -52,32 +52,38 @@ pub fn get_current_output_terminal() -> Option<WindowId> {
     }
 }
 
-/// Register a new terminal for output
+/// Register a new terminal for output AND install its stdin queue so
+/// keystrokes typed in this terminal land in their own per-terminal
+/// buffer (not the global one). Pre-fix, two terminals shared a
+/// single stdin queue and `ls` typed in terminal 2 could be drained
+/// by zsh1 — see the multi-terminal stdin learning.
 pub fn register_terminal(window_id: WindowId) {
     TERMINAL_BUFFERS.lock().entry(window_id).or_insert_with(Vec::new);
+    crate::userland::stdin::install_for_terminal(window_id);
 }
 
-/// Unregister a terminal
+/// Unregister a terminal and drop its stdin queue.
 pub fn unregister_terminal(window_id: WindowId) {
     TERMINAL_BUFFERS.lock().remove(&window_id);
+    crate::userland::stdin::clear_for_terminal(window_id);
 }
 
-/// Write text to a specific terminal window
+/// Write text to a specific terminal window.
+///
+/// **Deadlock-safe**: appends to the per-terminal buffer only; does
+/// NOT touch the WINDOW_MANAGER lock. The compositor's
+/// [`invalidate_dirty_terminals`] pass picks up the new content and
+/// invalidates the window on its own scheduling slice. Pre-fix, this
+/// function locked WINDOW_MANAGER to invalidate inline — but ring-3
+/// write syscalls run at CPL=0 with `is_in_spawned_process=false`, so
+/// the timer ISR doesn't preempt them. If the compositor was
+/// preempted mid-`render_frame` (holding WINDOW_MANAGER), a ring-3
+/// write would spin on the lock forever.
 pub fn write_to_terminal_id(terminal_id: WindowId, text: &str) {
-    // Add to this terminal's output buffer
-    {
-        let mut buffers = TERMINAL_BUFFERS.lock();
-        if let Some(buffer) = buffers.get_mut(&terminal_id) {
-            buffer.push(String::from(text));
-        }
+    let mut buffers = TERMINAL_BUFFERS.lock();
+    if let Some(buffer) = buffers.get_mut(&terminal_id) {
+        buffer.push(String::from(text));
     }
-
-    // Force window invalidation to trigger repaint
-    with_window_manager(|wm| {
-        if let Some(window) = wm.window_registry.get_mut(&terminal_id) {
-            window.invalidate();
-        }
-    });
 }
 
 /// Write text to the current output terminal (used by print! macro)
@@ -104,5 +110,33 @@ pub fn take_terminal_output(terminal_id: WindowId) -> Vec<String> {
 pub fn has_terminal_output(terminal_id: WindowId) -> bool {
     let buffers = TERMINAL_BUFFERS.lock();
     buffers.get(&terminal_id).map_or(false, |b| !b.is_empty())
+}
+
+/// Compositor-side: invalidate every terminal window with pending
+/// buffered output. Called from
+/// `crate::window::compositor::run` each iteration; pairs with
+/// [`write_to_terminal_id`]'s deadlock-safe "buffer only, defer
+/// invalidation" contract. Snapshots dirty IDs under the
+/// `TERMINAL_BUFFERS` lock, then drops it before taking
+/// WINDOW_MANAGER — no nested locks.
+pub fn invalidate_dirty_terminals() {
+    let dirty: Vec<WindowId> = {
+        let buffers = TERMINAL_BUFFERS.lock();
+        buffers
+            .iter()
+            .filter(|(_, b)| !b.is_empty())
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    if dirty.is_empty() {
+        return;
+    }
+    with_window_manager(|wm| {
+        for id in dirty {
+            if let Some(window) = wm.window_registry.get_mut(&id) {
+                window.invalidate();
+            }
+        }
+    });
 }
 

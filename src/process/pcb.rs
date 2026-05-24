@@ -127,6 +127,12 @@ pub enum BlockReason {
     SleepingUntilTick(u64),
     /// Waiting for a signal/event to occur
     WaitingForSignal,
+    /// U8: kernel-thread is the launcher of a ring-3 process
+    /// (`enter_user_mode_with_aspace`) and is parked until that
+    /// process exits. Woken by `wake_kernel_threads_waiting_for_ring3_exit`
+    /// in the ring-3 exit path (`long_jump_to_run_or_halt`).
+    /// The `u32` payload is the ring-3 PID being awaited.
+    WaitingForRing3Exit(u32),
 }
 
 /// Process Control Block - complete state for a process

@@ -17,6 +17,7 @@ pub mod path;
 pub mod pipe;
 pub mod signal;
 pub mod stdin;
+pub mod switch;
 pub mod syscalls;
 pub mod tty;
 pub mod user_state;
@@ -26,9 +27,7 @@ use core::arch::naked_asm;
 use x86_64::VirtAddr;
 
 use crate::userland::image::UserImage;
-use crate::userland::lifecycle::{
-    install_continuation, with_active_user, ExitKind, KernelContinuation,
-};
+use crate::userland::lifecycle::{with_active_user, ExitKind};
 
 // ---------- Linux x86-64 auxv constants ----------
 
@@ -118,16 +117,33 @@ pub fn enter_user_mode_with_aspace(
     envp: &[&str],
     address_space: Option<crate::userland::address_space::AddressSpace>,
 ) -> Result<(ExitKind, i64), EnterError> {
-    // D5: only one user app at a time.
-    with_active_user(|au| {
-        if au.image.is_some() {
-            return Err(EnterError::AlreadyActive);
-        }
-        Ok(())
-    })?;
+    // Combined entry point used by tests + the synchronous-launch path
+    // (`launch_user_binary`). Production launchers can call
+    // `setup_user_process` + `wait_for_ring3_exit` directly to release
+    // the binary-setup mutex before blocking.
+    let new_pid = setup_user_process(image, argv, envp, address_space)?;
+    Ok(wait_for_ring3_exit(new_pid))
+}
 
+/// U8 setup phase. Installs the Process, populates its
+/// `saved_user_state` with the binary's entry frame, marks it
+/// `ring3_ready`, and returns the new PID. Does NOT block.
+///
+/// **Caller responsibility (concurrency):** `address_space` must
+/// currently be active on this CPU (CR3 = its L4). The caller must
+/// guarantee that no other thread has activated a different L4
+/// between its `aspace.activate()` and this call, because
+/// `build_initial_stack` writes to user pages of `address_space`
+/// through CR3. `launch_user_binary` enforces this via
+/// `BINARY_SETUP_MUTEX`.
+pub fn setup_user_process(
+    image: UserImage,
+    argv: &[&str],
+    envp: &[&str],
+    address_space: Option<crate::userland::address_space::AddressSpace>,
+) -> Result<u32, EnterError> {
     // Capture the bits the initial-stack builder needs before the image
-    // moves into the active-user slot.
+    // moves into the new Process slot.
     let entry = image.entry.as_u64();
     let stack_top = image.stack_top.as_u64();
     let bounds = crate::userland::abi::UserVaBounds {
@@ -143,84 +159,93 @@ pub fn enter_user_mode_with_aspace(
     let argv_slice: &[&str] = if argv.is_empty() { &default_argv } else { argv };
 
     // The initial-stack builder writes through the kernel-visible alias
-    // of the user stack pages — those are mapped R+W by the loader.
+    // of the user stack pages. CR3 is already pointing at the new
+    // process's L4 (the caller activated it before calling us), so
+    // these writes land in the right address space.
     let user_rsp = build_initial_stack(stack_top, &phdr_bytes, e_phnum, argv_slice, envp);
 
-    // Phase 4 PR-A/B: install a fresh Process slot with a real PID
-    // and (when one was provided) the L4 page table the loader mapped
-    // into. Tests that bypass the run command pass `None` and stay on
-    // the kernel L4.
-    let _new_pid = crate::userland::lifecycle::install_new_process_opt(
+    // Install the new Process. U8: don't make it current — just insert
+    // and mark ready. The scheduler picks it up.
+    let new_pid = crate::userland::lifecycle::install_new_process_opt(
         image,
         crate::mm::paging::USER_BRK_BASE,
         crate::mm::paging::USER_MMAP_BASE,
         address_space,
     );
-    // U3: stash the launch path so `readlink("/proc/self/exe")` and
-    // tools like zsh's `$ZSH_ARGZERO` resolution can recover it. We use
-    // argv[0] as the canonical exe path — the run command and execve
-    // both pass the FAT path there. Synthetic test launches that pass an
-    // empty argv get the placeholder DEFAULT_ARGV0; that's fine because
-    // those paths don't exercise readlink anyway.
+
+    // U8: populate `saved_user_state` with the entry frame so the
+    // first `resume_ring3` lands at the binary's entry point with a
+    // clean register file (all GPRs zero, user RSP pointing at the
+    // freshly-built argc/argv/envp/auxv frame).
+    //
+    // Also: inherit the launching kernel thread's `terminal_id` so
+    // this ring-3 process's stdout/stderr route to the right terminal
+    // window (the bugfix to the multi-terminal write-routing race).
+    // Read from SCHEDULER.current()'s PCB.
+    let launcher_terminal_id = {
+        let sched = crate::process::scheduler::SCHEDULER.lock();
+        sched.current()
+            .and_then(|pid| sched.get_process(pid))
+            .and_then(|pcb| pcb.terminal_id)
+    };
     let exe_path = alloc::string::String::from(argv_slice[0]);
-    crate::userland::lifecycle::with_active_user(|p| {
+    crate::userland::lifecycle::with_process(new_pid, |p| {
         p.exe_path = Some(exe_path);
+        p.terminal_id = launcher_terminal_id;
+        p.saved_user_state = crate::userland::user_state::UserState {
+            rip: entry,
+            rsp: user_rsp,
+            // Reserved bit 1 set, IF set, IOPL=0, TF/NT/RF clear.
+            rflags: 0x202,
+            ..Default::default()
+        };
     });
+
+    // U8: `install_new_process_opt` still sets `current_user_pid =
+    // new_pid` (single-app-era invariant). Clear it so the first
+    // `resume_ring3` from the kernel main loop atomically sets CR3 +
+    // current_user_pid for us.
+    if crate::userland::lifecycle::current_user_pid() == Some(new_pid) {
+        crate::userland::lifecycle::set_current_user_pid(None);
+    }
+
     // Phase 5 PR-B2 test hook: lets tests pre-install a signal action
     // before the user process starts running. Production launches
     // never set this; release builds compile it out.
     #[cfg(feature = "test")]
     {
         if let Some((sig, action)) = test_hooks::take_pre_iretq_signal_action() {
-            with_active_user(|p| {
+            crate::userland::lifecycle::with_process(new_pid, |p| {
                 p.signal_state.set_action(sig, action);
             });
         }
     }
     crate::userland::abi::set_user_va_bounds(bounds);
-    // Phase 1 stdin: install an empty queue for `read(0, …)` to consume.
-    // Cleared by `release_active_image` after the long-jump returns.
     crate::userland::stdin::install();
-    // Phase 3 tty: reset termios to the default canonical/echo profile
-    // so each user binary starts in a known-good state.
     crate::userland::tty::install_default();
 
-    // Phase 5 PR-C1: point both TSS.rsp0 (used by interrupt gates)
-    // and the SYSCALL stub's `gs:[0]` slot at this process's own
-    // kernel stack — we just allocated it inside install_new_process.
-    let rsp0 = crate::userland::lifecycle::with_current_process(|p| {
-        p.kernel_stack.as_ref().expect("kernel_stack installed").top()
-    });
-    unsafe {
-        crate::arch::x86_64::gdt::set_kernel_rsp0(rsp0);
-        crate::arch::x86_64::syscall::set_percpu_kernel_rsp_top(rsp0.as_u64());
-    }
+    crate::userland::lifecycle::mark_ring3_ready(new_pid);
 
-    // Selectors. RPL=3 baked into the lower bits.
-    let sel = crate::arch::x86_64::gdt::selectors();
-    let user_cs = sel.user_code.0 as u64;
-    let user_ss = sel.user_data.0 as u64;
+    Ok(new_pid)
+}
 
-    // S4: sanitize RFLAGS for ring-3 entry. Reserved bit 1 set, IF set,
-    // IOPL=0, TF/NT/RF clear. 0x202 captures exactly that.
-    let user_rflags: u64 = 0x202;
+/// U8 wait phase. Blocks the calling kernel thread until ring-3
+/// process `pid` exits, then reads its exit info and returns. Does
+/// NOT remove the Process from PROCESS_TABLE — the caller's cleanup
+/// (`release_active_image`) is the canonical drop site, and tests
+/// rely on inspecting post-exit state via `with_current_process`.
+///
+/// Safe to call without any mutex — the kernel-thread block path
+/// touches no user-VA state.
+pub fn wait_for_ring3_exit(pid: u32) -> (ExitKind, i64) {
+    crate::process::block_kernel_thread_for_ring3_exit(pid);
 
-    // SAFETY: callee-saved regs + RSP are saved into the active-user slot's
-    // continuation by the asm prologue; `iretq` then transitions to ring 3.
-    // On exit/fault, `restore_continuation` jumps back to the resume label
-    // and the function continues normally.
-    unsafe {
-        enter_user_mode_asm(entry, user_rsp, user_rflags, user_cs, user_ss);
-    }
-
-    // Long-jumped back. Read the recorded exit reason.
-    let (kind, code) = with_active_user(|au| (au.exit_kind, au.exit_code));
-
-    // Clear the syscall pointer-validation bounds — no user pointers are
-    // valid until the next `run`.
-    crate::userland::abi::clear_user_va_bounds();
-
-    Ok((kind, code))
+    // Restore `current_user_pid` to point at the just-exited process so
+    // `release_active_image` (looks up by `current_user_pid`) finds
+    // and removes it.
+    crate::userland::lifecycle::set_current_user_pid(Some(pid));
+    crate::userland::lifecycle::with_process(pid, |p| (p.exit_kind, p.exit_code))
+        .unwrap_or((ExitKind::None, 0))
 }
 
 /// Build the Linux x86-64 initial stack frame.
@@ -370,161 +395,6 @@ unsafe fn write_u64_at(addr: u64, value: u64) {
     core::ptr::write_unaligned(addr as *mut u64, value);
 }
 
-/// Setjmp prologue + ring-3 transition.
-///
-/// Inputs (System V ABI):
-/// - `RDI` = user RIP (entry)
-/// - `RSI` = user RSP
-/// - `RDX` = user RFLAGS
-/// - `RCX` = user CS
-/// - `R8`  = user SS
-///
-/// Behavior:
-/// 1. Save callee-saved regs (RBX, RBP, R12-R15), RSP, and the address of
-///    the resume label into a `KernelContinuation` on the local stack.
-/// 2. Call `lifecycle::install_continuation` with that struct.
-/// 3. Build the iretq frame and `iretq` to ring 3.
-/// 4. Resume label: when `restore_continuation` jumps here, the saved RSP
-///    has already been restored, so `ret` returns from this function.
-///
-/// SAFETY:
-/// - Must be called from CPL=0 with interrupts enabled (the iretq sets
-///   IF=1 on the way in via RFLAGS=0x202; we explicitly do not need a
-///   `cli`/`sti` dance because the TSS is already loaded with the same
-///   kernel rsp0 stack we are running on, and the syscall path will not
-///   land us elsewhere).
-/// - The user CS/SS values must have RPL=3.
-/// - `entry` must be inside a USER-mapped, executable page.
-#[unsafe(naked)]
-#[no_mangle]
-pub unsafe extern "C" fn enter_user_mode_asm(
-    _entry: u64,    // RDI
-    _user_rsp: u64, // RSI
-    _rflags: u64,   // RDX
-    _user_cs: u64,  // RCX
-    _user_ss: u64,  // R8
-) {
-    naked_asm!(
-        // ----- Phase 1: build KernelContinuation on the local stack -----
-        //
-        // Allocate 64 bytes (8 qwords): rbx, rbp, r12, r13, r14, r15, rsp, rip.
-        // We push them in struct order so layout matches `KernelContinuation`.
-        //
-        // After the user app exits, `restore_continuation` will load RSP
-        // from offset +48 of the saved struct; at that point the saved
-        // struct is *also* on the same stack we're about to leave, but the
-        // reload makes that irrelevant — RSP becomes whatever we record in
-        // the +48 slot. We record the value of RSP *as it should be on
-        // resume*: just past the saved struct, so the matching `ret` at
-        // the resume label has a clean stack to unwind to.
-        //
-        // Layout (low addr first):
-        //  [rsp +  0] rbx
-        //  [rsp +  8] rbp
-        //  [rsp + 16] r12
-        //  [rsp + 24] r13
-        //  [rsp + 32] r14
-        //  [rsp + 40] r15
-        //  [rsp + 48] rsp_on_resume  (= rsp before this allocation)
-        //  [rsp + 56] rip            (= 1f)
-        //
-        // We compute rsp_on_resume = rsp_now + 64 (the 8 qwords we just
-        // allocated below).
-        "sub rsp, 64",
-        "mov [rsp + 0], rbx",
-        "mov [rsp + 8], rbp",
-        "mov [rsp + 16], r12",
-        "mov [rsp + 24], r13",
-        "mov [rsp + 32], r14",
-        "mov [rsp + 40], r15",
-        "lea rax, [rsp + 64]",          // rsp value to restore on resume
-        "mov [rsp + 48], rax",
-        "lea rax, [rip + 2f]",          // resume RIP
-        "mov [rsp + 56], rax",
-
-        // ----- Phase 2: install_continuation(&saved) -----
-        //
-        // System V: 1st arg in RDI. We stash the user-mode arg regs across
-        // the call by saving them on the stack first, since `install_continuation`
-        // is a regular Rust function and may clobber any caller-saved reg.
-        //
-        // Save: RDI (entry), RSI (user_rsp), RDX (rflags), RCX (user_cs), R8 (user_ss).
-        "push rdi",
-        "push rsi",
-        "push rdx",
-        "push rcx",
-        "push r8",
-        // The continuation lives at the original [rsp + 64] (we pushed 5 more
-        // qwords -> +40 above the original), but `install_continuation` only
-        // needs to read the contents — it copies into the global slot. Pass
-        // a pointer to it via RDI.
-        "lea rdi, [rsp + 40]",
-        "call {install_continuation}",
-        // Restore the user-mode arg regs.
-        "pop r8",
-        "pop rcx",
-        "pop rdx",
-        "pop rsi",
-        "pop rdi",
-
-        // ----- Phase 3: build iretq frame and transfer to ring 3 -----
-        //
-        // The CPU expects (from low to high addr on the kernel stack):
-        //   RIP, CS, RFLAGS, RSP, SS
-        // i.e. push in reverse order: SS, RSP, RFLAGS, CS, RIP.
-        //
-        // Inputs are still: RDI=entry, RSI=user_rsp, RDX=rflags, RCX=user_cs, R8=user_ss.
-        "push r8",      // SS
-        "push rsi",     // RSP
-        "push rdx",     // RFLAGS
-        "push rcx",     // CS
-        "push rdi",     // RIP
-
-        // Wipe GP regs we don't want leaking into ring 3. The user app's
-        // `_start` is `extern "C"` but receives no arguments by convention,
-        // so zeroing is fine. RAX/RCX/RDX may leak (we just used them); we
-        // explicitly zero them here. R10/R11 are scratch in the SysV ABI.
-        "xor rax, rax",
-        "xor rbx, rbx",
-        "xor rcx, rcx",
-        "xor rdx, rdx",
-        "xor rsi, rsi",
-        "xor rdi, rdi",
-        "xor rbp, rbp",
-        "xor r8, r8",
-        "xor r9, r9",
-        "xor r10, r10",
-        "xor r11, r11",
-        "xor r12, r12",
-        "xor r13, r13",
-        "xor r14, r14",
-        "xor r15, r15",
-
-        "iretq",
-
-        // ----- Resume label -----
-        //
-        // `restore_continuation` lands here with RSP = saved rsp_on_resume
-        // (which is the original RSP at function entry, prior to our 64-byte
-        // allocation). All callee-saved regs have already been restored.
-        // A plain `ret` returns to the caller.
-        "2:",
-        "ret",
-
-        install_continuation = sym install_continuation_thunk,
-    );
-}
-
-/// Thin C-callable shim around `lifecycle::install_continuation`. The naked
-/// stub references this by `sym` to dodge cross-crate-name-mangling concerns.
-#[no_mangle]
-extern "C" fn install_continuation_thunk(c: *const KernelContinuation) {
-    // SAFETY: the asm prologue passes a pointer to a stack-local struct that
-    // lives until the function returns; we copy out by-value into the global.
-    let cont = unsafe { *c };
-    install_continuation(cont);
-}
-
 /// Phase 4 PR-D: iretq into ring 3 with caller-supplied registers,
 /// **without** setjmp.
 ///
@@ -585,122 +455,6 @@ pub unsafe extern "C" fn iretq_to_user_with_regs(
         "iretq",
     );
 }
-
-/// Phase 4 PR-C2: setjmp + iretq with caller-supplied user registers.
-///
-/// Variant of `enter_user_mode_asm` for `fork()`'s child dispatch. Saves
-/// kernel state into a `KernelContinuation` (so when the child
-/// `_exit`s the kernel can long-jump back here), then loads the child's
-/// full GP-register snapshot from `state` and `iretq`s into ring 3.
-///
-/// On long-jump return (after the child exits), control resumes at the
-/// `2:` label and `ret`s back to the caller — same setjmp/longjmp
-/// shape as `enter_user_mode_asm`.
-///
-/// `user_cs` is `0x23` (GDT slot 4 | RPL=3) and `user_ss` is `0x1B`
-/// (GDT slot 3 | RPL=3). The caller passes them rather than us
-/// hard-coding so the same helper could be reused if selectors ever
-/// shift.
-///
-/// SAFETY: `state` must be a valid `UserState` describing a complete
-/// ring-3 register frame. `state.rsp` must lie inside a USER-mapped
-/// writable page in the currently active L4 (caller is responsible
-/// for the CR3 switch before invoking this), and `state.rip` must be
-/// inside a USER-mapped executable page in the same L4. Failures are
-/// not recoverable — they fault inside ring 3 and route through the
-/// existing fault-cleanup path.
-#[unsafe(naked)]
-#[no_mangle]
-pub unsafe extern "C" fn enter_user_mode_with_regs_asm(
-    _state: *const crate::userland::user_state::UserState, // RDI
-    _user_cs: u64,                                          // RSI
-    _user_ss: u64,                                          // RDX
-) {
-    naked_asm!(
-        // ----- Phase 1: build KernelContinuation on the local stack -----
-        // 64 bytes, same layout as `enter_user_mode_asm`:
-        //  [rsp +  0..40] callee-saved (rbx, rbp, r12, r13, r14, r15)
-        //  [rsp + 48]     rsp_on_resume (rsp_now + 64)
-        //  [rsp + 56]     resume rip   (label 2 below)
-        "sub rsp, 64",
-        "mov [rsp + 0], rbx",
-        "mov [rsp + 8], rbp",
-        "mov [rsp + 16], r12",
-        "mov [rsp + 24], r13",
-        "mov [rsp + 32], r14",
-        "mov [rsp + 40], r15",
-        "lea rax, [rsp + 64]",
-        "mov [rsp + 48], rax",
-        "lea rax, [rip + 2f]",
-        "mov [rsp + 56], rax",
-
-        // ----- Phase 2: install_continuation(&saved) -----
-        // Save user-state args across the call (RDI=state, RSI=cs, RDX=ss).
-        "push rdi",
-        "push rsi",
-        "push rdx",
-        "lea rdi, [rsp + 24]",      // ptr to saved continuation (above 3 pushes)
-        "call {install_continuation}",
-        "pop rdx",
-        "pop rsi",
-        "pop rdi",
-
-        // ----- Phase 3: build IRETQ frame from UserState -----
-        // CPU expects (low → high after pushes): RIP, CS, RFLAGS, RSP, SS.
-        // Push reverse: SS, RSP, RFLAGS, CS, RIP.
-        // UserState offsets:
-        //   72: rsp, 112: rip, 120: rflags
-        "push rdx",                  // SS
-        "mov rax, [rdi + 72]",
-        "push rax",                  // user RSP
-        "mov rax, [rdi + 120]",
-        "push rax",                  // RFLAGS
-        "push rsi",                  // CS
-        "mov rax, [rdi + 112]",
-        "push rax",                  // RIP
-
-        // ----- Phase 4: load user GP regs from UserState -----
-        // Use r11 as the live state pointer through the loads (r11
-        // is caller-saved in System V; the iretq clobbers nothing
-        // except CS/SS/RIP/RSP/RFLAGS via the pushed frame, so r11
-        // here doesn't conflict).
-        // UserState offsets:
-        //   0: rax, 8: rdi, 16: rsi, 24: rdx, 32: r10, 40: r8, 48: r9,
-        //  56: rbx, 64: rbp, 80: r12, 88: r13, 96: r14, 104: r15.
-        "mov r11, rdi",              // r11 = state ptr
-        "mov rax, [r11 + 0]",
-        "mov rbx, [r11 + 56]",
-        "mov rbp, [r11 + 64]",
-        "mov r12, [r11 + 80]",
-        "mov r13, [r11 + 88]",
-        "mov r14, [r11 + 96]",
-        "mov r15, [r11 + 104]",
-        "mov r10, [r11 + 32]",
-        "mov r8,  [r11 + 40]",
-        "mov r9,  [r11 + 48]",
-        "mov rdx, [r11 + 24]",
-        "mov rsi, [r11 + 16]",
-        "mov rdi, [r11 + 8]",         // load rdi LAST — we used it as the state ptr
-        // r11 itself is now stale (it held state ptr); user code
-        // doesn't expect any specific value in r11 across SYSCALL,
-        // and IRETQ doesn't touch it. Zero it for cleanliness.
-        "xor r11, r11",
-        // rcx similarly — clobbered by SYSCALL convention, zero it.
-        "xor rcx, rcx",
-
-        "iretq",
-
-        // ----- Resume label -----
-        // Restore-continuation lands here after the child exits.
-        // RSP has already been restored to rsp_on_resume by the asm
-        // jump in `restore_continuation`; just `ret` back to the caller.
-        "2:",
-        "ret",
-
-        install_continuation = sym install_continuation_thunk,
-    );
-}
-
 /// Drop the active `UserImage`, if any. Called by the run command after
 /// `enter_user_mode` returns. Separated out so tests can inspect the
 /// active-user state before the image is released.

@@ -172,12 +172,14 @@ impl TerminalWindow {
         // dropped — the terminal window doesn't actually exist yet in
         // that window so this branch is effectively unreachable in
         // production.
-        if crate::userland::stdin::is_active() {
-            crate::userland::stdin::push_bytes(input.as_bytes());
-            crate::userland::stdin::push_bytes(b"\n");
+        let tid = self.text_window.id();
+        if crate::userland::stdin::is_active_for_terminal(tid) {
+            crate::userland::stdin::push_bytes_for_terminal(tid, input.as_bytes());
+            crate::userland::stdin::push_bytes_for_terminal(tid, b"\n");
         } else {
             crate::debug_warn!(
-                "TerminalWindow::handle_enter: no userland stdin active; dropping line"
+                "TerminalWindow::handle_enter: no userland stdin active for terminal {:?}; dropping line",
+                tid,
             );
         }
 
@@ -282,7 +284,8 @@ impl Window for TerminalWindow {
                 // line editor and forward each keystroke as raw bytes to
                 // user stdin. zsh's zle does this so it can paint its
                 // own prompt and handle history/completion.
-                if crate::userland::stdin::is_active()
+                let tid = self.text_window.id();
+                if crate::userland::stdin::is_active_for_terminal(tid)
                     && !crate::userland::tty::is_canonical()
                 {
                     let bytes = encode_keystroke_for_raw_mode(
@@ -290,7 +293,7 @@ impl Window for TerminalWindow {
                         kbd_event.modifiers,
                     );
                     if !bytes.is_empty() {
-                        crate::userland::stdin::push_bytes(&bytes);
+                        crate::userland::stdin::push_bytes_for_terminal(tid, &bytes);
                         if crate::userland::tty::is_echo() {
                             // ECHO in raw mode: echo only printable bytes
                             // (skip control characters / escape sequences,
@@ -336,7 +339,7 @@ impl Window for TerminalWindow {
                             // off in canonical mode (e.g. password
                             // prompt), accept the byte but don't paint it.
                             self.input_buffer.push(ch);
-                            let echo_to_screen = !crate::userland::stdin::is_active()
+                            let echo_to_screen = !crate::userland::stdin::is_active_for_terminal(tid)
                                 || crate::userland::tty::is_echo();
                             if echo_to_screen {
                                 self.text_window.write_char(ch);
