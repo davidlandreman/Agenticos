@@ -219,6 +219,13 @@ impl TextWindow {
         }
     }
     
+    /// Grid dimensions in cells: `Some((rows, cols))`. Returned as
+    /// `Option` to match the `Window::grid_size` trait signature so
+    /// callers can use either form interchangeably.
+    pub fn grid_size_opt(&self) -> Option<(u16, u16)> {
+        Some((self.rows as u16, self.cols as u16))
+    }
+
     /// Set cursor position
     pub fn set_cursor(&mut self, x: usize, y: usize) {
         if x < self.cols && y < self.rows {
@@ -231,6 +238,32 @@ impl TextWindow {
     pub fn set_colors(&mut self, fg: Color, bg: Color) {
         self.current_fg = fg;
         self.current_bg = bg;
+    }
+
+    /// Overwrite a single cell with explicit content + colors. Bypasses
+    /// `write_char`'s cursor-advance / autowrap behavior — used by the
+    /// `Screen` → `TextWindow` sync path (U9) where the terminal's
+    /// `Screen` is the source of truth and TextWindow is just the
+    /// renderer. The cursor position is not touched; callers manage it
+    /// separately via `set_cursor_position`.
+    pub fn set_cell(&mut self, row: usize, col: usize, ch: char, fg: Color, bg: Color) {
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
+        self.buffer[row][col] = CharCell {
+            ch,
+            fg_color: fg,
+            bg_color: bg,
+        };
+        // Forcing full repaint is the simplest correct policy when an
+        // external source overwrites many cells in a single batch.
+        // The sync path repaints the entire grid each frame, so granular
+        // dirty tracking would be lost work.
+        self.incremental_updates = false;
+        self.dirty_cells.clear();
+        if !self.suppress_invalidation {
+            self.base.invalidate();
+        }
     }
     
     /// Get current cursor position
@@ -598,5 +631,9 @@ impl Window for TextWindow {
 
     fn can_focus(&self) -> bool {
         self.base.can_focus()
+    }
+
+    fn grid_size(&self) -> Option<(u16, u16)> {
+        self.grid_size_opt()
     }
 }

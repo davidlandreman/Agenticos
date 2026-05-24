@@ -122,6 +122,12 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("window_buffer", window_buffer::get_tests),
     ("desktop_backing_store", desktop_backing_store::get_tests),
     ("filter", filter::get_tests),
+    ("terminal", crate::terminal::get_tests),
+    ("vte", crate::terminal::vte::get_tests),
+    ("screen", crate::terminal::screen::get_tests),
+    ("caret", crate::terminal::caret::get_tests),
+    ("pty", crate::terminal::pty::get_tests),
+    ("keys", crate::terminal::keys::get_tests),
 ];
 
 /// Strip the `agenticos::tests::<topic>::` prefix from a test's `type_name`,

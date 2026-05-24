@@ -602,6 +602,25 @@ pub fn wake_ring3_blocked_on_input(terminal_id: Option<crate::window::WindowId>)
     }
 }
 
+/// Raise `sig` on every ring-3 process whose `terminal_id` matches.
+/// Used by the SIGWINCH path on grid resize, and available for any
+/// future tty-scoped signal delivery (`SIGINT` on Ctrl-C, etc.).
+///
+/// Walks the process table once and calls `signal_state.raise(sig)`
+/// on each match. Does not deliver the signal — deferred to the
+/// per-process `maybe_deliver_signal` path that runs at SYSCALL
+/// boundary.
+pub fn raise_signal_on_terminal(terminal_id: crate::window::WindowId, sig: i32) {
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    for (_pid, p) in g.by_pid.iter_mut() {
+        if p.terminal_id == Some(terminal_id) {
+            p.signal_state.raise(sig);
+        }
+    }
+}
+
 /// Wake every ring-3 process blocked on a pipe read. Called when a
 /// pipe write appends bytes or when the last writer drops (so blocked
 /// readers can observe EOF). Conservative — any pipe event wakes every

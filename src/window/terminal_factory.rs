@@ -158,6 +158,17 @@ pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
     // surfaced before zsh's first write) lands in this terminal.
     crate::window::terminal::register_terminal(terminal_id);
 
+    // Sync the pty's winsize to the freshly-constructed terminal
+    // window's grid. Without this, `TIOCGWINSZ` would report the
+    // default 80×24 even for windows that render a different grid —
+    // and vi / less would wrap to the wrong column.
+    if let Some((rows, cols)) =
+        crate::window::with_window_manager(|wm| wm.window_registry.get(&terminal_id).and_then(|w| w.grid_size()))
+            .flatten()
+    {
+        crate::window::terminal::sync_terminal_winsize(terminal_id, rows, cols);
+    }
+
     let pid = spawn_zsh_for_terminal(terminal_id);
     instance.shell_pid = Some(pid);
 
@@ -191,20 +202,25 @@ fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
         move || {
             crate::window::terminal::set_current_output_terminal(terminal_id);
 
-            // Match the env the old `run` command set for zsh: PATH
-            // hits the virtual /bin namespace first (BusyBox applets +
-            // GUI app launchers), then /host for staged binaries.
-            // TERM=dumb dodges terminfo lookups (we don't ship a
-            // database). HOME/USER/LOGNAME/SHELL match the staged
-            // /etc/passwd entry.
+            // PATH hits the virtual /bin namespace first (BusyBox
+            // applets + GUI app launchers), then /host for staged
+            // binaries. TERM=xterm-256color advertises full ANSI / 256
+            // color / cursor-positioning support so vi, less, and
+            // agnoster pick the right terminfo behavior — the matching
+            // parser support lives in `src/terminal/` (see the plan
+            // `docs/plans/2026-05-24-001-feat-terminal-ansi-vt-pty-and-caret-plan.md`).
+            // HOME/USER/LOGNAME/SHELL match the staged /etc/passwd
+            // entry. COLORTERM=truecolor unlocks 24-bit-color code
+            // paths in modern programs.
             let argv = [ZSH_HOST_PATH];
-            let envp: [&str; 7] = [
+            let envp: [&str; 8] = [
                 "PATH=/bin:/host",
                 "HOME=/root",
                 "USER=root",
                 "LOGNAME=root",
                 "SHELL=/bin/zsh",
-                "TERM=dumb",
+                "TERM=xterm-256color",
+                "COLORTERM=truecolor",
                 "LANG=C",
             ];
 

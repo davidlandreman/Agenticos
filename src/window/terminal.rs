@@ -52,34 +52,57 @@ pub fn get_current_output_terminal() -> Option<WindowId> {
     }
 }
 
-/// Register a new terminal for output AND install its stdin queue so
-/// keystrokes typed in this terminal land in their own per-terminal
-/// buffer (not the global one). Pre-fix, two terminals shared a
-/// single stdin queue and `ls` typed in terminal 2 could be drained
-/// by zsh1 — see the multi-terminal stdin learning.
+/// Register a new terminal for output AND install its pty (which
+/// holds the per-terminal stdin queue, termios, and winsize). The
+/// initial winsize is the 80×24 default — callers should follow up
+/// with [`sync_terminal_winsize`] once the hosting window's grid is
+/// known.
 pub fn register_terminal(window_id: WindowId) {
     TERMINAL_BUFFERS.lock().entry(window_id).or_insert_with(Vec::new);
     crate::userland::stdin::install_for_terminal(window_id);
 }
 
-/// Unregister a terminal and drop its stdin queue.
+/// Unregister a terminal and drop its pty.
 pub fn unregister_terminal(window_id: WindowId) {
     TERMINAL_BUFFERS.lock().remove(&window_id);
     crate::userland::stdin::clear_for_terminal(window_id);
 }
 
-/// Write text to a specific terminal window.
+/// Update the pty's `Winsize` for `terminal_id` to match the rendered
+/// grid. Raises `SIGWINCH` on every process bound to this terminal
+/// when the size actually changes — TUI apps (vi, less) rely on this
+/// to redraw on resize.
+pub fn sync_terminal_winsize(terminal_id: WindowId, rows: u16, cols: u16) {
+    let Some(master) = crate::terminal::pty::master_for_terminal(terminal_id) else {
+        return;
+    };
+    let new_ws = crate::terminal::pty::Winsize::new(rows, cols);
+    let changed = master.set_winsize(new_ws);
+    if !changed {
+        return;
+    }
+    // Raise SIGWINCH on every ring-3 process whose terminal_id matches.
+    crate::userland::lifecycle::raise_signal_on_terminal(
+        terminal_id,
+        crate::userland::signal::SIGWINCH,
+    );
+}
+
+/// Write text to a specific terminal window. Output enters the pty
+/// master's drain queue (the same path ring-3 `write(1/2)` uses),
+/// so kernel-side prints and userland output go through the same
+/// rendering pipeline. Falls back to the legacy per-terminal string
+/// buffer when no pty has been installed yet (only the synthetic
+/// `RPC_TERMINAL_ID` and pre-`register_terminal` paths).
 ///
-/// **Deadlock-safe**: appends to the per-terminal buffer only; does
-/// NOT touch the WINDOW_MANAGER lock. The compositor's
-/// [`invalidate_dirty_terminals`] pass picks up the new content and
-/// invalidates the window on its own scheduling slice. Pre-fix, this
-/// function locked WINDOW_MANAGER to invalidate inline — but ring-3
-/// write syscalls run at CPL=0 with `is_in_spawned_process=false`, so
-/// the timer ISR doesn't preempt them. If the compositor was
-/// preempted mid-`render_frame` (holding WINDOW_MANAGER), a ring-3
-/// write would spin on the lock forever.
+/// **Deadlock-safe**: only touches pty / buffer mutexes, never the
+/// WINDOW_MANAGER lock. The compositor's `invalidate_dirty_terminals`
+/// pass picks up the new content on its own scheduling slice.
 pub fn write_to_terminal_id(terminal_id: WindowId, text: &str) {
+    if let Some(slave) = crate::terminal::pty::slave_for_terminal(terminal_id) {
+        slave.write(text.as_bytes());
+        return;
+    }
     let mut buffers = TERMINAL_BUFFERS.lock();
     if let Some(buffer) = buffers.get_mut(&terminal_id) {
         buffer.push(String::from(text));
@@ -96,18 +119,38 @@ pub fn write_to_terminal(text: &str) {
     }
 }
 
-/// Take pending output for a terminal
+/// Take pending output for a terminal. Drains the pty master's output
+/// queue first (where ring-3 writes + kernel `write_to_terminal_id`
+/// land), then any leftover from the legacy string buffer (for
+/// terminals registered without a pty, e.g., the synthetic
+/// `RPC_TERMINAL_ID`). Result is `Vec<String>` so the consumer
+/// (`TerminalWindow::process_terminal_output`) continues to iterate
+/// chars unchanged.
 pub fn take_terminal_output(terminal_id: WindowId) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(master) = crate::terminal::pty::master_for_terminal(terminal_id) {
+        let bytes = master.drain_output();
+        if !bytes.is_empty() {
+            out.push(alloc::string::String::from_utf8_lossy(&bytes).into_owned());
+        }
+    }
     let mut buffers = TERMINAL_BUFFERS.lock();
     if let Some(buffer) = buffers.get_mut(&terminal_id) {
-        core::mem::take(buffer)
-    } else {
-        Vec::new()
+        if !buffer.is_empty() {
+            out.append(buffer);
+        }
     }
+    out
 }
 
-/// Check if a terminal has pending output
+/// Check if a terminal has pending output. Inspects both the pty
+/// master queue and the legacy buffer.
 pub fn has_terminal_output(terminal_id: WindowId) -> bool {
+    if let Some(master) = crate::terminal::pty::master_for_terminal(terminal_id) {
+        if master.with(|p| p.master_output_pending()) {
+            return true;
+        }
+    }
     let buffers = TERMINAL_BUFFERS.lock();
     buffers.get(&terminal_id).map_or(false, |b| !b.is_empty())
 }
