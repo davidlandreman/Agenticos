@@ -20,6 +20,7 @@ mod lib;
 mod mm;
 mod process;
 mod stdlib;
+mod terminal;
 mod tests;
 mod tools;
 mod userland;

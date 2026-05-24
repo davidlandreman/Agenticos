@@ -293,6 +293,14 @@ pub trait Window: Send {
         None
     }
 
+    /// Grid dimensions if this window renders a text grid.
+    /// Returns `Some((rows, cols))` for `TextWindow`/`TerminalWindow`,
+    /// `None` otherwise. The terminal factory uses this to size the
+    /// pty's `Winsize` from the actual on-screen grid.
+    fn grid_size(&self) -> Option<(u16, u16)> {
+        None
+    }
+
     /// Poll for pending popup (used by MenuBar)
     /// Returns None for non-menu-bar windows
     fn poll_pending_popup(&mut self) -> Option<windows::PendingPopup> {

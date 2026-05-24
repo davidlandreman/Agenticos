@@ -78,6 +78,7 @@ Each entry below points to the folder's own `CLAUDE.md`, which carries the detai
 - `src/mm/` — Frame allocator, heap allocator, paging, page-fault demand mapping. See [`src/mm/CLAUDE.md`](src/mm/CLAUDE.md).
 - `src/process/` — Process traits and the live preemptive scheduler. (The shell-command registry that used to live here was removed when zsh became the default terminal.) See [`src/process/CLAUDE.md`](src/process/CLAUDE.md).
 - `src/stdlib/` — `Read`/`Write` traits, async waker. No folder file yet — currently thin.
+- `src/terminal/` — VT100/xterm terminal emulation: PTY pair, ANSI/VT parser, character grid + scrollback + alt-screen, caret, per-pty termios/winsize, key encoding. See [`src/terminal/CLAUDE.md`](src/terminal/CLAUDE.md).
 - `src/tests/` — In-kernel test modules. See [`src/tests/CLAUDE.md`](src/tests/CLAUDE.md).
 - `src/userland/` — Ring-3 ELF loader, Linux x86-64 ABI, lifecycle (`enter_user_mode`, `cleanup_user_process`, `BinaryLoadGuard`). No folder file yet; design lives in `docs/plans/2026-05-08-004-feat-userland-app-platform-plan.md` and `docs/plans/2026-05-09-001-feat-userland-linux-abi-cpp-hello-plan.md`.
 - `src/window/` — Window system (hierarchy, types, default desktop, cursor rendering). See [`src/window/CLAUDE.md`](src/window/CLAUDE.md).

@@ -39,6 +39,12 @@ Boot lands in GUI mode:
 - `FrameWindow` titled "AgenticOS Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller).
 - `TerminalWindow` inside the frame.
 
+## TerminalWindow ↔ terminal subsystem
+
+Since the ANSI/VT overhaul (docs/plans/2026-05-24-001-...), `TerminalWindow` owns a `terminal::vte::Vte` parser + `terminal::screen::Screen` and the `TextWindow` is just a renderer. On every `prepare_for_render`, TerminalWindow drains the pty master's output queue, feeds bytes through `Vte → Screen`, pushes DSR replies back into the slave's input, and copies the Screen's visible viewport down to TextWindow via `set_cell`. Local echoes (canonical-mode typing) go through the parser too — single source of truth.
+
+PTY lookup goes through `terminal::pty::master_for_terminal(WindowId)` / `slave_for_terminal(WindowId)`. `userland::stdin` and `userland::tty` are now shims over `terminal::pty`.
+
 ## Coordinate transformation
 
 Child windows are positioned relative to their parent's coordinate system. `render_window_tree_with_offset` (in `manager.rs`) walks the tree, accumulating the offset into each child's bounds during render. Child bounds are temporarily adjusted during rendering — read from `WindowBase` after the render call to get the original.

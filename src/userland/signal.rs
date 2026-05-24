@@ -39,6 +39,7 @@ pub const SIGSYS: i32 = 31;
 pub const SIGCONT: i32 = 18;
 pub const SIGSTOP: i32 = 19;
 pub const SIGTSTP: i32 = 20;
+pub const SIGWINCH: i32 = 28;
 
 // ---- well-known sa_handler sentinels ----
 pub const SIG_DFL: u64 = 0;
