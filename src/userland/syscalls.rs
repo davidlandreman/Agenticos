@@ -121,13 +121,33 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
 
     match target {
         Target::Pipe(handle) => {
-            // Phase 5 PR-A: write to a pipe. Returns -EPIPE when the
-            // pipe has no readers (POSIX would also raise SIGPIPE; we
-            // skip the signal until Phase 5 PR-B).
+            // Write to a pipe. Return `-EPIPE` when no readers remain
+            // (POSIX would also raise SIGPIPE; we skip the signal
+            // until a later milestone). When the ring buffer has
+            // room, take what fits and return. When it's full but
+            // readers still exist, block via the ring-3 scheduler —
+            // `Pipe::read` and the last `PipeReadHandle::Drop` wake
+            // `WaitingForPipeWrite` blockers, so the resumed SYSCALL
+            // re-enters this handler.
             if handle.pipe().readers() == 0 {
                 return crate::userland::abi::EPIPE;
             }
-            handle.pipe().write(slice) as i64
+            let n = handle.pipe().write(slice);
+            if n > 0 {
+                return n as i64;
+            }
+            // n == 0 means the buffer was full. Re-check readers in
+            // case they vanished between the readers() probe and the
+            // write (reader process exited while we were preparing).
+            if handle.pipe().readers() == 0 {
+                return crate::userland::abi::EPIPE;
+            }
+            unsafe {
+                crate::userland::switch::block_current_ring3_and_yield(
+                    args,
+                    crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeWrite,
+                )
+            }
         }
         Target::File(handle) => match handle.write(slice) {
             Ok(n) => n as i64,
@@ -135,9 +155,21 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
         },
         Target::StdoutErr => {
             // Lossy: invalid UTF-8 bytes become U+FFFD rather than
-            // dropping the entire call.
+            // dropping the entire call. A strict `from_utf8` here
+            // would silently swallow writes that mix valid text with
+            // binary data (e.g. cat'ing a partially-binary file).
             let s = alloc::string::String::from_utf8_lossy(slice);
-            crate::print!("{}", s);
+            // U8/bugfix: route to THIS process's terminal_id, not the
+            // global CURRENT_OUTPUT_TERMINAL. With multiple ring-3
+            // processes (one per terminal), the global is wrong —
+            // last-launcher wins, so zsh1's writes would land in
+            // terminal 2's window.
+            let dest_terminal =
+                crate::userland::lifecycle::with_current_process(|p| p.terminal_id);
+            match dest_terminal {
+                Some(tid) => crate::window::terminal::write_to_terminal_id(tid, &s),
+                None => crate::print!("{}", s),
+            }
             len as i64
         }
     }
@@ -192,6 +224,16 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         }
     }
 
+    // U8/bugfix: route the StdoutErr fast path to the writing
+    // process's terminal_id (same reasoning as write_handler). Look
+    // up once outside the loop; only relevant when target is
+    // StdoutErr but cheap enough to always compute.
+    let dest_terminal = if matches!(target, Target::StdoutErr) {
+        crate::userland::lifecycle::with_current_process(|p| p.terminal_id)
+    } else {
+        None
+    };
+
     // Now emit every iov in order. Short writes break the loop so
     // POSIX writev's "stop at the first short write" semantics hold.
     let mut written: u64 = 0;
@@ -206,7 +248,10 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         match &target {
             Target::StdoutErr => {
                 let s = alloc::string::String::from_utf8_lossy(slice);
-                crate::print!("{}", s);
+                match dest_terminal {
+                    Some(tid) => crate::window::terminal::write_to_terminal_id(tid, &s),
+                    None => crate::print!("{}", s),
+                }
                 written += len;
             }
             Target::File(handle) => match handle.write(slice) {
@@ -258,15 +303,18 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
 
     let slot = with_fd_slot(fd);
     match slot {
-        Some(FdSlot::Stdin) => read_stdin_blocking(ptr, cap),
+        Some(FdSlot::Stdin) => read_stdin_blocking(args, ptr, cap),
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => EBADF,
         Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => EISDIR,
         Some(FdSlot::PipeRead(handle, _)) => {
-            // Phase 5 PR-A: drain bytes from the pipe. EOF when empty
-            // *and* no writers remain. EAGAIN when empty but writers
-            // exist (no real blocking until a concurrent scheduler
-            // lands; for now the user app is expected to read after
-            // the writer has run to completion).
+            // Drain bytes from the pipe. EOF when empty *and* no
+            // writers remain. When empty but writers exist, block via
+            // the ring-3 scheduler — `Pipe::write` and the last
+            // `PipeWriteHandle::Drop` both wake `WaitingForPipeRead`
+            // blockers, so the resumed SYSCALL re-enters this handler
+            // and either drains bytes or observes EOF. zsh's
+            // entersubsh_ret self-pipe (and any other POSIX-blocking
+            // pipe reader) depends on this.
             let mut staging = vec![0u8; cap as usize];
             let n = handle.pipe().read(&mut staging);
             if n > 0 {
@@ -278,7 +326,12 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
             if handle.pipe().writers() == 0 {
                 return 0; // EOF
             }
-            crate::userland::abi::EAGAIN
+            unsafe {
+                crate::userland::switch::block_current_ring3_and_yield(
+                    args,
+                    crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeRead,
+                );
+            }
         }
         Some(FdSlot::PipeWrite(_, _)) => EBADF,
         Some(FdSlot::File { handle, .. }) => {
@@ -306,23 +359,31 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
     }
 }
 
-fn read_stdin_blocking(ptr: u64, cap: u64) -> i64 {
-    if !crate::userland::stdin::is_active() {
+fn read_stdin_blocking(args: &SyscallArgs, ptr: u64, cap: u64) -> i64 {
+    if !crate::userland::stdin::is_active_for_current_process() {
         return 0;
     }
     let dst = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, cap as usize) };
-    let n = crate::userland::stdin::pop_into(dst);
+    let n = crate::userland::stdin::pop_into_for_current_process(dst);
     if n > 0 {
         return n as i64;
     }
-    loop {
-        unsafe {
-            core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags));
-        }
-        let n = crate::userland::stdin::pop_into(dst);
-        if n > 0 {
-            return n as i64;
-        }
+
+    // U8: no input available. Block via the ring-3 scheduler instead
+    // of spinning on `sti;hlt;cli` (which monopolized the CPU and
+    // blocked other ring-3 processes from being scheduled). Yields
+    // to the next runnable ring-3 process, or back to the kernel
+    // main loop if none. When input arrives, the input ISR's stdin
+    // push path calls `wake_ring3_blocked_on_input`, moving us to
+    // `ring3_ready`. The kernel main loop's `save_kernel_and_resume_ring3`
+    // (or another ring-3 yielding) picks us up; our SYSCALL re-fires
+    // and this handler re-runs from the top — re-checks the queue,
+    // pops the now-present bytes, returns.
+    unsafe {
+        crate::userland::switch::block_current_ring3_and_yield(
+            args,
+            crate::userland::lifecycle::Ring3BlockReason::WaitingForInput,
+        );
     }
 }
 
@@ -496,12 +557,36 @@ pub fn arch_prctl_handler(args: &mut SyscallArgs) -> i64 {
     let addr = args.rsi;
     match code {
         ARCH_SET_FS => {
-            // Validate addr is canonical and lies within user VA bounds.
-            // We don't dereference; we write it to the MSR.
+            // Validate addr is canonical AND in user VA range. Without
+            // the user-VA check, a buggy/hostile user could set FS_BASE
+            // to a kernel address, leak kernel data via `mov fs:[X]`,
+            // and trigger CPL=3 page faults at kernel pages. Pre-fix,
+            // we accepted any canonical address — which surfaced as
+            // weird ring-3 faults at kernel-heap addresses when zsh
+            // ran with a stale FS_BASE.
             if VirtAddr::try_new(addr).is_err() {
                 return EINVAL;
             }
+            if !(crate::mm::paging::USER_VA_RANGE_START..crate::mm::paging::USER_VA_RANGE_END)
+                .contains(&addr)
+            {
+                crate::debug_error!(
+                    "arch_prctl(SET_FS, {:#x}): rejected, not in user VA range",
+                    addr
+                );
+                return EINVAL;
+            }
+            crate::debug_info!("arch_prctl(SET_FS, {:#x}) accepted", addr);
             crate::arch::x86_64::msr::set_fs_base(addr);
+            // U8/bugfix: keep Process.fs_base in sync with the MSR so
+            // resume_ring3 restores the right value after a block/wake
+            // round-trip. Pre-fix, only save_user_cpu_state updated
+            // Process.fs_base — meaning a child forked between
+            // arch_prctl and the first preempt would inherit a stale
+            // fs_base (0).
+            crate::userland::lifecycle::with_current_process(|p| {
+                p.fs_base = addr;
+            });
             0
         }
         ARCH_GET_FS => {
@@ -813,26 +898,39 @@ pub fn getppid_handler(_: &mut SyscallArgs) -> i64 {
 /// This intentionally does not support concurrency between parent and
 /// child — pipelines and `cmd &` need a real scheduler (Phase 5+).
 pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
-    use crate::userland::user_state::{capture_callee_saved, CalleeSavedSnapshot, UserState};
+    use crate::userland::user_state::UserState;
     use crate::userland::lifecycle::{
-        parent_stashed, record_zombie, reap_zombie, stash_parent, swap_current_process,
-        take_stashed_parent, with_current_process, alloc_pid, ExitKind,
+        alloc_pid, insert_process, mark_ring3_ready, with_current_process, ExitKind,
     };
 
-    // 1. Capture parent's user-mode callee-saved registers IMMEDIATELY.
-    //    Done via a naked-asm helper so the Rust compiler hasn't had
-    //    a chance to spill them yet. The CalleeSavedSnapshot's r12
-    //    slot actually holds the user RSP (the syscall stub stashed
-    //    it there before dispatch).
-    let mut callee = CalleeSavedSnapshot::default();
-    unsafe { capture_callee_saved(&mut callee as *mut _); }
+    // U7: fork now returns immediately to the parent without iretq'ing
+    // into the child. The child is inserted into PROCESS_TABLE with a
+    // populated `saved_user_state` (rax=0, parent's other GPRs +
+    // RIP/RFLAGS/RSP at fork's SYSCALL boundary) and marked
+    // `ring3_ready`. The next timer preempt (or any block-and-yield)
+    // gives the child a slice; the scheduler round-robins between
+    // parent and child thereafter.
+    //
+    // The parent's `fork()` syscall returns `child_pid` here; the
+    // SYSCALL stub iretq's back to the parent at the post-SYSCALL
+    // instruction with rax=child_pid in the usual way.
 
-    // 2. Read the user RIP, RFLAGS, and original user R12 from the
-    //    SYSCALL stub's saved-state slots above SyscallArgs. Layout
-    //    is fixed by the stub:
-    //       args + 56 = rcx (user RIP)
-    //       args + 64 = r11 (user RFLAGS)
-    //       args + 72 = original user R12
+    // 1. Capture parent's user-mode callee-saved registers from the
+    //    explicit slots the SYSCALL stub pushed onto the kernel stack.
+    //    The historical `capture_callee_saved` naked helper read live
+    //    registers and got Rust scratch values — the SYSCALL stub now
+    //    pushes the user values to known offsets and the reader below
+    //    is the only correct path.
+    let saved = unsafe {
+        crate::userland::user_state::read_user_callee_saved(args as *const SyscallArgs)
+    };
+
+    // 2. Read the user RIP (post-SYSCALL), RFLAGS, and original user
+    //    R12 from the SYSCALL stub's saved-state slots above
+    //    SyscallArgs. Layout is fixed by the stub:
+    //       args +  56 = rcx (user RIP, post-SYSCALL)
+    //       args +  64 = r11 (user RFLAGS)
+    //       args + 112 = original user R12
     let user_rip;
     let user_rflags;
     let user_r12;
@@ -840,15 +938,15 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         let p = args as *const SyscallArgs as *const u64;
         user_rip = core::ptr::read(p.add(7));
         user_rflags = core::ptr::read(p.add(8));
-        user_r12 = core::ptr::read(p.add(9));
+        user_r12 = crate::userland::user_state::read_user_r12(args as *const SyscallArgs);
+        let _ = p; // silence unused warning if p is not otherwise used
     }
 
     // 3. Build the child's full register snapshot: same as parent at
-    //    fork()'s syscall instruction, except rax = 0 (the "I am the
-    //    child" signal) and rcx/r11 are clobbered (intentional — the
-    //    SYSCALL ABI documents them as undefined on return, so we
-    //    don't need to restore them).
-    let child_state = UserState {
+    //    fork()'s post-SYSCALL boundary, except rax = 0 (the "I am
+    //    the child" signal). When the scheduler eventually picks the
+    //    child via `resume_ring3`, this is what gets restored.
+    let child_saved_state = UserState {
         rax: 0, // child sees fork() return 0
         rdi: args.rdi,
         rsi: args.rsi,
@@ -856,25 +954,19 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         r10: args.r10,
         r8: args.r8,
         r9: args.r9,
-        rbx: callee.rbx,
-        rbp: callee.rbp,
-        rsp: callee.r12_register, // stub stashed user RSP into r12
+        rbx: saved.rbx,
+        rbp: saved.rbp,
+        rsp: saved.r12_register, // = user RSP from gs:[8]
         r12: user_r12,
-        r13: callee.r13,
-        r14: callee.r14,
-        r15: callee.r15,
+        r13: saved.r13,
+        r14: saved.r14,
+        r15: saved.r15,
         rip: user_rip,
         rflags: user_rflags,
     };
 
-    // 4. Refuse nested fork (PR-C2 supports depth = 1).
-    if parent_stashed() {
-        crate::debug_warn!("fork(): nested fork not yet supported");
-        return EINVAL;
-    }
-
-    // 5. Allocate the child PID. Pull what we need from the parent's
-    //    Process under one lock, build the child Process below.
+    // 4. Allocate the child PID. Pull parent's L4 frame under one lock,
+    //    then build the child Process below.
     let child_pid = alloc_pid();
     let parent_l4_frame = match with_current_process(|p| {
         p.address_space.as_ref().map(|a| a.l4_frame())
@@ -886,9 +978,9 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         }
     };
 
-    // 6. Eagerly clone the parent's address space (fresh L4 + copy of
+    // 5. Eagerly clone the parent's address space (fresh L4 + copy of
     //    every leaf page in PML4[0]). Built on the parent's L4 — we
-    //    haven't switched CR3 yet.
+    //    haven't switched CR3 yet, and we don't intend to.
     let child_aspace = match crate::userland::address_space::AddressSpace::clone_for_child(
         parent_l4_frame,
     ) {
@@ -899,12 +991,11 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         }
     };
 
-    // 7. Build the child Process. State pieces (FD table, cwd, brk,
+    // 6. Build the child Process. State pieces (FD table, cwd, brk,
     //    mmap) are cloned by value; address space ownership transfers.
     let child_process = with_current_process(|parent| crate::userland::lifecycle::Process {
         pid: child_pid,
         parent_pid: parent.pid,
-        continuation: None,
         image: None, // child shares parent's image — kept implicitly
         exit_kind: ExitKind::None,
         exit_code: 0,
@@ -919,160 +1010,48 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         signal_state: parent.signal_state.fork_clone(),
         // Phase 5 PR-C1: child gets its own freshly-allocated kernel
         // stack so its SYSCALL handlers don't share rsp0 with the
-        // parent's suspended fork() handler.
+        // parent's syscall handlers when both are alive concurrently.
         kernel_stack: Some(crate::userland::kernel_stack::KernelStack::new()),
         // U3: child shares parent's exe path (fork doesn't change the
         // running binary; execve replaces it).
         exe_path: parent.exe_path.clone(),
-        // Demand-grown stack (U5): child inherits the parent's exact
-        // stack window. The parent's stack pages already copied into
-        // the child's L4 via AddressSpace::clone_for_child above, so
-        // these five fields together with the eager page copy reproduce
-        // the parent's stack state at fork time. growth_faults_remaining
-        // inherits the parent's remaining budget — matching Linux's
-        // RLIMIT_STACK semantics where children inherit the rlimit.
+        // Demand-grown stack: child inherits the parent's exact stack
+        // window. The parent's stack pages already copied into the
+        // child's L4 via AddressSpace::clone_for_child above.
         stack_top: parent.stack_top,
         stack_bottom: parent.stack_bottom,
         stack_mapped_bottom: parent.stack_mapped_bottom,
         stack_max_growth_floor: parent.stack_max_growth_floor,
         growth_faults_remaining: parent.growth_faults_remaining,
-        // U2: child inherits parent's TLS pointer (FS_BASE). musl in
+        // U2: child inherits parent's FS_BASE (TLS pointer). musl in
         // the child may later re-call arch_prctl after fork to install
-        // its own TCB, but the initial inherit matches Linux's
-        // copy-on-fork semantics.
+        // its own TCB.
         fs_base: parent.fs_base,
-        // U2: fresh FPU state for the child. POSIX-Linux semantics:
-        // FPU state is NOT inherited across fork — children start with
-        // a clean register file. (The parent's pre-fork XMM values
-        // don't leak in because the SYSCALL fast path zeros them, and
-        // U4's switch primitive saves/restores.)
+        // U2: fresh FPU state for the child (POSIX-Linux: FPU state is
+        // not inherited across fork).
         fpu_state: crate::arch::x86_64::fpu::FpuState::fresh(),
+        // U7: child's first resume reads this snapshot. rax=0 makes
+        // child's fork() return 0; other regs match parent's state at
+        // the SYSCALL boundary.
+        saved_user_state: child_saved_state,
+        // Routing: stdout/stderr flow to the same terminal as parent.
+        terminal_id: parent.terminal_id,
     });
 
-    // 8. Stash the parent's Process and install the child as current.
-    //    The parent's Process holds its AddressSpace — we leave it on
-    //    the parent's L4 (CR3 is still pointing at parent's L4) so
-    //    the kernel state we just ran is consistent.
-    let parent_process = swap_current_process(child_process);
-    stash_parent(parent_process);
-
-    // 9. Activate the child's L4. From here until the child exits,
-    //    CR3 references the child's page table.
-    crate::userland::lifecycle::with_current_process(|child| {
-        if let Some(a) = child.address_space.as_ref() {
-            // SAFETY: AddressSpace::new copied the kernel half from
-            // the kernel L4, so the kernel code that runs after this
-            // CR3 write is still mapped.
-            unsafe { a.activate(); }
-        }
-    });
-
-    // 9a. Save the parent's pointer-validation bounds. The child's
-    //     long-jump back (cooperative or abnormal) flows through
-    //     `long_jump_to_run_or_halt`, which calls `clear_user_va_bounds`
-    //     unconditionally. Without restoring here, the parent's next
-    //     syscall with any user pointer would fail `-EFAULT` because
-    //     `validate_user_slice` would see `None` bounds. Symptom: zsh
-    //     hangs after a child crash because its post-fork sigsuspend /
-    //     waitpid / write all reject their user pointers.
-    let saved_user_va_bounds = crate::userland::abi::user_va_bounds();
-
-    // 9b. Phase 5 PR-C1: point both TSS.rsp0 and the SYSCALL stub's
-    //     `gs:[0]` slot at the *child's* freshly-allocated kernel
-    //     stack so its syscalls don't share rsp0 with the parent's
-    //     in-flight fork() frame. Save the parent's value to restore
-    //     after the child long-jumps back.
-    let saved_kernel_rsp_top: u64;
-    unsafe {
-        core::arch::asm!(
-            "mov {0}, gs:[0]",
-            out(reg) saved_kernel_rsp_top,
-            options(nomem, preserves_flags, nostack),
-        );
-    }
-
-    // 9c. Save the parent's IA32_FS_BASE. The child (especially after
-    //     execve) reinstalls its own FS_BASE pointing at the child's
-    //     musl-allocated TCB. Without this save/restore, the parent
-    //     resumes with FS_BASE still pointing at a VA that exists in
-    //     parent's L4 but contains unrelated data — `__errno_location`
-    //     style accesses then fault. (See CLAUDE.md "Deferred from the
-    //     zsh-interactive bring-up" follow-up.)
-    let saved_fs_base = crate::arch::x86_64::msr::read_fs_base();
-    let child_top = crate::userland::lifecycle::with_current_process(|child| {
-        child.kernel_stack.as_ref().expect("child kernel stack").top()
-    });
-    unsafe {
-        crate::arch::x86_64::syscall::set_percpu_kernel_rsp_top(child_top.as_u64());
-        crate::arch::x86_64::gdt::set_kernel_rsp0(child_top);
-    }
-
-    // 10. Dispatch the child via setjmp+iretq. The asm helper saves
-    //     the kernel continuation (resume here on child exit), then
-    //     iretqs into the child at the saved RIP/RSP/RFLAGS with
-    //     restored GP regs. When the child eventually `exit_group`s,
-    //     `cooperative_exit` long-jumps back; control resumes after
-    //     the asm call below.
-    let user_cs = crate::arch::x86_64::gdt::selectors().user_code.0 as u64;
-    let user_ss = crate::arch::x86_64::gdt::selectors().user_data.0 as u64;
-    unsafe {
-        super::enter_user_mode_with_regs_asm(&child_state as *const _, user_cs, user_ss);
-    }
-
-    // 10b. Restore the parent's kernel rsp0 (its own per-process
-    //      kernel stack from PR-C1).
-    unsafe {
-        crate::arch::x86_64::syscall::set_percpu_kernel_rsp_top(saved_kernel_rsp_top);
-        crate::arch::x86_64::gdt::set_kernel_rsp0(VirtAddr::new(saved_kernel_rsp_top));
-    }
-
-    // 10c. Restore the parent's FS_BASE. Paired with step 9c.
-    crate::arch::x86_64::msr::set_fs_base(saved_fs_base);
-
-    // 11. Child has exited and long-jumped back. Capture the recorded
-    //     zombie info (the child's `exit_group` already filed it into
-    //     ZOMBIES). Then dismantle the child slot and reinstall the
-    //     parent.
-    let (child_exit_code, child_pid_recorded) = with_current_process(|child| {
-        (child.exit_code, child.pid)
-    });
-    debug_assert_eq!(child_pid_recorded, child_pid);
-
-    // Drop the child Process. Its AddressSpace::Drop reverts CR3 to
-    // the kernel L4 if needed (it will, since child's L4 is still
-    // CR3 here).
-    let parent = take_stashed_parent().expect("parent stash empty");
-    let child_dropped = swap_current_process(parent);
-    drop(child_dropped);
-
-    // 12. Switch back to the parent's L4 so the rest of the parent's
-    //     execution sees the parent's user mappings. AddressSpace
-    //     activation is unsafe; we know the kernel half is consistent.
-    with_current_process(|p| {
-        if let Some(a) = p.address_space.as_ref() {
-            unsafe { a.activate(); }
-        }
-    });
-
-    // 12b. Restore the parent's pointer-validation bounds (paired with
-    //      step 9a). If we somehow entered fork without bounds set
-    //      (test path with no `enter_user_mode`), leave bounds cleared.
-    if let Some(bounds) = saved_user_va_bounds {
-        crate::userland::abi::set_user_va_bounds(bounds);
-    }
-
-    // 13. The zombie was already recorded by the child's exit_group.
-    //     Sanity-check that we can find it (if not, _exit didn't run
-    //     through the child path — bug).
-    let _ = (child_exit_code, reap_zombie);
+    // 7. Register child in PROCESS_TABLE and mark ready. The next
+    //    scheduling decision (timer preempt, block-and-yield from
+    //    parent, or top-level idle) picks the child via `resume_ring3`.
+    insert_process(child_process);
+    mark_ring3_ready(child_pid);
 
     crate::debug_info!(
-        "fork(): child {} exited with {}; parent resumes",
-        child_pid,
-        child_exit_code,
+        "fork(): registered child pid={} as Ready; parent returns immediately",
+        child_pid
     );
 
-    // 14. Parent's fork() returns the child PID.
+    // 8. Parent's fork() returns the child PID via the normal SYSCALL
+    //    stub return path. CR3, TSS.rsp0, GSBASE, FS_BASE, FPU all
+    //    stay as the parent's — we never touched them.
     child_pid as i64
 }
 
@@ -1341,13 +1320,18 @@ pub fn kill_handler(args: &mut SyscallArgs) -> i64 {
         crate::userland::lifecycle::with_current_process(|p| p.signal_state.raise(sig));
         return 0;
     }
-    // Try to deliver to the stashed parent (if any).
-    let delivered = crate::userland::lifecycle::with_current_process(|p| p.parent_pid as i32) == pid;
-    if delivered && pid != 0 {
+    // U7: deliver to the parent in the regular PROCESS_TABLE (formerly
+    // the PARENT_STASH slot). Returns ESRCH if `pid` doesn't match our
+    // direct parent — kill(any, sig) lookup across arbitrary PIDs is
+    // out of scope for this kernel.
+    let parent_pid = crate::userland::lifecycle::with_current_process(|p| p.parent_pid as i32);
+    if parent_pid == pid && pid != 0 {
         if sig == 0 {
             return 0;
         }
-        crate::userland::lifecycle::raise_signal_on_stashed_parent(sig);
+        let _ = crate::userland::lifecycle::with_process(pid as u32, |parent| {
+            parent.signal_state.raise(sig);
+        });
         return 0;
     }
     -3 // ESRCH
@@ -1444,7 +1428,6 @@ pub fn rt_sigreturn_handler(_args: &mut SyscallArgs) -> i64 {
 unsafe fn deliver_signal(
     signum: i32,
     action: crate::userland::signal::SigAction,
-    callee: crate::userland::user_state::CalleeSavedSnapshot,
     args: &SyscallArgs,
     syscall_ret: i64,
     saved_blocked: u64,
@@ -1465,19 +1448,26 @@ unsafe fn deliver_signal(
     }
 
     // 1. Snapshot the user state at the point of the interruption.
+    //    Read the user callee-saved set from the explicit slots the
+    //    SYSCALL stub pushed (see `read_user_callee_saved` for layout).
     let p = args as *const SyscallArgs as *const u64;
     let user_rip = core::ptr::read(p.add(7));
     let user_rflags = core::ptr::read(p.add(8));
-    let user_r12_orig = core::ptr::read(p.add(9));
-    let user_rsp = callee.r12_register;
+    let saved_regs = crate::userland::user_state::read_user_callee_saved(
+        args as *const SyscallArgs,
+    );
+    let user_r12_orig = crate::userland::user_state::read_user_r12(
+        args as *const SyscallArgs,
+    );
+    let user_rsp = saved_regs.r12_register; // = user RSP from gs:[8]
     let saved = UserState {
         rax: syscall_ret as u64,
         rdi: args.rdi, rsi: args.rsi, rdx: args.rdx,
         r10: args.r10, r8: args.r8, r9: args.r9,
-        rbx: callee.rbx, rbp: callee.rbp,
+        rbx: saved_regs.rbx, rbp: saved_regs.rbp,
         rsp: user_rsp,
         r12: user_r12_orig,
-        r13: callee.r13, r14: callee.r14, r15: callee.r15,
+        r13: saved_regs.r13, r14: saved_regs.r14, r15: saved_regs.r15,
         rip: user_rip, rflags: user_rflags,
     };
 
@@ -1546,11 +1536,21 @@ pub fn handler_blocked_mask(old_blocked: u64, sa_mask: u64, signum: i32) -> u64 
     (old_blocked | sa_mask | (1u64 << (signum - 1))) & !kill_stop_mask
 }
 
-pub fn maybe_deliver_signal(
-    callee: crate::userland::user_state::CalleeSavedSnapshot,
-    args: &SyscallArgs,
-    syscall_ret: i64,
-) -> Option<i64> {
+pub fn maybe_deliver_signal(args: &SyscallArgs, syscall_ret: i64) -> Option<i64> {
+    // U9 invariant (production): the dispatcher tail calls us right
+    // after a ring-3 SYSCALL returned through the dispatcher. The
+    // SYSCALL came from ring 3 → `current_user_pid` is set to the
+    // issuing process. If this fires with no current ring-3 process,
+    // `with_current_process` would silently fall back to the sentinel
+    // (PID 0) — harmless because nothing queues signals on the
+    // sentinel, but a sign of a kernel-side bug. The check is gated
+    // out of test builds because many tests drive `syscall_dispatch`
+    // synthetically without a loaded user process.
+    #[cfg(not(feature = "test"))]
+    debug_assert!(
+        crate::userland::lifecycle::current_user_pid().is_some(),
+        "maybe_deliver_signal called with no current ring-3 process — would deliver to sentinel"
+    );
     let prepared = crate::userland::lifecycle::with_current_process(|p| {
         let (sig, action) = p.signal_state.consume_deliverable()?;
         let old_blocked = p.signal_state.blocked;
@@ -1560,7 +1560,7 @@ pub fn maybe_deliver_signal(
     });
     if let Some((sig, action, old_blocked)) = prepared {
         unsafe {
-            deliver_signal(sig, action, callee, args, syscall_ret, old_blocked);
+            deliver_signal(sig, action, args, syscall_ret, old_blocked);
         }
     }
     None
@@ -1686,22 +1686,21 @@ pub fn wait4_handler(args: &mut SyscallArgs) -> i64 {
         return 0;
     }
 
-    // U6/U5 hand-off point. Under U5+U7, this becomes:
-    //   crate::userland::lifecycle::mark_ring3_blocked(
-    //       me,
-    //       crate::userland::lifecycle::Ring3BlockReason::WaitingForChild { target },
-    //   );
-    //   yield_to_ring3_scheduler();  // returns when child exits
-    //   retry reap_zombie(target, me)
-    //
-    // Until U5 wires the ring-3 yield path, parking here would hang
-    // the only ring-3 process (no other thing can run it back). The
-    // synchronous-fork pattern that exists today never reaches this
-    // branch (children always exit before the parent reaches wait4),
-    // so returning ECHILD preserves current behavior. The wake path
-    // (`wake_ring3_blocked_on_child` in notify_parent_of_*) is already
-    // armed and will fire correctly once U5 wires the block.
-    ECHILD
+    // U6: no matching zombie, has children, no WNOHANG → block until
+    // a child exits (which calls `wake_ring3_blocked_on_child` →
+    // moves us to ring3_ready) and re-fire the SYSCALL. The helper
+    // captures the current user state with RIP rewound 2 bytes (the
+    // SYSCALL instruction's length), marks us blocked, and yields to
+    // the next runnable ring-3 process via `resume_ring3`. When we
+    // eventually resume, our SYSCALL re-fires, this handler re-runs,
+    // and the early reap_zombie at the top of this function finds
+    // the matching zombie.
+    unsafe {
+        crate::userland::switch::block_current_ring3_and_yield(
+            args,
+            crate::userland::lifecycle::Ring3BlockReason::WaitingForChild { target },
+        );
+    }
 }
 
 // ---------- exit ----------
@@ -1714,24 +1713,22 @@ pub fn exit_group_handler(args: &mut SyscallArgs) -> i64 {
     let code = args.rdi as i32 as i64;
     *LAST_EXIT_CODE.lock() = Some(code);
 
-    let (has_cont, pid, parent_pid) =
-        crate::userland::lifecycle::with_active_user(|au| {
-            (au.continuation.is_some(), au.pid, au.parent_pid)
-        });
-    if !has_cont {
-        crate::debug_info!("USERLAND: exit_group({}) recorded (no active continuation)", code);
-        return 0;
-    }
+    let (pid, parent_pid) =
+        crate::userland::lifecycle::with_active_user(|au| (au.pid, au.parent_pid));
 
-    // Forked-child path: park a zombie so the parent's wait4 finds it
-    // and raise SIGCHLD on the stashed parent. `notify_parent_of_exit`
-    // is a no-op when parent_pid == 0 (top-level kernel-launched
-    // binary). The abnormal-exit and unimplemented-syscall paths in
-    // `lifecycle.rs` route through the same helper so all three exit
-    // paths surface a consistent SIGCHLD + zombie to the parent.
+    // U7: every exit (top-level binary AND forked child) routes
+    // through `notify_parent_of_exit` + `cooperative_exit`. The
+    // exit path's `long_jump_to_run_or_halt` chooses the right
+    // divergence: continuation present → long-jump to the
+    // launching kernel thread (top-level binary); no continuation
+    // → yield to the next runnable ring-3 process via resume_ring3
+    // (forked child).
+    //
+    // `notify_parent_of_exit` is a no-op when parent_pid == 0 (top-
+    // level kernel-launched binary — no userland parent).
     if parent_pid != 0 {
         crate::debug_info!(
-            "USERLAND: child pid={} exit_group({}) — long-jumping to fork()",
+            "USERLAND: child pid={} exit_group({}) — yielding to next ring-3",
             pid,
             code,
         );

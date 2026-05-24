@@ -29,14 +29,14 @@ The kernel runs a **live preemptive scheduler** with timer-driven context switch
 
 ## Ring-3 awareness
 
-`CpuContext` carries explicit `cs` and `ss` fields (offsets 144 and 152). The naked-asm `iretq` frames in `preemption.rs` and `context_switch.rs` read CS/SS from those fields rather than literal `push 0x08` / `push 0x10`. Kernel processes default to `cs=0x08, ss=0x10` so behavior is preserved; ring-3 processes (when they arrive via the userland subsystem) carry `cs=0x23, ss=0x1B` and resume in ring 3 without further asm changes.
+`CpuContext` carries explicit `cs` and `ss` fields (offsets 144 and 152). The naked-asm `iretq` frames in `preemption.rs` and `context_switch.rs` read CS/SS from those fields rather than literal `push 0x08` / `push 0x10`. Kernel processes default to `cs=0x08, ss=0x10`; the kernel-thread scheduler doesn't directly schedule ring-3 (each ring-3 process is in the userland subsystem's `PROCESS_TABLE`, not the kernel-thread scheduler).
 
-`timer_handler_inner` short-circuits on `(frame.cs & 3) == 3`: it refreshes `last_activity_tick` for the active PCB, sends EOI, and returns immediately. The naked wrapper then `iretq`s straight back to ring-3. This is the single-app-synchronous policy — user apps are not descheduled during execution.
+**Multi-ring-3 (U5-U8) integration:** `timer_handler_inner`'s CPL=3 branch calls `userland::lifecycle::try_preempt_ring3` to round-robin between ring-3 processes via `userland::switch::resume_ring3`. Kernel threads that launched ring-3 processes (e.g., terminal factory) block on `BlockReason::WaitingForRing3Exit(pid)` while their ring-3 process runs; the kernel main loop's `save_kernel_and_resume_ring3` dispatches `ring3_ready` processes when no kernel thread is runnable. See `src/userland/CLAUDE.md` for the full lifecycle.
 
 ## What's NOT wired up
 
-- **No isolation.** All kernel code shares one address space (ring 0). Ring-3 processes have a USER-bit-protected slice of the same address space (added by the userland subsystem at `src/userland/`).
-- **No real concurrency.** Single execution thread per CPU; the scheduler multiplexes processes but does not exploit multiple cores.
+- **No isolation between kernel threads.** All kernel code shares one address space (ring 0). Ring-3 processes have their own L4 (USER-bit-protected user half + shared kernel half) — see the userland subsystem at `src/userland/`.
+- **No SMP.** Single execution thread per CPU; the scheduler multiplexes both kernel threads and ring-3 processes but does not exploit multiple cores.
 - **No IPC.**
 
 ## Cross-references

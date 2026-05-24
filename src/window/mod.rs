@@ -23,6 +23,7 @@ pub mod terminal;
 pub mod console;
 pub mod keyboard;
 pub mod cursor;
+pub mod compositor;
 pub mod terminal_factory;
 
 pub use types::*;

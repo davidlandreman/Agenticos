@@ -288,24 +288,10 @@ fn close_start_menu() {
 
 /// Spawn a new terminal.
 ///
-/// The kernel is single-user-app-synchronous (D5): only one ring-3
-/// process can be active at a time. zsh is a ring-3 process, so each
-/// open terminal holds the slot. Opening a second terminal while one
-/// is still open would create a window, immediately fail to launch
-/// zsh, and close the window — confusing. Refuse upfront with a
-/// dialog instead.
+/// U8 lifted the single-user-app restriction: each terminal gets its
+/// own kernel-thread launcher + ring-3 zsh, and the scheduler
+/// round-robins between them. Concurrent terminals are now expected.
 fn spawn_terminal() {
-    if crate::userland::lifecycle::user_active() {
-        crate::debug_warn!(
-            "GUIShell: refusing second terminal — a user app (likely zsh) is already running"
-        );
-        crate::window::dialogs::show_error(
-            "Cannot open terminal",
-            "Only one ring-3 process can run at a time in this kernel. \
-             Close the existing terminal first.",
-        );
-        return;
-    }
     match crate::window::terminal_factory::spawn_terminal_with_shell() {
         Ok(instance) => {
             crate::debug_info!("GUIShell: Spawned terminal {:?}", instance.terminal_id);

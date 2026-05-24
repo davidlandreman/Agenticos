@@ -210,20 +210,32 @@ fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
 
             match crate::userland::launcher::launch_user_binary(ZSH_HOST_PATH, &argv, &envp) {
                 Ok((kind, code)) => {
-                    crate::debug_info!(
-                        "Terminal factory: zsh exited (kind={:?}, code={})",
+                    let msg = alloc::format!(
+                        "[zsh exited: kind={:?}, code={}]",
                         kind,
                         code,
                     );
+                    // Surface to BOTH serial (debug) and the terminal
+                    // window so the user can see + capture diagnostics.
+                    crate::debug_error!("Terminal factory: {}", msg);
+                    let banner = alloc::format!("\n{}\n", msg);
+                    crate::window::terminal::write_to_terminal_id(terminal_id, &banner);
                 }
                 Err(msg) => {
                     crate::println!("zsh failed to launch: {}", msg);
                     crate::debug_error!("Terminal factory: zsh launch failed: {}", msg);
+                    let banner = alloc::format!(
+                        "\n[zsh launch failed: {}]\n",
+                        msg,
+                    );
+                    crate::window::terminal::write_to_terminal_id(terminal_id, &banner);
                 }
             }
 
             crate::window::terminal::clear_current_output_terminal();
-            close_terminal(terminal_id);
+            // Leave the terminal window OPEN so the exit banner above
+            // stays visible. The user can dismiss the window manually.
+            // close_terminal(terminal_id);  // disabled for diagnostics
         },
     )
 }

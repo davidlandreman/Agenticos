@@ -210,31 +210,59 @@ pub unsafe extern "C" fn timer_interrupt_handler_preemptive() {
 
 /// Stack frame layout after pushing all registers in the interrupt handler.
 /// This matches the order we push registers in the assembly above.
+///
+/// **Load-bearing layout.** Field order corresponds to the naked-asm
+/// `push` sequence in `timer_interrupt_handler_preemptive` (high address
+/// first — `r15` was pushed last, so it sits at the lowest offset). The
+/// U4 ring-3 switch primitive (`crate::userland::switch::save_ring3`)
+/// reads from this layout to snapshot user GPRs into the
+/// process's `saved_user_state`; reordering or inserting fields without
+/// also updating the asm push sequence and `save_ring3` would silently
+/// copy the wrong registers on every preempt.
+///
+/// `pub(crate)` so the userland subsystem can take a `&InterruptStackFrame`
+/// without re-declaring the layout.
 #[repr(C)]
-struct InterruptStackFrame {
+pub(crate) struct InterruptStackFrame {
     // Registers we pushed (in reverse order, so first pushed = highest address)
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    r11: u64,
-    r10: u64,
-    r9: u64,
-    r8: u64,
-    rbp: u64,
-    rdi: u64,
-    rsi: u64,
-    rdx: u64,
-    rcx: u64,
-    rbx: u64,
-    rax: u64,
+    pub(crate) r15: u64,
+    pub(crate) r14: u64,
+    pub(crate) r13: u64,
+    pub(crate) r12: u64,
+    pub(crate) r11: u64,
+    pub(crate) r10: u64,
+    pub(crate) r9: u64,
+    pub(crate) r8: u64,
+    pub(crate) rbp: u64,
+    pub(crate) rdi: u64,
+    pub(crate) rsi: u64,
+    pub(crate) rdx: u64,
+    pub(crate) rcx: u64,
+    pub(crate) rbx: u64,
+    pub(crate) rax: u64,
     // CPU-pushed interrupt frame
-    rip: u64,
-    cs: u64,
-    rflags: u64,
-    rsp: u64,
-    ss: u64,
+    pub(crate) rip: u64,
+    pub(crate) cs: u64,
+    pub(crate) rflags: u64,
+    pub(crate) rsp: u64,
+    pub(crate) ss: u64,
 }
+
+// Static layout assertions — guard the asm-side contract. Every field
+// is u64, so offsets are 8 × position. If a future refactor inserts a
+// field or changes the type, the const evaluation fires at compile time
+// before anything boots with the wrong layout.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(InterruptStackFrame, r15) == 0);
+    assert!(offset_of!(InterruptStackFrame, rax) == 14 * 8);
+    assert!(offset_of!(InterruptStackFrame, rip) == 15 * 8);
+    assert!(offset_of!(InterruptStackFrame, cs) == 16 * 8);
+    assert!(offset_of!(InterruptStackFrame, rflags) == 17 * 8);
+    assert!(offset_of!(InterruptStackFrame, rsp) == 18 * 8);
+    assert!(offset_of!(InterruptStackFrame, ss) == 19 * 8);
+    assert!(core::mem::size_of::<InterruptStackFrame>() == 20 * 8);
+};
 
 /// Inner handler called from the naked interrupt handler.
 /// Checks if preemption is needed and sets up context switch if so.
@@ -246,14 +274,24 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     // Increment tick counter
     let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
-    // Ring-3 short-circuit (D7 / D10): if the interrupted CS has RPL=3, the
-    // user app was running. Refresh the active PCB's last_activity_tick so the
-    // watchdog does not reap a CPU-bound but otherwise healthy app, send EOI,
-    // and return immediately — the naked outer wrapper will iretq straight
-    // back to ring 3. This MUST run before any of the save/yield logic below
-    // because that logic writes user-mode RSP/RIP/RFLAGS into the kernel-side
-    // PCB, which would later iretq with kernel CS=0x08 against a user RIP and
-    // double-fault.
+    // Ring-3 timer trap (U5): the user app was running. Refresh the
+    // active PCB's last_activity_tick so the watchdog doesn't reap a
+    // CPU-bound but otherwise healthy app, EOI the PIC, then ask the
+    // userland subsystem whether to switch to a different ring-3
+    // process. If yes, `resume_ring3` diverges and `iretq`s into it;
+    // if no, fall through to `return` and the naked outer wrapper
+    // iretq's back to the same ring-3 process.
+    //
+    // Single ring-3 process today (D5/U8-pending) means the ring3_ready
+    // queue is empty when this fires, so try_preempt_ring3 returns None
+    // and behavior is byte-for-byte identical to the prior
+    // short-circuit. Once U7/U8 actually populate the queue with a
+    // second runnable process, this path starts time-slicing.
+    //
+    // The CPL=0 preemption logic below must NOT run after this path
+    // because it writes user-mode RSP/RIP/RFLAGS into a kernel PCB,
+    // which would later iretq with kernel CS=0x08 against a user RIP
+    // and double-fault. The `return` here keeps that invariant.
     let frame = unsafe { &*stack_frame };
     if (frame.cs & 3) == 3 {
         if let Some(mut sched) = crate::process::scheduler::SCHEDULER.try_lock() {
@@ -263,8 +301,20 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
                 }
             }
         }
+        // EOI before any potential iretq so the next ring-3 process
+        // (or this same one resuming) sees a clean PIC for the next
+        // tick. Interrupts are disabled in this handler, so EOI'ing
+        // early can't cause re-entry.
         unsafe {
             PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        }
+        if let Some(next_pid) = crate::userland::lifecycle::try_preempt_ring3(frame) {
+            // Diverges. resume_ring3 swaps CR3 / TSS.rsp0 / GSBASE /
+            // FS_BASE / FPU, then `iretq`s into next_pid at CPL=3.
+            unsafe {
+                crate::userland::switch::resume_ring3(next_pid);
+            }
+            // Unreachable.
         }
         return;
     }

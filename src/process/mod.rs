@@ -26,6 +26,14 @@ pub fn is_in_spawned_process() -> bool {
     IN_SPAWNED_PROCESS.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// U8: set the "in spawned process" flag. Used by the ring-3 → kernel
+/// yield path (`switch::yield_to_kernel_main_loop`) to clear the flag
+/// before switching to `KERNEL_CONTEXT` so the kernel main loop
+/// observes the correct state on resume.
+pub fn set_in_spawned_process(value: bool) {
+    IN_SPAWNED_PROCESS.store(value, core::sync::atomic::Ordering::Release);
+}
+
 /// Initialize the scheduler
 pub fn init_scheduler() {
     scheduler::SCHEDULER.lock().init();
@@ -80,11 +88,31 @@ where
 /// The current process gives up the remainder of its time slice and
 /// the scheduler picks the next process to run. The current process
 /// will be resumed later by the scheduler.
+///
+/// **Ring-3 dispatch hand-off:** if we'd otherwise stay on the
+/// current kernel thread (no other kernel thread is ready) AND a
+/// ring-3 process is sitting in `ring3_ready`, switch to
+/// `KERNEL_CONTEXT` instead so the kernel main loop's
+/// `save_kernel_and_resume_ring3` can dispatch it. Without this, a
+/// lone CPU-yielding kernel thread (e.g., the compositor between
+/// renders) keeps getting re-picked by `schedule()` — which resets
+/// its time slice every time — and the main loop never runs, so a
+/// freshly-launched ring-3 zsh never gets its first slice. The user
+/// sees a blank terminal until something else (e.g., launching
+/// notepad) adds a second kernel thread that finally lets the
+/// compositor yield outwards.
 pub fn yield_current() {
     use crate::arch::x86_64::context_switch::switch_context;
     use crate::arch::x86_64::interrupts::get_timer_ticks;
+    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
+    use core::sync::atomic::Ordering;
 
-    let (old_ctx_ptr, new_ctx) = {
+    enum YieldTarget {
+        Process(CpuContext),
+        Kernel,
+    }
+
+    let (old_ctx_ptr, target) = {
         let mut sched = scheduler::SCHEDULER.lock();
         let current_pid = match sched.current() {
             Some(pid) => pid,
@@ -104,40 +132,61 @@ pub fn yield_current() {
             None => return, // No process to switch to
         };
 
-        // If we're switching to ourselves, do nothing
-        if next_pid == current_pid {
-            return;
-        }
-
-        // Get context pointers while holding the lock
         let old_ctx = match sched.get_context_mut(current_pid) {
             Some(ctx) => ctx as *mut CpuContext,
             None => return,
         };
-        let new_ctx = match sched.get_context(next_pid) {
-            Some(ctx) => *ctx,
-            None => return,
-        };
 
-        (old_ctx, new_ctx)
+        if next_pid == current_pid {
+            // Only us in the ready queue. If a ring-3 process is
+            // waiting, give the kernel main loop a chance to dispatch
+            // it; otherwise stay on this thread (no work elsewhere).
+            if crate::userland::lifecycle::peek_next_ring3().is_some() {
+                (old_ctx, YieldTarget::Kernel)
+            } else {
+                return;
+            }
+        } else {
+            let new_ctx = match sched.get_context(next_pid) {
+                Some(ctx) => *ctx,
+                None => return,
+            };
+            (old_ctx, YieldTarget::Process(new_ctx))
+        }
     };
 
-    // Pre-map the stack pages before switching context
-    // This is critical for new processes that haven't started yet
-    let stack_top = new_ctx.rsp;
-    unsafe {
-        let page_size = 4096u64;
-        for offset in (0..page_size * 4).step_by(page_size as usize) {
-            let addr = stack_top - offset - 8;
-            // Volatile read to trigger page fault (which will map the page)
-            core::ptr::read_volatile(addr as *const u8);
-        }
-    }
+    match target {
+        YieldTarget::Process(new_ctx) => {
+            // Pre-map the stack pages before switching context
+            // This is critical for new processes that haven't started yet
+            let stack_top = new_ctx.rsp;
+            unsafe {
+                let page_size = 4096u64;
+                for offset in (0..page_size * 4).step_by(page_size as usize) {
+                    let addr = stack_top - offset - 8;
+                    // Volatile read to trigger page fault (which will map the page)
+                    core::ptr::read_volatile(addr as *const u8);
+                }
+            }
 
-    // Perform the context switch - this saves our state and switches
-    // When we're scheduled again, we'll resume right after this call
-    unsafe {
-        switch_context(old_ctx_ptr, &new_ctx);
+            // Perform the context switch - this saves our state and switches
+            // When we're scheduled again, we'll resume right after this call
+            unsafe {
+                switch_context(old_ctx_ptr, &new_ctx);
+            }
+        }
+        YieldTarget::Kernel => {
+            // Hand off to the kernel main loop. It'll dispatch the
+            // pending ring-3 process and eventually re-pick us via
+            // try_run_scheduled_processes. Mirrors the pattern
+            // sleep_ticks uses for SwitchTarget::Kernel.
+            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
+            let kernel_ctx = unsafe { KERNEL_CONTEXT };
+            unsafe {
+                switch_context(old_ctx_ptr, &kernel_ctx);
+            }
+            IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -247,6 +296,97 @@ pub fn block_for_input() {
             // Switch to the next process
             unsafe {
                 crate::arch::x86_64::context_switch::switch_to_context(&next_ctx);
+            }
+        }
+    }
+}
+
+/// U8: block the current kernel thread until ring-3 process `pid`
+/// exits, then return. Called from `enter_user_mode_with_aspace` after
+/// the launcher has installed the Process and marked it Ready.
+///
+/// The kernel thread is marked Blocked in the scheduler with
+/// `BlockReason::WaitingForRing3Exit(pid)`. The scheduler switches
+/// to the next runnable kernel thread (typically idle, which checks
+/// `ring3_ready` and `resume_ring3`s the freshly-Ready process).
+///
+/// When the ring-3 process exits, `long_jump_to_run_or_halt` calls
+/// `wake_threads_waiting_for_ring3_exit(pid)` which moves us back to
+/// the ready queue. The kernel-thread scheduler eventually picks us
+/// via `switch_context`, restoring our state from the PCB's saved
+/// `context`. Execution resumes right after the `switch_context`
+/// call below.
+pub fn block_kernel_thread_for_ring3_exit(pid: u32) {
+    use crate::arch::x86_64::context_switch::switch_context;
+
+    // Real kernel-thread path: block on the scheduler.
+    let block_outcome = {
+        let mut sched = scheduler::SCHEDULER.lock();
+        if let Some(current_pid) = sched.current() {
+            let old_ctx = match sched.get_context_mut(current_pid) {
+                Some(c) => c as *mut CpuContext,
+                None => return,
+            };
+
+            sched.block_current(BlockReason::WaitingForRing3Exit(pid));
+
+            let next_pid = match sched.schedule() {
+                Some(p) => p,
+                None => return,
+            };
+            let new_ctx = match sched.get_context(next_pid) {
+                Some(c) => *c,
+                None => return,
+            };
+
+            Some((old_ctx, new_ctx))
+        } else {
+            None
+        }
+    };
+
+    if let Some((old_ctx_ptr, new_ctx)) = block_outcome {
+        unsafe {
+            switch_context(old_ctx_ptr, &new_ctx);
+        }
+        return;
+    }
+
+    // U8: no current kernel thread (called from kernel main loop or
+    // test runner). Drive a mini-dispatch loop: dispatch ring3_ready
+    // processes via save_kernel_and_resume_ring3 until our target
+    // process exits. Yield to hlt between dispatches when no ring-3
+    // is ready.
+    drive_inline_ring3_until_exit(pid);
+}
+
+/// U8: inline ring-3 dispatch loop for non-kernel-thread contexts
+/// (kernel main loop, test runner). Polls until `awaited_pid`'s
+/// `exit_kind` becomes non-None.
+fn drive_inline_ring3_until_exit(awaited_pid: u32) {
+    use crate::userland::lifecycle::{
+        pop_next_ring3, with_process, ExitKind,
+    };
+    loop {
+        let exited = with_process(awaited_pid, |p| !matches!(p.exit_kind, ExitKind::None))
+            .unwrap_or(true); // process gone (already reaped) → treat as exited
+        if exited {
+            return;
+        }
+
+        if let Some(next) = pop_next_ring3() {
+            unsafe {
+                crate::userland::switch::save_kernel_and_resume_ring3(
+                    next,
+                    &raw mut crate::arch::x86_64::preemption::KERNEL_CONTEXT,
+                );
+            }
+            // Resumed via KERNEL_CONTEXT — continue polling.
+        } else {
+            // Nothing to dispatch; wait for an interrupt (timer, input)
+            // that might unblock our awaited process.
+            unsafe {
+                core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags));
             }
         }
     }

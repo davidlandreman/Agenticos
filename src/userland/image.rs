@@ -168,6 +168,35 @@ impl UserImage {
     pub fn mapping(&self, idx: usize) -> Option<MappingRange> {
         self.mappings.get(idx).copied()
     }
+
+    /// Mark the image as already-cleaned-up, suppressing the `Drop`
+    /// unmap pass. Call this when the surrounding `AddressSpace` is
+    /// going away in the same teardown (process exit / reap), so the
+    /// L4 frame and its leaves leak together rather than having
+    /// `unmap_user_region` operate on whatever CR3 happens to be live.
+    ///
+    /// The forward-only frame allocator never reclaims, so "leak"
+    /// here just means the same outcome as `AddressSpace::Drop`: the
+    /// frames stay allocated in physical memory but are no longer
+    /// referenced by any page-table the kernel can reach.
+    ///
+    /// Background: `UserImage::Drop` calls `unmap_user_region` against
+    /// the **active** CR3. That's correct in the execve path (the
+    /// process's own L4 is still active when the old image drops). It
+    /// is catastrophic during reap of a forked child whose L4 is no
+    /// longer active — `unmap_user_region` clobbers the CURRENT
+    /// process's L4 at any VAs that happen to overlap the dead
+    /// process's recorded mappings. For static-non-PIE binaries that
+    /// all link at the same base, that overlap is total.
+    pub fn abandon(&mut self) {
+        self.dropped = true;
+        self.mappings.clear();
+        // Stack initial-commit is also unmapped by Drop; suppress that
+        // by zeroing the trigger field. The grown-stack region is
+        // handled separately by `Process` (via `unmap_user_stack`) and
+        // is unaffected by this method.
+        self.stack_initial_bottom = 0;
+    }
 }
 
 impl Drop for UserImage {

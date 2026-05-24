@@ -53,24 +53,6 @@ pub struct AbnormalExit {
 /// the architectural exception range (0..32).
 pub const COOPERATIVE_EXIT_VECTOR: u8 = 0xFF;
 
-/// Saved kernel state at the moment we entered ring 3. Restored on long-jump.
-/// Layout matches the order in which the naked-asm helpers push and pop the
-/// callee-saved registers; do not reorder fields without auditing the asm.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct KernelContinuation {
-    pub rbx: u64,
-    pub rbp: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-    pub rsp: u64,
-    /// Address to resume at — the instruction immediately after the
-    /// `enter_user_mode_asm` call site in the run command.
-    pub rip: u64,
-}
-
 /// The single active per-CPU user-process slot.
 ///
 /// Holds:
@@ -103,7 +85,6 @@ pub struct Process {
     /// `run` command, this is `0` (kernel as parent). For fork-spawned
     /// children (PR-C), this becomes the parent's PID.
     pub parent_pid: u32,
-    pub continuation: Option<KernelContinuation>,
     pub image: Option<UserImage>,
     pub exit_kind: ExitKind,
     pub exit_code: i64,
@@ -181,6 +162,26 @@ pub struct Process {
     /// with the architectural reset state via
     /// [`crate::arch::x86_64::fpu::FpuState::fresh`].
     pub fpu_state: crate::arch::x86_64::fpu::FpuState,
+    /// U4: snapshot of this process's user-mode GPRs + RIP/RFLAGS/RSP
+    /// at the moment it was last switched out. Written by
+    /// [`crate::userland::switch::save_ring3`] on preempt-out and read
+    /// by [`crate::userland::switch::resume_ring3`] on preempt-in.
+    /// Zero-initialized for fresh processes; the first ring-3 entry
+    /// still goes through [`enter_user_mode_asm`] (which doesn't read
+    /// this field), so the first time U5's timer-driven save fires the
+    /// snapshot becomes meaningful. Layout matches `UserState` exactly
+    /// — the same offsets are baked into both `iretq_to_user_with_regs`
+    /// and `resume_ring3_asm`.
+    pub saved_user_state: crate::userland::user_state::UserState,
+    /// U8/bugfix: terminal window this process's stdout + stderr
+    /// should route to. Inherited from the launching kernel thread's
+    /// PCB.terminal_id at install time, and from the parent across
+    /// fork. `None` for synthetic test processes (output falls back
+    /// to the global CURRENT_OUTPUT_TERMINAL). Pre-fix, all ring-3
+    /// processes routed via a single global `CURRENT_OUTPUT_TERMINAL`
+    /// which the last launcher won — under multi-terminal that caused
+    /// zsh1's writes to land in terminal 2's window.
+    pub terminal_id: Option<crate::window::WindowId>,
 }
 
 /// Compatibility alias retained for the long tail of callsites using
@@ -209,7 +210,7 @@ pub enum ExitKind {
     /// Cooperative `exit(code)` syscall.
     Cooperative,
     /// Ring-3 fault — see `AbnormalExit` for vector / fault address.
-    Abnormal { vector: u8, fault_rip: u64 },
+    Abnormal { vector: u8, fault_rip: u64, fault_addr: Option<u64> },
     /// User issued a syscall the kernel does not implement. The number is
     /// recorded so diagnostic logging can name it; the process is torn
     /// down via the same long-jump path as a fault. Distinct from
@@ -277,9 +278,29 @@ pub enum Ring3BlockReason {
     /// any child of this process becomes a zombie (U6's child-exit
     /// path calls `wake_ring3_blocked_on_child(parent_pid)`).
     WaitingForChild { target: i32 },
+    /// `read(0, ...)` from stdin with an empty input queue. Wakes
+    /// when input lands on the blocked process's terminal via
+    /// [`wake_ring3_blocked_on_input`] (called from the stdin push
+    /// path with the producing terminal's id). On wake, the parent's
+    /// SYSCALL re-fires and `read_stdin_blocking` re-checks the
+    /// queue.
+    WaitingForInput,
+    /// `read(fd, ...)` on a pipe whose ring buffer is empty but at
+    /// least one writer still exists. Wakes when any pipe write
+    /// appends bytes, or when the last writer drops (allowing the
+    /// reader to observe EOF) — see [`wake_ring3_blocked_on_pipe_readable`].
+    /// Wake is conservative (all `WaitingForPipeRead` blockers wake on
+    /// any pipe event); each woken reader re-fires its SYSCALL and
+    /// either succeeds or blocks again.
+    WaitingForPipeRead,
+    /// `write(fd, ...)` on a pipe whose ring buffer is full but at
+    /// least one reader still exists. Wakes when any pipe read drains
+    /// bytes, or when the last reader drops (so the writer re-fires
+    /// and returns `EPIPE`) — see [`wake_ring3_blocked_on_pipe_writable`].
+    WaitingForPipeWrite,
 }
 
-static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::new(ProcessTable::empty());
+pub(crate) static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::new(ProcessTable::empty());
 
 /// Lazy initializer: ensures the sentinel entry at PID 0 exists. Called
 /// from every `with_current_process`/`with_process` path before lookup
@@ -302,7 +323,6 @@ impl Process {
         Process {
             pid: KERNEL_PID,
             parent_pid: KERNEL_PID,
-            continuation: None,
             image: None,
             exit_kind: ExitKind::None,
             exit_code: 0,
@@ -321,6 +341,8 @@ impl Process {
             growth_faults_remaining: 0,
             fs_base: 0,
             fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
+            saved_user_state: crate::userland::user_state::UserState::default(),
+            terminal_id: None,
         }
     }
 }
@@ -417,7 +439,31 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     // U3: a removed process must not linger in the scheduler queues.
     g.ring3_ready.retain(|p| *p != pid);
     g.ring3_blocked.remove(&pid);
-    g.by_pid.remove(&pid)
+    let mut removed = g.by_pid.remove(&pid)?;
+    drop(g);
+
+    // Critical: when a Process is removed, its image is going away
+    // along with its AddressSpace. `UserImage::Drop`'s default behavior
+    // is to call `unmap_user_region` against the **active** CR3 —
+    // which here is generally the CR3 of whichever process is currently
+    // loaded, NOT the dying process. That would clobber the live
+    // process's page tables at any VAs that overlap the dying process's
+    // recorded mappings (total overlap for two static-non-PIE binaries
+    // sharing a load base, e.g. zsh reaping a forked-then-execve'd
+    // child that loaded BB.ELF — the SIGCHLD handler's `ret`
+    // immediately faults on instruction fetch because the parent's
+    // text just got zero'd out).
+    //
+    // execve's in-place image swap does NOT go through this function —
+    // it uses `with_current_process(|p| p.image.take())` and drops the
+    // image while its own L4 is still active, which is the only path
+    // where the unmap-on-drop is correct. All other paths funnel
+    // through `remove_process`, so abandoning the image here is the
+    // single, correct chokepoint.
+    if let Some(img) = removed.image.as_mut() {
+        img.abandon();
+    }
+    Some(removed)
 }
 
 /// Reset the sentinel entry at PID 0 to its default state. Used by the
@@ -495,12 +541,114 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
         Some(Ring3BlockReason::WaitingForChild { target }) => {
             *target == -1 || *target == child_pid as i32
         }
-        None => false,
+        Some(Ring3BlockReason::WaitingForInput)
+        | Some(Ring3BlockReason::WaitingForPipeRead)
+        | Some(Ring3BlockReason::WaitingForPipeWrite)
+        | None => false,
     };
     if should_wake {
         g.ring3_blocked.remove(&parent_pid);
         if !g.ring3_ready.iter().any(|p| *p == parent_pid) {
             g.ring3_ready.push_back(parent_pid);
+        }
+    }
+}
+
+/// Wake any ring-3 process blocked on stdin input whose `terminal_id`
+/// matches `terminal_id`. Called by the stdin push path after
+/// enqueueing bytes; the caller already knows which terminal the bytes
+/// came from, so only readers on that terminal should wake.
+///
+/// Pre-fix this woke every `WaitingForInput` blocker — which under
+/// multi-terminal meant keystrokes typed in terminal 2 woke zsh1, and
+/// whichever zsh got dispatched first drained the shared global queue.
+/// Pairing each wake with a `terminal_id` makes input routing
+/// deterministic.
+///
+/// `terminal_id == None` matches processes whose own `terminal_id` is
+/// `None` (test / legacy paths that don't model a terminal window).
+///
+/// Walks the blocked map once per call. The set is small (one entry
+/// per terminal-bound ring-3 process); the walk cost is negligible.
+pub fn wake_ring3_blocked_on_input(terminal_id: Option<crate::window::WindowId>) {
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let blocked: alloc::vec::Vec<u32> = g
+        .ring3_blocked
+        .iter()
+        .filter_map(|(pid, reason)| {
+            if matches!(reason, Ring3BlockReason::WaitingForInput) {
+                Some(*pid)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let waking: alloc::vec::Vec<u32> = blocked
+        .into_iter()
+        .filter(|pid| {
+            g.by_pid
+                .get(pid)
+                .map(|p| p.terminal_id == terminal_id)
+                .unwrap_or(false)
+        })
+        .collect();
+    for pid in waking {
+        g.ring3_blocked.remove(&pid);
+        if !g.ring3_ready.iter().any(|p| *p == pid) {
+            g.ring3_ready.push_back(pid);
+        }
+    }
+}
+
+/// Wake every ring-3 process blocked on a pipe read. Called when a
+/// pipe write appends bytes or when the last writer drops (so blocked
+/// readers can observe EOF). Conservative — any pipe event wakes every
+/// `WaitingForPipeRead` blocker; each re-fires its read syscall and
+/// either succeeds or blocks again on its own pipe. The blocked set is
+/// at most one entry per ring-3 process, so the walk is negligible.
+///
+/// Uses `try_lock`: the wake may be invoked from inside
+/// `PipeWriteHandle::Drop`, which can fire while another path
+/// (`close_handler`, `dup2_handler`) holds `PROCESS_TABLE` via
+/// `with_fd_table_mut`. On contention the wake is skipped — the
+/// holding syscall handler is responsible for issuing an explicit
+/// follow-up wake after the lock is released (see
+/// `close_handler` / `dup2_handler`). Spin-deadlock-safe.
+pub fn wake_ring3_blocked_on_pipe_readable() {
+    wake_ring3_blocked_by(|r| matches!(r, Ring3BlockReason::WaitingForPipeRead));
+}
+
+/// Wake every ring-3 process blocked on a pipe write. Called when a
+/// pipe read drains bytes (freeing buffer space) or when the last
+/// reader drops (so blocked writers re-fire and return `EPIPE`).
+/// `try_lock` discipline matches
+/// [`wake_ring3_blocked_on_pipe_readable`].
+pub fn wake_ring3_blocked_on_pipe_writable() {
+    wake_ring3_blocked_by(|r| matches!(r, Ring3BlockReason::WaitingForPipeWrite));
+}
+
+fn wake_ring3_blocked_by<F>(matcher: F)
+where
+    F: Fn(&Ring3BlockReason) -> bool,
+{
+    // `try_lock` to avoid re-entrant spin: pipe-handle `Drop` can fire
+    // from inside `with_fd_table_mut`, which already holds this lock.
+    // Callers that mutate the FD table under the lock issue explicit
+    // wake calls after release so a skipped wake here is recovered.
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let waking: alloc::vec::Vec<u32> = g
+        .ring3_blocked
+        .iter()
+        .filter_map(|(pid, reason)| if matcher(reason) { Some(*pid) } else { None })
+        .collect();
+    for pid in waking {
+        g.ring3_blocked.remove(&pid);
+        if !g.ring3_ready.iter().any(|p| *p == pid) {
+            g.ring3_ready.push_back(pid);
         }
     }
 }
@@ -542,8 +690,91 @@ pub fn save_user_cpu_state(p: &mut Process) {
 /// happens separately (via [`crate::userland::address_space::AddressSpace::activate`])
 /// — this function only touches MSRs and the FPU register file.
 pub fn restore_user_cpu_state(p: &Process) {
+    // U8/diagnostic: log when restoring to a non-user FS_BASE — that
+    // would indicate Process.fs_base was set wrong somewhere.
+    if p.fs_base != 0
+        && !(crate::mm::paging::USER_VA_RANGE_START..crate::mm::paging::USER_VA_RANGE_END)
+            .contains(&p.fs_base)
+    {
+        crate::debug_error!(
+            "restore_user_cpu_state(pid={}): FS_BASE {:#x} is NOT in user VA range — likely corruption",
+            p.pid, p.fs_base
+        );
+    }
     crate::arch::x86_64::msr::set_fs_base(p.fs_base);
     crate::arch::x86_64::fpu::restore_fpu(&p.fpu_state);
+}
+
+/// Test-only: drain `ring3_ready` and `ring3_blocked`. Used by
+/// `PreemptTestGuard::drop` in `src/tests/userland_switch.rs` so a
+/// test that pushes synthetic PIDs into the queues and then panics
+/// (or simply forgets to clean up) doesn't poison subsequent tests.
+#[cfg(feature = "test")]
+pub fn clear_ring3_queues_for_test() {
+    let mut g = PROCESS_TABLE.lock();
+    g.ring3_ready.clear();
+    g.ring3_blocked.clear();
+}
+
+/// U5: timer-ISR ring-3 preempt decision.
+///
+/// Called from `timer_handler_inner` when the timer fires from CPL=3.
+/// Under a single `PROCESS_TABLE.try_lock()`:
+///
+/// 1. Read `current_user_pid`. If `None` or `KERNEL_PID`, no-op.
+/// 2. Pop the front of `ring3_ready`. If empty, no-op.
+/// 3. If popped pid equals `cur`, re-queue and no-op (nothing else
+///    to switch to).
+/// 4. Otherwise: snapshot `cur`'s GPRs + RIP + RFLAGS + RSP from
+///    `frame` into `cur`.saved_user_state, capture FS_BASE + FPU
+///    via `save_user_cpu_state`, push `cur` to the back of
+///    ring3_ready (round-robin), and return `Some(next_pid)`.
+///
+/// Returns `Some(next_pid)` to signal "caller should
+/// [`crate::userland::switch::resume_ring3`] this pid"; returns
+/// `None` to signal "fall through and iretq back to the current
+/// ring-3 process."
+///
+/// `try_lock` discipline matches the existing scheduler pattern: if
+/// the lock is contended (which shouldn't happen on single-CPU
+/// because syscall handlers run with IF=0 per the FMASK MSR, but
+/// matters for SMP-forward-compat), skip this preempt opportunity
+/// and let ring 3 continue. The next tick retries.
+pub fn try_preempt_ring3(
+    frame: &crate::arch::x86_64::preemption::InterruptStackFrame,
+) -> Option<u32> {
+    let mut g = PROCESS_TABLE.try_lock()?;
+    let cur = g.current_user_pid?;
+    if cur == KERNEL_PID {
+        return None;
+    }
+
+    let next = g.ring3_ready.pop_front()?;
+    if next == cur {
+        // Front of queue was us; nothing to switch to. Re-queue to
+        // preserve FIFO order.
+        g.ring3_ready.push_back(next);
+        return None;
+    }
+
+    // Snapshot `cur`'s state. The frame's CPU-pushed RIP/CS/RFLAGS/RSP
+    // describe ring 3's interrupted instruction; the GPRs were pushed
+    // by the naked timer-ISR prologue. After this returns,
+    // `cur.saved_user_state` is a complete iretq-ready snapshot.
+    let cur_p = g.by_pid.get_mut(&cur)?;
+    crate::userland::switch::save_ring3(cur_p, frame);
+
+    // Round-robin: cur goes to the back of the queue so the next
+    // preempt of `next` picks cur. `mark_ring3_ready` would re-take
+    // the lock; inline the push since we already hold it.
+    if !g.ring3_ready.iter().any(|p| *p == cur) {
+        g.ring3_ready.push_back(cur);
+    }
+
+    // current_user_pid is not flipped here — `resume_ring3` does
+    // that atomically with the CR3 / TSS.rsp0 / GSBASE side-effects.
+    drop(g);
+    Some(next)
 }
 
 /// Allocate a fresh PID. Used by `enter_user_mode_with` and (future)
@@ -582,7 +813,6 @@ pub fn install_new_process_opt(
     let mut p = Process {
         pid,
         parent_pid: KERNEL_PID,
-        continuation: None,
         image: Some(image),
         exit_kind: ExitKind::None,
         exit_code: 0,
@@ -601,6 +831,10 @@ pub fn install_new_process_opt(
         growth_faults_remaining: 0,
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::fresh(),
+        saved_user_state: crate::userland::user_state::UserState::default(),
+        // Filled in by `setup_user_process` from the launching kernel
+        // thread's PCB.
+        terminal_id: None,
     };
     // Demand-grown stack (U3): install the loader-computed window.
     // `stack_bottom == stack_mapped_bottom == initial_bottom` at
@@ -693,6 +927,15 @@ pub static LAST_GROW_OUTCOME: spin::Mutex<Option<GrowOutcome>> =
 /// on every other outcome it falls through to cleanup.
 pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
     use crate::mm::paging::UserPerms;
+
+    // U9 invariant: a ring-3 page fault implies CR3 is the faulting
+    // process's L4, which (by U5's `resume_ring3` atomic swap)
+    // implies `current_user_pid` points at the faulting process.
+    // `try_grow_user_stack` reads the stack window from
+    // `current_user_pid`'s Process — that's correctly the faulting
+    // process under all U5+ flows. The kernel-mode fall-through
+    // (sentinel) handles synthetic test paths and pre-launch
+    // kernel-page-faults.
 
     // Classification + mutation happens under the Process lock. We
     // drop the lock before calling map_user_region — the mapper is a
@@ -889,60 +1132,25 @@ pub fn current_pid() -> u32 {
     current_user_pid().unwrap_or(KERNEL_PID)
 }
 
-// ---------- Phase 4 PR-C2: parent stash + zombie table ----------
+// ---------- zombie filing + SIGCHLD on parent ----------
 
-/// While `fork()` runs the child synchronously, the parent's `Process`
-/// is moved out of the active slot (via `swap_current_process`) into
-/// here. When the child exits (long-jumps back to `fork_handler`), the
-/// parent is moved back. U7 collapses this stash by making fork return
-/// to the parent immediately and registering the child as runnable.
-///
-/// One slot — i.e., fork nesting depth = 1 — is sufficient for zsh's
-/// pattern of "fork from main, child runs, parent waits." Deeply
-/// nested fork (fork from inside a forked child) would need a stack;
-/// trivial extension when needed.
-static PARENT_STASH: Mutex<Option<Process>> = Mutex::new(None);
-
-pub fn stash_parent(process: Process) {
-    let mut g = PARENT_STASH.lock();
-    debug_assert!(g.is_none(), "PARENT_STASH already occupied — nested fork not yet supported");
-    *g = Some(process);
-}
-
-pub fn take_stashed_parent() -> Option<Process> {
-    PARENT_STASH.lock().take()
-}
-
-pub fn parent_stashed() -> bool {
-    PARENT_STASH.lock().is_some()
-}
-
-/// Raise a signal on the parent stashed by `fork()`. Used by the
-/// child-exit path to set SIGCHLD pending on the parent before the
-/// long-jump back. No-op if the stash is empty (the dying process is
-/// the top-level kernel-launched binary, which has no userland
-/// parent).
-pub fn raise_signal_on_stashed_parent(sig: i32) {
-    if let Some(parent) = PARENT_STASH.lock().as_mut() {
-        parent.signal_state.raise(sig);
-    }
-}
-
-/// Notify the stashed parent that a forked child has exited
-/// cooperatively (via `exit_group`): file the zombie so `wait4` finds
-/// it, and raise SIGCHLD. No-op when `parent_pid == 0` (top-level
-/// binary launched by the run command — no userland parent).
+/// Notify the parent that a forked child has exited cooperatively (via
+/// `exit_group`): file the zombie so `wait4` finds it, raise SIGCHLD
+/// on the parent's entry in PROCESS_TABLE, and wake the parent if it's
+/// blocked in `wait4`. No-op when `parent_pid == 0` (top-level binary
+/// launched by the run command — no userland parent).
 pub fn notify_parent_of_exit(pid: u32, parent_pid: u32, exit_code: i64) {
     if parent_pid == 0 {
         return;
     }
     record_zombie(pid, parent_pid, exit_code);
-    raise_signal_on_stashed_parent(crate::userland::signal::SIGCHLD);
-    // U3: wake parent if it's blocked in wait4. No-op today (the
-    // pre-U5 synchronous-fork pattern never has parent blocked while
-    // child runs); load-bearing once U7 collapses fork so parent
-    // returns to user immediately after fork and may then wait4
-    // before the child has exited.
+    // U7: raise SIGCHLD on the parent in PROCESS_TABLE (formerly the
+    // PARENT_STASH slot). No-op if the parent has already exited.
+    let _ = with_process(parent_pid, |parent| {
+        parent.signal_state.raise(crate::userland::signal::SIGCHLD);
+    });
+    // U3: wake the parent if it's blocked in `wait4`. Load-bearing
+    // under U7: parent may now `wait4` before the child exits.
     wake_ring3_blocked_on_child(parent_pid, pid);
 }
 
@@ -958,45 +1166,13 @@ pub fn notify_parent_of_signaled_exit(pid: u32, parent_pid: u32, signum: i32, ex
         return;
     }
     record_zombie_signaled(pid, parent_pid, signum, exit_code);
-    raise_signal_on_stashed_parent(crate::userland::signal::SIGCHLD);
-    // U3: see notify_parent_of_exit for the wake rationale.
+    // U7: SIGCHLD on the parent in PROCESS_TABLE — see
+    // `notify_parent_of_exit`.
+    let _ = with_process(parent_pid, |parent| {
+        parent.signal_state.raise(crate::userland::signal::SIGCHLD);
+    });
+    // U3/U7: wake the parent if it's blocked in `wait4`.
     wake_ring3_blocked_on_child(parent_pid, pid);
-}
-
-/// Replace the currently-loaded process with `new`, returning the
-/// previous entry. Used by fork (PR-C2) to swap parent → child before
-/// dispatching the child into ring 3.
-///
-/// Removes the current PID's entry from the table, inserts `new` at
-/// `new.pid`, and points `current_user_pid` at `new.pid`. The returned
-/// Process is the displaced entry — the fork path stashes it in
-/// `PARENT_STASH` so the child's eventual long-jump can restore it.
-///
-/// When no real ring-3 process is loaded (`current_user_pid == None`),
-/// the returned Process is the sentinel snapshot — matching the pre-
-/// PR-C behavior where `mem::replace` on the singleton always returned
-/// a value. This keeps test helpers that synthetically stage fork-like
-/// state without an enter_user_mode call working.
-pub fn swap_current_process(new: Process) -> Process {
-    let new_pid = new.pid;
-    let mut g = PROCESS_TABLE.lock();
-    ensure_sentinel(&mut g);
-    let cur_pid = g.current_user_pid.unwrap_or(KERNEL_PID);
-    let prev = if cur_pid == KERNEL_PID {
-        // No real process is loaded — return a fresh sentinel as the
-        // displaced value. The table's persistent sentinel stays in
-        // place (removing it would violate the invariant). Consumers
-        // of the returned Process either re-install it (cleanup
-        // tests) or stash it (fork's parent stash); both work fine
-        // with sentinel-shaped values because the original singleton
-        // was sentinel-shaped too.
-        Process::sentinel()
-    } else {
-        g.by_pid.remove(&cur_pid).expect("current_user_pid missing from table")
-    };
-    g.by_pid.insert(new_pid, new);
-    g.current_user_pid = Some(new_pid);
-    prev
 }
 
 /// Record of a child that exited but hasn't been reaped yet.
@@ -1059,6 +1235,20 @@ pub fn reap_zombie(target_pid: i32, reaper: u32) -> Option<(u32, i64, Option<i32
         return None;
     };
     let z = zombies.remove(&pid)?;
+    drop(zombies);
+
+    // U7: a forked child's Process slot stays in PROCESS_TABLE after
+    // exit (its kernel_stack was the one we were executing on at exit
+    // time, so the exit path couldn't drop it from there). Reaping
+    // is the safe drop point — the reaper is the parent, running on
+    // the parent's kernel stack; dropping the child's Process here
+    // releases its AddressSpace, KernelStack, fd_table, etc.
+    //
+    // No-op for top-level kernel-launched binaries (their Process was
+    // removed at long-jump time via the legacy release_active_image
+    // path), and no-op for the sentinel.
+    let _ = remove_process(pid);
+
     Some((pid, z.exit_code, z.signal_termination))
 }
 
@@ -1099,21 +1289,6 @@ impl Drop for BinaryLoadGuard {
     }
 }
 
-/// Save the kernel continuation. Called by `enter_user_mode` immediately
-/// before issuing `iretq` to user space. Stored on the currently-loaded
-/// process; the long-jump path reads it back from the same slot when
-/// the process exits.
-pub fn install_continuation(c: KernelContinuation) {
-    with_current_process(|p| p.continuation = Some(c));
-}
-
-/// Take ownership of the active continuation, if any. Used by the long-jump
-/// path before restoring registers — the slot is cleared so a second teardown
-/// is a no-op.
-pub fn take_continuation() -> Option<KernelContinuation> {
-    with_current_process(|p| p.continuation.take())
-}
-
 /// Helper used by exception handlers: returns true when the saved CS in the
 /// interrupt frame indicates the fault occurred at ring 3 (CPL=3 / RPL=3).
 #[inline]
@@ -1141,6 +1316,11 @@ pub fn frame_is_user(code_segment: u64) -> bool {
 pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
     use crate::debug_error;
 
+    let live_fs_base = crate::arch::x86_64::msr::read_fs_base();
+    let (live_cr3, _) = x86_64::registers::control::Cr3::read();
+    let cur_pid = current_user_pid();
+    let (proc_fs_base, parent_pid) = with_current_process(|p| (p.fs_base, p.parent_pid));
+
     debug_error!(
         "USERLAND: ring-3 fault — vector={}, error_code={:?}, fault_addr={:?}, rip={:?}",
         reason.vector,
@@ -1148,6 +1328,50 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
         reason.fault_addr,
         reason.fault_rip
     );
+    debug_error!(
+        "USERLAND: fault context — current_user_pid={:?}, parent_pid={}, live_fs_base={:#x}, proc_fs_base={:#x}, cr3_frame={:#x}",
+        cur_pid,
+        parent_pid,
+        live_fs_base,
+        proc_fs_base,
+        live_cr3.start_address().as_u64(),
+    );
+
+    // Diagnostic: cross-check the active CR3 against what PROCESS_TABLE
+    // says this process's L4 should be. A mismatch points at a
+    // resume_ring3 / current_user_pid bookkeeping race.
+    if let Some(pid) = cur_pid {
+        let expected_l4 = with_process(pid, |p| {
+            p.address_space.as_ref().map(|a| a.l4_frame().start_address().as_u64())
+        }).flatten();
+        match expected_l4 {
+            Some(exp) if exp != live_cr3.start_address().as_u64() => {
+                debug_error!(
+                    "USERLAND: CR3 MISMATCH — Process[{}].address_space.l4 = {:#x}, but live CR3 = {:#x}",
+                    pid,
+                    exp,
+                    live_cr3.start_address().as_u64(),
+                );
+            }
+            Some(exp) => {
+                debug_error!(
+                    "USERLAND: CR3 OK — Process[{}].address_space.l4 = {:#x} matches live CR3",
+                    pid,
+                    exp,
+                );
+            }
+            None => {
+                debug_error!("USERLAND: Process[{}] has no AddressSpace", pid);
+            }
+        }
+    }
+
+    // Diagnostic: walk the live CR3's page tables for the faulting
+    // address (or for the RIP if no fault address was reported, e.g.,
+    // a #GP). Logs each level's raw u64 entry so we can tell PRESENT
+    // vs not-present vs permission issues from the boot log.
+    let walk_target = reason.fault_addr.unwrap_or(reason.fault_rip);
+    log_page_table_walk(live_cr3.start_address().as_u64(), walk_target);
 
     // Demand-grown stack (U4): release the [stack_mapped_bottom,
     // stack_top) range before UserImage::Drop runs. unmap_user_stack
@@ -1168,6 +1392,7 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
         ExitKind::Abnormal {
             vector: reason.vector,
             fault_rip: reason.fault_rip.as_u64(),
+            fault_addr: reason.fault_addr.map(|a| a.as_u64()),
         },
         exit_code,
     );
@@ -1176,6 +1401,87 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
     notify_parent_of_signaled_exit(pid, parent_pid, signum, exit_code);
 
     long_jump_to_run_or_halt();
+}
+
+/// Walk the live page tables (rooted at `cr3_pa`) for `va` and log each
+/// level's entry. Reads through the bootloader's physical-memory offset
+/// alias. Pure diagnostic — no mutation, no faulting.
+pub fn log_page_table_walk(cr3_pa: u64, va: VirtAddr) {
+    use crate::debug_error;
+
+    let va_u = va.as_u64();
+    let pml4_idx = ((va_u >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((va_u >> 30) & 0x1FF) as usize;
+    let pd_idx = ((va_u >> 21) & 0x1FF) as usize;
+    let pt_idx = ((va_u >> 12) & 0x1FF) as usize;
+
+    let phys_offset = match crate::mm::memory::get_physical_memory_offset() {
+        Some(o) => o,
+        None => {
+            debug_error!("USERLAND: page walk skipped — no physical memory offset");
+            return;
+        }
+    };
+
+    debug_error!(
+        "USERLAND: page walk for VA={:#x} (pml4={}, pdpt={}, pd={}, pt={}), CR3={:#x}",
+        va_u, pml4_idx, pdpt_idx, pd_idx, pt_idx, cr3_pa,
+    );
+
+    // SAFETY: cr3_pa is the live CR3 frame; the bootloader maps all
+    // physical memory at `phys_offset`. We read 8 bytes per level. No
+    // writes, no dereferences past the entries we walk.
+    unsafe {
+        let pml4 = (phys_offset + cr3_pa) as *const u64;
+        let pml4e = core::ptr::read(pml4.add(pml4_idx));
+        debug_error!("  PML4[{}] = {:#018x} (present={}, us={}, rw={}, nx={})",
+            pml4_idx, pml4e,
+            pml4e & 1 != 0,
+            pml4e & (1 << 2) != 0,
+            pml4e & (1 << 1) != 0,
+            pml4e & (1 << 63) != 0,
+        );
+        if pml4e & 1 == 0 { return; }
+        let pdpt_pa = pml4e & 0x000F_FFFF_FFFF_F000;
+
+        let pdpt = (phys_offset + pdpt_pa) as *const u64;
+        let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
+        debug_error!("  PDPT[{}] = {:#018x} (present={}, us={}, rw={}, nx={}, huge={})",
+            pdpt_idx, pdpte,
+            pdpte & 1 != 0,
+            pdpte & (1 << 2) != 0,
+            pdpte & (1 << 1) != 0,
+            pdpte & (1 << 63) != 0,
+            pdpte & (1 << 7) != 0,
+        );
+        if pdpte & 1 == 0 { return; }
+        if pdpte & (1 << 7) != 0 { return; } // 1 GiB page
+        let pd_pa = pdpte & 0x000F_FFFF_FFFF_F000;
+
+        let pd = (phys_offset + pd_pa) as *const u64;
+        let pde = core::ptr::read(pd.add(pd_idx));
+        debug_error!("  PD[{}]   = {:#018x} (present={}, us={}, rw={}, nx={}, huge={})",
+            pd_idx, pde,
+            pde & 1 != 0,
+            pde & (1 << 2) != 0,
+            pde & (1 << 1) != 0,
+            pde & (1 << 63) != 0,
+            pde & (1 << 7) != 0,
+        );
+        if pde & 1 == 0 { return; }
+        if pde & (1 << 7) != 0 { return; } // 2 MiB page
+        let pt_pa = pde & 0x000F_FFFF_FFFF_F000;
+
+        let pt = (phys_offset + pt_pa) as *const u64;
+        let pte = core::ptr::read(pt.add(pt_idx));
+        debug_error!("  PT[{}]   = {:#018x} (present={}, us={}, rw={}, nx={})",
+            pt_idx, pte,
+            pte & 1 != 0,
+            pte & (1 << 2) != 0,
+            pte & (1 << 1) != 0,
+            pte & (1 << 63) != 0,
+        );
+    }
 }
 
 /// Map an x86 exception vector to the POSIX signal a Linux kernel would
@@ -1241,88 +1547,53 @@ fn record_exit(kind: ExitKind, code: i64) {
 }
 
 fn long_jump_to_run_or_halt() -> ! {
-    // Clear pointer-validation bounds so any straggling syscall after a fault
-    // would refuse user pointers (defense in depth — there should be no such
-    // syscall because we are about to long-jump out).
-    crate::userland::abi::clear_user_va_bounds();
+    // U8: ring-3 process exit unified through the scheduler-block
+    // model. Both top-level kernel-launched binaries and forked
+    // children leave their `Process` slot in PROCESS_TABLE (its
+    // kernel_stack is what we're executing on; we can't drop it from
+    // here). Cleanup happens later:
+    //   - Top-level binary: `enter_user_mode_with_aspace` is woken
+    //     via `wake_threads_waiting_for_ring3_exit`, returns,
+    //     `remove_process` drops the slot.
+    //   - Forked child: parent's `wait4` reap path calls
+    //     `remove_process`.
+    //
+    // We do NOT clear `user_va_bounds`: bounds describe the VA layout
+    // shared by all ring-3 processes, and any other ring-3 process
+    // still alive expects them in place.
 
-    if let Some(cont) = take_continuation() {
+    // Find the current ring-3 PID so we can wake the launching kernel
+    // thread blocked on its exit. If no current_user_pid is set, this
+    // is a synthetic test path; no kernel thread to wake.
+    let exiting_pid = current_user_pid();
+    if let Some(pid) = exiting_pid {
+        // Wake any kernel thread blocked on this process's exit. The
+        // thread's `block_kernel_thread_for_ring3_exit` returns when
+        // scheduler picks it; it reads exit_kind/exit_code from
+        // PROCESS_TABLE and removes the Process.
+        let mut sched = crate::process::scheduler::SCHEDULER.lock();
+        sched.wake_threads_waiting_for_ring3_exit(pid);
+        drop(sched);
+        // Clear current_user_pid — we're no longer running this
+        // process. The next ring-3 dispatch (via resume_ring3) will
+        // set it to the next pid.
+        set_current_user_pid(None);
+    }
+
+    // Yield to the next runnable ring-3 process if any (e.g., a
+    // freshly-woken wait4-parent). Otherwise yield to the kernel
+    // main loop, which gives the kernel-thread scheduler a chance to
+    // run the woken launcher thread (or any other Ready kernel
+    // thread).
+    if let Some(next) = pop_next_ring3() {
         unsafe {
-            restore_continuation(&cont);
+            crate::userland::switch::resume_ring3(next);
         }
+        // resume_ring3 diverges; unreachable.
     }
-    // No continuation — `enter_user_mode` was never invoked. Falling back to
-    // halting matches the U2 behavior (the safest possible answer when state
-    // is suspect).
-    crate::debug_error!("cleanup_user_process: no continuation saved; halting");
-    loop {
-        x86_64::instructions::hlt();
+
+    unsafe {
+        crate::userland::switch::yield_to_kernel_main_loop();
     }
 }
 
-/// Restore the saved kernel continuation: load callee-saved regs, switch to
-/// the saved RSP, and `jmp` to the saved RIP.
-///
-/// SAFETY: `cont` must point to a `KernelContinuation` previously written by
-/// the matching `enter_user_mode_asm` setjmp prologue. The saved RSP must
-/// reference a still-valid kernel stack frame (the run command's stack is
-/// owned by the spawned process and remains live until that process exits;
-/// the only way the stack would be invalid is if the run command had already
-/// returned, which by construction has not happened — control is only here
-/// because we're long-jumping *into* the run command's frame).
-///
-/// This function is `-> !` — control flow continues at `cont.rip` with the
-/// run command's saved registers restored. The caller must not expect to
-/// retain any live values across the jump.
-///
-/// U6: this path also restores SS to the kernel data selector (0x10).
-/// Long-mode CPU semantics on a fault from ring 3 leave SS NULL on
-/// the kernel-side handler frame; long mode permits NULL SS for the
-/// `push`/`ret` we use here, but any later code that explicitly reads
-/// SS (e.g., `test_gdt_kernel_selectors`) would see 0 and fail. The
-/// cooperative SYSCALL exit path doesn't trigger this because STAR
-/// programs SS automatically. See the multi-MiB-load learning's
-/// "SS-restore in restore_continuation" follow-up note.
-#[unsafe(naked)]
-#[no_mangle]
-pub unsafe extern "C" fn restore_continuation(cont: *const KernelContinuation) -> ! {
-    core::arch::naked_asm!(
-        // RDI = &KernelContinuation. Field offsets:
-        //   0  rbx
-        //   8  rbp
-        //  16  r12
-        //  24  r13
-        //  32  r14
-        //  40  r15
-        //  48  rsp
-        //  56  rip
-        "mov rbx, [rdi + 0]",
-        "mov rbp, [rdi + 8]",
-        "mov r12, [rdi + 16]",
-        "mov r13, [rdi + 24]",
-        "mov r14, [rdi + 32]",
-        "mov r15, [rdi + 40]",
-        "mov rsp, [rdi + 48]",
-        // U6: restore kernel SS before any push. After a ring-3 fault
-        // the CPU loads SS from the new privilege-level descriptor
-        // (often NULL in our setup since we don't update an SS slot in
-        // the IDT-pushed frame). Reload the kernel data selector so
-        // SS::get_reg() round-trips correctly post-longjmp. Literal
-        // 0x10 matches GDT slot 2 (kernel_data) — see
-        // src/arch/x86_64/CLAUDE.md's "GDT layout" section.
-        "mov ax, 0x10",
-        "mov ss, ax",
-        // Push the saved RIP and RET. Equivalent to `jmp [rdi+56]`, but using
-        // the call/ret protocol leaves the stack pre-aligned for the C ABI
-        // expectation that `ret` lands at a 16-byte-aligned-after-call
-        // boundary, which is exactly the state the saved frame represents.
-        "mov rax, [rdi + 56]",
-        "push rax",
-        // Re-enable interrupts. We may have arrived here from an interrupt
-        // gate (int 0x80 with IF auto-cleared) or from an exception handler
-        // — the run command expects to resume with IF=1 because it is part
-        // of the normal preemptive scheduler.
-        "sti",
-        "ret",
-    );
-}

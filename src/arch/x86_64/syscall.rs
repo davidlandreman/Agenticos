@@ -155,6 +155,20 @@ pub unsafe extern "C" fn syscall_fastpath_entry() {
         // value is restored from this slot just before IRETQ.
         "push r12",
         "mov  r12, gs:[8]",         // R12 = user RSP (preserved by Rust)
+        // CRITICAL: save the user's callee-saved registers (rbx, rbp,
+        // r13, r14, r15) explicitly here, BEFORE invoking any Rust code.
+        // Rust's calling convention requires the dispatcher to preserve
+        // these across its body, but compiler-generated prologues reuse
+        // these registers for locals — so by the time a syscall handler
+        // would read live registers, the user values are gone. Pushing
+        // them here from inside the naked stub captures user values
+        // directly. Handlers that need to build a re-fire / fork /
+        // signal snapshot read these slots via `read_user_callee_saved(args)`.
+        "push r15",                 // [rsp + 0 after all pushes: see layout below]
+        "push r14",
+        "push r13",
+        "push rbp",
+        "push rbx",
         // Save user R11 (user RFLAGS) and RCX (user RIP) — caller-saved
         // across the dispatcher call.
         "push r11",
@@ -179,13 +193,15 @@ pub unsafe extern "C" fn syscall_fastpath_entry() {
         //   [rsp + 48] r9
         //   [rsp + 56] saved RCX (user RIP)
         //   [rsp + 64] saved R11 (user RFLAGS)
-        //   [rsp + 72] saved user R12
-        //   [rsp + 80] kernel_rsp_top (top of kernel stack)
+        //   [rsp + 72] saved user RBX
+        //   [rsp + 80] saved user RBP
+        //   [rsp + 88] saved user R13
+        //   [rsp + 96] saved user R14
+        //   [rsp +104] saved user R15
+        //   [rsp +112] saved user R12
+        //   [rsp +120] kernel_rsp_top (top of kernel stack)
         //
-        // RSP = kernel_rsp_top - 80, which is 16-aligned (kernel_rsp_top
-        // is 16-aligned; we pushed 10 qwords = 80 bytes). Inside the call
-        // the call instruction pushes the return address, leaving RSP at
-        // top - 88 ≡ 8 mod 16 — the SysV invariant.
+        // RSP = kernel_rsp_top - 120 = 15 qwords pushed, which is 16-aligned.
 
         // ---- Phase 3: call dispatcher ----
         "mov rdi, rsp",             // &SyscallArgs
@@ -204,6 +220,11 @@ pub unsafe extern "C" fn syscall_fastpath_entry() {
         "pop r9",
         "pop rcx",                  // user RIP
         "pop r11",                  // user RFLAGS
+        "pop rbx",                  // user RBX restored
+        "pop rbp",                  // user RBP restored
+        "pop r13",                  // user R13 restored
+        "pop r14",                  // user R14 restored
+        "pop r15",                  // user R15 restored
 
         // Sanitize RFLAGS: clear AC (18), RF (16), NT (14), IOPL (12-13),
         // VM (17). RFLAGS only uses bits 0-31 in long mode, so a 32-bit

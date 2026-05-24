@@ -270,24 +270,14 @@ pub mod nr {
 /// will replace the default arm with a clean per-process termination via
 /// the existing fault-cleanup path.
 ///
-/// Phase 5 PR-B2: at dispatcher entry we capture user callee-saved
-/// registers (rbx/rbp/r12-r15) — they still hold user values here
-/// because the syscall stub didn't touch them and the dispatcher is
-/// the first Rust function called. After the syscall handler returns,
-/// we check whether a signal handler should run; if so, we build a
-/// signal frame on the user stack and `iretq` straight into the
-/// handler instead of returning normally.
+/// After the syscall handler returns, we check whether a signal
+/// handler should run; if so, we build a signal frame on the user
+/// stack and `iretq` straight into the handler instead of returning
+/// normally. User callee-saved registers needed for the signal frame
+/// are read from the explicit kernel-stack slots the SYSCALL stub
+/// pushed (see [`crate::userland::user_state::read_user_callee_saved`]).
 pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
     use crate::userland::syscalls;
-    use crate::userland::user_state::{capture_callee_saved, CalleeSavedSnapshot};
-
-    // Capture callee-saved registers BEFORE any other code can clobber
-    // them. The naked-asm helper does `mov [rdi + N], reg` for each;
-    // `r12` here is the user RSP that the SYSCALL stub stashed before
-    // calling us. The original user R12 lives on the kernel stack at
-    // `args + 72`.
-    let mut callee = CalleeSavedSnapshot::default();
-    unsafe { capture_callee_saved(&mut callee as *mut _); }
 
     let result = match args.rax {
         // Phase 1: streams + memory + signal stubs
@@ -392,7 +382,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
     // diverges (iretq into the handler) — control never returns
     // here. If no signal is pending, return the syscall result
     // normally and let the SYSCALL stub iretq back to the caller.
-    let _ = syscalls::maybe_deliver_signal(callee, args, result);
+    let _ = syscalls::maybe_deliver_signal(args, result);
     result
 }
 
@@ -432,12 +422,14 @@ fn unhandled_syscall(args: &SyscallArgs) -> i64 {
         }
         return ENOSYS;
     }
-    let has_cont = crate::userland::lifecycle::with_active_user(|au| au.continuation.is_some());
-    if has_cont {
+    // U8: route to the unimplemented-syscall exit path only when a
+    // real ring-3 process is loaded. Test paths drive the dispatcher
+    // synthetically without a loaded process; returning -ENOSYS keeps
+    // those deterministic.
+    let in_ring3 = crate::userland::lifecycle::current_user_pid().is_some();
+    if in_ring3 {
         crate::userland::lifecycle::unimplemented_syscall_exit(nr);
     }
-    // Test path: the dispatcher is being driven from kernel mode
-    // synthetically. Returning -ENOSYS keeps unit tests deterministic.
-    crate::debug_warn!("syscall_dispatch: unimplemented nr={} (no active continuation; returning -ENOSYS)", nr);
+    crate::debug_warn!("syscall_dispatch: unimplemented nr={} (no current ring-3 process; returning -ENOSYS)", nr);
     ENOSYS
 }
