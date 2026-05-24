@@ -104,11 +104,10 @@ These are cross-cutting (not subsystem-local). Subsystem-specific known issues l
 
 ### Current Limitations
 1. **No SMP** — Single CPU. The scheduler is preemptive (PIT @ 100 Hz) and multitasks kernel threads + ring-3 processes (U5-U8 in `docs/plans/2026-05-16-005-feat-multi-ring3-process-scheduling-plan.md`), but doesn't exploit multiple cores.
-2. **Read-Only Filesystem** — No write support implemented.
-3. **8.3 Filenames Only** — No long filename support.
-4. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
-5. **Global State** — Heavy use of `static mut` and `lazy_static`.
-6. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.
+2. **Three writable namespaces with different persistence semantics.** `/` is `overlay(tmpfs, boot-FAT)` — RAM upper, FAT lower. `/data` is a FAT32 disk on Secondary Master IDE, persistent across reboots. `/host` is vvfat (read-only). Overlay writes to `/` survive reboot via the BusyBox `sync` applet (calls the `sync(2)` syscall → overlay-state.{0,1} double-buffered blob on `/data`). FAT mkdir / rmdir / rename on `/data` deferred. Full design in `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md`.
+3. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
+4. **Global State** — Heavy use of `static mut` and `lazy_static`.
+5. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.
 
 ### Areas Needing Refactoring
 1. **Graphics Subsystem** — Complex relationships between display modules. (Detail in `src/graphics/CLAUDE.md`.)

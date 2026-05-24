@@ -9,7 +9,7 @@ Read-only filesystem stack: block devices → MBR partition table → VFS → FA
 - `vfs.rs` — virtual filesystem layer with mount management and filesystem detection.
 - `file_handle.rs` — `Arc`-based `File` and directory handle API.
 - `fs_manager.rs` — high-level filesystem operations that the rest of the kernel calls.
-- `fat/` — FAT12/16/32 implementation. `filesystem.rs` (FAT operations, 8.3 filenames only), `boot_sector.rs` (BPB parsing), `fat_table.rs` (cluster chain following), `directory.rs` (directory entry parsing), `types.rs`.
+- `fat/` — FAT12/16/32 implementation. `filesystem.rs` (FAT operations + long-name-aware `walk_directory`), `boot_sector.rs` (BPB parsing), `fat_table.rs` (cluster chain following), `directory.rs` (directory entry parsing — `DirectoryIterator` is the SFN-only low-level primitive), `lfn.rs` (VFAT LFN decoding + lowercase-attr-bit short-name formatting), `types.rs`.
 
 ## Architecture (bottom up)
 
@@ -39,12 +39,42 @@ Cleanup is automatic when the last `Arc` reference drops.
 
 ## Current limitations
 
-- **Read-only.** No write support is implemented anywhere in the stack.
-- **8.3 filenames only.** No long filename support. This applies to both the bundled BIOS image *and* any host folder mounted via the `/host` development mount — files staged from the Mac side must be uppercase 8.3 (e.g. `HELLO.TXT`, not `hello.txt` or `notes.markdown`) to be visible.
-- **FAT only.** No other filesystem implementation.
-- **No subdirectory traversal yet** in the higher-level API.
+- **FAT mkdir / rmdir / rename on `/data` deferred.** The directory-mutation primitives (`.`/`..` entry generation, empty-dir check, cross-dir rename with proper flush ordering) are not implemented. Userland sees `UnsupportedOperation` for these on `/data`. Single-level file create/write/unlink works.
+- **No subdirectory traversal yet** in some higher-level APIs (FAT subdir reads work via `walk_directory`; some legacy paths still assume single-level).
+- **FAT only on disk.** No other on-disk filesystem implementation.
+- **No real `fsck`.** Crash recovery is best-effort per the per-op flush ordering. Dirty-bit detection refuses writable mount on detected uncleanness; the actual repair sweep is a follow-up.
 
-These are scope decisions, not bugs — write support is a future track.
+See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for the full plan.
+
+## Mount topology
+
+```
+  /          → overlay(upper = Tmpfs, lower = boot FAT partition)
+  /host      → FAT (vvfat-backed, read-only)
+  /data      → FAT32 (writable, Secondary Master IDE, persistent)
+  /bin/<applet> → synthesized at syscall layer (src/userland/bin_namespace.rs)
+```
+
+The overlay's upper is a fresh `Tmpfs` constructed at boot in `vfs::mount_overlay_root`; the lower is the bootloader-built FAT image. `/bin` is invisible to the FS layer — the syscall dispatcher intercepts opens/access/stat before reaching the VFS.
+
+Writes under `/` go through copy-up into tmpfs; persistence happens via the `sync(2)` syscall (BusyBox `sync` applet) which flushes the upper to `/data/overlay-state.{0,1}` double-buffered blob with a 1-byte pointer commit. On boot, `restore_overlay_upper_from_data` validates the active blob's CRC32 and hydrates the upper tmpfs from it.
+
+Copy-up is size-capped at 64 KiB (`overlay::filesystem::MAX_COPY_UP_BYTES`) to bound the heap-burst risk — bigger files surface as `EFBIG`.
+
+Writes directly to `/data/<file>` skip the overlay and go straight to the FAT writer — persistent and immediate, no `sync` needed.
+
+## tmpfs and overlay
+
+- `tmpfs/` — `BTreeMap<String, TmpNode>` directories with `Arc<Mutex<Vec<u8>>>` file bodies. Open handles are anchored in a per-FS side table so `unlink` doesn't drop data out from under live readers (POSIX unlink-while-open).
+- `overlay/` — merge upper writable FS over lower read-only FS. Whiteouts are `.wh.<name>` sentinel files; opaque dir markers are `.wh..wh..opq`. Reads check upper first, fall through to lower unless whiteouted. Writes copy-up if needed, then mutate upper.
+
+## Long filenames (VFAT LFN)
+
+As of 2026-05-16 the driver decodes VFAT LFN runs and surfaces full mixed-case names everywhere `enumerate_dir` / `stat` / path lookup runs. `system.ttf` shows up as `system.ttf` (not `SYSTEM.TTF`), `agentic-banner.bmp` is reachable by that name (not `AGENTI~1.BMP`), and `/host/notes.markdown` works when the Mac side has such a file. Short-name fallback uses the lowercase-attr bits (offset 12, 0x08/0x10) so `readme.txt`-style 8.3 names that fit also display lowercase.
+
+The decoder is in `fat/lfn.rs`. Validation is strict (sequence break / checksum mismatch / orphan slot → drop the run, fall back to SFN; matches Linux `fs/fat/dir.c` behavior). LFN _writing_ is not yet implemented — new files (when writes ship) will get short names until the Phase C LFN-write path lands.
+
+Path lookup uses `eq_ignore_ascii_case` against the decoded name, so `/AGENTIC-BANNER.BMP` and `/agentic-banner.bmp` both resolve. Full Unicode case folding is out of scope; non-ASCII characters compare byte-exact.
 
 ## Multiple FAT mounts
 
@@ -60,7 +90,8 @@ Why it matters: before the fast path, every `File::read` call on a multi-MiB fil
 
 ## Gotchas
 
-- **Mount point case is byte-exact.** `vfs.rs::find_filesystem` uses `path.starts_with(mount.path)` so `/host/FOO.TXT` works and `/HOST/FOO.TXT` returns NotFound. Files inside the mount are uppercase 8.3 (FAT 8.3 limitation), but the mount POINT is lowercase — keep them straight.
-- File paths are uppercase 8.3 (e.g., `/TEST.TXT`, not `/test.txt`).
+- **Mount point case is byte-exact.** `vfs.rs::find_filesystem` uses `path.starts_with(mount.path)` so `/host/FOO.TXT` works and `/HOST/FOO.TXT` returns NotFound. The mount POINT is byte-exact lowercase; files inside the mount are matched case-insensitively against their decoded long names.
+- File names within mounts are case-insensitive (ASCII fold). `/system.ttf` and `/SYSTEM.TTF` both resolve to the same file.
 - The FAT cluster-chain follower in `fat_table.rs` does not currently cache; reading a large file walks the FAT each cluster. Acceptable for current sizes; revisit if performance bites.
 - IDE reads are PIO with interrupts disabled per `read_sectors` call — see `src/drivers/CLAUDE.md`. A cluster-walk that issues many `read_sectors` calls is therefore a sequence of small IRQ-disabled windows (one per cluster), not one big window.
+- The internal FAT `FileHandle.name` field is `[u8; 13]` — a legacy fixed slot. Long names are truncated when stored there, but `stat` and `enumerate_dir` use the full long-name path; the field is only authoritative for SFN-bounded callers.

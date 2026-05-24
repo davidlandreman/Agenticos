@@ -1,4 +1,30 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Mint a blank 64 MiB FAT32 image at `path` if it doesn't already
+/// exist. Subsequent `./build.sh` runs reuse the on-disk file so /data
+/// state survives reboots; passing `--clean` to build.sh removes the
+/// target dir (and with it data.img) for a fresh start.
+fn ensure_data_image(path: &Path, size: u64) {
+    if path.exists() {
+        return;
+    }
+    use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom};
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .expect("create data.img");
+    file.set_len(size).expect("set_len data.img");
+    file.seek(SeekFrom::Start(0)).expect("seek data.img");
+    let opts = fatfs::FormatVolumeOptions::new()
+        .fat_type(fatfs::FatType::Fat32)
+        .volume_label(*b"AGENTIC-DAT");
+    fatfs::format_volume(&mut file, opts).expect("format data.img as FAT32");
+    println!("cargo:warning=Minted blank {} MiB FAT32 at {}", size / 1024 / 1024, path.display());
+}
 
 fn main() {
     // Detect build profile (debug or release)
@@ -91,8 +117,16 @@ fn main() {
         // create a UEFI disk image
         let uefi_path = out_dir.join("uefi.img");
         uefi_builder.create_uefi_image(&uefi_path).unwrap();
-        
+
         println!("cargo:warning=✓ Bootloader images created successfully!");
+
+        // Phase C U7: mint the /data FAT32 image on first build. Lives
+        // alongside the boot images so `cargo clean` wipes it (clean
+        // slate); otherwise persists across kernel rebuilds so /data
+        // contents survive recompiles.
+        let data_path = out_dir.join("data.img");
+        ensure_data_image(&data_path, 64 * 1024 * 1024);
+        println!("cargo:rustc-env=DATA_IMAGE={}", data_path.display());
     } else {
         println!("cargo:warning=Kernel does not have the compiled application code");
     }
