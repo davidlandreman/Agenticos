@@ -76,18 +76,15 @@ pub struct UserVaBounds {
 static USER_VA_BOUNDS: Mutex<Option<UserVaBounds>> = Mutex::new(None);
 
 /// Last `exit_group` exit code — visible to in-kernel tests so they can
-/// assert `exit_group(42)` recorded `42`. Real ring-3 entry routes through
-/// `lifecycle::cooperative_exit` which long-jumps; the test path runs the
-/// dispatcher directly without an active continuation, falls back to
-/// recording here, and returns to the caller.
+/// assert `exit_group(42)` recorded `42`. A synthetic dispatch with no real
+/// ring-3 process (no PID or the PID-0 kernel sentinel) records here and
+/// returns to the caller; real ring-3 entry continues through lifecycle
+/// teardown.
 pub static LAST_EXIT_CODE: Mutex<Option<i64>> = Mutex::new(None);
 
-/// When true, `unhandled_syscall` returns `-ENOSYS` to the caller and
-/// logs the first occurrence of each syscall number at info, subsequent
-/// occurrences at trace, instead of terminating the process. Off by
-/// default in production builds; tests and discovery boots flip it on
-/// via `set_trace_mode` so a static-musl binary can survive past
-/// unimplemented syscalls and reveal its full surface.
+/// When true, `unhandled_syscall` logs the first occurrence of each syscall
+/// number at info and subsequent occurrences at trace. Unknown syscalls return
+/// `-ENOSYS` in every mode; trace mode changes diagnostics only.
 static TRACE_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Once-per-syscall-number bookkeeping for trace mode. `SEEN_NRS[n]`
@@ -266,9 +263,8 @@ pub mod nr {
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
 /// `arch::x86_64::syscall` (via `syscall_dispatch_entry`). Routes by the
-/// syscall number in `args.rax`. Unhandled numbers return `-ENOSYS`; U10
-/// will replace the default arm with a clean per-process termination via
-/// the existing fault-cleanup path.
+/// syscall number in `args.rax`. Unhandled numbers return `-ENOSYS` so libc
+/// feature probes and build tools can select their fallback paths.
 ///
 /// After the syscall handler returns, we check whether a signal
 /// handler should run; if so, we build a signal frame on the user
@@ -386,20 +382,9 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
     result
 }
 
-/// Default arm for `syscall_dispatch`. Two behavior modes:
-///
-/// **Trace mode off** (default): routes to a clean per-process termination
-/// via the kernel-continuation long-jump when an active user process
-/// issued the syscall; falls back to returning `-ENOSYS` for the
-/// in-kernel test path that exercises the dispatcher without an
-/// `enter_user_mode`.
-///
-/// **Trace mode on** (set via `set_trace_mode(true)`, intended for
-/// discovery boots and tests): logs the first occurrence of each
-/// syscall number at info with a full arg dump, subsequent occurrences
-/// at trace, and returns `-ENOSYS` to the caller. This lets a binary
-/// continue past unhandled syscalls so we can see the full surface it
-/// touches in one boot rather than one syscall at a time.
+/// Default arm for `syscall_dispatch`. Every unknown number returns
+/// `-ENOSYS`. Trace mode adds once-per-number argument logging for discovery;
+/// it never changes user-visible control flow.
 fn unhandled_syscall(args: &SyscallArgs) -> i64 {
     let nr = args.rax;
     if is_trace_mode() {
@@ -422,14 +407,6 @@ fn unhandled_syscall(args: &SyscallArgs) -> i64 {
         }
         return ENOSYS;
     }
-    // U8: route to the unimplemented-syscall exit path only when a
-    // real ring-3 process is loaded. Test paths drive the dispatcher
-    // synthetically without a loaded process; returning -ENOSYS keeps
-    // those deterministic.
-    let in_ring3 = crate::userland::lifecycle::current_user_pid().is_some();
-    if in_ring3 {
-        crate::userland::lifecycle::unimplemented_syscall_exit(nr);
-    }
-    crate::debug_warn!("syscall_dispatch: unimplemented nr={} (no current ring-3 process; returning -ENOSYS)", nr);
+    crate::debug_warn!("syscall_dispatch: unimplemented nr={}; returning -ENOSYS", nr);
     ENOSYS
 }

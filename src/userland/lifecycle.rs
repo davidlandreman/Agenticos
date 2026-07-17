@@ -211,12 +211,6 @@ pub enum ExitKind {
     Cooperative,
     /// Ring-3 fault — see `AbnormalExit` for vector / fault address.
     Abnormal { vector: u8, fault_rip: u64, fault_addr: Option<u64> },
-    /// User issued a syscall the kernel does not implement. The number is
-    /// recorded so diagnostic logging can name it; the process is torn
-    /// down via the same long-jump path as a fault. Distinct from
-    /// `Abnormal` because no CPU exception fired — the failure mode is a
-    /// kernel-policy refusal, not a hardware fault.
-    UnimplementedSyscall { nr: u64 },
 }
 
 /// Reserved PID for "no current process." Real PIDs start at 1.
@@ -442,17 +436,13 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     let mut removed = g.by_pid.remove(&pid)?;
     drop(g);
 
-    // Critical: when a Process is removed, its image is going away
-    // along with its AddressSpace. `UserImage::Drop`'s default behavior
-    // is to call `unmap_user_region` against the **active** CR3 —
-    // which here is generally the CR3 of whichever process is currently
-    // loaded, NOT the dying process. That would clobber the live
-    // process's page tables at any VAs that overlap the dying process's
-    // recorded mappings (total overlap for two static-non-PIE binaries
-    // sharing a load base, e.g. zsh reaping a forked-then-execve'd
-    // child that loaded BB.ELF — the SIGCHLD handler's `ret`
-    // immediately faults on instruction fetch because the parent's
-    // text just got zero'd out).
+    // Critical: when a production Process is removed, its image is going
+    // away along with its owned AddressSpace. `UserImage::Drop` would call
+    // `unmap_user_region` against the currently active CR3, which is generally
+    // another process by this point. Abandon those mappings and let the owned
+    // AddressSpace drop as a unit instead. Kernel-test processes deliberately
+    // have no AddressSpace and map into the shared kernel L4; their images must
+    // retain normal drop-unmapping so consecutive booted fixtures are isolated.
     //
     // execve's in-place image swap does NOT go through this function —
     // it uses `with_current_process(|p| p.image.take())` and drops the
@@ -460,8 +450,10 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     // where the unmap-on-drop is correct. All other paths funnel
     // through `remove_process`, so abandoning the image here is the
     // single, correct chokepoint.
-    if let Some(img) = removed.image.as_mut() {
-        img.abandon();
+    if removed.address_space.is_some() {
+        if let Some(img) = removed.image.as_mut() {
+            img.abandon();
+        }
     }
     Some(removed)
 }
@@ -1174,7 +1166,7 @@ pub fn notify_parent_of_exit(pid: u32, parent_pid: u32, exit_code: i64) {
 }
 
 /// Same as [`notify_parent_of_exit`] for children killed by a signal
-/// (fault or unimplemented syscall). The zombie is filed with the
+/// (currently ring-3 faults). The zombie is filed with the
 /// signal number so `wait4_handler` can emit a POSIX-correct
 /// `WIFSIGNALED` status word — without this, the parent's
 /// `wait4` would see `WIFEXITED` with `WEXITSTATUS = 128 + signum`,
@@ -1197,7 +1189,7 @@ pub fn notify_parent_of_signaled_exit(pid: u32, parent_pid: u32, signum: i32, ex
 /// Record of a child that exited but hasn't been reaped yet.
 ///
 /// `signal_termination = Some(sig)` means the child died by signal `sig`
-/// (fault or unimplemented syscall path); `exit_code` is the
+/// (currently a fault path); `exit_code` is the
 /// shell-style `128 + sig` mirror but `wait4` MUST emit the
 /// `WIFSIGNALED` encoding, not the `WIFEXITED` encoding. `None` means
 /// the child called `exit_group(code)` cooperatively.
@@ -1526,33 +1518,6 @@ pub fn cooperative_exit(code: i64) -> ! {
     long_jump_to_run_or_halt();
 }
 
-/// Unimplemented-syscall path — invoked from the dispatcher's default arm
-/// when a binary issues a syscall number the kernel does not handle.
-///
-/// Records `ExitKind::UnimplementedSyscall { nr }` and long-jumps to the
-/// run command's continuation. The kernel does not panic, hang, or
-/// silently return `-ENOSYS` — the binary is terminated cleanly with a
-/// diagnostic on serial.
-pub fn unimplemented_syscall_exit(nr: u64) -> ! {
-    crate::debug_warn!("USERLAND: unimplemented syscall nr={} — terminating user process", nr);
-    let (pid, parent_pid, exit_code) = with_current_process(|p| {
-        if matches!(p.exit_kind, ExitKind::None) {
-            p.exit_kind = ExitKind::UnimplementedSyscall { nr };
-            p.exit_code = -38; // ENOSYS sentinel for the run command's log
-        }
-        (p.pid, p.parent_pid, p.exit_code)
-    });
-    // POSIX wait4: encode this as a SIGSYS-killed child. The kernel-
-    // internal `exit_code` field keeps the -ENOSYS sentinel for run-
-    // command logging; the parent's wait4 sees `WIFSIGNALED` with
-    // signal SIGSYS.
-    let signum = crate::userland::signal::SIGSYS;
-    let parent_visible_code = 128 + signum as i64;
-    let _ = exit_code;
-    notify_parent_of_signaled_exit(pid, parent_pid, signum, parent_visible_code);
-    long_jump_to_run_or_halt();
-}
-
 fn record_exit(kind: ExitKind, code: i64) {
     with_current_process(|p| {
         // Only record if not already terminated (defensive: a second fault
@@ -1615,4 +1580,3 @@ fn long_jump_to_run_or_halt() -> ! {
         crate::userland::switch::yield_to_kernel_main_loop();
     }
 }
-

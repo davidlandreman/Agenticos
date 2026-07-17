@@ -1713,6 +1713,19 @@ pub fn exit_group_handler(args: &mut SyscallArgs) -> i64 {
     let code = args.rdi as i32 as i64;
     *LAST_EXIT_CODE.lock() = Some(code);
 
+    // In-kernel ABI tests exercise the dispatcher without installing a
+    // ring-3 process. There is no process to tear down or scheduler context
+    // to yield from in that case; recording LAST_EXIT_CODE is the complete
+    // synthetic contract. Some dispatcher tests select the persistent PID-0
+    // kernel sentinel, which is synthetic too. Only a nonzero ring-3 PID may
+    // follow the divergent lifecycle path below.
+    if !matches!(
+        crate::userland::lifecycle::current_user_pid(),
+        Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID
+    ) {
+        return 0;
+    }
+
     let (pid, parent_pid) =
         crate::userland::lifecycle::with_active_user(|au| (au.pid, au.parent_pid));
 

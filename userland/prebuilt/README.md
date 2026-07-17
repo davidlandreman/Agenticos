@@ -58,6 +58,12 @@ noise.
   fetch. The `x86_64-linux-musl-g++` toolchain is the only requirement
   and is already needed to rebuild zsh anyway. Built every run.
 
+The `compiler-compat/` subdirectory is a separate category: tiny committed
+static-musl test inputs, not interactive apps. `test.sh` always stages them,
+including with `--skip-userland`, so the booted `compiler_compat` module is
+hermetic on machines without a musl cross compiler. Their sources and refresh
+recipe live in `userland/apps/compiler-compat/`.
+
 The rule of thumb: an app belongs here if (a) its build fetches an
 upstream tarball, or (b) its compile takes long enough that running
 it on every `./build.sh` would slow down kernel iteration. New Linux

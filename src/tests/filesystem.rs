@@ -546,6 +546,8 @@ fn test_data_create_write_read_round_trip() {
     let f2 = crate::fs::File::open_read("/data/u10-test.txt").expect("reopen");
     let content = f2.read_to_string().expect("read");
     assert_eq!(content, "hello from /data\n");
+    drop(f2);
+    crate::fs::vfs::vfs_unlink("/data/u10-test.txt").expect("cleanup u10-test.txt");
 }
 
 fn test_data_unlink() {
@@ -578,6 +580,8 @@ fn test_data_write_larger_than_one_cluster() {
     assert_eq!(f2.size() as usize, data.len());
     let content = f2.read_to_vec().expect("read");
     assert_eq!(content, data);
+    drop(f2);
+    crate::fs::vfs::vfs_unlink("/data/u10-big.bin").expect("cleanup u10-big.bin");
 }
 
 // --- U11 / Phase D: overlay persistence to /data ---------------------
@@ -711,6 +715,18 @@ fn test_u11_pointer_flip_is_atomic() {
     // And must be exactly 1 byte ('0' or '1').
     assert_eq!(ptr2.len(), 1);
     assert!(ptr2[0] == b'0' || ptr2[0] == b'1');
+
+    // These blobs are fixtures for this test sequence, not ambient
+    // state for later FAT modules in the same boot.
+    for path in [
+        "/data/overlay-state.ptr",
+        "/data/overlay-state.0",
+        "/data/overlay-state.1",
+    ] {
+        if crate::fs::exists(path) {
+            crate::fs::vfs::vfs_unlink(path).expect("cleanup overlay-state fixture");
+        }
+    }
 }
 
 fn test_data_mkdir_returns_unsupported() {
