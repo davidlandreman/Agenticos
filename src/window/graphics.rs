@@ -155,6 +155,13 @@ pub trait GraphicsDevice: Send {
     /// Flush any pending operations (for double-buffered implementations)
     fn flush(&mut self);
 
+    /// Flush only the supplied screen regions when the adapter supports
+    /// partial presentation. The default preserves correctness for devices
+    /// that only support whole-frame flushes.
+    fn flush_regions(&mut self, _regions: &[Rect]) {
+        self.flush();
+    }
+
     /// Snapshot the device's current pixels into an owned buffer. Default
     /// returns `None`; adapters that back the framebuffer override this.
     /// Used by the `screenshot` tool.

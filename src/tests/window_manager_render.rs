@@ -50,6 +50,7 @@ pub(super) struct RecordedState {
     pub fills: Vec<RecordedFill>,
     pub clip_changes: Vec<Option<Rect>>,
     pub blits: Vec<RecordedBlit>,
+    pub presented_batches: Vec<Vec<Rect>>,
 }
 
 impl RecordedState {
@@ -59,6 +60,7 @@ impl RecordedState {
             fills: Vec::new(),
             clip_changes: Vec::new(),
             blits: Vec::new(),
+            presented_batches: Vec::new(),
         }
     }
 
@@ -66,6 +68,7 @@ impl RecordedState {
         self.fills.clear();
         self.clip_changes.clear();
         self.blits.clear();
+        self.presented_batches.clear();
     }
 
     /// Find every fill recorded with the given color (each TestWindow paints
@@ -119,6 +122,10 @@ impl GraphicsDevice for RecordingDevice {
     }
 
     fn flush(&mut self) {}
+
+    fn flush_regions(&mut self, regions: &[Rect]) {
+        self.state.lock().presented_batches.push(regions.to_vec());
+    }
 
     fn pixel_format(&self) -> PixelFormat { PixelFormat::Bgr }
     fn bytes_per_pixel(&self) -> usize { 4 }
@@ -821,6 +828,42 @@ fn test_opt_in_window_invalidate_re_rasterizes() {
     assert!(blit_count_for(&s, 100, 100) >= 1);
 }
 
+fn test_render_presents_dirty_region_and_cursor_footprint() {
+    let (mut wm, state) = make_manager(800, 600);
+    let (_root_id, children) = build_simple_scene(
+        &mut wm,
+        Rect::new(0, 0, 800, 600),
+        &[Rect::new(20, 20, 80, 60)],
+    );
+
+    // Establish the initial full frame and a saved cursor background.
+    wm.render();
+    state.lock().reset();
+
+    if let Some(child) = wm.window_registry.get_mut(&children[0]) {
+        child.invalidate();
+    }
+    wm.render();
+
+    let state = state.lock();
+    assert_eq!(state.presented_batches.len(), 1);
+    let batch = &state.presented_batches[0];
+    assert!(
+        batch.iter().any(|rect| *rect == Rect::new(20, 20, 80, 60)),
+        "expected child damage in presentation batch, got {:?}",
+        batch,
+    );
+    assert!(
+        batch.iter().any(|rect| rect.contains_point(Point::new(400, 300))),
+        "expected cursor footprint in presentation batch, got {:?}",
+        batch,
+    );
+    assert!(
+        !batch.iter().any(|rect| *rect == Rect::new(0, 0, 800, 600)),
+        "incremental frame unexpectedly presented the full screen",
+    );
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         // U3 — absolute-bounds dirty marking
@@ -840,5 +883,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_opt_in_window_blits_instead_of_painting,
         &test_opt_in_skips_rasterization_when_content_unchanged,
         &test_opt_in_window_invalidate_re_rasterizes,
+        // Regional front-buffer presentation includes both repaint damage
+        // and cursor overlay writes.
+        &test_render_presents_dirty_region_and_cursor_footprint,
     ]
 }

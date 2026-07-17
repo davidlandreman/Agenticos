@@ -25,9 +25,7 @@ impl Tool for Screenshot {
         // own buffer mutex into an owned Vec, then drop both locks before
         // returning. `with_window_manager` disables interrupts; we don't want
         // it held during serial transmission of the result.
-        let snapshot = crate::window::with_window_manager(|wm| {
-            wm.graphics_device.snapshot()
-        })
+        let snapshot = crate::window::with_window_manager(|wm| wm.framebuffer_snapshot())
         .flatten()
         .ok_or_else(|| ToolError::unsupported(
             "framebuffer not initialized or adapter does not support snapshot",

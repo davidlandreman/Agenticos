@@ -36,7 +36,7 @@ pub struct WindowManager {
     /// Focus stack - top element has focus
     focus_stack: Vec<WindowId>,
     /// Graphics device for rendering
-    pub graphics_device: Box<dyn GraphicsDevice>,
+    graphics_device: Box<dyn GraphicsDevice>,
     /// Compositor for dirty tracking and cursor overlay
     compositor: Compositor,
     /// Keyboard state tracker
@@ -88,6 +88,11 @@ impl WindowManager {
         wm.active_screen = default_screen;
 
         wm
+    }
+
+    /// Capture an owned framebuffer snapshot for the screenshot tool.
+    pub fn framebuffer_snapshot(&self) -> Option<super::graphics::Snapshot> {
+        self.graphics_device.snapshot()
     }
     
     // Screen management
@@ -713,6 +718,8 @@ impl WindowManager {
         // Begin frame
         self.compositor.begin_frame();
 
+        let old_cursor_bounds = self.cursor.saved_bounds();
+
         // Restore old cursor background before any rendering
         // This erases the cursor from its old position
         self.cursor.restore_background(&mut *self.graphics_device);
@@ -754,11 +761,52 @@ impl WindowManager {
         self.cursor.save_background(mouse_x, mouse_y, &*self.graphics_device);
         self.cursor.draw(mouse_x, mouse_y, &mut *self.graphics_device);
 
+        // Presentation damage is broader than repaint damage: moving the
+        // cursor restores its old background and draws at its new position
+        // without asking the windows underneath to repaint.
+        let screen_bounds = Rect::new(
+            0,
+            0,
+            self.graphics_device.width() as u32,
+            self.graphics_device.height() as u32,
+        );
+        let mut present_regions = Vec::new();
+        for region in &regions {
+            Self::add_present_region(&mut present_regions, *region, screen_bounds);
+        }
+        if let Some(old_cursor_bounds) = old_cursor_bounds {
+            Self::add_present_region(&mut present_regions, old_cursor_bounds, screen_bounds);
+        }
+        Self::add_present_region(
+            &mut present_regions,
+            CursorRenderer::bounds_at(mouse_x, mouse_y),
+            screen_bounds,
+        );
+
         // End frame and clear dirty tracking
         self.compositor.end_frame();
 
-        // Flush to physical framebuffer
-        self.graphics_device.flush();
+        // Present only pixels touched by window repainting or cursor overlay.
+        self.graphics_device.flush_regions(&present_regions);
+    }
+
+    /// Clamp a presentation rectangle and merge it transitively with any
+    /// overlapping rectangles already in the batch.
+    fn add_present_region(regions: &mut Vec<Rect>, rect: Rect, screen: Rect) {
+        let Some(mut merged) = rect.intersection(&screen) else {
+            return;
+        };
+
+        let mut index = 0;
+        while index < regions.len() {
+            if regions[index].overlaps(&merged) {
+                merged = merged.union(&regions.remove(index));
+                index = 0;
+            } else {
+                index += 1;
+            }
+        }
+        regions.push(merged);
     }
 
     /// Walk the render-order tree and mark every invalidated window's

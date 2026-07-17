@@ -257,10 +257,8 @@ fn build_window(_explorer_id: usize, initial_path: &str) -> Option<ExplorerWindo
     let dialog_height: u32 = 600;
 
     let (screen_width, screen_height) = with_window_manager(|wm| {
-        (
-            wm.graphics_device.width() as i32,
-            wm.graphics_device.height() as i32,
-        )
+        let (width, height) = wm.screen_dimensions();
+        (width as i32, height as i32)
     })
     .unwrap_or((1024, 768));
 

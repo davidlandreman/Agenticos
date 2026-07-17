@@ -472,8 +472,7 @@ pub fn create_default_desktop() {
         wm.switch_screen(screen_id);
 
         // Get actual screen dimensions from graphics device
-        let width = wm.graphics_device.width() as u32;
-        let height = wm.graphics_device.height() as u32;
+        let (width, height) = wm.screen_dimensions();
 
         // Create desktop background window
         let desktop_id = wm.create_window(None);
@@ -552,8 +551,7 @@ pub fn create_default_desktop() {
 pub fn create_terminal_window() -> WindowId {
     let window_id = with_window_manager(|wm| {
         // Get screen dimensions
-        let width = wm.graphics_device.width() as u32;
-        let height = wm.graphics_device.height() as u32;
+        let (width, height) = wm.screen_dimensions();
         
         // Create window
         let window_id = wm.create_window(None);
