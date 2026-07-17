@@ -1,3 +1,7 @@
 [toolchain]
-channel = "nightly"
+# bootloader 0.11.10's BIOS stages use the pre-2025-07-28 custom-target JSON
+# schema. Later rustc versions reject that schema, and current Cargo also
+# requires `-Zjson-target-spec`, which the bootloader's nested builds don't pass.
+# Keep the kernel and those nested builds on a known-compatible nightly.
+channel = "nightly-2025-07-22"
 components = ["rust-src", "llvm-tools-preview"]
