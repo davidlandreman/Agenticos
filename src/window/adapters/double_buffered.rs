@@ -238,6 +238,30 @@ impl GraphicsDevice for DoubleBufferedDevice {
         }
     }
 
+    fn flush_regions(&mut self, regions: &[Rect]) {
+        if !self.dirty {
+            return;
+        }
+
+        let mut buffer = self.buffer.lock();
+        if regions.is_empty() {
+            // Untracked drawing must never leave the front buffer stale.
+            buffer.swap_buffers();
+        } else {
+            for rect in regions {
+                let left = rect.x.max(0) as usize;
+                let top = rect.y.max(0) as usize;
+                let right = rect.right().max(0).min(self.width as i32) as usize;
+                let bottom = rect.bottom().max(0).min(self.height as i32) as usize;
+                if right > left && bottom > top {
+                    buffer.swap_region(left, top, right - left, bottom - top);
+                }
+            }
+        }
+        drop(buffer);
+        self.dirty = false;
+    }
+
     fn snapshot(&self) -> Option<Snapshot> {
         let buffer = self.buffer.lock();
         let (width, height, stride, bytes_per_pixel, pixel_format, pixels) =

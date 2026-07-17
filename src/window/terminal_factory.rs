@@ -54,8 +54,7 @@ pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
     // Create the terminal window structure
     let instance = with_window_manager(|wm| {
         // Get screen dimensions
-        let screen_width = wm.graphics_device.width() as u32;
-        let screen_height = wm.graphics_device.height() as u32;
+        let (screen_width, screen_height) = wm.screen_dimensions();
 
         // Find the desktop window (root of active screen)
         let desktop_id = wm.get_active_screen()

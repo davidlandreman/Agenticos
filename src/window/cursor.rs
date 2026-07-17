@@ -1,7 +1,7 @@
 //! Cursor rendering with background save/restore
 
 use crate::graphics::color::Color;
-use super::GraphicsDevice;
+use super::{GraphicsDevice, Rect};
 
 /// Size of the cursor save buffer (cursor footprint + outline margin)
 const CURSOR_BUFFER_SIZE: usize = 17;
@@ -42,6 +42,28 @@ impl CursorRenderer {
             last_y: 0,
             background_valid: false,
         }
+    }
+
+    /// Bounds of the background currently saved under the visible cursor.
+    pub fn saved_bounds(&self) -> Option<Rect> {
+        self.background_valid.then(|| {
+            Rect::new(
+                self.last_x,
+                self.last_y,
+                CURSOR_BUFFER_SIZE as u32,
+                CURSOR_BUFFER_SIZE as u32,
+            )
+        })
+    }
+
+    /// Complete cursor save/draw footprint at a position.
+    pub fn bounds_at(cursor_x: i32, cursor_y: i32) -> Rect {
+        Rect::new(
+            cursor_x - 1,
+            cursor_y - 1,
+            CURSOR_BUFFER_SIZE as u32,
+            CURSOR_BUFFER_SIZE as u32,
+        )
     }
 
     /// Save background pixels at the cursor position before drawing.

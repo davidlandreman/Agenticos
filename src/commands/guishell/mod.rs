@@ -93,8 +93,7 @@ pub fn init_guishell() {
 
     window::with_window_manager(|wm| {
         // Get screen dimensions
-        let width = wm.graphics_device.width() as u32;
-        let height = wm.graphics_device.height() as u32;
+        let (width, height) = wm.screen_dimensions();
 
         // Create GUI screen
         let screen_id = wm.create_screen(window::ScreenMode::Gui);
@@ -543,7 +542,7 @@ fn update_button_layout() {
 
     window::with_window_manager(|wm| {
         // Get screen width for layout calculation
-        let screen_width = wm.graphics_device.width() as u32;
+        let (screen_width, _) = wm.screen_dimensions();
 
         // Calculate button dimensions
         let start_x = BUTTON_GAP + START_BUTTON_WIDTH + BUTTON_GAP;
@@ -564,7 +563,6 @@ fn update_button_layout() {
 
             if let Some(button) = wm.window_registry.get_mut(button_id) {
                 button.set_bounds(bounds);
-                button.invalidate();
             }
         }
     });

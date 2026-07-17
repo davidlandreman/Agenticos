@@ -30,7 +30,8 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
 
     // Get screen size and center dialog
     let (screen_width, screen_height) = with_window_manager(|wm| {
-        (wm.graphics_device.width() as i32, wm.graphics_device.height() as i32)
+        let (width, height) = wm.screen_dimensions();
+        (width as i32, height as i32)
     })
     .unwrap_or((800, 600));
 
