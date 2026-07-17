@@ -7,7 +7,8 @@
 //!
 //! This is the synchronous launch path: callers block in
 //! [`launch_user_binary`] until the user process exits (cooperative
-//! `exit_group`, fault, or unimplemented syscall). U8 removed the
+//! `exit_group` or fault). Unsupported syscalls return `-ENOSYS` to the
+//! process so libc can choose a fallback. U8 removed the
 //! single-user-app guard — multiple kernel threads can now call this
 //! concurrently and each gets its own ring-3 process, scheduled
 //! round-robin via the U5 timer ISR.

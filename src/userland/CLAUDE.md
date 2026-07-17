@@ -36,7 +36,8 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
 - `signal.rs` — POSIX signal dispositions, blocked/pending masks.
 - `fdtable.rs` — per-process file-descriptor table.
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, pointer
-  validation, errno constants.
+  validation, errno constants. Unknown syscall numbers always return
+  `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
   to BusyBox (`/host/BB.ELF`) or kernel-side GUI apps via
   `GLAUNCH.ELF` + `sys_gui_launch`.

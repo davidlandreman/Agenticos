@@ -30,6 +30,7 @@ userland/
 └── apps/
     ├── hello/          # rust app — prints "hello\n", exits 0
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
+    ├── compiler-compat/# tiny C static-musl boot-test fixtures
     └── hello-cpp/      # C++ app — std::cout, exits 0
         ├── Makefile    # invokes x86_64-linux-musl-g++ -static -no-pie
         └── src/main.cpp
@@ -95,6 +96,17 @@ lookups described above have something to `execve`. Built fresh on
 every `build.sh` / `test.sh` invocation — too small to bother
 prebuilt-managing. See
 `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`.
+
+### Booted compiler compatibility fixtures
+
+`apps/compiler-compat/` contains three progressively demanding C programs
+covering musl CRT startup, libc/heap/stack behavior, and unknown-syscall
+fallback followed by filesystem work. Their stripped static ET_EXEC artifacts
+are committed under `prebuilt/compiler-compat/` and staged by `test.sh` even
+with `--skip-userland`; ordinary test runs never need a musl compiler.
+
+Run the ladder with `./test.sh compiler_compat`. Refresh instructions and
+artifact hashes are in `apps/compiler-compat/README.md`.
 
 Decision tree for adding a new app:
 

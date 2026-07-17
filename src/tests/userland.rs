@@ -707,14 +707,19 @@ fn test_write_handler_zero_len_succeeds() {
     clear_streams_after_dispatcher_test();
 }
 
-/// `exit_group(42)` records 42 in `LAST_EXIT_CODE` (kernel-test fallback —
-/// no active continuation here).
+/// `exit_group(42)` records 42 in `LAST_EXIT_CODE` and returns through the
+/// synthetic kernel-test fallback when no real ring-3 process is current.
 fn test_exit_group_handler_records_code() {
     *LAST_EXIT_CODE.lock() = None;
+    let prior_pid = crate::userland::lifecycle::current_user_pid();
+    crate::userland::lifecycle::set_current_user_pid(Some(
+        crate::userland::lifecycle::KERNEL_PID,
+    ));
     let mut args = SyscallArgs::default();
     args.rax = nr::EXIT_GROUP;
     args.rdi = 42;
     let _ = syscall_dispatch(&mut args);
+    crate::userland::lifecycle::set_current_user_pid(prior_pid);
     assert_eq!(*LAST_EXIT_CODE.lock(), Some(42));
 }
 
@@ -1072,9 +1077,17 @@ fn reset_active_user() {
     let _img = crate::userland::release_active_image();
     drop(_img);
     crate::userland::force_clear_active_for_test();
+    // Scheduler unit tests use synthetic PIDs. A booted fixture must never
+    // inherit one of those ready entries or the kernel main loop will attempt
+    // to resume a nonexistent process before the fixture gets CPU time.
+    while crate::userland::lifecycle::pop_next_ring3().is_some() {}
 }
 
-fn test_enter_user_mode_single_user_invariant() {
+/// Mutations to the PID-0 compatibility sentinel are not a live ring-3
+/// process and must not block a real launch. The scheduler-era lifecycle
+/// tracks runnable processes by their nonzero PIDs rather than enforcing the
+/// old singleton-image invariant.
+fn test_enter_user_mode_ignores_kernel_sentinel_state() {
     reset_active_user();
 
     let dummy = crate::userland::image::UserImage::new(
@@ -1089,8 +1102,12 @@ fn test_enter_user_mode_single_user_invariant() {
 
     let bytes = fix::hello_exit0_elf();
     let image = load_elf(&bytes).expect("load_elf");
-    let r = crate::userland::enter_user_mode(image);
-    assert!(matches!(r, Err(crate::userland::EnterError::AlreadyActive)));
+    let result = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    assert!(matches!(
+        result.0,
+        crate::userland::lifecycle::ExitKind::Cooperative
+    ));
+    assert_eq!(result.1, 0);
 
     reset_active_user();
 }
@@ -1117,21 +1134,19 @@ fn test_run_initial_stack_fixture_b() {
     );
 }
 
-/// Fixture D — unhandled-syscall trap. Binary issues `syscall RAX=999`;
-/// kernel must terminate the process with `ExitKind::UnimplementedSyscall`
-/// rather than panicking, hanging, or silently returning.
-fn test_run_unhandled_syscall_fixture_d() {
+/// Fixture D — live unknown-syscall fallback. Binary issues syscall 999,
+/// verifies that ring 3 receives `-ENOSYS`, then exits normally. Compatibility
+/// probes must not require trace mode to survive.
+fn test_run_unknown_syscall_returns_enosys() {
     reset_active_user();
-    let bytes = fix::syscall_999_elf();
+    let bytes = fix::unknown_syscall_enosys_elf();
     let image = load_elf(&bytes).expect("load_elf");
     let result = crate::userland::enter_user_mode(image).expect("enter_user_mode");
     let _ = crate::userland::release_active_image();
 
     use crate::userland::lifecycle::ExitKind;
-    match result.0 {
-        ExitKind::UnimplementedSyscall { nr } => assert_eq!(nr, 999),
-        other => panic!("expected UnimplementedSyscall(999), got {:?}", other),
-    }
+    assert!(matches!(result.0, ExitKind::Cooperative));
+    assert_eq!(result.1, 0, "fixture did not observe -ENOSYS from syscall 999");
 }
 
 /// Fixture A — SYSCALL fast-path smoke test. The smallest possible end-to-end
@@ -1175,32 +1190,30 @@ fn test_run_fault_ud() {
     }
 }
 
-/// U6: regression for the SS-restore latent bug flagged by the
-/// multi-MiB-load learning. After a ring-3 fault the CPU's SS is
-/// clobbered (NULL on the return-from-exception path); our long-jump
-/// in `restore_continuation` historically didn't restore it. Cooperative
-/// SYSCALL exits preserve SS via STAR, so this only bit the fault path.
-///
-/// Sequence: trigger a #UD in ring 3, return to kernel via the fault →
-/// restore_continuation long-jump path, then assert SS is still 0x10
-/// (kernel data selector). Without the U6 fix to restore_continuation,
-/// SS reads back as 0 and this test fails.
-fn test_kernel_ss_after_user_fault() {
-    use x86_64::instructions::segmentation::{Segment, SS};
+/// A ring-3 fault must return control to the scheduler, release the failed
+/// image, and leave the kernel able to launch a fresh process. The deleted
+/// setjmp continuation path used to require SS=0x10 here; scheduler-era
+/// long-mode kernel execution also permits a null SS, so successful recovery
+/// and relaunch is the relevant contract.
+fn test_kernel_and_userland_resume_after_user_fault() {
     reset_active_user();
     let bytes = fix::fault_ud_elf();
     let image = load_elf(&bytes).expect("load_elf");
-    let _ = crate::userland::enter_user_mode(image).expect("enter_user_mode");
+    let fault = crate::userland::enter_user_mode(image).expect("enter_user_mode");
     let _ = crate::userland::release_active_image();
-    // The long-jump back through restore_continuation must have left
-    // SS at the kernel data selector. Without the U6 fix this reads 0.
-    let ss = SS::get_reg();
-    assert_eq!(
-        ss.0, 0x10,
-        "kernel SS not restored after ring-3 fault (was {:#x}); \
-         restore_continuation should reload the kernel data selector",
-        ss.0
-    );
+    assert!(matches!(
+        fault.0,
+        crate::userland::lifecycle::ExitKind::Abnormal { vector: 6, .. }
+    ));
+
+    let image = load_elf(&fix::hello_exit0_elf()).expect("load follow-up ELF");
+    let follow_up = crate::userland::enter_user_mode(image).expect("launch after fault");
+    let _ = crate::userland::release_active_image();
+    assert!(matches!(
+        follow_up.0,
+        crate::userland::lifecycle::ExitKind::Cooperative
+    ));
+    assert_eq!(follow_up.1, 0);
 }
 
 fn test_run_fault_pf() {
@@ -1241,9 +1254,9 @@ fn test_run_fault_pf() {
 // "Deferred to Follow-Up Work" for the allocator-replacement
 // follow-up captured during U8.
 
-/// Drive `RunProcess::run` against `/host/ZSH.ELF` with the given argv,
-/// `--trace` always on so any unimplemented syscall logs + returns
-/// ENOSYS instead of terminating zsh. Returns `true` if the binary was
+/// Drive `RunProcess::run` against `/host/ZSH.ELF` with the given argv.
+/// Trace mode is enabled for detailed discovery logging; unsupported syscalls
+/// return ENOSYS in normal operation too. Returns `true` if the binary was
 /// staged and the run completed; `false` (skip) if not staged.
 #[cfg(feature = "test")]
 fn drive_zsh(argv_after_path: &[&str]) -> bool {
@@ -1254,9 +1267,8 @@ fn drive_zsh(argv_after_path: &[&str]) -> bool {
         crate::debug_info!("[u8] {} not staged; skipping", path);
         return false;
     }
-    // Enable trace mode for the duration of this launch so unknown
-    // syscalls log + return -ENOSYS instead of terminating the binary.
-    // Used to match the prior `RunProcess --trace` behavior.
+    // Enable trace mode for detailed once-per-number argument logs. It does
+    // not alter the ENOSYS behavior observed by the binary.
     let prior_trace = crate::userland::abi::is_trace_mode();
     crate::userland::abi::set_trace_mode(true);
     crate::userland::abi::reset_unknown_syscall_trace();
@@ -1380,9 +1392,14 @@ fn test_dispatch_read_returns_queued_bytes() {
     let ptr = buf.as_ptr() as u64;
     abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + 32 });
 
-    crate::userland::stdin::clear();
-    crate::userland::stdin::install();
-    crate::userland::stdin::push_bytes(b"echo me\n");
+    let terminal_id = crate::window::WindowId::new();
+    let prior_terminal = crate::userland::lifecycle::with_active_user(|p| {
+        let prior = p.terminal_id;
+        p.terminal_id = Some(terminal_id);
+        prior
+    });
+    crate::userland::stdin::install_for_terminal(terminal_id);
+    crate::userland::stdin::push_bytes_for_terminal(terminal_id, b"echo me\n");
 
     let mut args = SyscallArgs::default();
     args.rax = nr::READ;
@@ -1393,7 +1410,8 @@ fn test_dispatch_read_returns_queued_bytes() {
     assert_eq!(ret, 8, "expected 8 bytes (\"echo me\\n\")");
     assert_eq!(&buf[..8], b"echo me\n");
 
-    crate::userland::stdin::clear();
+    crate::userland::stdin::clear_for_terminal(terminal_id);
+    crate::userland::lifecycle::with_active_user(|p| p.terminal_id = prior_terminal);
     abi::clear_user_va_bounds();
     clear_streams_after_dispatcher_test();
 }
@@ -2172,9 +2190,8 @@ fn test_fork_child_exit_sets_sigchld_on_parent() {
     );
 }
 
-/// `notify_parent_of_exit` is the shared helper that `exit_group`,
-/// `cleanup_user_process`, and `unimplemented_syscall_exit` all route
-/// through. It must (a) file a zombie the parent's `wait4` can find
+/// `notify_parent_of_exit` is the shared helper that cooperative exits and
+/// fault cleanup route through. It must (a) file a zombie the parent's `wait4` can find
 /// and (b) raise SIGCHLD on the stashed parent. Regression guard for
 /// the bug where ring-3 faults skipped both, leaving zsh hung in
 /// `rt_sigsuspend` after `ls` crashed.
@@ -2523,7 +2540,7 @@ fn test_fork_execve_badpath_returns_to_parent() {
 /// - The child's 42 was parked in `LAST_EXIT_CODE` at some point but
 ///   then overwritten by the parent's final exit — we don't observe
 ///   42 here directly.
-/// - No abnormal exit / unimplemented syscall.
+/// - No abnormal exit.
 fn test_fork_then_wait_returns_to_parent() {
     use crate::userland::lifecycle::ExitKind;
 
@@ -3041,7 +3058,6 @@ fn test_run_leak_loop_fault() {
         let image = load_elf(&bytes).expect("load_elf in fault leak loop");
         let result = crate::userland::enter_user_mode(image).expect("enter_user_mode in fault leak loop");
         let _ = crate::userland::release_active_image();
-        use crate::userland::lifecycle::ExitKind;
         assert!(matches!(result.0, crate::userland::lifecycle::ExitKind::Abnormal { .. }));
     }
 }
@@ -3291,29 +3307,76 @@ fn test_try_grow_user_stack_budget_exhausted() {
     restore_stack_window(snap);
 }
 
-/// A fault at or above stack_bottom returns `NotStackGrow` —
-/// already-mapped pages aren't this handler's problem.
-fn test_try_grow_user_stack_not_stack_grow_above_bottom() {
+/// An unmapped page inside the stack window may sit above the low-water mark.
+/// This happens after inherited/partial mappings; filling the hole must not
+/// lower the contiguous stack bookkeeping.
+fn test_try_grow_user_stack_fills_gap_above_bottom() {
+    use crate::mm::paging::UserPerms;
     use crate::mm::paging::USER_STACK_TOP;
+    use crate::userland::lifecycle::{try_grow_user_stack, with_current_process, GrowOutcome};
+    use x86_64::VirtAddr;
+
+    let top = USER_STACK_TOP;
+    let bottom = top - 8 * 0x1000;
+    let floor = top - 64 * 0x1000;
+    crate::mm::memory::with_memory_mapper(|m| {
+        m.map_user_region(VirtAddr::new(bottom), 8, UserPerms::ReadWrite)
+    })
+    .unwrap()
+    .unwrap();
+    let gap_page = bottom + 0x2000;
+    crate::mm::memory::with_memory_mapper(|m| {
+        m.unmap_user_region(VirtAddr::new(gap_page), 1)
+    })
+    .unwrap()
+    .unwrap();
+    let snap = stage_stack_window(top, bottom, floor, 100);
+
+    assert_eq!(
+        try_grow_user_stack(VirtAddr::new(gap_page + 0x100)),
+        GrowOutcome::Grew,
+    );
+    with_current_process(|p| {
+        assert_eq!(p.stack_bottom, bottom);
+        assert_eq!(p.stack_mapped_bottom, bottom);
+        assert_eq!(p.growth_faults_remaining, 99);
+    });
+
+    crate::userland::lifecycle::with_current_process(
+        crate::userland::lifecycle::unmap_user_stack,
+    );
+    restore_stack_window(snap);
+}
+
+/// Already-mapped in-window pages are protection faults, not growth, and
+/// addresses above stack_top are outside the stack window entirely.
+fn test_try_grow_user_stack_rejects_mapped_and_out_of_range_pages() {
+    use crate::mm::paging::{UserPerms, USER_STACK_TOP};
     use crate::userland::lifecycle::{try_grow_user_stack, GrowOutcome};
     use x86_64::VirtAddr;
 
     let top = USER_STACK_TOP;
     let bottom = top - 8 * 0x1000;
     let floor = top - 64 * 0x1000;
+    crate::mm::memory::with_memory_mapper(|m| {
+        m.map_user_region(VirtAddr::new(bottom), 8, UserPerms::ReadWrite)
+    })
+    .unwrap()
+    .unwrap();
     let snap = stage_stack_window(top, bottom, floor, 100);
 
-    // Above the current bottom.
     assert_eq!(
         try_grow_user_stack(VirtAddr::new(bottom + 0x100)),
         GrowOutcome::NotStackGrow,
     );
-    // Above stack_top entirely.
     assert_eq!(
         try_grow_user_stack(VirtAddr::new(top + 0x10000)),
         GrowOutcome::NotStackGrow,
     );
 
+    crate::userland::lifecycle::with_current_process(
+        crate::userland::lifecycle::unmap_user_stack,
+    );
     restore_stack_window(snap);
 }
 
@@ -3395,22 +3458,11 @@ fn test_install_new_process_populates_stack_window() {
     };
     use crate::userland::lifecycle::{install_new_process_opt, with_current_process};
 
-    // Snapshot and restore Process state so this test stays a leaf.
-    let snap = with_current_process(|p| {
-        (
-            p.pid,
-            p.parent_pid,
-            p.stack_top,
-            p.stack_bottom,
-            p.stack_mapped_bottom,
-            p.stack_max_growth_floor,
-            p.growth_faults_remaining,
-        )
-    });
+    reset_active_user();
 
     let bytes = fix::happy_path_elf();
     let image = load_elf(&bytes).expect("load_elf");
-    let _pid = install_new_process_opt(image, USER_BRK_BASE, USER_MMAP_BASE, None);
+    let pid = install_new_process_opt(image, USER_BRK_BASE, USER_MMAP_BASE, None);
 
     let expected_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 0x1000;
     with_current_process(|p| {
@@ -3426,8 +3478,9 @@ fn test_install_new_process_populates_stack_window() {
         assert_eq!(p.growth_faults_remaining, USER_STACK_MAX_GROWTH_PAGES);
     });
 
-    // Teardown the stack pages the loader installed and restore Process
-    // state so the next test starts clean.
+    // Teardown the mappings while this process's address space is current,
+    // then remove the actual table entry. Rewriting `p.pid` would not change
+    // the table key and would strand a synthetic process between tests.
     with_current_process(|p| {
         crate::userland::lifecycle::unmap_user_stack(p);
         // Take the image out so it doesn't try to unmap the (already
@@ -3437,14 +3490,9 @@ fn test_install_new_process_populates_stack_window() {
         // does still own gets unmapped too.
         let _img = p.image.take();
         drop(_img);
-        p.pid = snap.0;
-        p.parent_pid = snap.1;
-        p.stack_top = snap.2;
-        p.stack_bottom = snap.3;
-        p.stack_mapped_bottom = snap.4;
-        p.stack_max_growth_floor = snap.5;
-        p.growth_faults_remaining = snap.6;
     });
+    drop(crate::userland::lifecycle::remove_process(pid));
+    crate::userland::lifecycle::reset_sentinel();
 }
 
 // --- U2: loader growth-floor + bounds_start + per-binary floor ---
@@ -4044,21 +4092,17 @@ fn test_remove_process_cleans_ring3_queues() {
 /// back to the kernel-thread scheduler (idle) otherwise. This is the
 /// load-bearing decision the U5 timer ISR will consult.
 fn test_next_runnable_prefers_ring3() {
-    use crate::process::scheduler::{Runnable, SCHEDULER};
+    use crate::process::scheduler::{Runnable, Scheduler};
     clear_ring3_queues();
+    let mut sched = Scheduler::new();
+    sched.init();
 
     crate::userland::lifecycle::mark_ring3_ready(70);
-    let pick = {
-        let mut sched = SCHEDULER.lock();
-        sched.next_runnable()
-    };
+    let pick = sched.next_runnable();
     assert_eq!(pick, Runnable::RingThree(70));
 
     // No more ring-3 ready — falls back to kernel-thread (idle PCB).
-    let pick = {
-        let mut sched = SCHEDULER.lock();
-        sched.next_runnable()
-    };
+    let pick = sched.next_runnable();
     assert!(matches!(pick, Runnable::KernelThread(_)));
 }
 
@@ -4085,7 +4129,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_try_grow_user_stack_grew,
         &test_try_grow_user_stack_overflow_below_floor,
         &test_try_grow_user_stack_budget_exhausted,
-        &test_try_grow_user_stack_not_stack_grow_above_bottom,
+        &test_try_grow_user_stack_fills_gap_above_bottom,
+        &test_try_grow_user_stack_rejects_mapped_and_out_of_range_pages,
         &test_try_grow_user_stack_sentinel_is_not_stack_grow,
         &test_try_grow_user_stack_widens_validated_bounds,
         &test_handler_blocked_mask_includes_sa_mask_and_signum,
@@ -4154,13 +4199,13 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_loader_no_relocations_is_ok,
         &test_loader_rollback_unmaps_on_reloc_failure,
         // enter_user_mode lifecycle
-        &test_enter_user_mode_single_user_invariant,
+        &test_enter_user_mode_ignores_kernel_sentinel_state,
         &test_run_initial_stack_fixture_b,
-        &test_run_unhandled_syscall_fixture_d,
+        &test_run_unknown_syscall_returns_enosys,
         &test_run_syscall_exit42_fixture_a,
         &test_run_happy_path_hello,
         &test_run_fault_ud,
-        &test_kernel_ss_after_user_fault,
+        &test_kernel_and_userland_resume_after_user_fault,
         // U8: ZSH.ELF end-to-end tests.
         &test_run_zsh_minimal_exit,
         &test_run_zsh_echo_command,

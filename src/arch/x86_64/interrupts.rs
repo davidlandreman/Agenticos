@@ -248,8 +248,8 @@ extern "x86-interrupt" fn page_fault_handler(
     // Everything else (overflow, budget exhaustion, lock contention,
     // map failure, or a fault outside the grow window) routes to
     // `cleanup_user_process` with vector 14 / SIGSEGV — the single
-    // termination path preserves the SS-restore invariant guarded by
-    // test_kernel_ss_after_user_fault.
+    // termination path is covered by the fault-recovery and follow-up launch
+    // regression in the userland suite.
     if frame_is_user(stack_frame.code_segment as u64) {
         use crate::userland::lifecycle::{try_grow_user_stack, GrowOutcome};
         match try_grow_user_stack(accessed_addr) {

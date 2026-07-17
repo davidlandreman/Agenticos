@@ -24,6 +24,8 @@ pub mod userland;
 #[cfg(feature = "test")]
 pub mod userland_fixtures;
 #[cfg(feature = "test")]
+pub mod compiler_compat;
+#[cfg(feature = "test")]
 pub mod userland_switch;
 #[cfg(feature = "test")]
 pub mod fonts;
@@ -94,6 +96,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("fat_write", fat_write::get_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
+    ("compiler_compat", compiler_compat::get_tests),
     ("userland_switch", userland_switch::get_tests),
     ("path", crate::userland::path::path_tests),
     ("bin_namespace", crate::userland::bin_namespace::bin_namespace_tests),

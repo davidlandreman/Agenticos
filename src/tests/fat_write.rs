@@ -6,19 +6,10 @@
 //! discarded at QEMU exit — each test boot starts from the same
 //! freshly-`mkfs.fat`'d image.
 //!
-//! We don't restore state between tests; the order in `get_tests()`
-//! matters. Each test names a cluster range it owns to minimize
-//! cross-test interference.
-//!
-//! Cross-module runner caveat: when this module runs in the SAME boot
-//! as `filesystem` (`./test.sh fat_write filesystem`), the kernel's
-//! wrapper-mounted FatFilesystem at /data and the `SHARED_FS`
-//! singleton below are TWO separate instances on the same disk. Each
-//! has its own cluster-allocator hint and short-name cache, so a
-//! create via one doesn't show up in the other's cache, and find can
-//! miss entries written via the other instance. Each module passes
-//! cleanly on its own; the combined run is a test-runner ordering
-//! concern, not a correctness bug in either path.
+//! Direct FAT-entry tests restore the entries they touch. Directory
+//! mutation tests use the production VFS-mounted `/data` instance and
+//! unlink their fixtures, so allocator hints and short-name caches never
+//! diverge between two writers in the same boot.
 
 use crate::debug_info;
 use crate::drivers::ide::{IDE_CONTROLLER, IdeBlockDevice, IdeChannel, IdeDrive};
@@ -234,44 +225,11 @@ fn test_fat_extend_chain_then_free() {
 // (snapshot=on means writes are discarded at QEMU exit, so each
 // test boot starts clean).
 
-use crate::fs::fat::filesystem::FatFilesystem;
 use crate::fs::fat::lfn::{generate_short_name, lfn_slot_count, fits_short_name};
 
-/// Shared FatFilesystem singleton for U9 tests. First call constructs
-/// + writable-gates; subsequent calls reuse it. This is necessary
-/// because each test mutates the dirty bit on disk; without sharing,
-/// the SECOND `enable_writes` call in a boot run hits the C-2
-/// dirty-bit refusal.
-///
-/// Uses the kernel's `static mut` singleton pattern (rather than a
-/// `spin::Mutex`) because `dyn BlockDevice` isn't `Sync` — the same
-/// reason `PRIMARY_MASTER_DISK` in kernel.rs uses raw `static mut`.
-/// Kernel is single-threaded; tests run serially.
-static mut SHARED_FS: Option<&'static FatFilesystem<'static>> = None;
-
-fn shared_data_fs() -> &'static FatFilesystem<'static> {
-    unsafe {
-        if let Some(fs) = SHARED_FS {
-            return fs;
-        }
-        let dev = data_block_device();
-        let leaked_dev: &'static IdeBlockDevice =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(dev));
-        let fs = FatFilesystem::new(leaked_dev).expect("construct FatFilesystem on /data");
-        // force=true here: the kernel's main /data mount (via
-        // auto_mount_writable in kernel.rs) ALSO holds a writable
-        // FatFilesystem on this disk and has already cleared the
-        // dirty bit. This test-side FatFilesystem is a SECOND
-        // instance; it would otherwise refuse via the C-2 gate
-        // because the disk's dirty bit is now "dirty" (set by the
-        // first instance). QEMU snapshot=on means the disk state
-        // resets per boot, so this is safe for tests.
-        fs.enable_writes(true)
-            .expect("enable writes (force=true for test isolation)");
-        let fs_static: &'static FatFilesystem<'static> =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(fs));
-        SHARED_FS = Some(fs_static);
-        fs_static
+fn unlink_if_present(path: &str) {
+    if crate::fs::exists(path) {
+        crate::fs::vfs::vfs_unlink(path).expect("remove FAT test fixture");
     }
 }
 
@@ -308,59 +266,46 @@ fn test_u9_lfn_slot_count() {
 }
 
 fn test_u9_create_and_unlink_short_name() {
-    let fs = shared_data_fs();
-    // Create a short-name file at the FAT layer, then unlink.
-    let cluster = fs.create_file("/SHORT.TXT").expect("create");
-    debug_info!("  /SHORT.TXT created with first_cluster {}", cluster.0);
-    // Verify it shows up.
-    let fh = fs.find_file("/SHORT.TXT").expect("find after create");
-    assert!(!fh.is_directory);
-    // Unlink.
-    fs.unlink_file("/SHORT.TXT").expect("unlink");
-    // No longer present.
-    assert!(fs.find_file("/SHORT.TXT").is_err());
+    const PATH: &str = "/data/FW-SHORT.TXT";
+    unlink_if_present(PATH);
+    let file = crate::fs::File::create(PATH).expect("create short-name fixture");
+    drop(file);
+    let metadata = crate::fs::metadata(PATH).expect("find short-name fixture");
+    assert!(matches!(
+        metadata.file_type,
+        crate::fs::filesystem::FileType::File
+    ));
+    crate::fs::vfs::vfs_unlink(PATH).expect("unlink short-name fixture");
+    assert!(!crate::fs::exists(PATH));
 }
 
 fn test_u9_create_long_name_writes_lfn_run() {
-    let fs = shared_data_fs();
-    // notes.markdown — 14 chars, needs LFN.
-    let _cluster = fs.create_file("/notes.markdown").expect("create long");
-    // Find it by long name (case-insensitive ASCII fold).
-    let fh = fs.find_file("/notes.markdown").expect("find by long name");
-    assert!(!fh.is_directory);
-    // Find it by long name UPPERCASE — should also resolve.
-    let fh2 = fs.find_file("/NOTES.MARKDOWN").expect("find case-insensitive");
-    assert!(!fh2.is_directory);
-    // Clean up.
-    fs.unlink_file("/notes.markdown").expect("unlink long");
+    const PATH: &str = "/data/fat-write-notes.markdown";
+    const UPPER_PATH: &str = "/data/FAT-WRITE-NOTES.MARKDOWN";
+    unlink_if_present(PATH);
+    let file = crate::fs::File::create(PATH).expect("create long-name fixture");
+    drop(file);
+    let metadata = crate::fs::metadata(PATH).expect("find by long name");
+    assert_eq!(metadata.name_str(), "fat-write-notes.markdown");
+    let upper = crate::fs::metadata(UPPER_PATH).expect("find long name case-insensitively");
+    assert_eq!(upper.name_str(), "fat-write-notes.markdown");
+    crate::fs::vfs::vfs_unlink(PATH).expect("unlink long-name fixture");
 }
 
 fn test_u9_write_then_read_round_trip() {
-    let fs = shared_data_fs();
-    let _cluster = fs.create_file("/hello.txt").expect("create");
-    let fh = fs.find_file("/hello.txt").expect("find");
+    const PATH: &str = "/data/fat-write-roundtrip.txt";
+    unlink_if_present(PATH);
     let data = b"hello, persistent disk\n";
-    // Write at offset 0.
-    let mut new_cluster = fh.first_cluster;
-    let n = fs
-        .write_file_at(fh.first_cluster, 0, data, &mut new_cluster)
-        .expect("write");
+    let file = crate::fs::File::create(PATH).expect("create round-trip fixture");
+    let n = file.write(data).expect("write round-trip fixture");
     assert_eq!(n, data.len());
-    // Update the directory entry's first_cluster + size.
-    fs.update_sfn_size_and_cluster(
-        Some(crate::fs::fat::types::ClusterId(2)), // FAT32 root cluster
-        "hello.txt",
-        new_cluster,
-        data.len() as u64,
-    )
-    .expect("update sfn");
-    // Read back via the existing read path.
-    let fh2 = fs.find_file("/hello.txt").expect("re-find");
-    assert_eq!(fh2.size as usize, data.len());
-    let mut buf = alloc::vec![0u8; data.len()];
-    fs.read_file(&fh2, &mut buf).expect("read");
-    assert_eq!(&buf[..], data);
-    fs.unlink_file("/hello.txt").expect("unlink");
+    drop(file);
+    let content = crate::fs::File::open_read(PATH)
+        .expect("reopen round-trip fixture")
+        .read_to_vec()
+        .expect("read round-trip fixture");
+    assert_eq!(&content[..], data);
+    crate::fs::vfs::vfs_unlink(PATH).expect("unlink round-trip fixture");
 }
 
 fn test_u9_short_name_cache_no_redundant_scans() {
@@ -368,14 +313,20 @@ fn test_u9_short_name_cache_no_redundant_scans() {
     // same basename prefix should not require additional directory
     // scans. We can't easily measure scan count directly, but we
     // can verify the cache yields increasing ~N values.
-    let fs = shared_data_fs();
-    let _ = fs.create_file("/doc1.markdown").expect("create 1");
-    let _ = fs.create_file("/doc2.markdown").expect("create 2");
-    let _ = fs.create_file("/doc3.markdown").expect("create 3");
+    const PATHS: [&str; 3] = [
+        "/data/fat-cache-doc1.markdown",
+        "/data/fat-cache-doc2.markdown",
+        "/data/fat-cache-doc3.markdown",
+    ];
+    for path in PATHS {
+        unlink_if_present(path);
+        drop(crate::fs::File::create(path).expect("create cache fixture"));
+    }
     // All three should resolve uniquely (no name collision).
-    assert!(fs.find_file("/doc1.markdown").is_ok());
-    assert!(fs.find_file("/doc2.markdown").is_ok());
-    assert!(fs.find_file("/doc3.markdown").is_ok());
+    for path in PATHS {
+        assert!(crate::fs::exists(path));
+        crate::fs::vfs::vfs_unlink(path).expect("unlink cache fixture");
+    }
 }
 
 pub fn get_tests() -> &'static [&'static dyn Testable] {

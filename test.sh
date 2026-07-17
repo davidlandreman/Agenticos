@@ -38,9 +38,9 @@ at the start and/or end:
   ./test.sh '*scroll*'         # substring anywhere
 
 Flags:
-  --skip-userland     Skip building userland/ and hello-cpp (faster iteration
-                      when not exercising userland tests). Wins over
-                      --rebuild-userland if both are passed.
+  --skip-userland     Skip building optional userland apps and hello-cpp
+                      (mandatory committed compiler-compat fixtures are still
+                      staged). Wins over --rebuild-userland if both are passed.
   --rebuild-userland  Force rebuild of prebuilt-managed userland apps (zsh).
                       Default copies the committed userland/prebuilt/ELF into
                       host_share/. Equivalent: REBUILD_USERLAND=1 env.
@@ -99,6 +99,23 @@ mkdir -p "$HOST_SHARE_STAGE"
 mkdir -p "$HOST_SHARE_STAGE/ETC"
 printf 'root:x:0:0::/root:/bin/zsh\n' > "$HOST_SHARE_STAGE/ETC/PASSWD"
 printf 'root:x:0:\n'                  > "$HOST_SHARE_STAGE/ETC/GROUP"
+
+# Mandatory static-musl compatibility fixtures. These are committed test
+# inputs, so stage them even with --skip-userland and fail loudly if a fresh
+# checkout is missing one. Ordinary test runs never invoke a musl compiler.
+COMPAT_PREBUILT="userland/prebuilt/compiler-compat"
+for name in CCCRT.ELF CCLIBC.ELF CCPROBE.ELF; do
+    SRC="$COMPAT_PREBUILT/$name"
+    if [ ! -f "$SRC" ]; then
+        echo "Missing mandatory compiler-compat fixture: $SRC" >&2
+        exit 1
+    fi
+    STAGED="$HOST_SHARE_STAGE/$name"
+    TMP="$HOST_SHARE_STAGE/.$name.tmp.$$"
+    cp "$SRC" "$TMP"
+    mv -f "$TMP" "$STAGED"
+    echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
+done
 
 # Stage userland apps into host_share/ so test boots see the same artifacts
 # as interactive boots. Failures here do not block tests (they use embedded

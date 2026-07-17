@@ -278,21 +278,27 @@ pub fn build_print_exit_elf(msg: &[u8], exit_code: u32) -> Vec<u8> {
     runnable_elf_rx(&code)
 }
 
-/// Fixture D — unhandled-syscall trap.
+/// Fixture D — live unknown-syscall fallback.
 ///
-/// Issues `syscall RAX=999`. The kernel dispatcher's default arm should
-/// log the number and terminate the process via the existing fault-cleanup
-/// path, recording `ExitKind::UnimplementedSyscall { nr: 999 }`. No
-/// kernel panic, no hang, no silent `-ENOSYS` return.
-pub fn syscall_999_elf() -> Vec<u8> {
+/// Issues syscall 999, requires RAX == -ENOSYS, then exits 0. A different
+/// return value exits 1. Reaching either exit proves the dispatcher returned
+/// to ring 3 instead of terminating the process.
+pub fn unknown_syscall_enosys_elf() -> Vec<u8> {
     let mut code: Vec<u8> = Vec::new();
     // mov eax, 999
     code.extend_from_slice(&[0xB8, 0xE7, 0x03, 0x00, 0x00]);
     // syscall
     code.extend_from_slice(&[0x0F, 0x05]);
-    // hlt — only reached if the dispatcher returned cleanly, which would
-    // be a bug.
-    code.push(0xF4);
+    // cmp rax, -38; jne failure
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0xDA, 0x75, 0x09]);
+    // exit_group(0)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x31, 0xFF]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // failure: exit_group(1)
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x0F, 0x05]);
     runnable_elf_rx(&code)
 }
 
