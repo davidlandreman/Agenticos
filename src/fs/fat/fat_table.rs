@@ -384,7 +384,7 @@ impl<'a> FatTable<'a> {
             callback(current)?;
             visited += 1;
             if visited.is_multiple_of(32) {
-                crate::debug_info!(
+                crate::debug_trace!(
                     "[fat] follow_chain: {} clusters visited, current={}",
                     visited,
                     current.0
@@ -394,7 +394,7 @@ impl<'a> FatTable<'a> {
             current = self.read_entry(current)?;
 
             if current.is_end_of_chain(self.fat_type) {
-                crate::debug_info!(
+                crate::debug_trace!(
                     "[fat] follow_chain: end-of-chain after {} clusters",
                     visited
                 );
