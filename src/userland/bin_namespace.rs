@@ -5,16 +5,16 @@
 //! - **GUILAUNCH** (`GLAUNCH.ELF`) — one ring-3 launcher binary that
 //!   takes an applet name in `argv[0]` and issues the
 //!   `gui_launch` syscall, spawning the matching kernel-side GUI app
-//!   (`painting`, `tasks`, `explorer`).
-//! - **Direct apps** — standalone native ELFs such as `CALC.ELF` and
-//!   `NOTEPAD.ELF`.
+//!   (`tasks`, `explorer`).
+//! - **Direct apps** — standalone native ELFs such as `CALC.ELF`,
+//!   `NOTEPAD.ELF`, and `PAINTING.ELF`.
 //!
 //! The kernel exposes a single virtual `/bin` directory whose entries
 //! resolve into either binary based on which list the name belongs to.
 //! `execve("/bin/ls", ["ls", ...], envp)` rewrites to
-//! `execve("/host/BB.ELF", ["ls", ...], envp)`; `execve("/bin/painting",
-//! ["painting"], envp)` rewrites to `execve("/host/GLAUNCH.ELF",
-//! ["painting"], envp)`. The respective multicall dispatcher then takes
+//! `execve("/host/BB.ELF", ["ls", ...], envp)`; `execve("/bin/tasks",
+//! ["tasks"], envp)` rewrites to `execve("/host/GLAUNCH.ELF",
+//! ["tasks"], envp)`. The respective multicall dispatcher then takes
 //! over.
 //!
 //! No symlinks, no directory mirror in `host_share/` — the namespace is
@@ -44,6 +44,8 @@ pub const GUILAUNCH_HOST_PATH: &str = "/host/GLAUNCH.ELF";
 
 pub const NOTEPAD_HOST_PATH: &str = "/host/NOTEPAD.ELF";
 
+pub const PAINTING_HOST_PATH: &str = "/host/PAINTING.ELF";
+
 pub const CALC_HOST_PATH: &str = "/host/CALC.ELF";
 
 /// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
@@ -53,11 +55,11 @@ pub const CALC_HOST_PATH: &str = "/host/CALC.ELF";
 ///
 /// Names MUST NOT collide with [`APPLETS`] or [`DIRECT_APPLETS`]. The
 /// disjoint-list invariant is asserted at test time.
-pub const GUI_APPLETS: &[&str] = &["explorer", "painting", "tasks"];
+pub const GUI_APPLETS: &[&str] = &["explorer", "tasks"];
 
 /// Sorted standalone executables synthesized into `/bin` without a multicall
 /// launcher. `apply_bin_rewrite` maps each name directly to its staged ELF.
-pub const DIRECT_APPLETS: &[&str] = &["calc", "notepad"];
+pub const DIRECT_APPLETS: &[&str] = &["calc", "notepad", "painting"];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
 /// `/bin/<name>`. Binary-searched on every lookup. MUST stay sorted —
@@ -342,6 +344,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
     let path = match canonical {
         "calc" => CALC_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,
+        "painting" => PAINTING_HOST_PATH,
         _ => return None,
     };
     Some((path, canonical))
@@ -633,15 +636,21 @@ mod tests_internal {
     }
 
     fn test_apply_bin_rewrite_dispatches_gui_app() {
-        let (path, applet) = apply_bin_rewrite("/bin/painting").expect("must resolve");
+        let (path, applet) = apply_bin_rewrite("/bin/tasks").expect("must resolve");
         assert_eq!(path, "/host/GLAUNCH.ELF");
-        assert_eq!(applet, "painting");
+        assert_eq!(applet, "tasks");
     }
 
     fn test_apply_bin_rewrite_dispatches_direct_app() {
         let (path, applet) = apply_bin_rewrite("/bin/notepad").expect("must resolve");
         assert_eq!(path, "/host/NOTEPAD.ELF");
         assert_eq!(applet, "notepad");
+
+        // painting migrated from a kernel GUI applet to a standalone ring-3
+        // ELF, so it now rewrites directly instead of via GLAUNCH.ELF.
+        let (path, applet) = apply_bin_rewrite("/bin/painting").expect("must resolve");
+        assert_eq!(path, "/host/PAINTING.ELF");
+        assert_eq!(applet, "painting");
 
         let (path, applet) = apply_bin_rewrite("/bin/calc").expect("must resolve");
         assert_eq!(path, "/host/CALC.ELF");
@@ -677,16 +686,18 @@ mod tests_internal {
                 win[1],
             );
         }
-        // Spot-check that both lists' entries are present.
+        // Spot-check that all three lists' entries are present.
         assert!(
             entries.contains(&"ls"),
             "merged stream missing BusyBox 'ls'"
         );
         assert!(
-            entries.contains(&"painting"),
-            "merged stream missing GUI 'painting'"
+            entries.contains(&"tasks"),
+            "merged stream missing GUI 'tasks'"
         );
+        assert!(entries.contains(&"calc"));
         assert!(entries.contains(&"notepad"));
+        assert!(entries.contains(&"painting"));
     }
 
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {

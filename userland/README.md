@@ -39,6 +39,7 @@ userland/
     ├── guidemo/        # minimal ring-3 GUI reference client
     ├── notepad/        # standalone editor with userland dialogs + working Save
     ├── calc/           # standalone four-operation calculator
+    ├── painting/       # standalone bouncing-shapes GUI demo (self-driven frame loop)
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
     ├── compiler-compat/# tiny C static-musl boot-test fixtures

@@ -90,6 +90,18 @@ Each process owns:
   SIGALRM delivery. Timer expiry is processed by kernel housekeeping and the
   inline test dispatcher; a signal-woken blocking syscall re-enters the
   dispatcher as `-EINTR` so its handler runs before the syscall can re-block.
+- `sleep_deadline` — restart-stable absolute PIT deadline for a blocking
+  `nanosleep`. Set on first entry, checked on every SYSCALL re-fire, cleared on
+  completion (`lifecycle::nanosleep_deadline`). The process parks on
+  `Ring3BlockReason::Sleeping { deadline_tick }`; `process_expired_sleeps()`
+  wakes it when the deadline elapses. That wake pass runs primarily from the
+  compositor kernel thread's loop (`window::compositor::run`) — the kernel main
+  loop is the idle task under U10 and is starved, so a self-timed animation
+  would otherwise wake only every few seconds; it is also called from the main
+  loop and the inline dispatch loop for the launcher/test paths. Dispatch of the
+  woken process is fast (`scheduler::next_runnable` pops `ring3_ready` each
+  switch). Self-driven ring-3 animation loops (`PAINTING.ELF`) and zsh's
+  `sleep`/`usleep` depend on this; `-EINTR`/remaining-time is not modeled.
 
 Socket slots hold `Arc<net::socket::SocketHandle>`. The handle is a shared
 open-file description: dup/fork share `O_NONBLOCK` and protocol state, while

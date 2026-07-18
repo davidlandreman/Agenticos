@@ -25,16 +25,19 @@ impl Color {
         green: 0,
         blue: 0,
     };
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const GREEN: Color = Color {
         red: 0,
         green: 255,
         blue: 0,
     };
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const BLUE: Color = Color {
         red: 0,
         green: 0,
         blue: 255,
     };
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const YELLOW: Color = Color {
         red: 255,
         green: 255,

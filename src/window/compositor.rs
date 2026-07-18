@@ -29,6 +29,17 @@
 //! - `save_kernel_and_resume_ring3` (the U8 ring-3 dispatcher).
 //! - `hlt` for true CPU idle.
 //!
+//! ## Why `process_expired_sleeps` runs here
+//!
+//! Ring-3 `nanosleep` deadlines are expired from this loop, not only the main
+//! loop. Under U10 the main loop is the idle task and barely runs once this
+//! compositor thread is always ready, so a self-timed ring-3 animation
+//! (`PAINTING.ELF`) that blocks in `nanosleep` each frame would be woken only
+//! every few seconds. The compositor is scheduled every round-robin revolution,
+//! so waking sleepers here gives them frame-cadence resumption. Dispatch of the
+//! woken process is already fast (`scheduler::next_runnable` pops `ring3_ready`
+//! on every context switch).
+//!
 //! ## The BinaryLoadGuard interaction
 //!
 //! The IDE PIO atomicity concern (multi-MiB binary loads contending
@@ -66,6 +77,14 @@ pub fn run() {
     let using_virtio = crate::drivers::mouse::is_virtio_tablet();
 
     loop {
+        // Expire ring-3 `nanosleep` deadlines here, not just in the kernel
+        // main loop: under U10 the main loop is the idle task and barely runs
+        // once other kernel threads (this compositor) are always ready, so a
+        // self-timed ring-3 animation loop would only get woken every few
+        // seconds. The compositor is scheduled every round-robin revolution,
+        // so waking sleepers here gives them frame-cadence resumption.
+        crate::userland::lifecycle::process_expired_sleeps();
+
         let user_active = crate::userland::lifecycle::binary_load_in_progress();
 
         // Input processing — skip while a binary is being loaded so the

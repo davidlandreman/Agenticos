@@ -3,7 +3,7 @@
 //!
 //! ## Why this exists
 //!
-//! The remaining kernel GUI app launchers (`painting`, `tasks`,
+//! The remaining kernel GUI app launchers (`tasks`,
 //! `explorer`) were previously reachable only as kernel-shell commands
 //! registered in `src/process/manager.rs::ProcessManager`. With zsh as
 //! the default shell, those typed names need to resolve through ring-3
@@ -34,7 +34,6 @@ use alloc::{boxed::Box, string::String, vec::Vec};
 pub fn spawn_by_name(name: &str) -> Result<ProcessId, i64> {
     let factory: fn(Vec<String>) -> Box<dyn RunnableProcess> = match name {
         "explorer" => crate::commands::explorer::create_explorer_process,
-        "painting" => crate::commands::painting::create_painting_process,
         "tasks" => crate::commands::tasks::create_tasks_process,
         _ => return Err(ENOENT),
     };
@@ -80,7 +79,7 @@ mod tests_internal {
     /// assert coverage without spawning.
     fn handler_for(name: &str) -> Option<()> {
         match name {
-            "explorer" | "painting" | "tasks" => Some(()),
+            "explorer" | "tasks" => Some(()),
             _ => None,
         }
     }

@@ -687,12 +687,30 @@ fn test_dispatch_setitimer_real_arms_queries_and_validates() {
     crate::userland::abi::clear_user_va_bounds();
 }
 
-fn test_dispatch_nanosleep_stub_returns_zero() {
+/// `nanosleep` returns 0 without blocking when there is nothing to wait for:
+/// a null (zero-length) request, or a re-fired call whose absolute deadline
+/// has already elapsed. The genuinely-blocking path diverges via
+/// `block_current_ring3_and_yield`, so it can't run in this synchronous
+/// dispatcher harness — only the immediate-return paths are exercised here.
+fn test_dispatch_nanosleep_returns_zero_without_blocking() {
+    // A null request pointer is treated as a zero-length sleep: immediate 0.
     let mut args = SyscallArgs::default();
     args.rax = crate::userland::abi::nr::NANOSLEEP;
-    args.rdi = 0xdead_beef;
+    args.rdi = 0; // req NULL
     args.rsi = 0; // rem NULL
     assert_eq!(syscall_dispatch(&mut args), 0);
+
+    // Simulate a re-fired nanosleep whose deadline has already elapsed: the
+    // restart machinery observes `now >= sleep_deadline`, returns 0, and
+    // clears the per-process deadline.
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    crate::userland::lifecycle::with_current_process(|process| {
+        process.sleep_deadline = Some(now);
+    });
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    crate::userland::lifecycle::with_current_process(|process| {
+        assert!(process.sleep_deadline.is_none());
+    });
 }
 
 /// `write(1, valid_ptr, len)` succeeds and returns `len`. The active
@@ -2524,6 +2542,7 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -4295,6 +4314,7 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -4355,6 +4375,7 @@ fn test_has_children_sees_live_child() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -4501,6 +4522,7 @@ fn test_remove_process_cleans_ring3_queues() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -4529,6 +4551,7 @@ fn test_remove_process_cleans_ring3_queues() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -4648,7 +4671,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_prlimit64_null_old_returns_zero,
         &test_dispatch_getrusage_self_zero_fills_and_rejects_unknown_who,
         &test_dispatch_setitimer_real_arms_queries_and_validates,
-        &test_dispatch_nanosleep_stub_returns_zero,
+        &test_dispatch_nanosleep_returns_zero_without_blocking,
         &test_write_handler_valid_slice,
         &test_write_handler_rejects_unknown_fd,
         &test_write_handler_rejects_kernel_pointer,
