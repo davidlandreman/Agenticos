@@ -10,6 +10,7 @@ Filesystem stack: checked block I/O → VFS → ext2/FAT/tmpfs/overlay with moun
 - `file_handle.rs` — `Arc`-based `File` and directory handle API.
 - `fs_manager.rs` — high-level filesystem operations that the rest of the kernel calls.
 - `block_io.rs` — checked byte and filesystem-block I/O over sector devices.
+- `p9/` — 9P2000.L client backend for the virtio-9p host share at `/shared` (`protocol.rs` wire codec, `client.rs` serialized fid/ops client, `filesystem.rs` trait impl). No guest-side caching by design: every op is a fresh RPC, which is what makes concurrent multi-instance use of one host directory coherent.
 - `ext2/` — writable ext2 parser and allocator, including indirect blocks, directories, hard links, symlinks, sparse files, and Unix metadata.
 - `fat/` — FAT12/16/32 implementation. `filesystem.rs` (FAT operations + long-name-aware `walk_directory`), `boot_sector.rs` (BPB parsing), `fat_table.rs` (cluster chain following), `directory.rs` (directory entry parsing — `DirectoryIterator` is the SFN-only low-level primitive), `lfn.rs` (VFAT LFN decoding + lowercase-attr-bit short-name formatting), `types.rs`.
 
@@ -60,6 +61,9 @@ See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for
   /host      → FAT (vvfat-backed, read-only; /host/sysroot is the TCC musl sysroot)
   /data      → ext2 (writable, `agenticos-data` VirtIO disk, persistent)
   /legacy-data → optional old FAT image (read-only, `agenticos-legacy` VirtIO disk)
+  /shared    → 9p host directory (virtio-9p tag `agenticos-shared`, writable,
+               worktree-independent, safe for concurrent instances; host default
+               ~/.agenticos/shared, AGENTICOS_SHARED_DIR / AGENTICOS_SHARED=off)
   /bin/<applet> → synthesized at syscall layer (src/userland/bin_namespace.rs)
 ```
 

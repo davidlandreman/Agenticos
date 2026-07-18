@@ -21,6 +21,11 @@ PCI bus, VirtIO block storage, PS/2 keyboard and mouse, VirtIO input/network/GPU
   only after clear, alpha/readback, and repeated-lifecycle gates pass.
 - `virtio/input.rs` — VirtIO tablet (absolute pointing, seamless mouse in QEMU).
 - `virtio/net.rs` — polling modern VirtIO-net device, bounded RX/TX DMA pools, and smoltcp Ethernet adapter.
+- `virtio/p9.rs` — polling modern virtio-9p transport (device type 9, ID
+  `0x1049`). Carries whole 9P2000.L messages for the `/shared` client in
+  `src/fs/p9/`; identity is the config-space `mount_tag` (`agenticos-shared`),
+  read under the config-generation loop. One request in flight, serialized by
+  the client's lock; timeout/malformed completions quarantine the channel.
 - `virtio/rng.rs` — polling modern VirtIO entropy device. Completion waits are
   finite; a timed-out or malformed queue is quarantined while its DMA storage
   remains owned by the driver.

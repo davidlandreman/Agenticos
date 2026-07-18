@@ -5,6 +5,7 @@ pub mod file_handle;
 pub mod filesystem;
 pub mod fs_manager;
 pub mod overlay;
+pub mod p9;
 pub mod partition;
 pub mod tmpfs;
 pub mod vfs;

@@ -92,7 +92,7 @@ export REBUILD_USERLAND
 if [ "$LIST_ONLY" -eq 1 ]; then
     echo "Available test modules (from src/tests/mod.rs MODULES registry):"
     awk '/^static MODULES:/,/^\];$/' src/tests/mod.rs \
-        | grep -oE '\("[a-z_]+"' \
+        | grep -oE '\("[a-z0-9_]+"' \
         | tr -d '("'
     exit 0
 fi
@@ -236,6 +236,29 @@ QEMU_BIN="${AGENTICOS_QEMU_BIN:-$(command -v qemu-system-x86_64 || true)}"
 if [ -z "$QEMU_BIN" ] || [ ! -x "$QEMU_BIN" ]; then
     echo "QEMU binary is missing or not executable: ${QEMU_BIN:-<unset>}" >&2
     exit 1
+fi
+# Host share exported over virtio-9p and mounted at /shared. Tests run
+# against a hermetic per-run temp directory pre-seeded with a fixture file
+# the p9 test module asserts on. The kernel-side tests self-skip when the
+# device is absent (AGENTICOS_SHARED=off or a QEMU without virtio-9p-pci).
+if [ "${AGENTICOS_SHARED:-on}" = "off" ]; then
+    echo "Host share disabled (AGENTICOS_SHARED=off); p9 tests will self-skip"
+elif "$QEMU_BIN" -device help 2>/dev/null | grep -q virtio-9p-pci; then
+    TEST_SHARED_DIR="${AGENTICOS_TEST_SHARED_DIR:-}"
+    if [ -z "$TEST_SHARED_DIR" ]; then
+        TEST_SHARED_DIR="$(mktemp -d /tmp/agenticos-shared-test.XXXXXX)"
+        trap 'rm -rf "$TEST_SHARED_DIR"' EXIT
+    else
+        mkdir -p "$TEST_SHARED_DIR"
+    fi
+    printf 'agenticos 9p fixture\n' > "$TEST_SHARED_DIR/fixture.txt"
+    QEMU_ARGS+=(
+        -fsdev "local,id=agenticos-shared-fsdev,path=$TEST_SHARED_DIR,security_model=none"
+        -device "virtio-9p-pci,disable-legacy=on,fsdev=agenticos-shared-fsdev,mount_tag=agenticos-shared"
+    )
+    echo "Host share: $TEST_SHARED_DIR -> /shared"
+else
+    echo "Host share unsupported by $QEMU_BIN; p9 tests will self-skip"
 fi
 "$QEMU_BIN" "${QEMU_ARGS[@]}"
 

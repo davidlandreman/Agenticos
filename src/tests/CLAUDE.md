@@ -36,6 +36,11 @@ This folder holds in-kernel test modules that run under QEMU when the kernel is 
   smokes that keep the committed multicall binary aligned with the kernel ABI.
 - `entropy.rs` — asserts the default QEMU selects modern VirtIO RNG, requests
   distinct broker output, and covers the RDRAND CPUID decoder.
+- `p9.rs` — 9P2000.L codec round-trips plus booted `/shared` coverage against
+  the per-run host temp share `test.sh` attaches (fixture read, create/write/
+  read-back, truncate+append, 256 KiB multi-chunk, enumerate with real sizes,
+  rename, symlink resolution, error paths). Self-skips only when no virtio-9p
+  device is attached; with the device present a broken mount is a hard failure.
 
 ## Adding a test
 
