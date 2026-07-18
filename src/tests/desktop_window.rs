@@ -175,6 +175,24 @@ fn test_repeated_paint_without_invalidate_redraws() {
     assert_eq!(device.draw_image_scaled_calls, 3);
 }
 
+fn test_live_wallpaper_replace_invalidates_and_reset_uses_solid() {
+    let bounds = Rect::new(0, 0, 1280, 720);
+    let mut desktop = DesktopWindow::new(WindowId::new(), bounds);
+    let mut device = RecordingDevice::default();
+    desktop.paint(&mut device);
+    assert!(!desktop.needs_repaint());
+
+    desktop.set_wallpaper(Some(tiny_bmp()));
+    assert!(desktop.needs_repaint());
+    desktop.paint(&mut device);
+    assert_eq!(device.draw_image_scaled_calls, 1);
+
+    desktop.set_wallpaper(None);
+    assert!(desktop.needs_repaint());
+    desktop.paint(&mut device);
+    assert_eq!(device.fill_rect_calls, 2);
+}
+
 // -- registration ---------------------------------------------------------
 
 pub fn get_tests() -> &'static [&'static dyn Testable] {
@@ -185,5 +203,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_paint_clears_needs_repaint_for_wallpaper_branch,
         &test_paint_clears_needs_repaint_for_fallback_branch,
         &test_repeated_paint_without_invalidate_redraws,
+        &test_live_wallpaper_replace_invalidates_and_reset_uses_solid,
     ]
 }

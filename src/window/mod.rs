@@ -6,7 +6,6 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::arch::x86_64::preemption_guard::PreemptionMutex;
@@ -284,6 +283,12 @@ pub trait Window: Send {
         None
     }
 
+    /// Typed accessor used by the system-control service for live wallpaper
+    /// replacement.
+    fn as_desktop_window_mut(&mut self) -> Option<&mut windows::desktop::DesktopWindow> {
+        None
+    }
+
     /// Grid dimensions if this window renders a text grid.
     /// Returns `Some((rows, cols))` for `TextWindow`/`TerminalWindow`,
     /// `None` otherwise. The terminal factory uses this to size the
@@ -415,39 +420,36 @@ where
 /// Path of the bundled default wallpaper on the FAT root. The basename is
 /// 8.3-compliant — see `src/fs/CLAUDE.md` for the FAT layer's filename limit.
 pub const DEFAULT_WALLPAPER_PATH: &str = "/WALLPAPR.BMP";
+const MAX_WALLPAPER_BYTES: usize = 16 * 1024 * 1024;
+
+/// Read and validate a BMP wallpaper from an absolute VFS path.
+pub fn load_wallpaper(path: &str) -> Option<Vec<u8>> {
+    let file = crate::fs::File::open_read(path).ok()?;
+    let size = file.size() as usize;
+    if size == 0 || size > MAX_WALLPAPER_BYTES {
+        crate::debug_warn!("wallpaper rejected path={} size={}", path, size);
+        return None;
+    }
+    let bytes = file.read_to_vec().ok()?;
+    if crate::graphics::images::BmpImage::from_bytes(&bytes).is_err() {
+        crate::debug_warn!("wallpaper rejected invalid BMP: {}", path);
+        return None;
+    }
+    Some(bytes)
+}
 
 /// Read the default wallpaper file from the mounted filesystem and return its
 /// raw bytes. Returns `None` on any failure — file missing, read error, or an
 /// empty file. Callers fall back to a solid-color desktop when this returns
 /// `None`, so a missing wallpaper never blocks boot.
 pub fn load_default_wallpaper() -> Option<Vec<u8>> {
-    let file = match crate::fs::File::open_read(DEFAULT_WALLPAPER_PATH) {
-        Ok(f) => f,
-        Err(_) => {
-            crate::debug_info!(
-                "Wallpaper {} not found on root filesystem; using solid background",
-                DEFAULT_WALLPAPER_PATH
-            );
-            return None;
-        }
-    };
-
-    let size = file.size() as usize;
-    if size == 0 {
-        return None;
-    }
-
-    let mut bytes = vec![0u8; size];
-    match file.read(&mut bytes) {
-        Ok(_) => Some(bytes),
-        Err(_) => {
-            crate::debug_info!(
-                "Failed to read wallpaper bytes from {}",
-                DEFAULT_WALLPAPER_PATH
-            );
-            None
-        }
-    }
+    load_wallpaper(DEFAULT_WALLPAPER_PATH).or_else(|| {
+        crate::debug_info!(
+            "Wallpaper {} unavailable; using solid background",
+            DEFAULT_WALLPAPER_PATH
+        );
+        None
+    })
 }
 
 /// Process any pending terminal output.

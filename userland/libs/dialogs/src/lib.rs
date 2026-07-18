@@ -86,6 +86,14 @@ impl Modal {
             Modal::Color(dialog) => map_status(dialog.handle_event(event), ModalOutcome::Color),
         }
     }
+
+    pub fn refresh_theme(&mut self) {
+        match self {
+            Modal::File(dialog) => dialog.refresh_theme(),
+            Modal::Message(dialog) => dialog.refresh_theme(),
+            Modal::Color(dialog) => dialog.refresh_theme(),
+        }
+    }
 }
 
 fn map_status<T>(

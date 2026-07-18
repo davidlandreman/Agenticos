@@ -27,6 +27,7 @@ const PANEL_BORDER: u32 = 2;
 /// Typed actions emitted by enabled Start-menu leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartMenuAction {
+    Settings,
     FileManager,
     Terminal,
     Notepad,
@@ -58,7 +59,10 @@ pub enum StartMenuItem {
 pub const START_MENU_ROOT_ITEMS: &[StartMenuItem] = &[
     StartMenuItem::Submenu { label: "Programs" },
     StartMenuItem::Disabled { label: "Documents" },
-    StartMenuItem::Disabled { label: "Settings" },
+    StartMenuItem::Action {
+        label: "Settings",
+        action: StartMenuAction::Settings,
+    },
     StartMenuItem::Action {
         label: "Run...",
         action: StartMenuAction::Run,

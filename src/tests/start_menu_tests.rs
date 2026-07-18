@@ -77,7 +77,10 @@ fn test_menu_model_order_and_geometry() {
     ));
     assert!(matches!(
         START_MENU_ROOT_ITEMS[2],
-        StartMenuItem::Disabled { label: "Settings" }
+        StartMenuItem::Action {
+            label: "Settings",
+            action: StartMenuAction::Settings
+        }
     ));
     assert!(matches!(START_MENU_ROOT_ITEMS[4], StartMenuItem::Separator));
     assert!(matches!(
@@ -141,6 +144,11 @@ fn test_enabled_and_disabled_dispatch() {
     menu.handle_event(mouse(MouseEventType::ButtonDown, documents));
     menu.handle_event(mouse(MouseEventType::ButtonUp, documents));
     assert_eq!(*LAST_ACTION.lock(), None);
+
+    let settings = root_row_center(2);
+    menu.handle_event(mouse(MouseEventType::ButtonDown, settings));
+    menu.handle_event(mouse(MouseEventType::ButtonUp, settings));
+    assert_eq!(*LAST_ACTION.lock(), Some(StartMenuAction::Settings));
 
     let shutdown = root_row_center(5);
     menu.handle_event(mouse(MouseEventType::ButtonDown, shutdown));

@@ -2,7 +2,7 @@
 
 This directory contains `guishell`, the desktop/taskbar policy layer, plus
 the (empty today) GUI launch table. Every GUI application has migrated to
-the ring-3 platform: File Manager, Notepad, Calc, Painting, GL Arena, and
+the ring-3 platform: Settings, File Manager, Notepad, Calc, Painting, GL Arena, and
 the Task Manager (`userland/apps/taskmgr/`, replacing the kernel-side
 `tasks` app — see
 `docs/plans/2026-07-18-003-feat-ring3-task-manager-and-procfs-plan.md`) all
@@ -25,10 +25,11 @@ compatibility name for `FILEMAN.ELF`).
 - Start → Run opens the kernel-owned non-blocking Run dialog. Submitted text is
   passed unchanged as the single command argument to `/host/ZSH.ELF -c`, using
   the same `/bin:/host` PATH as interactive terminals.
-- Start → Documents and Settings are disabled placeholders. Start → Shut Down
+- Start → Settings launches `/host/CONTROL.ELF`; Documents remains a disabled
+  placeholder. Start → Shut Down
   reports that clean shutdown is not implemented; it does not use QEMU's test
   exit port.
-- zsh `explorer`, `notepad`, `calc`, `painting`, `glgame`, `taskmgr`, and
+- zsh `control`/`settings`, `explorer`, `notepad`, `calc`, `painting`, `glgame`, `taskmgr`, and
   `tasks` resolve through the synthetic `/bin` namespace directly to their
   standalone ELFs. The historical `explorer` command is the compatibility
   name for `FILEMAN.ELF`.

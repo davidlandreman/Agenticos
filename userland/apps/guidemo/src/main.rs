@@ -226,6 +226,13 @@ pub unsafe extern "C" fn _start() -> ! {
             Ok(event) => event,
             Err(_) => runtime::exit(2),
         };
+        if event.kind == gui::GUI_EVENT_THEME_CHANGED {
+            demo.render();
+            if let Some(modal) = demo.modal.as_mut() {
+                modal.refresh_theme();
+            }
+            continue;
+        }
         let exit = if event.window == demo.window.handle() {
             demo.handle_main(&event)
         } else {

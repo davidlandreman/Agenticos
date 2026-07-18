@@ -54,6 +54,7 @@ pub const CALC_HOST_PATH: &str = "/host/CALC.ELF";
 
 pub const GLGAME_HOST_PATH: &str = "/host/GLGAME.ELF";
 pub const FILEMAN_HOST_PATH: &str = "/host/FILEMAN.ELF";
+pub const CONTROL_HOST_PATH: &str = "/host/CONTROL.ELF";
 
 /// TinyCC: on-target C compiler. `tcc` and the traditional `cc` alias
 /// both rewrite here; argv[0] keeps the invoked name.
@@ -75,7 +76,8 @@ pub const GUI_APPLETS: &[&str] = &[];
 /// `tasks` preserves the retired kernel app's name. `tcc` and `cc` are
 /// both TinyCC.
 pub const DIRECT_APPLETS: &[&str] = &[
-    "calc", "cc", "explorer", "glgame", "notepad", "painting", "taskmgr", "tasks", "tcc",
+    "calc", "cc", "control", "explorer", "glgame", "notepad", "painting", "settings", "taskmgr",
+    "tasks", "tcc",
 ];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
@@ -361,6 +363,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
     let path = match canonical {
         "calc" => CALC_HOST_PATH,
         "cc" | "tcc" => TCC_HOST_PATH,
+        "control" | "settings" => CONTROL_HOST_PATH,
         "glgame" => GLGAME_HOST_PATH,
         "explorer" => FILEMAN_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,
@@ -698,6 +701,13 @@ mod tests_internal {
         let (path, applet) = apply_bin_rewrite("/bin/tasks").expect("must resolve");
         assert_eq!(path, "/host/TASKMGR.ELF");
         assert_eq!(applet, "tasks");
+
+        let (path, applet) = apply_bin_rewrite("/bin/control").expect("must resolve");
+        assert_eq!(path, "/host/CONTROL.ELF");
+        assert_eq!(applet, "control");
+        let (path, applet) = apply_bin_rewrite("/bin/settings").expect("must resolve");
+        assert_eq!(path, "/host/CONTROL.ELF");
+        assert_eq!(applet, "settings");
     }
 
     fn test_apply_bin_rewrite_busybox_still_resolves() {

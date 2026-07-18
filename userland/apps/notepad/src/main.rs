@@ -265,6 +265,13 @@ impl Notepad {
                 Ok(event) => event,
                 Err(error) => return error,
             };
+            if event.kind == gui::GUI_EVENT_THEME_CHANGED {
+                self.render();
+                if let Some(modal) = self.modal.as_mut() {
+                    modal.refresh_theme();
+                }
+                continue;
+            }
             let exit = if event.window == self.window.handle() {
                 self.handle_main(event)
             } else if self.modal.as_ref().map(Modal::window_handle) == Some(event.window) {

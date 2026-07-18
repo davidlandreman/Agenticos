@@ -85,6 +85,10 @@ impl MessageBox {
         self.window.handle()
     }
 
+    pub fn refresh_theme(&mut self) {
+        self.render();
+    }
+
     fn affirmative_choice(&self) -> MessageChoice {
         match self.buttons {
             Buttons::YesNo => MessageChoice::Yes,

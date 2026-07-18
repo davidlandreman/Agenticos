@@ -326,6 +326,7 @@ pub mod nr {
     pub const GUI_GL_SUBMIT_FRAME: u64 = 5007;
     pub const GUI_GL_GET_INFO: u64 = 5008;
     pub const GUI_GL_CONTEXT_DESTROY: u64 = 5009;
+    pub const SYSTEM_CONTROL: u64 = 5010;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -455,6 +456,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GUI_GL_SUBMIT_FRAME => crate::userland::gui_gl::submit_frame_handler(args),
         nr::GUI_GL_GET_INFO => crate::userland::gui_gl::get_info_handler(args),
         nr::GUI_GL_CONTEXT_DESTROY => crate::userland::gui_gl::context_destroy_handler(args),
+        nr::SYSTEM_CONTROL => crate::system_control::syscall_handler(args),
         // Phase B: namespace mutations
         nr::MKDIR => syscalls::mkdir_handler(args),
         nr::MKDIRAT => syscalls::mkdirat_handler(args),

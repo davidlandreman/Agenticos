@@ -33,6 +33,8 @@ pub const GUI_EVENT_MOUSE: u32 = 2;
 pub const GUI_EVENT_RESIZE: u32 = 3;
 pub const GUI_EVENT_CLOSE: u32 = 4;
 pub const GUI_EVENT_FOCUS_CHANGE: u32 = 5;
+pub const GUI_EVENT_THEME_CHANGED: u32 = 6;
+pub const GUI_EVENT_SETTINGS_CHANGED: u32 = 7;
 pub const GUI_MOUSE_MOVE: u32 = 0;
 pub const GUI_MOUSE_DOWN: u32 = 1;
 pub const GUI_MOUSE_UP: u32 = 2;
@@ -94,6 +96,48 @@ const NR_GUI_GL_CONTEXT_CREATE: u64 = 5006;
 const NR_GUI_GL_SUBMIT_FRAME: u64 = 5007;
 const NR_GUI_GL_GET_INFO: u64 = 5008;
 const NR_GUI_GL_CONTEXT_DESTROY: u64 = 5009;
+const NR_SYSTEM_CONTROL: u64 = 5010;
+
+pub const SYSTEM_CONTROL_GET_SNAPSHOT: u64 = 0;
+pub const SYSTEM_CONTROL_GET_WALLPAPER_PATH: u64 = 1;
+pub const SYSTEM_CONTROL_SET_THEME: u64 = 2;
+pub const SYSTEM_CONTROL_SET_WALLPAPER_PATH: u64 = 3;
+pub const SYSTEM_CONTROL_RESET_WALLPAPER: u64 = 4;
+
+pub const THEME_AUTO: u32 = 0;
+pub const THEME_CLASSIC: u32 = 1;
+pub const THEME_AERO: u32 = 2;
+
+pub const THEME_AVAILABLE_CLASSIC: u32 = 1 << 0;
+pub const THEME_AVAILABLE_AERO: u32 = 1 << 1;
+
+pub const SYSTEM_PERSISTENCE_AVAILABLE: u32 = 1 << 0;
+pub const SYSTEM_BOOT_THEME_OVERRIDE: u32 = 1 << 0;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SystemControlSnapshotV1 {
+    pub version: u32,
+    pub byte_len: u32,
+    pub theme_preference: u32,
+    pub active_theme: u32,
+    pub theme_available_mask: u32,
+    pub renderer_kind: u32,
+    pub boot_flags: u32,
+    pub wallpaper_state: u32,
+    pub persistence_flags: u32,
+    pub display_width: u32,
+    pub display_height: u32,
+    pub reserved: [u32; 5],
+}
+
+const _: [(); 64] = [(); core::mem::size_of::<SystemControlSnapshotV1>()];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyResult {
+    Persisted,
+    SessionOnly,
+}
 
 #[inline]
 unsafe fn syscall0(number: u64) -> i64 {
@@ -395,6 +439,93 @@ pub fn gui_win_set_title(handle: u32, title: &str) -> i64 {
             title.len() as u64,
         )
     }
+}
+
+fn decode_apply_result(result: i64) -> Result<ApplyResult, i64> {
+    match result {
+        0 => Ok(ApplyResult::Persisted),
+        1 => Ok(ApplyResult::SessionOnly),
+        error => Err(error),
+    }
+}
+
+pub fn system_control_snapshot() -> Result<SystemControlSnapshotV1, i64> {
+    let mut snapshot = SystemControlSnapshotV1::default();
+    let result = unsafe {
+        syscall5(
+            NR_SYSTEM_CONTROL,
+            SYSTEM_CONTROL_GET_SNAPSHOT,
+            0,
+            &mut snapshot as *mut _ as u64,
+            core::mem::size_of::<SystemControlSnapshotV1>() as u64,
+            0,
+        )
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(snapshot)
+    }
+}
+
+pub fn system_control_wallpaper_path(buffer: &mut [u8]) -> Result<usize, i64> {
+    let result = unsafe {
+        syscall5(
+            NR_SYSTEM_CONTROL,
+            SYSTEM_CONTROL_GET_WALLPAPER_PATH,
+            0,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+        )
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as usize)
+    }
+}
+
+pub fn system_control_set_theme(theme: u32) -> Result<ApplyResult, i64> {
+    let result = unsafe {
+        syscall5(
+            NR_SYSTEM_CONTROL,
+            SYSTEM_CONTROL_SET_THEME,
+            theme as u64,
+            0,
+            0,
+            0,
+        )
+    };
+    decode_apply_result(result)
+}
+
+pub fn system_control_set_wallpaper(path: &str) -> Result<ApplyResult, i64> {
+    let result = unsafe {
+        syscall5(
+            NR_SYSTEM_CONTROL,
+            SYSTEM_CONTROL_SET_WALLPAPER_PATH,
+            0,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            0,
+        )
+    };
+    decode_apply_result(result)
+}
+
+pub fn system_control_reset_wallpaper() -> Result<ApplyResult, i64> {
+    let result = unsafe {
+        syscall5(
+            NR_SYSTEM_CONTROL,
+            SYSTEM_CONTROL_RESET_WALLPAPER,
+            0,
+            0,
+            0,
+            0,
+        )
+    };
+    decode_apply_result(result)
 }
 
 #[repr(C)]

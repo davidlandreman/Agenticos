@@ -93,6 +93,10 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // No-op when /data is missing or has no prior sync.
     restore_overlay_upper_from_data();
 
+    // Load persistent system preferences before display initialization so the
+    // window manager can resolve its initial theme from the saved request.
+    crate::system_control::init();
+
     // Writable scratch directory on the overlay tmpfs. Idempotent:
     // a hydrated overlay state that already contains /work (or files
     // under it) must not fail boot. Ring-3 processes start with cwd
