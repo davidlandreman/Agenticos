@@ -85,6 +85,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // filesystem tests assert /host is mounted, so we keep it in test mode.
     try_mount_host_disk();
     try_mount_data_disk();
+    try_mount_legacy_data_disk();
     // Phase D U11: now that /data is mounted (if present), restore
     // the overlay's upper-layer tmpfs from any persistent state.
     // No-op when /data is missing or has no prior sync.
@@ -215,6 +216,8 @@ static mut HOST_PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'stat
 /// Secondary Master = the writable /data disk. Whole-disk FAT32 (no
 /// MBR/partition table); the BPB lives at sector 0.
 static mut SECONDARY_MASTER_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
+/// Optional previous FAT data image, attached read-only for migration.
+static mut SECONDARY_SLAVE_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
 
 fn init_filesystems() {
     use crate::drivers::block::BlockDevice;
@@ -535,15 +538,19 @@ fn try_mount_host_disk() {
     debug_info!("Host disk: no FAT partition found; /host not mounted");
 }
 
-/// Probe Secondary IDE Master and mount the whole-disk FAT32 image at
-/// `/data`. Phase C U7 plumbing — this is the persistent writable
-/// surface (Phase C U10 will flip it from read-only to writable once
-/// the FAT writer lands).
-///
-/// The image is a bare FAT32 volume (no MBR), minted by `build.rs`
-/// via `fatfs::format_volume`. Any failure (no drive, no BPB, mount
-/// error) logs and returns silently — the kernel boots fine without
-/// /data, just with no persistent writable mount.
+fn force_dirty_mount_requested() -> bool {
+    let mut value = [0u8; 8];
+    let Some(length) =
+        crate::drivers::fw_cfg::read_file("opt/agenticos/force_dirty_mount", &mut value)
+    else {
+        return false;
+    };
+    matches!(core::str::from_utf8(&value[..length]), Ok("1"))
+}
+
+/// Probe Secondary IDE Master and mount the whole-disk ext2/FAT image at
+/// `/data`. Failures are non-fatal so the kernel can still boot without a
+/// persistent disk.
 fn try_mount_data_disk() {
     use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
     use crate::fs::filesystem::FilesystemError;
@@ -573,12 +580,15 @@ fn try_mount_data_disk() {
     }
     let data_disk = unsafe { (*&raw const SECONDARY_MASTER_DISK).as_ref().unwrap() };
 
-    // Whole-disk FAT: no MBR, no partition table. Detect at sector 0.
+    // Whole-disk filesystem: no MBR or partition table.
     match detect_filesystem(data_disk) {
         Ok(fs_type)
             if matches!(
                 fs_type,
-                FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32
+                FilesystemType::Fat12
+                    | FilesystemType::Fat16
+                    | FilesystemType::Fat32
+                    | FilesystemType::Ext2
             ) =>
         {
             debug_info!(
@@ -588,10 +598,11 @@ fn try_mount_data_disk() {
             // Try writable first; on dirty-bit refusal (C-2) fall back
             // to a read-only mount with a warning so userland still has
             // a /data mount to inspect.
-            // TODO: plumb this through fw_cfg so production boots still
-            // respect the dirty-bit gate. Forced to true for now so dev
-            // workflow doesn't require `sync` before every Cmd-Q.
-            match auto_mount_writable(data_disk, "/data", true) {
+            let force_dirty = force_dirty_mount_requested();
+            if force_dirty {
+                debug_warn!("Data disk: forced dirty writable mount override is active");
+            }
+            match auto_mount_writable(data_disk, "/data", force_dirty) {
                 Ok(_) => {
                     debug_info!("Data disk mounted writable at /data");
                 }
@@ -614,6 +625,43 @@ fn try_mount_data_disk() {
         Err(_) => {
             debug_info!("Data disk: filesystem detection failed (uninitialized?)");
         }
+    }
+}
+
+/// Mount an explicitly supplied legacy FAT image from Secondary Slave at
+/// `/legacy-data`. `auto_mount` always creates a read-only FAT wrapper, making
+/// this a safe migration source for `cp -a /legacy-data/. /data/`.
+fn try_mount_legacy_data_disk() {
+    use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
+    use crate::fs::vfs::auto_mount;
+    use crate::fs::{detect_filesystem, FilesystemType};
+
+    let Some((_model, sectors)) =
+        IDE_CONTROLLER.get_disk_info(IdeChannel::Secondary, IdeDrive::Slave)
+    else {
+        return;
+    };
+    unsafe {
+        SECONDARY_SLAVE_DISK = Some(IdeBlockDevice::new(IdeChannel::Secondary, IdeDrive::Slave));
+    }
+    let disk = unsafe { (*&raw const SECONDARY_SLAVE_DISK).as_ref().unwrap() };
+    match detect_filesystem(disk) {
+        Ok(kind)
+            if matches!(
+                kind,
+                FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32
+            ) =>
+        {
+            match auto_mount(disk, "/legacy-data") {
+                Ok(_) => debug_info!(
+                    "Mounted legacy FAT data image read-only at /legacy-data ({} MB)",
+                    (sectors * 512) / (1024 * 1024)
+                ),
+                Err(error) => debug_warn!("Failed to mount /legacy-data: {:?}", error),
+            }
+        }
+        Ok(kind) => debug_warn!("Legacy data disk is {:?}, expected FAT", kind),
+        Err(error) => debug_warn!("Legacy data disk detection failed: {:?}", error),
     }
 }
 

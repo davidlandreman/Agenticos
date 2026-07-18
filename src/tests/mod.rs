@@ -286,6 +286,14 @@ pub fn run_tests() {
             total_skipped
         );
     }
+    // QEMU's debug-exit device is an abrupt power-off from the guest's point
+    // of view. Checkpoint mounted filesystems first so non-snapshot ext2
+    // interoperability runs leave a clean image for host e2fsck.
+    if let Err(error) = crate::fs::vfs::vfs_sync_all() {
+        crate::debug_error!("final filesystem sync failed: {:?}", error);
+        exit_qemu_failed();
+        return;
+    }
     exit_qemu_success();
 }
 

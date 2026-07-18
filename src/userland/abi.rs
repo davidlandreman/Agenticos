@@ -62,6 +62,7 @@ pub const ENOMEM: i64 = -12;
 pub const ENFILE: i64 = -23;
 pub const EAFNOSUPPORT: i64 = -97;
 pub const EPROTONOSUPPORT: i64 = -93;
+pub const EOPNOTSUPP: i64 = -95;
 pub const ENOTCONN: i64 = -107;
 pub const ENOTSUP: i64 = -95;
 pub const EISCONN: i64 = -106;
@@ -276,6 +277,8 @@ pub mod nr {
     pub const RMDIR: u64 = 84;
     pub const CREAT: u64 = 85;
     pub const UNLINK: u64 = 87;
+    pub const LINK: u64 = 86;
+    pub const SYMLINK: u64 = 88;
     pub const FSYNC: u64 = 74;
     pub const FDATASYNC: u64 = 75;
     pub const SYNC: u64 = 162;
@@ -285,6 +288,8 @@ pub mod nr {
     pub const MKDIRAT: u64 = 258;
     pub const UNLINKAT: u64 = 263;
     pub const RENAMEAT: u64 = 264;
+    pub const LINKAT: u64 = 265;
+    pub const SYMLINKAT: u64 = 266;
     pub const SYNCFS: u64 = 306;
     // Phase 4 PR-C: process management
     pub const FORK: u64 = 57;
@@ -397,7 +402,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::FCNTL => syscalls::fcntl_handler(args),
         // Phase 2: stat / access
         nr::STAT => syscalls::stat_handler(args),
-        nr::LSTAT => syscalls::stat_handler(args),
+        nr::LSTAT => syscalls::lstat_handler(args),
         nr::FSTAT => syscalls::fstat_handler(args),
         nr::NEWFSTATAT => syscalls::newfstatat_handler(args),
         nr::ACCESS => syscalls::access_handler(args),
@@ -456,6 +461,10 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::UNLINKAT => syscalls::unlinkat_handler(args),
         nr::RENAME => syscalls::rename_handler(args),
         nr::RENAMEAT => syscalls::renameat_handler(args),
+        nr::LINK => syscalls::link_handler(args),
+        nr::LINKAT => syscalls::linkat_handler(args),
+        nr::SYMLINK => syscalls::symlink_handler(args),
+        nr::SYMLINKAT => syscalls::symlinkat_handler(args),
         nr::CREAT => syscalls::creat_handler(args),
         nr::FTRUNCATE => syscalls::ftruncate_handler(args),
         nr::TRUNCATE => syscalls::truncate_handler(args),

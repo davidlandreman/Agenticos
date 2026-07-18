@@ -32,8 +32,8 @@
 use crate::arch::x86_64::syscall::SyscallArgs;
 use crate::userland::abi::{
     validate_user_slice, EACCES, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINTR, EINVAL, EIO, EISDIR,
-    EMFILE, ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EPERM, ERANGE, EROFS,
-    ESPIPE, ESRCH, EXDEV, LAST_EXIT_CODE,
+    EMFILE, ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EOPNOTSUPP, EPERM, ERANGE,
+    EROFS, ESPIPE, ESRCH, EXDEV, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
 use crate::userland::path::{copy_user_cstr, normalize_path};
@@ -2051,6 +2051,7 @@ const O_RDONLY: u32 = 0;
 const O_RDWR: u32 = 0o2;
 const O_NONBLOCK: u32 = 0o4000;
 const O_CREAT: u32 = 0o100;
+const O_EXCL: u32 = 0o200;
 const O_TRUNC: u32 = 0o1000;
 const O_APPEND: u32 = 0o2000;
 /// Modify-the-world flags. Used to determine whether the caller is
@@ -2150,6 +2151,7 @@ fn map_filesystem_err(err: &crate::fs::filesystem::FilesystemError) -> i64 {
         FE::NotEmpty => ENOTEMPTY,
         FE::DiskFull => ENOSPC,
         FE::BufferTooSmall => EFBIG,
+        FE::UnsupportedFeature => EOPNOTSUPP,
         FE::UnsupportedOperation => ENOSYS,
         _ => EIO,
     }
@@ -2309,6 +2311,9 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
     };
 
     if let Ok(m) = meta_result {
+        if want_create && (flags & O_EXCL) != 0 {
+            return EEXIST;
+        }
         if m.file_type == FileType::Directory {
             let dir = match crate::fs::file_handle::Directory::open(&path) {
                 Ok(d) => d,
@@ -2559,6 +2564,81 @@ pub fn renameat_handler(args: &mut SyscallArgs) -> i64 {
     rename_handler(&mut new_args)
 }
 
+pub fn link_handler(args: &mut SyscallArgs) -> i64 {
+    let old = match resolve_user_path(args.rdi) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    let new = match resolve_user_path(args.rsi) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    if let Some(error) = bin_namespace_mutation_check(&old)
+        .or_else(|| bin_namespace_mutation_check(&new))
+        .or_else(|| managed_etc_mutation_check(&old))
+        .or_else(|| managed_etc_mutation_check(&new))
+    {
+        return error;
+    }
+    match crate::fs::vfs::vfs_link(&old, &new) {
+        Ok(()) => 0,
+        Err(crate::fs::filesystem::FilesystemError::UnsupportedOperation) => EXDEV,
+        Err(ref error) => map_filesystem_err(error),
+    }
+}
+
+pub fn linkat_handler(args: &mut SyscallArgs) -> i64 {
+    if args.rdi as i32 != AT_FDCWD || args.rdx as i32 != AT_FDCWD {
+        return ENOSYS;
+    }
+    let mut forwarded = SyscallArgs {
+        rax: args.rax,
+        rdi: args.rsi,
+        rsi: args.r10,
+        rdx: 0,
+        r10: 0,
+        r8: 0,
+        r9: 0,
+    };
+    link_handler(&mut forwarded)
+}
+
+pub fn symlink_handler(args: &mut SyscallArgs) -> i64 {
+    let target = match copy_user_cstr(args.rdi) {
+        Ok(target) => target,
+        Err(error) => return error,
+    };
+    let link_path = match resolve_user_path(args.rsi) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    if let Some(error) =
+        bin_namespace_mutation_check(&link_path).or_else(|| managed_etc_mutation_check(&link_path))
+    {
+        return error;
+    }
+    match crate::fs::vfs::vfs_symlink(&target, &link_path) {
+        Ok(()) => 0,
+        Err(ref error) => map_filesystem_err(error),
+    }
+}
+
+pub fn symlinkat_handler(args: &mut SyscallArgs) -> i64 {
+    if args.rsi as i32 != AT_FDCWD {
+        return ENOSYS;
+    }
+    let mut forwarded = SyscallArgs {
+        rax: args.rax,
+        rdi: args.rdi,
+        rsi: args.rdx,
+        rdx: 0,
+        r10: 0,
+        r8: 0,
+        r9: 0,
+    };
+    symlink_handler(&mut forwarded)
+}
+
 /// `creat(path, mode) -> int` — equivalent to
 /// `open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)`.
 pub fn creat_handler(args: &mut SyscallArgs) -> i64 {
@@ -2578,38 +2658,9 @@ pub fn ftruncate_handler(args: &mut SyscallArgs) -> i64 {
     if crate::userland::etc::is_managed_path(&handle.path()) {
         return EROFS;
     }
-    // Use File::write through seek + write to (re)size the file. The
-    // Filesystem trait doesn't expose truncate as a method yet
-    // (deferred to Phase C plan); for tmpfs the open-handle table
-    // already supports resize via the existing write path's
-    // extend-on-write semantic. For a true truncate (including
-    // shrink), we extend a write of zero bytes after seeking.
-    //
-    // TODO(Phase C): proper Filesystem::truncate. For now: tmpfs and
-    // overlay both grow files via write-past-end; shrinks are
-    // approximated by seeking to new_size and zero-writing only when
-    // extending. Real shrink isn't supported yet.
-    if handle.size() > new_size {
-        // No shrink mechanism via current trait — return ENOSYS so
-        // userland sees a clear unsupported signal rather than a
-        // silent partial truncate.
-        return ENOSYS;
-    }
-    if let Err(ref e) = handle.seek(new_size) {
-        return map_file_err(e);
-    }
-    // Extend by writing a single zero byte at position new_size-1,
-    // then truncate the position back. tmpfs's write extends with
-    // zeros so this is correct.
-    if new_size > 0 {
-        if let Err(ref e) = handle.seek(new_size - 1) {
-            return map_file_err(e);
-        }
-        if let Err(ref e) = handle.write(&[0u8]) {
-            return map_file_err(e);
-        }
-    }
-    0
+    handle
+        .truncate(new_size)
+        .map_or_else(|ref error| map_file_err(error), |_| 0)
 }
 
 pub fn truncate_handler(args: &mut SyscallArgs) -> i64 {
@@ -2638,34 +2689,31 @@ pub fn truncate_handler(args: &mut SyscallArgs) -> i64 {
         Ok(h) => h,
         Err(ref e) => return map_file_err(e),
     };
-    if handle.size() > new_size {
-        return ENOSYS;
-    }
-    if new_size > 0 {
-        if let Err(ref e) = handle.seek(new_size - 1) {
-            return map_file_err(e);
-        }
-        if let Err(ref e) = handle.write(&[0u8]) {
-            return map_file_err(e);
-        }
-    }
-    0
+    handle
+        .truncate(new_size)
+        .map_or_else(|ref error| map_file_err(error), |_| 0)
 }
 
 pub fn fsync_handler(args: &mut SyscallArgs) -> i64 {
     let fd = args.rdi as i32;
     match with_fd_slot(fd) {
-        Some(FdSlot::File { .. }) => {
-            let _ = crate::fs::vfs::vfs_sync_all();
-            0
-        }
+        Some(FdSlot::File { handle, .. }) => handle
+            .sync(false)
+            .map_or_else(|ref error| map_file_err(error), |_| 0),
         Some(FdSlot::Directory { .. }) => 0,
         Some(_) | None => EBADF,
     }
 }
 
 pub fn fdatasync_handler(args: &mut SyscallArgs) -> i64 {
-    fsync_handler(args)
+    let fd = args.rdi as i32;
+    match with_fd_slot(fd) {
+        Some(FdSlot::File { handle, .. }) => handle
+            .sync(true)
+            .map_or_else(|ref error| map_file_err(error), |_| 0),
+        Some(FdSlot::Directory { .. }) => 0,
+        Some(_) | None => EBADF,
+    }
 }
 
 pub fn sync_handler(_args: &mut SyscallArgs) -> i64 {
@@ -3074,6 +3122,22 @@ fn fill_stat(
     st
 }
 
+fn fill_unix_stat(meta: &crate::fs::filesystem::UnixMetadata) -> LinuxStat {
+    let mut stat = LinuxStat::default();
+    stat.st_ino = meta.inode;
+    stat.st_nlink = meta.links;
+    stat.st_mode = meta.mode;
+    stat.st_uid = meta.uid;
+    stat.st_gid = meta.gid;
+    stat.st_size = meta.size as i64;
+    stat.st_blksize = meta.block_size as i64;
+    stat.st_blocks = meta.blocks_512 as i64;
+    stat.st_atime = meta.accessed as i64;
+    stat.st_mtime = meta.modified as i64;
+    stat.st_ctime = meta.changed as i64;
+    stat
+}
+
 fn write_stat(out_ptr: u64, st: &LinuxStat) -> i64 {
     crate::userland::usercopy::write_unaligned(out_ptr, st).map_or_else(|e| e, |_| 0)
 }
@@ -3094,12 +3158,33 @@ pub fn stat_handler(args: &mut SyscallArgs) -> i64 {
             None => ENOENT,
         };
     }
-    let meta = match crate::fs::metadata(&path) {
+    let meta = match crate::fs::vfs::vfs_unix_metadata(&path) {
         Ok(m) => m,
-        Err(ref e) => return map_fs_err(e),
+        Err(ref e) => return map_filesystem_err(e),
     };
-    let st = fill_stat(&meta, None);
+    let st = fill_unix_stat(&meta);
     write_stat(out_ptr, &st)
+}
+
+pub fn lstat_handler(args: &mut SyscallArgs) -> i64 {
+    let path = match resolve_user_path(args.rdi) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    if let Some(stat) = stat_virtual_bin(&path) {
+        return write_stat(args.rsi, &stat);
+    }
+    if crate::userland::procfs::is_proc_path(&path) {
+        return match stat_virtual_proc(&path) {
+            Some(stat) => write_stat(args.rsi, &stat),
+            None => ENOENT,
+        };
+    }
+    let metadata = match crate::fs::vfs::vfs_symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(ref error) => return map_filesystem_err(error),
+    };
+    write_stat(args.rsi, &fill_unix_stat(&metadata))
 }
 
 /// Synthesize a `LinuxStat` for the `/proc` namespace. Files report
@@ -3175,15 +3260,11 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
             write_stat(out_ptr, &st)
         }
         Some(FdSlot::File { handle, .. }) => {
-            // For files we use the recorded path to look up metadata,
-            // overriding the size with the live handle's recorded size
-            // (in case a future write path adjusts it).
-            let path = handle.path();
-            let meta = match crate::fs::metadata(&path) {
+            let meta = match handle.metadata() {
                 Ok(m) => m,
-                Err(ref e) => return map_fs_err(e),
+                Err(ref e) => return map_file_err(e),
             };
-            let st = fill_stat(&meta, Some(handle.size()));
+            let st = fill_unix_stat(&meta);
             write_stat(out_ptr, &st)
         }
         Some(FdSlot::PipeRead(_, _)) | Some(FdSlot::PipeWrite(_, _)) => {
@@ -3250,8 +3331,7 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
 }
 
 /// `newfstatat(dirfd, path, statbuf, flags)` — only `AT_FDCWD` is
-/// supported for `dirfd`; `flags` (e.g. `AT_SYMLINK_NOFOLLOW`) are
-/// ignored (the FS has no symlinks).
+/// supported for `dirfd`.
 pub fn newfstatat_handler(args: &mut SyscallArgs) -> i64 {
     let dirfd = args.rdi as i32;
     if dirfd != AT_FDCWD {
@@ -3259,7 +3339,11 @@ pub fn newfstatat_handler(args: &mut SyscallArgs) -> i64 {
     }
     let path_ptr = args.rsi;
     let out_ptr = args.rdx;
-    let _flags = args.r10;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    let flags = args.r10;
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+        return EINVAL;
+    }
     let path = match resolve_user_path(path_ptr) {
         Ok(p) => p,
         Err(e) => return e,
@@ -3273,11 +3357,15 @@ pub fn newfstatat_handler(args: &mut SyscallArgs) -> i64 {
             None => ENOENT,
         };
     }
-    let meta = match crate::fs::metadata(&path) {
+    let meta = match if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        crate::fs::vfs::vfs_symlink_metadata(&path)
+    } else {
+        crate::fs::vfs::vfs_unix_metadata(&path)
+    } {
         Ok(m) => m,
-        Err(ref e) => return map_fs_err(e),
+        Err(ref e) => return map_filesystem_err(e),
     };
-    let st = fill_stat(&meta, None);
+    let st = fill_unix_stat(&meta);
     write_stat(out_ptr, &st)
 }
 
@@ -3984,7 +4072,7 @@ const READLINK_MAX_PATH: usize = 256;
 ///     the standard streams, the backing file path for opened files,
 ///     `pipe:[<n>]` for pipe ends. Used by `ttyname()`.
 ///
-/// Other paths return `-ENOENT` (no real symlinks on the FAT mount).
+/// Other paths fall through to the mounted filesystem's symlink implementation.
 /// The result is NOT null-terminated; we return the byte count written.
 pub fn readlink_handler(args: &mut SyscallArgs) -> i64 {
     readlink_common(args.rdi, args.rsi, args.rdx)
@@ -4013,18 +4101,21 @@ fn readlink_common(path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> i64 {
     if let Err(e) = validate_user_slice(buf_ptr, bufsiz) {
         return e;
     }
-    let path = match copy_user_cstr(path_ptr) {
+    let raw_path = match copy_user_cstr(path_ptr) {
         Ok(s) => s,
         Err(e) => return e,
     };
+    let path = with_cwd(|cwd| normalize_path(cwd, &raw_path));
     if path.len() > READLINK_MAX_PATH {
         return ERANGE;
     }
-    let target = match resolve_proc_link(&path) {
-        Some(t) => t,
-        None => return ENOENT,
+    let bytes = match resolve_proc_link(&path) {
+        Some(target) => target.into_bytes(),
+        None => match crate::fs::vfs::vfs_read_link(&path) {
+            Ok(target) => target,
+            Err(ref error) => return map_filesystem_err(error),
+        },
     };
-    let bytes = target.as_bytes();
     let n = core::cmp::min(bytes.len(), bufsiz as usize);
     crate::userland::usercopy::copy_to_user(buf_ptr, &bytes[..n]).map_or_else(|e| e, |_| n as i64)
 }

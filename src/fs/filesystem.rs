@@ -9,8 +9,8 @@ pub enum FilesystemError {
     InvalidPath,
     DiskFull,
     ReadOnly,
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     Corrupted,
+    UnsupportedFeature,
     UnsupportedOperation,
     IoError,
     InvalidFilesystem,
@@ -30,6 +30,7 @@ impl fmt::Display for FilesystemError {
             FilesystemError::DiskFull => write!(f, "Disk full"),
             FilesystemError::ReadOnly => write!(f, "Filesystem is read-only"),
             FilesystemError::Corrupted => write!(f, "Filesystem corrupted"),
+            FilesystemError::UnsupportedFeature => write!(f, "Filesystem feature is unsupported"),
             FilesystemError::UnsupportedOperation => write!(f, "Operation not supported"),
             FilesystemError::IoError => write!(f, "I/O error"),
             FilesystemError::InvalidFilesystem => write!(f, "Invalid filesystem"),
@@ -47,11 +48,9 @@ impl fmt::Display for FilesystemError {
 pub enum FileType {
     File,
     Directory,
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     Symlink,
     #[expect(dead_code, reason = "intentional kernel API surface")]
     Device,
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     Other,
 }
 
@@ -77,11 +76,8 @@ pub struct DirectoryEntry {
     pub size: u64,
     #[expect(dead_code, reason = "intentional kernel API surface")]
     pub attributes: FileAttributes,
-    #[expect(dead_code, reason = "intentional kernel API surface")]
-    pub created: u64, // Timestamp
-    #[expect(dead_code, reason = "intentional kernel API surface")]
+    pub created: u64,  // Timestamp
     pub modified: u64, // Timestamp
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub accessed: u64, // Timestamp
 }
 
@@ -102,7 +98,6 @@ pub struct FileHandle {
 /// File open modes
 #[derive(Debug, Clone, Copy)]
 pub struct FileMode {
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub read: bool,
     pub write: bool,
     pub append: bool,
@@ -140,8 +135,23 @@ pub struct FilesystemStats {
     pub free_inodes: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct UnixMetadata {
+    pub inode: u64,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub links: u64,
+    pub size: u64,
+    pub blocks_512: u64,
+    pub block_size: u32,
+    pub accessed: u64,
+    pub modified: u64,
+    pub changed: u64,
+}
+
 /// Main filesystem trait that all filesystem implementations must implement
-pub trait Filesystem {
+pub trait Filesystem: Sync {
     /// Get the name/type of this filesystem
     fn name(&self) -> &str;
 
@@ -149,7 +159,6 @@ pub trait Filesystem {
     fn is_read_only(&self) -> bool;
 
     /// Get filesystem statistics
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn stats(&self) -> Result<FilesystemStats, FilesystemError>;
 
     /// List directory contents
@@ -175,6 +184,43 @@ pub trait Filesystem {
     /// Get file/directory metadata
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError>;
 
+    fn unix_metadata(&self, path: &str) -> Result<UnixMetadata, FilesystemError> {
+        let entry = self.stat(path)?;
+        let mode = match entry.file_type {
+            FileType::Directory => 0o040755,
+            FileType::Symlink => 0o120777,
+            FileType::Device => 0o060600,
+            FileType::File | FileType::Other => 0o100644,
+        };
+        Ok(UnixMetadata {
+            inode: 0,
+            mode,
+            uid: 0,
+            gid: 0,
+            links: if entry.file_type == FileType::Directory {
+                2
+            } else {
+                1
+            },
+            size: entry.size,
+            blocks_512: entry.size.div_ceil(512),
+            block_size: self.stats().map(|stats| stats.block_size).unwrap_or(4096),
+            accessed: entry.accessed,
+            modified: entry.modified,
+            changed: entry.created,
+        })
+    }
+
+    /// Metadata for the directory entry itself. Filesystems without symlink
+    /// support naturally share the normal metadata implementation.
+    fn symlink_metadata(&self, path: &str) -> Result<UnixMetadata, FilesystemError> {
+        self.unix_metadata(path)
+    }
+
+    fn handle_metadata(&self, _handle: &FileHandle) -> Result<UnixMetadata, FilesystemError> {
+        Err(FilesystemError::UnsupportedOperation)
+    }
+
     /// Open a file
     fn open(&self, path: &str, mode: FileMode) -> Result<FileHandle, FilesystemError>;
 
@@ -189,6 +235,26 @@ pub trait Filesystem {
 
     /// Seek in a file
     fn seek(&self, handle: &mut FileHandle, position: u64) -> Result<u64, FilesystemError>;
+
+    fn truncate(&self, _handle: &mut FileHandle, _size: u64) -> Result<(), FilesystemError> {
+        Err(FilesystemError::UnsupportedOperation)
+    }
+
+    fn sync_handle(&self, _handle: &FileHandle, _data_only: bool) -> Result<(), FilesystemError> {
+        self.sync()
+    }
+
+    fn link(&self, _old_path: &str, _new_path: &str) -> Result<(), FilesystemError> {
+        Err(FilesystemError::UnsupportedOperation)
+    }
+
+    fn symlink(&self, _target: &str, _link_path: &str) -> Result<(), FilesystemError> {
+        Err(FilesystemError::UnsupportedOperation)
+    }
+
+    fn read_link(&self, _path: &str) -> Result<alloc::vec::Vec<u8>, FilesystemError> {
+        Err(FilesystemError::InvalidPath)
+    }
 
     /// Create a directory
     fn mkdir(&self, path: &str) -> Result<(), FilesystemError>;
@@ -288,9 +354,7 @@ pub enum FilesystemType {
     Fat16,
     Fat32,
     Ext2,
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     Ext3,
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     Ext4,
     Ntfs,
     Unknown,
@@ -335,9 +399,7 @@ pub fn detect_filesystem(device: &dyn BlockDevice) -> Result<FilesystemType, Fil
 
     // Check ext2/3/4 magic number at offset 56 of superblock (0x438 from start of partition)
     if ext_buffer[56] == 0x53 && ext_buffer[57] == 0xEF {
-        // This is an ext2/3/4 filesystem
-        // We could further distinguish between them by checking features
-        return Ok(FilesystemType::Ext2); // For now, just return Ext2
+        return crate::fs::ext2::classify_ext(device);
     }
 
     // Check for NTFS

@@ -1,7 +1,7 @@
 //! Block device abstraction for storage devices
 
 /// Trait for block devices (storage devices that read/write in blocks)
-pub trait BlockDevice {
+pub trait BlockDevice: Sync {
     /// Read blocks from the device
     ///
     /// # Arguments
@@ -25,13 +25,11 @@ pub trait BlockDevice {
     fn total_blocks(&self) -> u64;
 
     /// Get the total capacity in bytes
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn capacity(&self) -> u64 {
         self.total_blocks() * self.block_size() as u64
     }
 
     /// Check if the device is read-only
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn is_read_only(&self) -> bool {
         false
     }
@@ -41,7 +39,6 @@ pub trait BlockDevice {
     fn name(&self) -> &str;
 
     /// Flush any pending writes to the device
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn flush(&self) -> Result<(), &'static str> {
         Ok(()) // Default implementation does nothing
     }

@@ -12,7 +12,7 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 - **Window System**: Hierarchical window management with mouse support
 - **Terminal**: Windowed terminals running static-musl zsh and BusyBox applets
 - **Memory Management**: Virtual memory, demand paging, per-process address spaces, and heap allocation
-- **Filesystem**: FAT12/16/32 VFS, writable `/data`, and persistent overlay writes
+- **Filesystem**: FAT12/16/32 plus a Linux-compatible writable ext2 `/data`, with persistent overlay writes
 - **Input**: VirtIO tablet (seamless in QEMU) with PS/2 fallback
 - **Graphics**: Framebuffer/retained composition, qualified VirGL acceleration,
   and a bounded OpenGL-style ring-3 client path
@@ -32,6 +32,7 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 
 - Rust nightly toolchain (managed automatically via `rust-toolchain.toml`)
 - QEMU for x86-64 (`qemu-system-x86_64`)
+- e2fsprogs (`mke2fs` and `e2fsck`; `brew install e2fsprogs` on macOS)
 
 ### Build and Run
 
@@ -96,10 +97,8 @@ Hello from the host!
 
 **Caveats** (inherent to the QEMU vvfat mechanism this uses):
 
-- Filenames must be **uppercase 8.3** (e.g. `HELLO.TXT`, not `hello.txt` or `notes.markdown`). The kernel's FAT driver does not parse VFAT long-filename entries, so anything else is hidden.
 - The directory listing is **snapshotted at QEMU start**. Adding or removing a file on the host while the guest is running will not be reflected until the next boot. File contents do update live, but new files do not appear.
-- Read-only. The kernel filesystem stack does not support writes today.
-- Subdirectories are not yet traversable (existing FAT-driver limitation).
+- `/host` is intentionally mounted read-only. Persistent writable storage lives at `/data`.
 - `host_share/` is gitignored except for the seed files. **Do not drop secrets, `.env` files, or credentials there** — the guest has no kernel/user boundary, so anything in `/host` is fully readable to anything running in the OS.
 
 ## Shell Commands
@@ -132,7 +131,7 @@ agenticos/
 │   │   ├── display/         # Framebuffer display
 │   │   ├── virtio/          # VirtIO devices
 │   │   └── ...              # PS/2, IDE, PCI
-│   ├── fs/                  # Filesystem (FAT, VFS)
+│   ├── fs/                  # Filesystem (ext2, FAT, tmpfs, overlay, VFS)
 │   ├── graphics/            # Graphics primitives, fonts
 │   ├── input/               # Input processing pipeline
 │   ├── mm/                  # Memory management
