@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+mod font;
 pub mod theme;
 
 use alloc::string::String;
@@ -13,6 +14,9 @@ pub use runtime::{
     GUI_EVENT_RESIZE, GUI_MOUSE_DOWN, GUI_MOUSE_MOVE, GUI_MOUSE_SCROLL, GUI_MOUSE_UP,
 };
 pub use theme::{ButtonState, Theme};
+
+pub const FONT_CELL_WIDTH: i32 = font::CELL_WIDTH;
+pub const FONT_LINE_HEIGHT: i32 = font::LINE_HEIGHT;
 
 // Legacy theme-agnostic values. Widgets now derive their colors from the
 // active theme (`theme::palette()`); these remain for app-specific chrome
@@ -73,6 +77,28 @@ impl Canvas {
         self.pixels[y as usize * self.width as usize + x as usize] = color;
     }
 
+    fn blend_pixel(&mut self, x: i32, y: i32, color: u32, alpha: u8) {
+        if alpha == 0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        if alpha == u8::MAX {
+            self.pixel(x, y, color);
+            return;
+        }
+        let index = y as usize * self.width as usize + x as usize;
+        let background = self.pixels[index];
+        let alpha = alpha as u32;
+        let inverse = 255 - alpha;
+        let blend = |shift: u32| {
+            ((((color >> shift) & 0xff_u32) * alpha
+                + ((background >> shift) & 0xff_u32) * inverse
+                + 127_u32)
+                / 255)
+                << shift
+        };
+        self.pixels[index] = blend(16) | blend(8) | blend(0);
+    }
+
     pub fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: u32) {
         let left = x.max(0) as u32;
         let top = y.max(0) as u32;
@@ -105,16 +131,20 @@ impl Canvas {
     }
 
     pub fn draw_char(&mut self, x: i32, y: i32, character: char, color: u32) {
-        let code = character as u32;
-        if !(32..=126).contains(&code) {
+        let font = font::canvas_font();
+        let Some(glyph) = font.glyph(character) else {
             return;
-        }
-        let glyph = &fontdata::DEFAULT_8X8_FONT_DATA[(code - 32) as usize];
-        for (row, bits) in glyph.iter().enumerate() {
-            for column in 0..8 {
-                if bits & (1 << (7 - column)) != 0 {
-                    self.pixel(x + column, y + row as i32, color);
-                }
+        };
+        let left = x + glyph.x_offset as i32;
+        let top = y + font.ascent() + glyph.y_offset as i32;
+        for row in 0..glyph.height as usize {
+            for column in 0..glyph.width as usize {
+                self.blend_pixel(
+                    left + column as i32,
+                    top + row as i32,
+                    color,
+                    glyph.coverage[row * glyph.width as usize + column],
+                );
             }
         }
     }
@@ -125,7 +155,7 @@ impl Canvas {
                 break;
             }
             self.draw_char(x, y, character, color);
-            x += 8;
+            x += FONT_CELL_WIDTH;
         }
     }
 }
@@ -247,7 +277,7 @@ impl<'a> MenuBar<'a> {
         }
         canvas.draw_text(
             10,
-            8,
+            (Self::HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
             self.label,
             if self.open {
                 palette.selection_text
@@ -262,7 +292,9 @@ impl<'a> MenuBar<'a> {
             for (index, item) in self.items.iter().enumerate() {
                 canvas.draw_text(
                     12,
-                    Self::HEIGHT as i32 + index as i32 * Self::ITEM_HEIGHT as i32 + 7,
+                    Self::HEIGHT as i32
+                        + index as i32 * Self::ITEM_HEIGHT as i32
+                        + (Self::ITEM_HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
                     item,
                     palette.text,
                 );
@@ -310,7 +342,7 @@ pub fn next_boundary(text: &str, index: usize) -> usize {
         .unwrap_or(text.len())
 }
 
-/// A clickable push button: filled panel + border + centered 8×8 label.
+/// A clickable push button with a centered system-font label.
 ///
 /// Positioned manually by the caller (no layout engine), matching the
 /// `MenuBar` idiom. `draw(canvas, hot)` renders the default/hot variant;
@@ -356,9 +388,9 @@ impl Button {
     /// disabled states themselves.
     pub fn draw_state(&self, canvas: &mut Canvas, state: ButtonState) {
         theme::draw_button(canvas, self.x, self.y, self.w, self.h, state);
-        let text_width = self.label.chars().count() as i32 * 8;
+        let text_width = self.label.chars().count() as i32 * FONT_CELL_WIDTH;
         let text_x = self.x + (self.w as i32 - text_width) / 2;
-        let text_y = self.y + (self.h as i32 - 8) / 2;
+        let text_y = self.y + (self.h as i32 - FONT_LINE_HEIGHT) / 2;
         let shift = theme::pressed_label_shift(state);
         canvas.draw_text(
             text_x.max(self.x + 2) + shift,
@@ -413,7 +445,7 @@ impl TextField {
     }
 
     fn visible_columns(&self) -> usize {
-        ((self.w as i32 - Self::PAD * 2) / 8).max(1) as usize
+        ((self.w as i32 - Self::PAD * 2) / FONT_CELL_WIDTH).max(1) as usize
     }
 
     pub fn hit(&self, x: i32, y: i32) -> bool {
@@ -422,7 +454,7 @@ impl TextField {
 
     /// Place the caret nearest the pixel column of `x` (window coordinates).
     pub fn click(&mut self, x: i32) {
-        let column = ((x - self.x - Self::PAD).max(0) / 8) as usize + self.scroll;
+        let column = ((x - self.x - Self::PAD).max(0) / FONT_CELL_WIDTH) as usize + self.scroll;
         self.caret = self
             .text
             .char_indices()
@@ -492,14 +524,14 @@ impl TextField {
         }
         theme::draw_field(canvas, self.x, self.y, self.w, self.h, focused);
         let text_color = theme::palette().field_text;
-        let text_y = self.y + (self.h as i32 - 8) / 2;
+        let text_y = self.y + (self.h as i32 - FONT_LINE_HEIGHT) / 2;
         let mut pixel_x = self.x + Self::PAD;
         for character in self.text.chars().skip(self.scroll).take(visible) {
             canvas.draw_char(pixel_x, text_y, character, text_color);
-            pixel_x += 8;
+            pixel_x += FONT_CELL_WIDTH;
         }
         if focused {
-            let caret_x = self.x + Self::PAD + (column - self.scroll) as i32 * 8;
+            let caret_x = self.x + Self::PAD + (column - self.scroll) as i32 * FONT_CELL_WIDTH;
             canvas.vertical_line(caret_x, self.y + 4, self.h.saturating_sub(8), text_color);
         }
     }
@@ -656,7 +688,7 @@ impl ListView {
         let overflow = self.rows.len() > visible;
         let gutter = if overflow { 6 } else { 0 };
         let text_width = self.w as i32 - gutter - 4;
-        let max_chars = (text_width / 8).max(1) as usize;
+        let max_chars = (text_width / FONT_CELL_WIDTH).max(1) as usize;
         for slot in 0..visible {
             let row = self.first_row + slot;
             let Some(text) = self.rows.get(row) else {
@@ -679,7 +711,12 @@ impl ListView {
                 palette.field_text
             };
             let clipped: String = text.chars().take(max_chars).collect();
-            canvas.draw_text(self.x + 4, row_y + 4, &clipped, fg);
+            canvas.draw_text(
+                self.x + 4,
+                row_y + (Self::ROW_HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
+                &clipped,
+                fg,
+            );
         }
         theme::draw_field_border(canvas, self.x, self.y, self.w, self.h, false);
         if overflow {
@@ -727,7 +764,7 @@ impl TabBar {
     }
 
     fn tab_width(label: &str) -> i32 {
-        label.chars().count() as i32 * 8 + Self::PAD * 2
+        label.chars().count() as i32 * FONT_CELL_WIDTH + Self::PAD * 2
     }
 
     /// Which tab a click at `(x, y)` lands on, if any.
@@ -774,7 +811,12 @@ impl TabBar {
                 canvas.vertical_line(tab_x + tw - 1, self.y, Self::HEIGHT, COLOR_BORDER);
             }
             let fg = if active { COLOR_TEXT } else { COLOR_TEXT_DIM };
-            canvas.draw_text(tab_x + Self::PAD, self.y + 9, label, fg);
+            canvas.draw_text(
+                tab_x + Self::PAD,
+                self.y + (Self::HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
+                label,
+                fg,
+            );
             tab_x += tw;
         }
     }
@@ -1105,7 +1147,7 @@ impl ColumnListView {
         let gutter: i32 = if overflow { 6 } else { 0 };
         let mut col_x = self.x;
         for (i, column) in self.columns.iter().enumerate() {
-            let max_chars = ((column.width as i32 - 8) / 8).max(1) as usize;
+            let max_chars = ((column.width as i32 - 8) / FONT_CELL_WIDTH).max(1) as usize;
             let mut title: String = column.title.chars().take(max_chars).collect();
             if i == self.sort_col && !title.is_empty() {
                 // Replace the last visible char with a sort arrow when
@@ -1115,7 +1157,12 @@ impl ColumnListView {
                 }
                 title.push(if self.sort_desc { 'v' } else { '^' });
             }
-            canvas.draw_text(col_x + 4, self.y + 5, &title, COLOR_TEXT);
+            canvas.draw_text(
+                col_x + 4,
+                self.y + (Self::HEADER_HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
+                &title,
+                COLOR_TEXT,
+            );
             col_x += column.width as i32;
             if col_x >= self.x + self.w as i32 {
                 break;
@@ -1151,9 +1198,14 @@ impl ColumnListView {
                 let Some(cell) = row.cells.get(i) else {
                     break;
                 };
-                let max_chars = ((column.width as i32 - 8) / 8).max(1) as usize;
+                let max_chars = ((column.width as i32 - 8) / FONT_CELL_WIDTH).max(1) as usize;
                 let clipped: String = cell.chars().take(max_chars).collect();
-                canvas.draw_text(cell_x + 4, row_y + 4, &clipped, fg);
+                canvas.draw_text(
+                    cell_x + 4,
+                    row_y + (Self::ROW_HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
+                    &clipped,
+                    fg,
+                );
                 cell_x += column.width as i32;
                 if cell_x >= self.x + self.w as i32 {
                     break;
@@ -1343,7 +1395,7 @@ impl TimeSeriesGraph {
         }
         canvas.rect(self.x, self.y, self.w, self.h, COLOR_BORDER);
         canvas.draw_text(self.x + 6, self.y + 5, title, COLOR_TEXT);
-        let label_w = value_label.chars().count() as i32 * 8;
+        let label_w = value_label.chars().count() as i32 * FONT_CELL_WIDTH;
         canvas.draw_text(
             self.x + self.w as i32 - label_w - 6,
             self.y + 5,

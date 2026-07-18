@@ -3,7 +3,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use gui::{theme, Button, Window};
+use gui::{theme, Button, Window, FONT_CELL_WIDTH, FONT_LINE_HEIGHT};
 
 use crate::DialogStatus;
 
@@ -25,7 +25,7 @@ pub enum MessageChoice {
 }
 
 const MARGIN: i32 = 14;
-const LINE_HEIGHT: i32 = 12;
+const LINE_HEIGHT: i32 = FONT_LINE_HEIGHT + 2;
 const BUTTON_W: u32 = 88;
 const BUTTON_H: u32 = 26;
 
@@ -45,7 +45,10 @@ pub struct MessageBox {
 impl MessageBox {
     pub fn new(title: &str, text: &str, buttons: Buttons) -> Result<Self, i64> {
         let width = 420u32;
-        let lines = wrap(text, ((width as i32 - MARGIN * 2) / 8).max(1) as usize);
+        let lines = wrap(
+            text,
+            ((width as i32 - MARGIN * 2) / FONT_CELL_WIDTH).max(1) as usize,
+        );
         let height = (MARGIN * 2 + lines.len() as i32 * LINE_HEIGHT + 16 + BUTTON_H as i32)
             .clamp(120, 360) as u32;
         let window = Window::new(width, height, title)?;

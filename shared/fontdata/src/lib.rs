@@ -1,7 +1,7 @@
 #![no_std]
 
 // Default 8x8 font data for ASCII characters 32-126 (space to tilde).
-// Shared by the kernel fallback renderer and the ring-3 GUI toolkit.
+// Used by the kernel only as a parse-failure fallback for system.ttf.
 pub const DEFAULT_8X8_FONT_DATA: [[u8; 8]; 95] = [
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // ' ' (space)
     [0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00], // '!'
