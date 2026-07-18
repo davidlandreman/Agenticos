@@ -181,13 +181,12 @@ pub extern "C" fn process_entry_trampoline() {
         core::arch::asm!("sti");
     }
 
-    // Debug: We reached the trampoline
-    crate::debug_info!(">>> process_entry_trampoline: ENTERED");
+    crate::debug_trace!("process_entry_trampoline: entered");
 
     // Get the current process and call its entry function
-    crate::debug_info!(">>> process_entry_trampoline: about to lock scheduler");
+    crate::debug_trace!("process_entry_trampoline: locking scheduler");
     let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
-    crate::debug_info!(">>> process_entry_trampoline: scheduler locked");
+    crate::debug_trace!("process_entry_trampoline: scheduler locked");
     if let Some(pid) = scheduler.current() {
         if let Some(pcb) = scheduler.get_process_mut(pid) {
             if let Some(entry_fn) = pcb.entry_fn.take() {

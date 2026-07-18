@@ -301,7 +301,7 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
                 .expect("bitmap index must map to a frame");
             debug_trace!("allocated frame {:?}", frame.start_address());
             if self.allocations.is_multiple_of(SUMMARY_INTERVAL) {
-                debug_info!(
+                debug_trace!(
                     "frame allocator: {} allocations, {} free, {} shared",
                     self.allocations,
                     self.stats.free,
