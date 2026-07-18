@@ -5,14 +5,14 @@ Physical and virtual memory management: frame allocation, virtual paging with de
 ## Key files
 
 - `memory.rs` — subsystem entry point and initialization sequence.
-- `frame_allocator.rs` — `BootInfoFrameAllocator`. Bump-cursor allocator over the bootloader's `MemoryRegions`: per-call cost is amortized O(1), the cursor remembers `(region_idx, next_addr)` so consecutive calls don't rebuild the iterator. Skips frame 0 for null-pointer safety. Emits a periodic info-level summary every 256 frames so a stuck system is still observable. The pure cursor-step (`next_frame`) is exposed via `test_support` for unit tests over synthetic memory maps. The previous implementation rebuilt `usable_frames().nth(self.next)` every call (O(n) per call, O(n²) overall) and was the dominant cost during multi-MiB heap demand-paging.
+- `frame_allocator.rs` — reusable bitmap allocator with compact per-usable-frame `u32` refcounts, next-fit search, pin/retain/release APIs, stats, and test-only failure injection. A small pre-heap cursor reserves the contiguous metadata extent and pins frame zero/metadata.
 - `heap.rs` — global allocator. Backed by `linked_list_allocator` v0.10.
 - `paging.rs` — `MemoryMapper` over `OffsetPageTable` for virtual ↔ physical translation. Page-fault integration for demand paging.
 
 ## Heap
 
 - **Virtual address**: `0x_4444_4444_0000`.
-- **Size**: 100 MiB (configurable in `heap.rs`).
+- **Size**: 512 MiB of virtual address space (configurable in `heap.rs`).
 - **Backend**: `linked_list_allocator` crate.
 - Provides `#[global_allocator]`, which enables `alloc::*` collections (`Vec`, `String`, etc.) — see `.claude/rules/no-std.md`.
 - Heap pages are mapped on demand: pages get backing frames only when first accessed.
@@ -23,25 +23,35 @@ The kernel address space is partitioned into disjoint regions, each owned by exa
 
 | Range | Owner | Notes |
 |---|---|---|
-| `0x0040_0000` – `0x0080_0000` | userland binary + stack | `USER_LOAD_BASE` and `USER_STACK_TOP`; stack grows down. Initial commit `USER_STACK_INITIAL_PAGES = 8` mapped eagerly; demand-grown on page faults up to `USER_STACK_MAX_GROWTH_PAGES = 768` (intent — saturates at `USER_LOAD_BASE` in this 4 MiB slice) and bounded per-binary by `highest_pt_load_end + USER_STACK_GUARD_PAGES * 0x1000` (16-page guard). Growth driven by `lifecycle::try_grow_user_stack` from the ring-3 page-fault handler. |
+| `0x0040_0000` – canonical lower-half ceiling | per-process user VMAs | Sparse ELF, TLS, heap, anonymous/private-file mmap, and a 64 MiB grow-down stack ending at `0x0000_7fff_ffff_f000`. Only eight stack pages are initially resident; a 1 MiB guard separates the reservation from lower mappings. |
 | `0x0100_0000` – `0x0100_2000` | userland TLS | TLS image page (`USER_TLS_IMAGE_VA`) + TCB page (`USER_TCB_VA`). FS_BASE points at TCB. Mapped only when the binary has a `PT_TLS` segment. |
-| `0x0200_0000` – `0x0280_0000` | userland brk arena | `USER_BRK_BASE` + 8 MiB cap. `brk(0)` returns the current high water; `brk(addr)` grows on demand. |
-| `0x0300_0000` – `0x4000_0000` | userland mmap arena | `USER_MMAP_BASE`. Anonymous-private bump arena, no coalescing. Reaches `USER_VA_RANGE_END` at 1 GiB. |
-| `0x_4444_4444_0000` + 100 MiB | kernel heap | Demand-mapped on page fault. |
+| derived from highest PT_LOAD | userland brk | Heap VMA grows metadata-only and releases complete resident pages on shrink. |
+| reusable top-down gaps | userland mmap | Anonymous-private and readable file-private mappings; reservations are nonresident until touched. |
+| `0x_4444_4444_0000` + 512 MiB | kernel heap | Demand-mapped on page fault. Freed objects are reused, but resident heap pages remain a high-water mark. |
 | `0x_5555_0000_0000` + N stacks | process stacks | `src/process/stack.rs`. |
 
-`USER_VA_RANGE_START` / `USER_VA_RANGE_END` constants in `paging.rs` bracket the union of the userland slices; `map_user_region` rejects anything outside them.
+Lower-half PML4 slots 136 (kernel heap) and 170 (kernel-thread stacks) are shared kernel holes. VMA validation and targeted mapping reject them; upper-half slots remain shared.
 
 ## User mapping API
 
-`MemoryMapper::map_user_region(virt_start, num_pages, perms)` and `unmap_user_region` are the only blessed paths into the user-VA partition. They:
+Address-space-targeted `MemoryMapper` operations accept an L4 frame and map,
+inspect, protect, COW-resolve, unmap/prune, or destroy a user tree without
+requiring that CR3 be active. Compatibility range wrappers remain for the ELF
+loader and older kernel fixtures. Mapping operations:
 
 - Use `Mapper::map_to_with_table_flags(parent_flags = PRESENT | WRITABLE | USER_ACCESSIBLE)` so the U bit is propagated to every parent table entry on the path, including pre-existing kernel-installed parents (D11). Without this, the first ring-3 access page-faults on the parent walk and the kernel triple-faults if the U2 fault routing isn't perfect.
 - Return `Err(UserMapError::PageAlreadyMapped)` rather than swallow a clash; the user range must be empty when load begins.
 - Zero-fill freshly allocated frames before mapping so user code never sees stale kernel data.
-- Do **not** go through `handle_page_fault`. The page-fault handler short-circuits on CPL=3 in U2; user faults are lifecycle events, not lazy mappings.
+- Roll back leaves and newly empty page tables on partial failure.
+- Release leaf references and empty L1/L2/L3 tables during unmap; AddressSpace drop also releases its L4 root.
 
-`UserPerms` (R-X, R, R-W) bakes in NX/WX hygiene per D11 — `EFER.NXE` is documentary today, but the bits are correct so a future flip is a one-line change.
+`UserPerms` (R-X, R, R-W) bakes in NX/WX hygiene. `EFER.NXE` is enabled during architecture initialization, so NX is enforced.
+
+All runtime access to the global `MemoryMapper` goes through
+`memory::with_memory_mapper`; do not call `paging::get_mapper` outside the
+`mm` module. Mapper closures must stay bounded and must not yield. Do not add a
+spin mutex here: mapper access from page-fault context would make a same-core
+spin lock deadlock.
 
 ## Page-fault flow
 
@@ -52,7 +62,9 @@ When code accesses an unmapped heap page:
 3. If yes, it allocates a physical frame via `BootInfoFrameAllocator` and maps the virtual page via `MemoryMapper`.
 4. Execution resumes transparently.
 
-A page fault outside the heap range is fatal — it indicates a real bug, not lazy mapping.
+A kernel heap fault demand-maps one page. A ring-3 fault first resolves COW,
+then checks VMA protection, then pages in anonymous/heap/stack/private-file
+backing. Addresses outside VMAs are fatal to that user process.
 
 ### Ring-3 stack-grow path
 
@@ -87,8 +99,8 @@ A `debug_assert!(bytes_read <= size)` makes the bound a runtime check in test bu
 
 - **Heap is unavailable until init runs.** Code in the boot path before `heap::init()` cannot use `alloc::*` types.
 - **`OffsetPageTable` requires the physical-memory offset.** Don't construct one directly; go through `MemoryMapper`.
-- **Frame 0 is intentionally never handed out.** The cursor's null-frame skip in `next_frame` is the load-bearing check; don't bypass it if you write a new allocator path.
-- **Frame allocator's iteration order is load-bearing for the unit tests.** Frames within a Usable region are issued in ascending physical order; cross-region order matches `MemoryRegions::iter()`. A future allocator swap (bitmap, free-list) that reorders frames will trip the `test_frame_cursor_monotonic_over_4096_calls` test deliberately — that's the signal to revisit the invariant when changing the allocator.
+- **Frame 0 and allocator metadata are pinned.** Releasing pinned, unmanaged, already-free, or overflowing references is rejected rather than corrupting the bitmap.
+- **Every installed user leaf owns one frame reference.** COW fork retains leaves; every unmap/drop path must release exactly once. Never hide release calls inside `debug_assert!`, because release builds erase the assertion expression.
 
 ## Debugging
 

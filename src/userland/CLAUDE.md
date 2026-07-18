@@ -12,10 +12,15 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
 
 - `loader.rs` — minimal ELF64 loader. Reads PT_LOAD segments off the
   filesystem, allocates user pages, populates the page tables.
-- `image.rs` — `UserImage`: ownership wrapper for a loaded program's
-  mapped user-VA ranges. `Drop` unmaps everything.
-- `address_space.rs` — `AddressSpace`: a fresh user-half L4 plus a
-  copy of the kernel half. `activate()` writes CR3.
+- `image.rs` — `UserImage`: ELF entry/stack/TLS/program-header metadata;
+  production mapping ownership transfers to `AddressSpace` during setup.
+- `address_space.rs` — `AddressSpace`: owns a fresh L4, every private user
+  page-table subtree, and the authoritative VMA set. Drop performs targeted
+  teardown even when another CR3 is active.
+- `vm.rs` — sorted non-overlapping VMAs, split/merge/protect/remove, and
+  reusable top-down gap search.
+- `usercopy.rs` — VMA-aware reads/writes that page in lazy buffers and
+  resolve COW before kernel writes.
 - `kernel_stack.rs` — per-process 64 KiB kernel stack. TSS.rsp0 +
   GSBASE-stored SYSCALL rsp top are pointed at this when the process
   is current.
@@ -35,8 +40,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   fork/wait4/sigreturn are the most fragile pieces.
 - `signal.rs` — POSIX signal dispositions, blocked/pending masks.
 - `fdtable.rs` — per-process file-descriptor table.
-- `abi.rs` — Linux x86-64 syscall ABI: dispatch table, pointer
-  validation, errno constants. Unknown syscall numbers always return
+- `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility
+  pointer bounds for synthetic tests, and errno constants. Real processes
+  use VMA-aware user-copy validation. Unknown syscall numbers always return
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
   to BusyBox (`/host/BB.ELF`) or kernel-side GUI apps via
@@ -62,7 +68,8 @@ Each process owns:
 - `signal_state` (dispositions + blocked mask, inherited across fork
   per POSIX; pending cleared per POSIX),
 - `fd_table` (cloned by value across fork),
-- `cwd`, `brk_current`, `mmap_next`,
+- `cwd`, a byte-granular `brk_current` and derived `brk_base`, plus an
+  AddressSpace-owned VMA set (`mmap_next` is compatibility state only),
 - demand-grown stack bookkeeping (`stack_top`/`stack_bottom`/
   `stack_mapped_bottom`/`stack_max_growth_floor`/
   `growth_faults_remaining`),
@@ -81,8 +88,12 @@ that makes the "current" field meaningful as a per-instant pointer.
 1. Terminal opens → `spawn_zsh_for_terminal` (in `src/window/`)
    spawns a kernel thread that calls
    `launcher::launch_user_binary("/host/ZSH.ELF")`.
-2. `launch_user_binary` builds a fresh `AddressSpace`, loads the ELF
-   into it, and calls `enter_user_mode_with_aspace`.
+2. `launch_user_binary` holds `BINARY_SETUP_MUTEX` and `BinaryLoadGuard`,
+   reads the ELF bytes while CR3 is still the kernel L4, then performs
+   `AddressSpace::new → activate → load/map ELF → initialize VMAs once →
+   build stack/install Process`. The setup mutex also serializes teardown;
+   kernel-thread preemption remains enabled so FAT-backed page-in and sparse
+   address-space destruction cannot freeze the compositor.
 3. `enter_user_mode_with_aspace` builds the initial user stack,
    inserts the Process into `PROCESS_TABLE` with `saved_user_state`
    populated to the binary's entry frame (rip=entry, rsp=user_rsp,
@@ -108,7 +119,8 @@ that makes the "current" field meaningful as a per-instant pointer.
    `enter_user_mode_with_aspace`, reads exit info from the Process,
    returns to the caller. `release_active_image` (or the caller's
    cleanup) drops the Process from PROCESS_TABLE, freeing
-   `AddressSpace`/`KernelStack`/fd_table/etc.
+   `AddressSpace`/`KernelStack`/fd_table/etc. AddressSpace teardown releases
+   resident leaves and private page-table frames to the reusable allocator.
 
 Two terminals coexisting: two `spawn_zsh_for_terminal` kernel threads
 are created; each calls `enter_user_mode_with_aspace` for its own
@@ -122,6 +134,27 @@ next runnable ring-3 (the other zsh) or falls back to the kernel
 main loop. Input from the keyboard ISR's stdin push calls
 `wake_ring3_blocked_on_input`, moving blocked readers back to
 ring3_ready; the next dispatch picks them up.
+
+## Virtual memory
+
+User space is the canonical lower half minus the reserved kernel-heap and
+kernel-stack PML4 slots. ELF segments retain ET_EXEC addresses; brk is derived
+from the highest PT_LOAD; mmap searches reusable gaps top-down; the stack ends
+at `0x0000_7fff_ffff_f000` with a 64 MiB sparse reservation.
+
+Fork clones VMA metadata and page-table structure, retaining resident leaves.
+Writable private leaves become read-only `BIT_9` COW mappings and copy only on
+first write. Anonymous mmap and heap growth are metadata-only; stack, heap,
+anonymous, private-file, and production ELF pages are materialized by the VMA
+fault resolver. The production loader records PT_LOAD file offsets and keeps
+only the initial stack and TLS resident; direct loader fixtures may opt into
+eager segment population for deterministic tests.
+`munmap`, shrinking brk, and `mprotect` update both VMAs and resident PTEs.
+Writable+executable mappings are rejected and NXE is enabled.
+
+Syscall/path/signal user pointers must go through `usercopy`; raw user virtual
+dereferences are reserved for loader/initial-stack construction while the new
+address space is active but not yet installed as a Process.
 
 ## Multi-ring-3 scheduling (in progress)
 

@@ -321,28 +321,16 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
             };
         }
 
-        // Fallback: partial read or short caller buffer — read the file into a
-        // temp the size of the file, then copy out the requested slice. This
-        // path is taken by callers that want a window into the middle of a
-        // file or that pass a smaller buffer than the file size; the cost is
-        // intrinsic to that interface (read_file requires buffer >= file.size)
-        // and not exercised by the multi-MiB-binary load path.
-        const ASSUMED_CLUSTER_SIZE: usize = 4096;
-        let buffer_size = ((handle.size as usize + ASSUMED_CLUSTER_SIZE - 1)
-            / ASSUMED_CLUSTER_SIZE)
-            * ASSUMED_CLUSTER_SIZE;
-        let mut file_buffer = alloc::vec![0u8; buffer_size];
-
-        match self.inner.read_file(&fat_handle, &mut file_buffer) {
-            Ok(_) => {
-                let remaining = handle.size - handle.position;
-                let to_copy = core::cmp::min(buffer.len(), remaining as usize);
-                buffer[..to_copy].copy_from_slice(
-                    &file_buffer
-                        [handle.position as usize..handle.position as usize + to_copy],
-                );
-                handle.position += to_copy as u64;
-                Ok(to_copy)
+        // Partial reads must not materialize the whole file. Sparse ELF VMAs
+        // arrive here one page at a time; rebuilding a multi-cluster file for
+        // every page fault makes startup quadratic and can monopolize the UI.
+        match self
+            .inner
+            .read_file_at(&fat_handle, handle.position, buffer)
+        {
+            Ok(bytes_read) => {
+                handle.position += bytes_read as u64;
+                Ok(bytes_read)
             }
             Err(_) => Err(FilesystemError::IoError),
         }

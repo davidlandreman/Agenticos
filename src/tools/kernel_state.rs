@@ -1,6 +1,6 @@
 //! `kernel_state` tool — structured snapshots of in-kernel state.
 //!
-//! Discriminator: `{"what": "windows" | "processes" | "heap"}`. Adding a new
+//! Discriminator: `{"what": "windows" | "processes" | "heap" | "memory"}`. Adding a new
 //! discriminator is additive (R5).
 
 use alloc::format;
@@ -10,8 +10,8 @@ use alloc::vec::Vec;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::tools::{Tool, ToolError, ToolResult};
 use crate::process::ProcessState;
+use crate::tools::{Tool, ToolError, ToolResult};
 
 #[derive(Deserialize)]
 struct KernelStateArgs<'a> {
@@ -21,14 +21,16 @@ struct KernelStateArgs<'a> {
 pub struct KernelState;
 
 impl Tool for KernelState {
-    fn name(&self) -> &'static str { "kernel_state" }
+    fn name(&self) -> &'static str {
+        "kernel_state"
+    }
 
     fn description(&self) -> &'static str {
-        "structured snapshot of in-kernel state (windows, processes, heap)"
+        "structured snapshot of in-kernel state (windows, processes, heap, memory)"
     }
 
     fn schema(&self) -> &'static str {
-        r#"{"type":"object","required":["what"],"properties":{"what":{"type":"string","enum":["windows","processes","heap"]}}}"#
+        r#"{"type":"object","required":["what"],"properties":{"what":{"type":"string","enum":["windows","processes","heap","memory"]}}}"#
     }
 
     fn call(&self, args_json: &str) -> Result<ToolResult, ToolError> {
@@ -39,9 +41,10 @@ impl Tool for KernelState {
             "windows" => snapshot_windows()?,
             "processes" => snapshot_processes(),
             "heap" => snapshot_heap()?,
+            "memory" => snapshot_memory()?,
             other => {
                 return Err(ToolError::bad_args(format!(
-                    "unknown discriminator {:?}; expected windows | processes | heap",
+                    "unknown discriminator {:?}; expected windows | processes | heap | memory",
                     other
                 )));
             }
@@ -101,14 +104,27 @@ fn snapshot_processes() -> Value {
 }
 
 fn snapshot_heap() -> Result<Value, ToolError> {
-    let stats = crate::mm::heap::stats()
-        .ok_or_else(|| ToolError::unsupported("heap not initialized"))?;
+    let stats =
+        crate::mm::heap::stats().ok_or_else(|| ToolError::unsupported("heap not initialized"))?;
     Ok(json!({
         "size": stats.size,
         "used": stats.used,
         "free": stats.free,
         "bottom": stats.bottom,
         "top": stats.top,
+    }))
+}
+
+fn snapshot_memory() -> Result<Value, ToolError> {
+    let stats = crate::mm::memory::with_memory_mapper(|mapper| mapper.frame_stats())
+        .ok_or_else(|| ToolError::unsupported("frame allocator not initialized"))?;
+    Ok(json!({
+        "total_usable_frames": stats.total_usable,
+        "pinned_frames": stats.pinned,
+        "allocated_frames": stats.allocated,
+        "exclusive_frames": stats.exclusive(),
+        "shared_frames": stats.shared,
+        "free_frames": stats.free,
     }))
 }
 

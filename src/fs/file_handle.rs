@@ -1,12 +1,12 @@
 //! Modern file handle API using Arc for shared ownership
-//! 
+//!
 //! This module provides a new file handle API that uses Arc for lifetime management,
 //! eliminating the need for callback-based file operations and unsafe transmutation.
 
-use crate::lib::arc::Arc;
-use crate::fs::filesystem::{FilesystemError, FileMode, DirectoryEntry};
+use crate::fs::filesystem::{DirectoryEntry, FileMode, FilesystemError};
 use crate::fs::vfs::get_vfs;
-use alloc::{vec::Vec, string::String};
+use crate::lib::arc::Arc;
+use alloc::{string::String, vec::Vec};
 use core::fmt;
 use spin::Mutex;
 
@@ -73,13 +73,12 @@ impl File {
         let _vfs = get_vfs();
 
         // Use VFS to open the file
-        let fs_handle = crate::fs::vfs::vfs_open(path, mode)
-            .map_err(|e| FileError::FilesystemError(e))?;
-        
+        let fs_handle =
+            crate::fs::vfs::vfs_open(path, mode).map_err(|e| FileError::FilesystemError(e))?;
+
         // Get file metadata
-        let metadata = crate::fs::vfs::vfs_stat(path)
-            .map_err(|e| FileError::FilesystemError(e))?;
-        
+        let metadata = crate::fs::vfs::vfs_stat(path).map_err(|e| FileError::FilesystemError(e))?;
+
         let inner = FileHandleInner {
             path: String::from(path),
             mode,
@@ -90,12 +89,12 @@ impl File {
             buffer_dirty: false,
             is_open: true,
         };
-        
+
         Ok(Arc::new(File {
             inner: Arc::new(Mutex::new(inner)),
         }))
     }
-    
+
     /// Create a new file at the given path
     pub fn create(path: &str) -> FileResult<Arc<File>> {
         let mode = FileMode {
@@ -107,12 +106,12 @@ impl File {
         };
         Self::open(path, mode)
     }
-    
+
     /// Open a file for reading only
     pub fn open_read(path: &str) -> FileResult<Arc<File>> {
         Self::open(path, FileMode::READ)
     }
-    
+
     /// Open a file for writing (creates if doesn't exist)
     pub fn open_write(path: &str) -> FileResult<Arc<File>> {
         let mode = FileMode {
@@ -124,75 +123,105 @@ impl File {
         };
         Self::open(path, mode)
     }
-    
+
     /// Read data into the provided buffer
     /// Returns the number of bytes read
     pub fn read(&self, buffer: &mut [u8]) -> FileResult<usize> {
         let mut inner = self.inner.lock();
-        
+
         // Check if file is still open
         if !inner.is_open {
             return Err(FileError::HandleClosed);
         }
-        
+
         // Clone the path to avoid borrowing conflict
         let path = inner.path.clone();
-        
-        let fs_handle = inner.fs_handle.as_mut()
-            .ok_or(FileError::HandleClosed)?;
-        
+
+        let fs_handle = inner.fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
+
         // Get VFS and find filesystem for this path
         let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(&path)
-            .ok_or(FileError::NotFound)?;
-        
+        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
+
         // Perform the read
-        let bytes_read = filesystem.read(fs_handle, buffer)
+        let bytes_read = filesystem
+            .read(fs_handle, buffer)
             .map_err(|e| FileError::FilesystemError(e))?;
         inner.position += bytes_read as u64;
-        
+
         Ok(bytes_read)
     }
-    
+
+    /// Read without changing the descriptor's shared position. The handle
+    /// lock covers seek/read/restore as one atomic operation.
+    pub fn read_at(&self, offset: u64, buffer: &mut [u8]) -> FileResult<usize> {
+        let mut inner = self.inner.lock();
+        if !inner.is_open {
+            return Err(FileError::HandleClosed);
+        }
+        if offset > inner.size {
+            return Err(FileError::SeekOutOfBounds);
+        }
+        let path = inner.path.clone();
+        let original_position = inner.position;
+        let fs_handle = inner.fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
+        let vfs = get_vfs();
+        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
+        filesystem
+            .seek(fs_handle, offset)
+            .map_err(FileError::FilesystemError)?;
+        let result = filesystem
+            .read(fs_handle, buffer)
+            .map_err(FileError::FilesystemError);
+        let restore = filesystem
+            .seek(fs_handle, original_position)
+            .map_err(FileError::FilesystemError);
+        inner.position = original_position;
+        match (result, restore) {
+            (Ok(bytes), Ok(_)) => Ok(bytes),
+            (Err(error), _) => Err(error),
+            (_, Err(error)) => Err(error),
+        }
+    }
+
     /// Write data from the provided buffer
     /// Returns the number of bytes written
     pub fn write(&self, buffer: &[u8]) -> FileResult<usize> {
         let mut inner = self.inner.lock();
-        
+
         // Check if file supports writing
         if !inner.mode.write {
             return Err(FileError::AccessDenied);
         }
-        
+
         // Check if file is still open
         if !inner.is_open {
             return Err(FileError::HandleClosed);
         }
-        
+
         // Clone the path to avoid borrowing conflict
         let path = inner.path.clone();
-        
-        let fs_handle = inner.fs_handle.as_mut()
-            .ok_or(FileError::HandleClosed)?;
-        
+
+        let fs_handle = inner.fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
+
         // Get VFS and find filesystem for this path
         let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(&path)
-            .ok_or(FileError::NotFound)?;
-        
+        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
+
         // Perform the write
-        let bytes_written = filesystem.write(fs_handle, buffer)
+        let bytes_written = filesystem
+            .write(fs_handle, buffer)
             .map_err(|e| FileError::FilesystemError(e))?;
         inner.position += bytes_written as u64;
-        
+
         // Update size if we extended the file
         if inner.position > inner.size {
             inner.size = inner.position;
         }
-        
+
         Ok(bytes_written)
     }
-    
+
     /// Read the entire file contents into a `Vec<u8>`.
     ///
     /// Reads directly into the freshly allocated `Vec`'s spare capacity —
@@ -243,116 +272,117 @@ impl File {
 
         Ok(buffer)
     }
-    
+
     /// Read the entire file contents as a UTF-8 string
     pub fn read_to_string(&self) -> FileResult<String> {
         let bytes = self.read_to_vec()?;
-        String::from_utf8(bytes)
-            .map_err(|_| FileError::IoError)
+        String::from_utf8(bytes).map_err(|_| FileError::IoError)
     }
-    
+
     /// Write a string to the file
     pub fn write_string(&self, text: &str) -> FileResult<usize> {
         self.write(text.as_bytes())
     }
-    
+
     /// Write all data in the Vec to the file
     pub fn write_vec(&self, data: &[u8]) -> FileResult<usize> {
         self.write(data)
     }
-    
+
     /// Seek to a specific position in the file
     pub fn seek(&self, position: u64) -> FileResult<u64> {
         let mut inner = self.inner.lock();
-        
+
         // Check bounds
         if position > inner.size {
             return Err(FileError::SeekOutOfBounds);
         }
-        
+
         // Check if file is still open
         if !inner.is_open {
             return Err(FileError::HandleClosed);
         }
-        
+
         // Clone the path to avoid borrowing conflict
         let path = inner.path.clone();
-        
-        let fs_handle = inner.fs_handle.as_mut()
-            .ok_or(FileError::HandleClosed)?;
-        
+
+        let fs_handle = inner.fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
+
         // Get VFS and find filesystem for this path
         let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(&path)
-            .ok_or(FileError::NotFound)?;
-        
+        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
+
         // Perform the seek
-        let new_position = filesystem.seek(fs_handle, position)
+        let new_position = filesystem
+            .seek(fs_handle, position)
             .map_err(|e| FileError::FilesystemError(e))?;
         inner.position = new_position;
-        
+
         Ok(new_position)
     }
-    
+
     /// Get the current position in the file
     pub fn position(&self) -> u64 {
         self.inner.lock().position
     }
-    
+
     /// Get the size of the file
     pub fn size(&self) -> u64 {
         self.inner.lock().size
     }
-    
+
     /// Get the file path
     pub fn path(&self) -> String {
         self.inner.lock().path.clone()
     }
-    
+
     /// Check if the file is still open
     pub fn is_open(&self) -> bool {
         self.inner.lock().is_open
     }
-    
+
     /// Flush any pending writes to disk
     pub fn flush(&self) -> FileResult<()> {
         let inner = self.inner.lock();
-        
+
         // Check if file is still open
         if !inner.is_open {
             return Err(FileError::HandleClosed);
         }
-        
+
         // Get VFS and find filesystem for this path
         let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(&inner.path)
+        let (filesystem, _) = vfs
+            .find_filesystem(&inner.path)
             .ok_or(FileError::NotFound)?;
-        
+
         // Sync the filesystem
-        filesystem.sync()
+        filesystem
+            .sync()
             .map_err(|e| FileError::FilesystemError(e))?;
-        
+
         Ok(())
     }
-    
+
     /// Close the file handle explicitly
     /// After calling this, other operations will fail
     pub fn close(&self) -> FileResult<()> {
         let mut inner = self.inner.lock();
-        
+
         if inner.is_open {
             if let Some(fs_handle) = inner.fs_handle.take() {
                 // Get VFS and find filesystem for this path
                 let vfs = get_vfs();
                 if let Some((filesystem, _)) = vfs.find_filesystem(&inner.path) {
                     let mut handle = fs_handle;
-                    filesystem.close(&mut handle)
+                    filesystem
+                        .close(&mut handle)
                         .map_err(|e| FileError::FilesystemError(e))?;
                 }
             }
             inner.is_open = false;
         }
-        
+
         Ok(())
     }
 }
@@ -447,28 +477,33 @@ impl Directory {
             inner: Arc::new(Mutex::new(inner)),
         }))
     }
-    
+
     /// Collect entries from filesystem using filesystem-specific methods
     fn collect_filesystem_entries(
-        filesystem: &dyn crate::fs::filesystem::Filesystem, 
-        path: &str, 
-        entries: &mut Vec<DirectoryEntry>
+        filesystem: &dyn crate::fs::filesystem::Filesystem,
+        path: &str,
+        entries: &mut Vec<DirectoryEntry>,
     ) {
         // Try to cast to FatFilesystemWrapper to access FAT-specific methods
         // This is a workaround for the limited generic filesystem trait
-        
+
         // For root directory of FAT filesystem, we can use direct VFS access
         if path == "/" {
             // Get VFS and try to access the FAT filesystem directly
             let _vfs = crate::fs::vfs::get_vfs();
-            
+
             // Try to access mounted filesystems - for now we'll check if we can find files
             // by trying some common patterns and using the stat method
             let test_paths = [
-                "/TEST.TXT", "/assets", "/assets/TEST.TXT", "/assets/LAND3.BMP",
-                "/assets/arial.ttf", "/assets/ibmplex.fnt", "/assets/agentic-banner.png"
+                "/TEST.TXT",
+                "/assets",
+                "/assets/TEST.TXT",
+                "/assets/LAND3.BMP",
+                "/assets/arial.ttf",
+                "/assets/ibmplex.fnt",
+                "/assets/agentic-banner.png",
             ];
-            
+
             for test_path in &test_paths {
                 if let Ok(metadata) = filesystem.stat(test_path) {
                     entries.push(metadata);
@@ -476,11 +511,11 @@ impl Directory {
             }
         }
     }
-    
+
     /// Read the next directory entry
     pub fn read_entry(&self) -> Option<DirectoryEntry> {
         let mut inner = self.inner.lock();
-        
+
         if inner.position < inner.entries.len() {
             let entry = inner.entries[inner.position].clone();
             inner.position += 1;
@@ -489,12 +524,12 @@ impl Directory {
             None
         }
     }
-    
+
     /// Get all directory entries as a Vec
     pub fn entries(&self) -> Vec<DirectoryEntry> {
         self.inner.lock().entries.clone()
     }
-    
+
     /// Get the directory path
     pub fn path(&self) -> String {
         self.inner.lock().path.clone()

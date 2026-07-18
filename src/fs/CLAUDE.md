@@ -84,7 +84,10 @@ Path lookup uses `eq_ignore_ascii_case` against the decoded name, so `/AGENTIC-B
 
 `<Fat as Filesystem>::read` (in `fat/fat_filesystem.rs`) has a hot-path branch for the common case `position == 0 && buffer.len() >= file.size`: it passes the caller's buffer directly to `FileSystem::read_file`, which walks clusters and copies straight in. No intermediate file-sized allocation, no zero-fill.
 
-The fallback path (partial reads or short caller buffers) still allocates a temp buffer the size of the file, reads into it, then memcpy's the requested slice — that's intrinsic to `read_file`'s contract (`buffer.len() >= file.size`). The fallback is fine for small files; it bites on multi-MiB reads, which is what the fast path eliminates.
+Partial reads and short caller buffers use `FileSystem::read_file_at`, which
+walks to the cluster containing the requested offset and reads only the
+intersecting sectors. This is load-bearing for sparse executable VMAs: a 4 KiB
+ELF page fault must not allocate and reconstruct the entire executable.
 
 Why it matters: before the fast path, every `File::read` call on a multi-MiB file allocated AND zero-filled a temp the size of the file (~1414 page faults for a 5.79 MiB binary), then memcpy'd the whole thing into the caller — doubling page-fault and heap pressure. Loading a C++ ELF used to look like a hang for that reason.
 

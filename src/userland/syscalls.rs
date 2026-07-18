@@ -30,18 +30,16 @@
 //! `Result` / negative-errno returns instead.
 
 use crate::arch::x86_64::syscall::SyscallArgs;
-use crate::mm::paging::{
-    UserPerms, USER_BRK_BASE, USER_VA_RANGE_END,
-};
 use crate::userland::abi::{
     validate_user_slice, EACCES, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINTR, EINVAL, EIO, EISDIR,
-    EMFILE, ENOENT, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EPERM, ERANGE, EROFS, ESPIPE,
-    EXDEV, LAST_EXIT_CODE,
+    EMFILE, ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EPERM, ERANGE, EROFS,
+    ESPIPE, EXDEV, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
 use crate::userland::path::{apply_fs_rewrite, copy_user_cstr, normalize_path};
 use alloc::string::String;
 use alloc::vec;
+use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
 /// Maximum bytes a single `write` call can emit.
@@ -52,7 +50,7 @@ const WRITEV_MAX_IOV: usize = 16;
 /// Maximum total bytes per `writev` (sum of iov_len).
 const WRITEV_MAX_TOTAL: u64 = 16 * 1024;
 /// Maximum mmap allocation in bytes.
-const MMAP_MAX_LEN: u64 = 8 * 1024 * 1024;
+const MMAP_MAX_LEN: u64 = 512 * 1024 * 1024;
 /// Maximum brk growth from the initial anchor in bytes. Bumped from
 /// 8 MiB to 32 MiB in U3 to give static-musl zsh's mallocng comfortable
 /// headroom for transient startup spikes (parsing rc files, building
@@ -66,6 +64,7 @@ const PROT_WRITE: u64 = 2;
 const PROT_EXEC: u64 = 4;
 
 const MAP_PRIVATE: u64 = 0x02;
+const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
 
 const ARCH_SET_FS: u64 = 0x1002;
@@ -111,13 +110,14 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
     if len > WRITE_MAX_LEN as u64 {
         return EFAULT;
     }
-    if let Err(e) = validate_user_slice(ptr, len) {
-        return e;
-    }
     if len == 0 {
         return 0;
     }
-    let slice = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let mut staging = alloc::vec![0u8; len as usize];
+    if let Err(e) = crate::userland::usercopy::copy_from_user(&mut staging, ptr) {
+        return e;
+    }
+    let slice = staging.as_slice();
 
     match target {
         Target::Pipe(handle) => {
@@ -164,8 +164,7 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
             // processes (one per terminal), the global is wrong —
             // last-launcher wins, so zsh1's writes would land in
             // terminal 2's window.
-            let dest_terminal =
-                crate::userland::lifecycle::with_current_process(|p| p.terminal_id);
+            let dest_terminal = crate::userland::lifecycle::with_current_process(|p| p.terminal_id);
             match dest_terminal {
                 Some(tid) => crate::window::terminal::write_to_terminal_id(tid, &s),
                 None => crate::print!("{}", s),
@@ -203,25 +202,28 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
     if iovcnt < 0 || iovcnt as usize > WRITEV_MAX_IOV {
         return EINVAL;
     }
-    let iov_bytes = (iovcnt as u64) * 16;
-    if let Err(e) = validate_user_slice(iov_ptr, iov_bytes) {
-        return e;
-    }
-
     // Validate every iov_base/iov_len pair before writing any of them, so
     // a bad later entry doesn't produce a partial write.
     let mut total: u64 = 0;
+    let mut iovecs = alloc::vec::Vec::with_capacity(iovcnt as usize);
     for i in 0..iovcnt as u64 {
         let entry = iov_ptr + i * 16;
-        let base = unsafe { core::ptr::read_unaligned(entry as *const u64) };
-        let len = unsafe { core::ptr::read_unaligned((entry + 8) as *const u64) };
-        if let Err(e) = validate_user_slice(base, len) {
+        let base = match crate::userland::usercopy::read_unaligned::<u64>(entry) {
+            Ok(value) => value,
+            Err(e) => return e,
+        };
+        let len = match crate::userland::usercopy::read_unaligned::<u64>(entry + 8) {
+            Ok(value) => value,
+            Err(e) => return e,
+        };
+        if let Err(e) = crate::userland::usercopy::ensure_user_range(base, len, false) {
             return e;
         }
         match total.checked_add(len) {
             Some(t) if t <= WRITEV_MAX_TOTAL => total = t,
             _ => return EINVAL,
         }
+        iovecs.push((base, len));
     }
 
     // U8/bugfix: route the StdoutErr fast path to the writing
@@ -237,14 +239,15 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
     // Now emit every iov in order. Short writes break the loop so
     // POSIX writev's "stop at the first short write" semantics hold.
     let mut written: u64 = 0;
-    for i in 0..iovcnt as u64 {
-        let entry = iov_ptr + i * 16;
-        let base = unsafe { core::ptr::read_unaligned(entry as *const u64) };
-        let len = unsafe { core::ptr::read_unaligned((entry + 8) as *const u64) };
+    for (base, len) in iovecs {
         if len == 0 {
             continue;
         }
-        let slice = unsafe { core::slice::from_raw_parts(base as *const u8, len as usize) };
+        let mut bytes = alloc::vec![0u8; len as usize];
+        if let Err(e) = crate::userland::usercopy::copy_from_user(&mut bytes, base) {
+            return if written > 0 { written as i64 } else { e };
+        }
+        let slice = bytes.as_slice();
         match &target {
             Target::StdoutErr => {
                 let s = alloc::string::String::from_utf8_lossy(slice);
@@ -297,10 +300,6 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
         return 0;
     }
     let cap = core::cmp::min(len, READ_MAX_LEN as u64);
-    if let Err(e) = validate_user_slice(ptr, cap) {
-        return e;
-    }
-
     let slot = with_fd_slot(fd);
     match slot {
         Some(FdSlot::Stdin) => read_stdin_blocking(args, ptr, cap),
@@ -318,8 +317,8 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
             let mut staging = vec![0u8; cap as usize];
             let n = handle.pipe().read(&mut staging);
             if n > 0 {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(staging.as_ptr(), ptr as *mut u8, n);
+                if let Err(e) = crate::userland::usercopy::copy_to_user(ptr, &staging[..n]) {
+                    return e;
                 }
                 return n as i64;
             }
@@ -342,12 +341,10 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
             match handle.read(&mut staging) {
                 Ok(n) => {
                     if n > 0 {
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                staging.as_ptr(),
-                                ptr as *mut u8,
-                                n,
-                            );
+                        if let Err(e) =
+                            crate::userland::usercopy::copy_to_user(ptr, &staging[..n])
+                        {
+                            return e;
                         }
                     }
                     n as i64
@@ -363,9 +360,12 @@ fn read_stdin_blocking(args: &SyscallArgs, ptr: u64, cap: u64) -> i64 {
     if !crate::userland::stdin::is_active_for_current_process() {
         return 0;
     }
-    let dst = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, cap as usize) };
-    let n = crate::userland::stdin::pop_into_for_current_process(dst);
+    let mut staging = alloc::vec![0u8; cap as usize];
+    let n = crate::userland::stdin::pop_into_for_current_process(&mut staging);
     if n > 0 {
+        if let Err(e) = crate::userland::usercopy::copy_to_user(ptr, &staging[..n]) {
+            return e;
+        }
         return n as i64;
     }
 
@@ -391,107 +391,210 @@ fn read_stdin_blocking(args: &SyscallArgs, ptr: u64, cap: u64) -> i64 {
 
 /// `mmap(addr, length, prot, flags, fd, offset) -> void *`
 ///
-/// Anonymous private only: `MAP_PRIVATE | MAP_ANONYMOUS`, fd = -1, addr
-/// is treated as a hint and ignored (the kernel's bump arena chooses the
-/// address). Length is rounded up to page granularity. PROT bits map
-/// onto `UserPerms` (RW always; +X if requested; the loader's
-/// permission-profile invariant — never both writable and executable —
-/// would technically be violated by `PROT_READ|WRITE|EXEC`, but
-/// libstdc++ doesn't ask for X here, so we treat the X bit as a hint
-/// and pick `ReadWrite` for any RW request).
+/// Creates a metadata-only anonymous-private or file-private VMA. A valid
+/// free hint is honored; otherwise a top-down reusable gap is selected.
+/// Resident pages are allocated only when touched.
 pub fn mmap_handler(args: &mut SyscallArgs) -> i64 {
-    let _addr_hint = args.rdi;
+    use crate::userland::vm::{VmProt, Vma, VmaBacking};
+
+    let addr_hint = args.rdi;
     let length = args.rsi;
     let prot = args.rdx;
     let flags = args.r10;
     let fd = args.r8 as i64;
-    let _offset = args.r9;
+    let offset = args.r9;
 
     if length == 0 || length > MMAP_MAX_LEN {
         return EINVAL;
     }
-    if (flags & MAP_PRIVATE) == 0 || (flags & MAP_ANONYMOUS) == 0 {
+    if (flags & MAP_PRIVATE) == 0 || flags & MAP_FIXED != 0 {
         return ENOSYS;
-    }
-    if fd != -1 {
-        return ENOSYS; // file-backed mmap not yet supported
     }
     if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         return EINVAL;
     }
-
-    let pages = length.div_ceil(0x1000);
-    let perms = if prot & PROT_EXEC != 0 {
-        UserPerms::ReadExecute
-    } else if prot & PROT_WRITE != 0 {
-        UserPerms::ReadWrite
-    } else {
-        UserPerms::ReadOnly
-    };
-
-    // Allocate from the per-process bump arena.
-    let addr = crate::userland::lifecycle::with_active_user(|au| {
-        let next = au.mmap_next;
-        let end = next + pages * 0x1000;
-        if end > USER_VA_RANGE_END {
-            return None;
-        }
-        au.mmap_next = end;
-        Some(next)
-    });
-    let addr = match addr {
-        Some(a) => a,
-        None => return -12, // ENOMEM
-    };
-
-    // Map and record on the active UserImage so Drop unmaps it.
-    let map_result = crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(addr), pages, perms)
-    });
-    match map_result {
-        Some(Ok(_)) => {}
-        Some(Err(_)) => return -12, // ENOMEM
-        None => return -12,
+    if prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0 {
+        return EACCES;
     }
-    crate::userland::lifecycle::with_active_user(|au| {
-        if let Some(img) = au.image.as_mut() {
-            img.record_mapping(VirtAddr::new(addr), pages);
-        }
-    });
+    if offset & 0xfff != 0 {
+        return EINVAL;
+    }
 
-    addr as i64
+    let len = length.div_ceil(0x1000) * 0x1000;
+    let mut vm_prot = VmProt::NONE;
+    if prot & PROT_READ != 0 {
+        vm_prot = vm_prot.union(VmProt::READ);
+    }
+    if prot & PROT_WRITE != 0 {
+        vm_prot = vm_prot.union(VmProt::WRITE);
+    }
+    if prot & PROT_EXEC != 0 {
+        vm_prot = vm_prot.union(VmProt::EXEC);
+    }
+
+    let file = if flags & MAP_ANONYMOUS == 0 {
+        if fd < 0 {
+            return EBADF;
+        }
+        crate::userland::lifecycle::with_current_process(|process| {
+            match process.fd_table.get(fd as i32) {
+                Some(FdSlot::File { handle, .. }) => Some(handle.clone()),
+                _ => None,
+            }
+        })
+    } else {
+        if fd != -1 {
+            return EINVAL;
+        }
+        None
+    };
+    if flags & MAP_ANONYMOUS == 0 && file.is_none() {
+        return EBADF;
+    }
+
+    crate::userland::lifecycle::with_current_process(|process| {
+        let Some(space) = process.address_space.as_mut() else {
+            return ENOMEM;
+        };
+        let stack_floor = space
+            .vmas()
+            .as_slice()
+            .iter()
+            .find_map(|vma| matches!(vma.backing, VmaBacking::Stack { .. }).then_some(vma.start))
+            .unwrap_or(crate::mm::paging::USER_STACK_TOP);
+        let hinted_end = addr_hint.checked_add(len);
+        let addr = if addr_hint & 0xfff == 0
+            && hinted_end.is_some_and(|end| space.vmas().is_free(addr_hint, end))
+        {
+            addr_hint
+        } else {
+            match space
+                .vmas()
+                .find_gap_top_down(len, stack_floor.saturating_sub(1024 * 1024))
+            {
+                Ok(address) => address,
+                Err(_) => return ENOMEM,
+            }
+        };
+        let backing = match file {
+            Some(ref handle) => VmaBacking::FilePrivate {
+                file: handle.clone(),
+                file_offset: offset,
+                file_size: handle.size(),
+            },
+            None => VmaBacking::Anonymous,
+        };
+        let Ok(vma) = Vma::new(addr, addr + len, vm_prot, backing) else {
+            return ENOMEM;
+        };
+        if space.vmas_mut().insert(vma).is_err() {
+            return ENOMEM;
+        }
+        addr as i64
+    })
 }
 
 /// `munmap(addr, length) -> int`
 ///
-/// Best-effort: unmaps the page-aligned range. The bump arena pointer
-/// does not retract — `mmap` always returns fresh VA. For the milestone,
-/// freeing a region returns the pages to the kernel's frame allocator
-/// (insofar as it tracks them) but doesn't reclaim the user-VA region
-/// for future `mmap` calls.
+/// Splits/trims intersecting VMAs, tolerates holes, and releases every
+/// resident leaf in the range. Subsequent mmap gap search can reuse it.
 pub fn munmap_handler(args: &mut SyscallArgs) -> i64 {
     let addr = args.rdi;
     let length = args.rsi;
     if addr & 0xFFF != 0 || length == 0 {
         return EINVAL;
     }
-    let pages = length.div_ceil(0x1000);
-    let _ = crate::mm::memory::with_memory_mapper(|m| {
-        m.unmap_user_region(VirtAddr::new(addr), pages)
+    let end = match addr.checked_add(length.div_ceil(0x1000) * 0x1000) {
+        Some(end) => end,
+        None => return EINVAL,
+    };
+    let l4 = crate::userland::lifecycle::with_current_process(|process| {
+        let Some(space) = process.address_space.as_mut() else {
+            return None;
+        };
+        if space.vmas_mut().remove(addr, end).is_err() {
+            return None;
+        }
+        Some(space.l4_frame())
     });
-    // Always succeed — the unmap may fail for never-mapped ranges, which
-    // POSIX considers an error, but for the milestone a forgiving
-    // implementation is fine.
+    let Some(l4) = l4 else {
+        return EINVAL;
+    };
+    crate::mm::memory::with_memory_mapper(|mapper| {
+        let mut page = addr;
+        while page < end {
+            if mapper.leaf_info(l4, VirtAddr::new(page)).is_some() {
+                let _ = mapper.unmap_page_from(l4, VirtAddr::new(page));
+            }
+            page += 0x1000;
+        }
+    });
     0
 }
 
 /// `mprotect(addr, length, prot) -> int`
 ///
-/// Stub: returns 0. musl uses this for thread-stack guard pages on
-/// `pthread_create`, which single-threaded hello-world doesn't trigger.
-/// libstdc++ doesn't issue mprotect during basic iostream use either.
-/// Real perm changes will land when a binary actually requires them.
-pub fn mprotect_handler(_args: &mut SyscallArgs) -> i64 {
+/// Updates logical VMA protections and hardware flags on resident pages.
+/// COW software state is preserved and writable+executable is rejected.
+pub fn mprotect_handler(args: &mut SyscallArgs) -> i64 {
+    use crate::userland::vm::VmProt;
+    let addr = args.rdi;
+    let length = args.rsi;
+    let prot = args.rdx;
+    if addr & 0xfff != 0 || length == 0 || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        return EINVAL;
+    }
+    if prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0 {
+        return EACCES;
+    }
+    let Some(end) = addr.checked_add(length.div_ceil(0x1000) * 0x1000) else {
+        return EINVAL;
+    };
+    let mut vm_prot = VmProt::NONE;
+    if prot & PROT_READ != 0 {
+        vm_prot = vm_prot.union(VmProt::READ);
+    }
+    if prot & PROT_WRITE != 0 {
+        vm_prot = vm_prot.union(VmProt::WRITE);
+    }
+    if prot & PROT_EXEC != 0 {
+        vm_prot = vm_prot.union(VmProt::EXEC);
+    }
+    let l4 = crate::userland::lifecycle::with_current_process(|process| {
+        let space = process.address_space.as_mut()?;
+        space.vmas_mut().protect(addr, end, vm_prot).ok()?;
+        Some(space.l4_frame())
+    });
+    let Some(l4) = l4 else {
+        return ENOMEM;
+    };
+    crate::mm::memory::with_memory_mapper(|mapper| {
+        let mut page = addr;
+        while page < end {
+            if let Some((frame, mut flags)) = mapper.leaf_info(l4, VirtAddr::new(page)) {
+                flags.remove(PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
+                if vm_prot != VmProt::NONE {
+                    flags.insert(PageTableFlags::USER_ACCESSIBLE);
+                }
+                if vm_prot.contains(VmProt::EXEC) {
+                    flags.remove(PageTableFlags::NO_EXECUTE);
+                } else {
+                    flags.insert(PageTableFlags::NO_EXECUTE);
+                }
+                if vm_prot.contains(VmProt::WRITE) {
+                    if flags.contains(PageTableFlags::BIT_9)
+                        || mapper.frame_refcount(frame).is_some_and(|count| count > 1)
+                    {
+                        flags.insert(PageTableFlags::BIT_9);
+                    } else {
+                        flags.insert(PageTableFlags::WRITABLE);
+                    }
+                }
+                let _ = mapper.set_leaf_flags(l4, VirtAddr::new(page), flags);
+            }
+            page += 0x1000;
+        }
+    });
     0
 }
 
@@ -499,49 +602,79 @@ pub fn mprotect_handler(_args: &mut SyscallArgs) -> i64 {
 
 /// `brk(addr) -> void *`
 ///
-/// `addr == 0` returns the current brk. `addr >= current_brk` grows the
-/// region by mapping new pages from `current_brk` (page-aligned) up to
-/// `addr` (page-aligned). `addr < current_brk` is treated as a no-op:
-/// the milestone does not shrink (no real reclaim path either).
+/// `addr == 0` returns the current break. Growth changes only heap VMA
+/// metadata; shrink releases complete pages and clears the retained
+/// boundary-page tail so regrowth cannot reveal stale bytes.
 pub fn brk_handler(args: &mut SyscallArgs) -> i64 {
+    use crate::userland::vm::{VmProt, Vma, VmaBacking};
     let new_brk = args.rdi;
 
     let cur = crate::userland::lifecycle::with_active_user(|au| au.brk_current);
-    if new_brk == 0 || new_brk <= cur {
+    if new_brk == 0 {
         return cur as i64;
     }
-    if new_brk > USER_BRK_BASE + BRK_MAX_BYTES {
+    let base = crate::userland::lifecycle::with_current_process(|p| p.brk_base);
+    if new_brk < base || new_brk > base + BRK_MAX_BYTES {
         return cur as i64;
     }
-
-    // Pages to map: from the page above the current brk to the page
-    // covering new_brk - 1.
-    let cur_page_end = (cur + 0xFFF) & !0xFFF;
+    let old_page_end = (cur + 0xFFF) & !0xFFF;
     let new_page_end = (new_brk + 0xFFF) & !0xFFF;
-    if new_page_end > cur_page_end {
-        let pages = (new_page_end - cur_page_end) / 0x1000;
-        let map_result = crate::mm::memory::with_memory_mapper(|m| {
-            m.map_user_region(
-                VirtAddr::new(cur_page_end),
-                pages,
-                UserPerms::ReadWrite,
+    // Linux keeps the partially used boundary page resident. Clear the
+    // truncated bytes now so a later byte-granular regrowth cannot expose
+    // stale heap contents from that page.
+    if new_brk < cur {
+        let zero_end = cur.min(new_page_end);
+        if zero_end > new_brk {
+            let zeros = [0u8; 0x1000];
+            if crate::userland::usercopy::copy_to_user(
+                new_brk,
+                &zeros[..(zero_end - new_brk) as usize],
             )
-        });
-        match map_result {
-            Some(Ok(_)) => {}
-            _ => return cur as i64, // mapping failed; brk unchanged
+            .is_err()
+            {
+                return cur as i64;
+            }
         }
-        crate::userland::lifecycle::with_active_user(|au| {
-            if let Some(img) = au.image.as_mut() {
-                img.record_mapping(VirtAddr::new(cur_page_end), pages);
+    }
+    let l4 = crate::userland::lifecycle::with_current_process(|process| {
+        let Some(space) = process.address_space.as_mut() else {
+            return None;
+        };
+        let original = space.vmas().clone();
+        if old_page_end > base {
+            let _ = space.vmas_mut().remove(base, old_page_end);
+        }
+        if new_page_end > base {
+            let vma = Vma::new(
+                base,
+                new_page_end,
+                VmProt::READ.union(VmProt::WRITE),
+                VmaBacking::Heap,
+            )
+            .ok()?;
+            if space.vmas_mut().insert(vma).is_err() {
+                *space.vmas_mut() = original;
+                return None;
+            }
+        }
+        process.brk_current = new_brk;
+        Some(space.l4_frame())
+    });
+    let Some(l4) = l4 else {
+        return cur as i64;
+    };
+    if new_page_end < old_page_end {
+        crate::mm::memory::with_memory_mapper(|mapper| {
+            let mut page = new_page_end;
+            while page < old_page_end {
+                if mapper.leaf_info(l4, VirtAddr::new(page)).is_some() {
+                    let _ = mapper.unmap_page_from(l4, VirtAddr::new(page));
+                }
+                page += 0x1000;
             }
         });
     }
-
-    crate::userland::lifecycle::with_active_user(|au| {
-        au.brk_current = new_brk;
-        au.brk_current as i64
-    })
+    new_brk as i64
 }
 
 // ---------- arch_prctl ----------
@@ -590,16 +723,12 @@ pub fn arch_prctl_handler(args: &mut SyscallArgs) -> i64 {
             0
         }
         ARCH_GET_FS => {
-            if let Err(e) = validate_user_slice(addr, 8) {
-                return e;
-            }
             // Read current FS_BASE via the typed wrapper. Since we set it
             // ourselves, we could mirror it on ActiveUser instead of
             // round-tripping through the MSR — but reading is cheap.
             use x86_64::registers::model_specific::FsBase;
             let cur = FsBase::read().as_u64();
-            unsafe { core::ptr::write_unaligned(addr as *mut u64, cur); }
-            0
+            crate::userland::usercopy::write_unaligned(addr, &cur).map_or_else(|e| e, |_| 0)
         }
         _ => EINVAL,
     }
@@ -654,50 +783,20 @@ pub fn ioctl_handler(args: &mut SyscallArgs) -> i64 {
 
     match request {
         TCGETS => {
-            let size = core::mem::size_of::<crate::userland::tty::Termios>() as u64;
-            if let Err(e) = validate_user_slice(arg, size) {
-                return e;
-            }
             let t = crate::userland::tty::snapshot();
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    &t as *const _ as *const u8,
-                    arg as *mut u8,
-                    size as usize,
-                );
-            }
-            0
+            crate::userland::usercopy::write_unaligned(arg, &t).map_or_else(|e| e, |_| 0)
         }
         TCSETS | TCSETSW | TCSETSF => {
-            let size = core::mem::size_of::<crate::userland::tty::Termios>() as u64;
-            if let Err(e) = validate_user_slice(arg, size) {
-                return e;
-            }
-            let mut t = crate::userland::tty::snapshot();
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    arg as *const u8,
-                    &mut t as *mut _ as *mut u8,
-                    size as usize,
-                );
-            }
+            let t = match crate::userland::usercopy::read_unaligned(arg) {
+                Ok(value) => value,
+                Err(e) => return e,
+            };
             crate::userland::tty::set(t);
             0
         }
         TIOCGWINSZ => {
-            let size = core::mem::size_of::<crate::userland::tty::Winsize>() as u64;
-            if let Err(e) = validate_user_slice(arg, size) {
-                return e;
-            }
             let ws = crate::userland::tty::winsize();
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    &ws as *const _ as *const u8,
-                    arg as *mut u8,
-                    size as usize,
-                );
-            }
-            0
+            crate::userland::usercopy::write_unaligned(arg, &ws).map_or_else(|e| e, |_| 0)
         }
         TIOCGPGRP => ENOTTY,
         TIOCSPGRP => 0,
@@ -746,21 +845,16 @@ pub fn rt_sigaction_handler(args: &mut SyscallArgs) -> i64 {
     });
 
     if oldact_ptr != 0 {
-        let size = core::mem::size_of::<SigAction>() as u64;
-        if let Err(e) = validate_user_slice(oldact_ptr, size) {
+        if let Err(e) = crate::userland::usercopy::write_unaligned(oldact_ptr, &prev) {
             return e;
-        }
-        unsafe {
-            core::ptr::write_unaligned(oldact_ptr as *mut SigAction, prev);
         }
     }
 
     if act_ptr != 0 {
-        let size = core::mem::size_of::<SigAction>() as u64;
-        if let Err(e) = validate_user_slice(act_ptr, size) {
-            return e;
-        }
-        let new_action = unsafe { core::ptr::read_unaligned(act_ptr as *const SigAction) };
+        let new_action = match crate::userland::usercopy::read_unaligned::<SigAction>(act_ptr) {
+            Ok(value) => value,
+            Err(e) => return e,
+        };
         crate::userland::lifecycle::with_current_process(|p| {
             p.signal_state.set_action(signum, new_action);
         });
@@ -775,7 +869,7 @@ pub fn rt_sigaction_handler(args: &mut SyscallArgs) -> i64 {
 /// `set == NULL` means "just query"; `oldset == NULL` means "don't
 /// return previous mask."
 pub fn rt_sigprocmask_handler(args: &mut SyscallArgs) -> i64 {
-    use crate::userland::signal::{SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, SIGKILL, SIGSTOP};
+    use crate::userland::signal::{SIGKILL, SIGSTOP, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK};
     let how = args.rdi as i32;
     let set_ptr = args.rsi;
     let oldset_ptr = args.rdx;
@@ -789,17 +883,16 @@ pub fn rt_sigprocmask_handler(args: &mut SyscallArgs) -> i64 {
     let prev = crate::userland::lifecycle::with_current_process(|p| p.signal_state.blocked);
 
     if oldset_ptr != 0 {
-        if let Err(e) = validate_user_slice(oldset_ptr, 8) {
+        if let Err(e) = crate::userland::usercopy::write_unaligned(oldset_ptr, &prev) {
             return e;
         }
-        unsafe { core::ptr::write_unaligned(oldset_ptr as *mut u64, prev); }
     }
 
     if set_ptr != 0 {
-        if let Err(e) = validate_user_slice(set_ptr, 8) {
-            return e;
-        }
-        let set = unsafe { core::ptr::read_unaligned(set_ptr as *const u64) };
+        let set = match crate::userland::usercopy::read_unaligned::<u64>(set_ptr) {
+            Ok(value) => value,
+            Err(e) => return e,
+        };
         // POSIX: SIGKILL and SIGSTOP can never be blocked. Strip them.
         let kill_stop_mask = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
         let sanitized = set & !kill_stop_mask;
@@ -850,10 +943,10 @@ pub fn rt_sigsuspend_handler(args: &mut SyscallArgs) -> i64 {
     if sigsetsize != 8 {
         return EINVAL;
     }
-    if let Err(e) = validate_user_slice(mask_ptr, 8) {
-        return e;
-    }
-    let mask = unsafe { core::ptr::read_unaligned(mask_ptr as *const u64) };
+    let mask = match crate::userland::usercopy::read_unaligned::<u64>(mask_ptr) {
+        Ok(value) => value,
+        Err(e) => return e,
+    };
     // POSIX: SIGKILL and SIGSTOP can never be blocked. Strip them so
     // the new mask doesn't accidentally swallow a pending KILL/STOP
     // bit during the (zero-duration) suspension window.
@@ -867,10 +960,18 @@ pub fn rt_sigsuspend_handler(args: &mut SyscallArgs) -> i64 {
 
 // ---------- credentials ----------
 
-pub fn getuid_handler(_: &mut SyscallArgs) -> i64 { 0 }
-pub fn getgid_handler(_: &mut SyscallArgs) -> i64 { 0 }
-pub fn geteuid_handler(_: &mut SyscallArgs) -> i64 { 0 }
-pub fn getegid_handler(_: &mut SyscallArgs) -> i64 { 0 }
+pub fn getuid_handler(_: &mut SyscallArgs) -> i64 {
+    0
+}
+pub fn getgid_handler(_: &mut SyscallArgs) -> i64 {
+    0
+}
+pub fn geteuid_handler(_: &mut SyscallArgs) -> i64 {
+    0
+}
+pub fn getegid_handler(_: &mut SyscallArgs) -> i64 {
+    0
+}
 
 /// `getpid() -> pid_t`. Phase 4 PR-A returns the real per-process PID
 /// instead of the previous fixed `1`. PIDs are allocated monotonically
@@ -898,10 +999,10 @@ pub fn getppid_handler(_: &mut SyscallArgs) -> i64 {
 /// This intentionally does not support concurrency between parent and
 /// child — pipelines and `cmd &` need a real scheduler (Phase 5+).
 pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
-    use crate::userland::user_state::UserState;
     use crate::userland::lifecycle::{
         alloc_pid, insert_process, mark_ring3_ready, with_current_process, ExitKind,
     };
+    use crate::userland::user_state::UserState;
 
     // U7: fork now returns immediately to the parent without iretq'ing
     // into the child. The child is inserted into PROCESS_TABLE with a
@@ -921,9 +1022,8 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
     //    registers and got Rust scratch values — the SYSCALL stub now
     //    pushes the user values to known offsets and the reader below
     //    is the only correct path.
-    let saved = unsafe {
-        crate::userland::user_state::read_user_callee_saved(args as *const SyscallArgs)
-    };
+    let saved =
+        unsafe { crate::userland::user_state::read_user_callee_saved(args as *const SyscallArgs) };
 
     // 2. Read the user RIP (post-SYSCALL), RFLAGS, and original user
     //    R12 from the SYSCALL stub's saved-state slots above
@@ -968,10 +1068,12 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
     // 4. Allocate the child PID. Pull parent's L4 frame under one lock,
     //    then build the child Process below.
     let child_pid = alloc_pid();
-    let parent_l4_frame = match with_current_process(|p| {
-        p.address_space.as_ref().map(|a| a.l4_frame())
+    let (parent_l4_frame, parent_vmas) = match with_current_process(|p| {
+        p.address_space
+            .as_ref()
+            .map(|a| (a.l4_frame(), a.vmas().clone()))
     }) {
-        Some(f) => f,
+        Some(state) => state,
         None => {
             crate::debug_warn!("fork(): parent has no AddressSpace (test path?)");
             return ENOSYS;
@@ -981,15 +1083,15 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
     // 5. Eagerly clone the parent's address space (fresh L4 + copy of
     //    every leaf page in PML4[0]). Built on the parent's L4 — we
     //    haven't switched CR3 yet, and we don't intend to.
-    let child_aspace = match crate::userland::address_space::AddressSpace::clone_for_child(
-        parent_l4_frame,
-    ) {
-        Ok(a) => a,
-        Err(e) => {
-            crate::debug_error!("fork(): clone_for_child failed: {:?}", e);
-            return -12; // ENOMEM
-        }
-    };
+    let mut child_aspace =
+        match crate::userland::address_space::AddressSpace::clone_for_child(parent_l4_frame) {
+            Ok(a) => a,
+            Err(e) => {
+                crate::debug_error!("fork(): clone_for_child failed: {:?}", e);
+                return -12; // ENOMEM
+            }
+        };
+    *child_aspace.vmas_mut() = parent_vmas;
 
     // 6. Build the child Process. State pieces (FD table, cwd, brk,
     //    mmap) are cloned by value; address space ownership transfers.
@@ -1000,6 +1102,7 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         exit_kind: ExitKind::None,
         exit_code: 0,
         brk_current: parent.brk_current,
+        brk_base: parent.brk_base,
         mmap_next: parent.mmap_next,
         fd_table: parent.fd_table.clone(),
         cwd: parent.cwd.clone(),
@@ -1057,7 +1160,7 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
 
 pub fn vfork_handler(args: &mut SyscallArgs) -> i64 {
     // vfork in real Linux runs the child sharing parent's memory until
-    // exec/exit. We don't support that; route to fork (full eager copy).
+    // exec/exit. We don't support that; route to ordinary COW fork.
     fork_handler(args)
 }
 
@@ -1083,7 +1186,7 @@ pub fn clone_handler(_args: &mut SyscallArgs) -> i64 {
 /// On success: does not return (control flows to ring 3 of the new
 /// program). On failure: returns `-errno`.
 pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
-    use crate::mm::paging::{USER_BRK_BASE, USER_MMAP_BASE};
+    use crate::mm::paging::USER_MMAP_BASE;
     use crate::userland::abi::{set_user_va_bounds, UserVaBounds};
     use crate::userland::path::copy_user_cstr_array;
     use crate::userland::user_state::UserState;
@@ -1139,15 +1242,11 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     // 2. Read the new binary off the filesystem. Use the existing
     //    File API; this is the same path the `run` shell command
     //    takes for top-level launches.
-    const MAX_USER_BINARY_BYTES: u64 = 16 * 1024 * 1024;
-    let bytes = match crate::fs::file_handle::File::open_read(&resolved_path) {
+    let (exec_file, bytes) = match crate::fs::file_handle::File::open_read(&resolved_path) {
         Ok(file) => {
-            if file.size() > MAX_USER_BINARY_BYTES {
-                return ENOSYS; // -E2BIG would be more accurate
-            }
             match file.read_to_vec() {
-                Ok(v) => v,
-                Err(ref e) => return map_file_err(e),
+            Ok(v) => (file, v),
+            Err(ref e) => return map_file_err(e),
             }
         }
         Err(ref e) => return map_file_err(e),
@@ -1155,50 +1254,57 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
 
     // 3. Build a fresh AddressSpace for the new image. If this fails,
     //    we haven't touched the old state yet — return cleanly.
-    let new_aspace = match crate::userland::address_space::AddressSpace::new() {
+    let mut new_aspace = match crate::userland::address_space::AddressSpace::new() {
         Ok(a) => a,
         Err(_) => return -12, // ENOMEM
     };
 
-    // 4. Drop the OLD image while the OLD aspace is still active so
-    //    the recorded mappings can be unmapped from the right L4.
-    //    UserImage::Drop walks its mapping list and calls
-    //    `unmap_user_region`, which targets the active CR3.
-    let old_image = crate::userland::lifecycle::with_current_process(|p| p.image.take());
-    drop(old_image);
-
-    // 5. Take the OLD aspace out of the Process. Don't drop yet —
-    //    we keep it alive in case load_elf below fails so we can
-    //    roll back to it and return -errno from execve.
-    let old_aspace =
-        crate::userland::lifecycle::with_current_process(|p| p.address_space.take());
+    // 4. Detach, but retain, the complete old VM transaction. Nothing in
+    // the old image or page tables is modified until the replacement has
+    // loaded, its stack has been built, and its VMA set is complete.
+    let (old_image, old_aspace) = crate::userland::lifecycle::with_current_process(|p| {
+        (p.image.take(), p.address_space.take())
+    });
 
     // 6. Activate the new L4 and load the new ELF into it.
     // SAFETY: kernel half copied from kernel L4; the kernel code
     // post-CR3-write is still mapped.
-    unsafe { new_aspace.activate(); }
+    unsafe {
+        new_aspace.activate();
+    }
 
-    let image = match crate::userland::loader::load_elf(&bytes) {
+    let mut image = match crate::userland::loader::load_elf_file(&bytes, exec_file) {
         Ok(i) => i,
         Err(e) => {
-            // Load failed. Roll back to the old aspace if we still
-            // have it. The old image is already gone (step 4), so
-            // there's no clean rollback for the user pages — but the
-            // process can at least reach `cooperative_exit` cleanly.
             crate::debug_error!("execve(): load_elf failed: {:?}", e);
             if let Some(old) = old_aspace.as_ref() {
-                unsafe { old.activate(); }
+                unsafe {
+                    old.activate();
+                }
             }
             crate::userland::lifecycle::with_current_process(|p| {
+                p.image = old_image;
                 p.address_space = old_aspace;
             });
             return EINVAL;
         }
     };
 
-    // 7. Commit: drop the old aspace (frame leaks under the bump
-    //    allocator but that's pre-existing).
-    drop(old_aspace);
+    if new_aspace.initialize_vmas_from_image(&image).is_err() {
+        // UserImage's construction rollback targets the currently active new
+        // L4. Drop it before switching back to the old transaction.
+        drop(image);
+        if let Some(old) = old_aspace.as_ref() {
+            unsafe {
+                old.activate();
+            }
+        }
+        crate::userland::lifecycle::with_current_process(|p| {
+            p.image = old_image;
+            p.address_space = old_aspace;
+        });
+        return ENOMEM;
+    }
 
     // 8. Extract image bits we need for the initial stack and the
     //    iretq frame, before moving image onto the Process.
@@ -1215,6 +1321,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     // AddressSpace (bump allocator never reclaims anyway).
     let stack_initial_bottom = image.stack_initial_bottom;
     let stack_max_growth_floor = image.stack_max_growth_floor;
+    let brk_base = image.brk_base;
 
     // 9. Build the new initial stack with the supplied argv/envp.
     //    `argv[0]` is the program name; if the user passed an empty
@@ -1231,7 +1338,12 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         argv_refs[0] = applet;
     }
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
-    let user_rsp = super::build_initial_stack(stack_top, &phdr_bytes, e_phnum, &argv_refs, &envp_refs);
+    let user_rsp =
+        super::build_initial_stack(stack_top, &phdr_bytes, e_phnum, &argv_refs, &envp_refs);
+
+    // From commit onward the targeted AddressSpace walker is the sole page
+    // owner; UserImage remains only executable metadata.
+    image.transfer_mapping_ownership();
 
     // 10. Move new image and aspace onto the Process; reset brk/mmap
     //     anchors and exit info. Retain PID, parent_pid, FD table,
@@ -1239,7 +1351,8 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     crate::userland::lifecycle::with_current_process(|p| {
         p.image = Some(image);
         p.address_space = Some(new_aspace);
-        p.brk_current = USER_BRK_BASE;
+        p.brk_current = brk_base;
+        p.brk_base = brk_base;
         p.mmap_next = USER_MMAP_BASE;
         p.exit_kind = crate::userland::lifecycle::ExitKind::None;
         p.exit_code = 0;
@@ -1264,6 +1377,8 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
             crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES,
         );
     });
+    drop(old_image);
+    drop(old_aspace);
     set_user_va_bounds(bounds);
     // Phase 3 termios: a freshly exec'd process gets a default tty.
     crate::userland::tty::install_default();
@@ -1284,9 +1399,19 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     let user_ss = crate::arch::x86_64::gdt::selectors().user_data.0 as u64;
     let state = UserState {
         rax: 0,
-        rdi: 0, rsi: 0, rdx: 0, r10: 0, r8: 0, r9: 0,
-        rbx: 0, rbp: 0, rsp: user_rsp,
-        r12: 0, r13: 0, r14: 0, r15: 0,
+        rdi: 0,
+        rsi: 0,
+        rdx: 0,
+        r10: 0,
+        r8: 0,
+        r9: 0,
+        rbx: 0,
+        rbp: 0,
+        rsp: user_rsp,
+        r12: 0,
+        r13: 0,
+        r14: 0,
+        r15: 0,
         rip: entry,
         rflags: 0x202,
     };
@@ -1378,9 +1503,14 @@ pub fn rt_sigreturn_handler(_args: &mut SyscallArgs) -> i64 {
     // we wrote the saved UserState (128 bytes), immediately following
     // the (now popped) sa_restorer pointer. The pre-delivery blocked
     // mask sits at +128; signum at +136 (not needed on return).
-    let saved: UserState = unsafe { core::ptr::read_unaligned(user_rsp as *const UserState) };
-    let saved_blocked: u64 =
-        unsafe { core::ptr::read_unaligned((user_rsp + 128) as *const u64) };
+    let saved = match crate::userland::usercopy::read_unaligned::<UserState>(user_rsp) {
+        Ok(saved) => saved,
+        Err(e) => return e,
+    };
+    let saved_blocked = match crate::userland::usercopy::read_unaligned::<u64>(user_rsp + 128) {
+        Ok(mask) => mask,
+        Err(e) => return e,
+    };
 
     // POSIX: restore the pre-delivery mask before resuming the
     // interrupted instruction. Without this, sa_mask (and the
@@ -1453,22 +1583,27 @@ unsafe fn deliver_signal(
     let p = args as *const SyscallArgs as *const u64;
     let user_rip = core::ptr::read(p.add(7));
     let user_rflags = core::ptr::read(p.add(8));
-    let saved_regs = crate::userland::user_state::read_user_callee_saved(
-        args as *const SyscallArgs,
-    );
-    let user_r12_orig = crate::userland::user_state::read_user_r12(
-        args as *const SyscallArgs,
-    );
+    let saved_regs =
+        crate::userland::user_state::read_user_callee_saved(args as *const SyscallArgs);
+    let user_r12_orig = crate::userland::user_state::read_user_r12(args as *const SyscallArgs);
     let user_rsp = saved_regs.r12_register; // = user RSP from gs:[8]
     let saved = UserState {
         rax: syscall_ret as u64,
-        rdi: args.rdi, rsi: args.rsi, rdx: args.rdx,
-        r10: args.r10, r8: args.r8, r9: args.r9,
-        rbx: saved_regs.rbx, rbp: saved_regs.rbp,
+        rdi: args.rdi,
+        rsi: args.rsi,
+        rdx: args.rdx,
+        r10: args.r10,
+        r8: args.r8,
+        r9: args.r9,
+        rbx: saved_regs.rbx,
+        rbp: saved_regs.rbp,
         rsp: user_rsp,
         r12: user_r12_orig,
-        r13: saved_regs.r13, r14: saved_regs.r14, r15: saved_regs.r15,
-        rip: user_rip, rflags: user_rflags,
+        r13: saved_regs.r13,
+        r14: saved_regs.r14,
+        r15: saved_regs.r15,
+        rip: user_rip,
+        rflags: user_rflags,
     };
 
     // 2. Allocate space on the user stack, 16-aligned. 152 bytes for
@@ -1482,10 +1617,25 @@ unsafe fn deliver_signal(
     // 3. Write the frame contents. We're running with CR3 = the user
     //    process's L4, so user-VA writes from kernel mode go to the
     //    right pages.
-    *(frame_addr as *mut u64) = action.sa_restorer;
-    core::ptr::write_unaligned((frame_addr + 8) as *mut UserState, saved);
-    *((frame_addr + 8 + 128) as *mut u64) = saved_blocked;
-    *((frame_addr + 8 + 128 + 8) as *mut u64) = signum as u64;
+    let frame_write = (|| -> Result<(), i64> {
+        crate::userland::usercopy::write_unaligned(frame_addr, &action.sa_restorer)?;
+        crate::userland::usercopy::write_unaligned(frame_addr + 8, &saved)?;
+        crate::userland::usercopy::write_unaligned(frame_addr + 8 + 128, &saved_blocked)?;
+        crate::userland::usercopy::write_unaligned(
+            frame_addr + 8 + 128 + 8,
+            &(signum as u64),
+        )
+    })();
+    if frame_write.is_err() {
+        crate::userland::lifecycle::cleanup_user_process(
+            crate::userland::lifecycle::AbnormalExit {
+                vector: 14,
+                error_code: Some(0x6),
+                fault_addr: Some(VirtAddr::new(frame_addr)),
+                fault_rip: VirtAddr::new(user_rip),
+            },
+        );
+    }
 
     crate::debug_info!(
         "deliver_signal: sig={} handler={:#x} restorer={:#x} frame={:#x} saved_blocked={:#x}",
@@ -1502,10 +1652,16 @@ unsafe fn deliver_signal(
         rdi: signum as u64, // handler(int sig)
         rsi: 0,             // siginfo_t* (SA_SIGINFO not supported)
         rdx: 0,             // ucontext_t*
-        r10: 0, r8: 0, r9: 0,
-        rbx: 0, rbp: 0,
+        r10: 0,
+        r8: 0,
+        r9: 0,
+        rbx: 0,
+        rbp: 0,
         rsp: frame_addr,
-        r12: 0, r13: 0, r14: 0, r15: 0,
+        r12: 0,
+        r13: 0,
+        r14: 0,
+        r15: 0,
         rip: action.sa_handler,
         rflags: 0x202,
     };
@@ -1590,9 +1746,6 @@ fn pipe2_common(fds_ptr: u64, flags: u32) -> i64 {
     if fds_ptr == 0 {
         return EFAULT;
     }
-    if let Err(e) = validate_user_slice(fds_ptr, 8) {
-        return e;
-    }
     let cloexec = (flags & O_CLOEXEC) != 0;
 
     let pipe = Pipe::new();
@@ -1615,9 +1768,15 @@ fn pipe2_common(fds_ptr: u64, flags: u32) -> i64 {
     };
 
     // Write the fd pair into the user's int[2].
-    unsafe {
-        core::ptr::write_unaligned(fds_ptr as *mut i32, read_fd);
-        core::ptr::write_unaligned((fds_ptr + 4) as *mut i32, write_fd);
+    if let Err(e) = crate::userland::usercopy::write_unaligned(fds_ptr, &read_fd) {
+        let _ = with_fd_table_mut(|t| t.close(read_fd));
+        let _ = with_fd_table_mut(|t| t.close(write_fd));
+        return e;
+    }
+    if let Err(e) = crate::userland::usercopy::write_unaligned(fds_ptr + 4, &write_fd) {
+        let _ = with_fd_table_mut(|t| t.close(read_fd));
+        let _ = with_fd_table_mut(|t| t.close(write_fd));
+        return e;
     }
     0
 }
@@ -1655,9 +1814,6 @@ pub fn wait4_handler(args: &mut SyscallArgs) -> i64 {
         crate::userland::lifecycle::reap_zombie(target, me)
     {
         if status_ptr != 0 {
-            if let Err(e) = validate_user_slice(status_ptr, 4) {
-                return e;
-            }
             // POSIX wait status encoding:
             //   Exited normally: bits 8..15 = exit code, bits 0..7 = 0
             //                    → WIFEXITED == true
@@ -1667,7 +1823,9 @@ pub fn wait4_handler(args: &mut SyscallArgs) -> i64 {
                 Some(sig) => (sig as u32) & 0x7F,
                 None => ((code as u32) & 0xFF) << 8,
             };
-            unsafe { core::ptr::write(status_ptr as *mut u32, status); }
+            if let Err(e) = crate::userland::usercopy::write_unaligned(status_ptr, &status) {
+                return e;
+            }
         }
         return pid as i64;
     }
@@ -1746,7 +1904,10 @@ pub fn exit_group_handler(args: &mut SyscallArgs) -> i64 {
             code,
         );
     } else {
-        crate::debug_info!("USERLAND: exit_group({}) — long-jumping to run command", code);
+        crate::debug_info!(
+            "USERLAND: exit_group({}) — long-jumping to run command",
+            code
+        );
     }
     crate::userland::lifecycle::notify_parent_of_exit(pid, parent_pid, code);
     crate::userland::lifecycle::cooperative_exit(code);
@@ -1974,11 +2135,9 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
     // argv[0] see something coherent.
     use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir};
     if is_bin_dir(&path) {
-        return with_fd_table_mut(|t| {
-            t.alloc(FdSlot::VirtualBinDir { cursor: 0, cloexec })
-        })
-        .map(|fd| fd as i64)
-        .unwrap_or(EMFILE);
+        return with_fd_table_mut(|t| t.alloc(FdSlot::VirtualBinDir { cursor: 0, cloexec }))
+            .map(|fd| fd as i64)
+            .unwrap_or(EMFILE);
     }
     if let Some((host_path, _)) = apply_bin_rewrite(&path) {
         let handle = match crate::fs::file_handle::File::open_read(host_path) {
@@ -2042,14 +2201,9 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
         Ok(h) => h,
         Err(ref e) => return map_file_err(e),
     };
-    with_fd_table_mut(|t| {
-        t.alloc(FdSlot::File {
-            handle,
-            cloexec,
-        })
-    })
-    .map(|fd| fd as i64)
-    .unwrap_or(EMFILE)
+    with_fd_table_mut(|t| t.alloc(FdSlot::File { handle, cloexec }))
+        .map(|fd| fd as i64)
+        .unwrap_or(EMFILE)
 }
 
 /// `close(fd) -> int`. Drops the `Arc<File>` (which closes the underlying
@@ -2347,9 +2501,6 @@ pub fn pread64_handler(args: &mut SyscallArgs) -> i64 {
     if len > WRITE_MAX_LEN as u64 {
         return EFAULT;
     }
-    if let Err(e) = validate_user_slice(ptr, len) {
-        return e;
-    }
     if len == 0 {
         return 0;
     }
@@ -2366,8 +2517,8 @@ pub fn pread64_handler(args: &mut SyscallArgs) -> i64 {
         }
     };
     let _ = handle.seek(prev);
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr as *mut u8, n);
+    if let Err(e) = crate::userland::usercopy::copy_to_user(ptr, &buf[..n]) {
+        return e;
     }
     n as i64
 }
@@ -2385,18 +2536,18 @@ pub fn pwrite64_handler(args: &mut SyscallArgs) -> i64 {
     if len > WRITE_MAX_LEN as u64 {
         return EFAULT;
     }
-    if let Err(e) = validate_user_slice(ptr, len) {
-        return e;
-    }
     if len == 0 {
         return 0;
     }
-    let slice = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let mut bytes = alloc::vec![0u8; len as usize];
+    if let Err(e) = crate::userland::usercopy::copy_from_user(&mut bytes, ptr) {
+        return e;
+    }
     let prev = handle.position();
     if let Err(ref e) = handle.seek(offset) {
         return map_file_err(e);
     }
-    let n = match handle.write(slice) {
+    let n = match handle.write(&bytes) {
         Ok(n) => n,
         Err(ref e) => {
             let _ = handle.seek(prev);
@@ -2453,10 +2604,10 @@ pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
 
     let saved_pos = in_handle.position();
     if offset_ptr != 0 {
-        if let Err(e) = validate_user_slice(offset_ptr, 8) {
-            return e;
-        }
-        let off = unsafe { core::ptr::read_unaligned(offset_ptr as *const u64) };
+        let off = match crate::userland::usercopy::read_unaligned::<u64>(offset_ptr) {
+            Ok(off) => off,
+            Err(e) => return e,
+        };
         if let Err(ref e) = in_handle.seek(off) {
             return map_file_err(e);
         }
@@ -2512,8 +2663,8 @@ pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
     if offset_ptr != 0 {
         let new_off = in_handle.position();
         let _ = in_handle.seek(saved_pos);
-        unsafe {
-            core::ptr::write_unaligned(offset_ptr as *mut u64, new_off);
+        if let Err(e) = crate::userland::usercopy::write_unaligned(offset_ptr, &new_off) {
+            return if total > 0 { total as i64 } else { e };
         }
     }
 
@@ -2645,11 +2796,18 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
 
 // ---------- stat / access ----------
 
-fn fill_stat(meta: &crate::fs::filesystem::DirectoryEntry, size_override: Option<u64>) -> LinuxStat {
+fn fill_stat(
+    meta: &crate::fs::filesystem::DirectoryEntry,
+    size_override: Option<u64>,
+) -> LinuxStat {
     use crate::fs::filesystem::FileType;
     let is_dir = meta.file_type == FileType::Directory;
     let mut st = LinuxStat::default();
-    st.st_mode = if is_dir { S_IFDIR | PERM_RX_ALL } else { S_IFREG | PERM_READ_ALL };
+    st.st_mode = if is_dir {
+        S_IFDIR | PERM_RX_ALL
+    } else {
+        S_IFREG | PERM_READ_ALL
+    };
     st.st_nlink = if is_dir { 2 } else { 1 };
     st.st_uid = 0;
     st.st_gid = 0;
@@ -2660,18 +2818,7 @@ fn fill_stat(meta: &crate::fs::filesystem::DirectoryEntry, size_override: Option
 }
 
 fn write_stat(out_ptr: u64, st: &LinuxStat) -> i64 {
-    let size = core::mem::size_of::<LinuxStat>() as u64;
-    if let Err(e) = validate_user_slice(out_ptr, size) {
-        return e;
-    }
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            st as *const LinuxStat as *const u8,
-            out_ptr as *mut u8,
-            size as usize,
-        );
-    }
-    0
+    crate::userland::usercopy::write_unaligned(out_ptr, st).map_or_else(|e| e, |_| 0)
 }
 
 pub fn stat_handler(args: &mut SyscallArgs) -> i64 {
@@ -2870,12 +3017,10 @@ pub fn getcwd_handler(args: &mut SyscallArgs) -> i64 {
     if size < needed {
         return ERANGE;
     }
-    if let Err(e) = validate_user_slice(buf, needed) {
+    let mut bytes = cwd.into_bytes();
+    bytes.push(0);
+    if let Err(e) = crate::userland::usercopy::copy_to_user(buf, &bytes) {
         return e;
-    }
-    unsafe {
-        core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf as *mut u8, cwd.len());
-        *((buf + cwd.len() as u64) as *mut u8) = 0;
     }
     needed as i64
 }
@@ -2941,22 +3086,12 @@ pub fn clock_gettime_handler(args: &mut SyscallArgs) -> i64 {
     if clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC {
         return EINVAL;
     }
-    if let Err(e) = validate_user_slice(ts_ptr, core::mem::size_of::<LinuxTimespec>() as u64) {
-        return e;
-    }
     let ns = monotonic_ns();
     let ts = LinuxTimespec {
         tv_sec: (ns / 1_000_000_000) as i64,
         tv_nsec: (ns % 1_000_000_000) as i64,
     };
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &ts as *const LinuxTimespec as *const u8,
-            ts_ptr as *mut u8,
-            core::mem::size_of::<LinuxTimespec>(),
-        );
-    }
-    0
+    crate::userland::usercopy::write_unaligned(ts_ptr, &ts).map_or_else(|e| e, |_| 0)
 }
 
 pub fn gettimeofday_handler(args: &mut SyscallArgs) -> i64 {
@@ -2965,22 +3100,12 @@ pub fn gettimeofday_handler(args: &mut SyscallArgs) -> i64 {
     if tv_ptr == 0 {
         return 0;
     }
-    if let Err(e) = validate_user_slice(tv_ptr, core::mem::size_of::<LinuxTimeval>() as u64) {
-        return e;
-    }
     let ns = monotonic_ns();
     let tv = LinuxTimeval {
         tv_sec: (ns / 1_000_000_000) as i64,
         tv_usec: ((ns % 1_000_000_000) / 1_000) as i64,
     };
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &tv as *const LinuxTimeval as *const u8,
-            tv_ptr as *mut u8,
-            core::mem::size_of::<LinuxTimeval>(),
-        );
-    }
-    0
+    crate::userland::usercopy::write_unaligned(tv_ptr, &tv).map_or_else(|e| e, |_| 0)
 }
 
 /// `getrandom(buf, len, flags) -> ssize_t`. Tiny xorshift64 seeded from
@@ -2996,9 +3121,7 @@ pub fn getrandom_handler(args: &mut SyscallArgs) -> i64 {
         return 0;
     }
     let cap = core::cmp::min(len, 4096);
-    if let Err(e) = validate_user_slice(buf, cap) {
-        return e;
-    }
+    let mut bytes = alloc::vec![0u8; cap as usize];
     // xorshift64* — small, fast, deterministic enough for libc seed needs.
     let mut state: u64 = monotonic_ns() ^ 0x9E37_79B9_7F4A_7C15;
     if state == 0 {
@@ -3009,11 +3132,9 @@ pub fn getrandom_handler(args: &mut SyscallArgs) -> i64 {
         state ^= state >> 7;
         state ^= state << 17;
         let byte = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8;
-        unsafe {
-            *((buf + i) as *mut u8) = byte;
-        }
+        bytes[i as usize] = byte;
     }
-    cap as i64
+    crate::userland::usercopy::copy_to_user(buf, &bytes).map_or_else(|e| e, |_| cap as i64)
 }
 
 #[repr(C)]
@@ -3141,10 +3262,10 @@ fn getdents64_virtual_bin(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
             *c = cursor;
         }
     });
-    unsafe {
-        core::ptr::copy_nonoverlapping(staging.as_ptr(), dirp as *mut u8, staging.len());
-    }
-    Some(staging.len() as i64)
+    Some(
+        crate::userland::usercopy::copy_to_user(dirp, &staging)
+            .map_or_else(|e| e, |_| staging.len() as i64),
+    )
 }
 
 pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
@@ -3256,10 +3377,8 @@ pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
             *c = cursor;
         }
     });
-    unsafe {
-        core::ptr::copy_nonoverlapping(staging.as_ptr(), dirp as *mut u8, staging.len());
-    }
-    staging.len() as i64
+    crate::userland::usercopy::copy_to_user(dirp, &staging)
+        .map_or_else(|e| e, |_| staging.len() as i64)
 }
 
 pub fn uname_handler(args: &mut SyscallArgs) -> i64 {
@@ -3282,14 +3401,7 @@ pub fn uname_handler(args: &mut SyscallArgs) -> i64 {
     pack_utsname_field(&mut u.version, "AgenticOS phase-2");
     pack_utsname_field(&mut u.machine, "x86_64");
     pack_utsname_field(&mut u.domainname, "(none)");
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &u as *const LinuxUtsname as *const u8,
-            out_ptr as *mut u8,
-            size as usize,
-        );
-    }
-    0
+    crate::userland::usercopy::write_unaligned(out_ptr, &u).map_or_else(|e| e, |_| 0)
 }
 
 // ---------- U3: musl-init / zsh-startup syscalls ----------
@@ -3363,12 +3475,13 @@ fn poll_common(fds_ptr: u64, nfds: u64) -> i64 {
     if let Err(e) = validate_user_slice(fds_ptr, bytes) {
         return e;
     }
-    let n = nfds as usize;
-    let slice = unsafe {
-        core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, n)
-    };
     let mut ready = 0i64;
-    for entry in slice.iter_mut() {
+    for index in 0..nfds {
+        let address = fds_ptr + index * core::mem::size_of::<PollFd>() as u64;
+        let mut entry = match crate::userland::usercopy::read_unaligned::<PollFd>(address) {
+            Ok(entry) => entry,
+            Err(e) => return e,
+        };
         let want = entry.events;
         let revents = match with_fd_slot(entry.fd) {
             Some(_) => want & (POLLIN | POLLOUT), // mirror requested bits as ready
@@ -3377,6 +3490,9 @@ fn poll_common(fds_ptr: u64, nfds: u64) -> i64 {
         entry.revents = revents;
         if revents != 0 {
             ready += 1;
+        }
+        if let Err(e) = crate::userland::usercopy::write_unaligned(address, &entry) {
+            return e;
         }
     }
     ready
@@ -3449,10 +3565,8 @@ fn readlink_common(path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> i64 {
     };
     let bytes = target.as_bytes();
     let n = core::cmp::min(bytes.len(), bufsiz as usize);
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr as *mut u8, n);
-    }
-    n as i64
+    crate::userland::usercopy::copy_to_user(buf_ptr, &bytes[..n])
+        .map_or_else(|e| e, |_| n as i64)
 }
 
 /// Inline minimal procfs: resolve `/proc/self/exe` and `/proc/self/fd/N`
@@ -3520,19 +3634,11 @@ pub fn prlimit64_handler(args: &mut SyscallArgs) -> i64 {
 }
 
 fn write_rlim_infinity(out_ptr: u64) -> i64 {
-    let size = core::mem::size_of::<LinuxRlimit>() as u64;
-    if let Err(e) = validate_user_slice(out_ptr, size) {
-        return e;
-    }
-    let r = LinuxRlimit { rlim_cur: RLIM_INFINITY, rlim_max: RLIM_INFINITY };
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &r as *const LinuxRlimit as *const u8,
-            out_ptr as *mut u8,
-            size as usize,
-        );
-    }
-    0
+    let r = LinuxRlimit {
+        rlim_cur: RLIM_INFINITY,
+        rlim_max: RLIM_INFINITY,
+    };
+    crate::userland::usercopy::write_unaligned(out_ptr, &r).map_or_else(|e| e, |_| 0)
 }
 
 /// Linux `struct rusage` layout (x86-64): two `timeval` pairs followed by
@@ -3579,19 +3685,8 @@ pub fn getrusage_handler(args: &mut SyscallArgs) -> i64 {
     if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
         return EINVAL;
     }
-    let size = core::mem::size_of::<LinuxRusage>() as u64;
-    if let Err(e) = validate_user_slice(out_ptr, size) {
-        return e;
-    }
     let zero = LinuxRusage::default();
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &zero as *const LinuxRusage as *const u8,
-            out_ptr as *mut u8,
-            size as usize,
-        );
-    }
-    0
+    crate::userland::usercopy::write_unaligned(out_ptr, &zero).map_or_else(|e| e, |_| 0)
 }
 
 /// Linux `struct itimerval` (matches musl's layout: two `timeval` pairs,
@@ -3617,19 +3712,8 @@ pub fn setitimer_handler(args: &mut SyscallArgs) -> i64 {
     if old_ptr == 0 {
         return 0;
     }
-    let size = core::mem::size_of::<LinuxItimerval>() as u64;
-    if let Err(e) = validate_user_slice(old_ptr, size) {
-        return e;
-    }
     let zero = LinuxItimerval::default();
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &zero as *const LinuxItimerval as *const u8,
-            old_ptr as *mut u8,
-            size as usize,
-        );
-    }
-    0
+    crate::userland::usercopy::write_unaligned(old_ptr, &zero).map_or_else(|e| e, |_| 0)
 }
 
 /// `nanosleep(*req: *const timespec, *rem: *mut timespec) -> int`
@@ -3644,19 +3728,8 @@ pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
     if rem_ptr == 0 {
         return 0;
     }
-    let size = core::mem::size_of::<LinuxTimespec>() as u64;
-    if let Err(e) = validate_user_slice(rem_ptr, size) {
-        return e;
-    }
     let zero = LinuxTimespec::default();
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &zero as *const LinuxTimespec as *const u8,
-            rem_ptr as *mut u8,
-            size as usize,
-        );
-    }
-    0
+    crate::userland::usercopy::write_unaligned(rem_ptr, &zero).map_or_else(|e| e, |_| 0)
 }
 
 /// AgenticOS-internal syscall `gui_launch(name_ptr, name_len) -> 0 | -errno`.
@@ -3690,15 +3763,10 @@ pub fn gui_launch_handler(args: &mut SyscallArgs) -> i64 {
         crate::debug_warn!("[gui_launch] EINVAL: name_len={} out of range", name_len);
         return EINVAL;
     }
-    if let Err(e) = validate_user_slice(name_ptr, name_len) {
-        crate::debug_warn!("[gui_launch] validate_user_slice failed: errno={}", e);
+    let mut bytes = alloc::vec![0u8; name_len as usize];
+    if let Err(e) = crate::userland::usercopy::copy_from_user(&mut bytes, name_ptr) {
+        crate::debug_warn!("[gui_launch] user copy failed: errno={}", e);
         return e;
-    }
-
-    let mut bytes = alloc::vec::Vec::with_capacity(name_len as usize);
-    for i in 0..name_len {
-        let b = unsafe { core::ptr::read_volatile((name_ptr + i) as *const u8) };
-        bytes.push(b);
     }
     let name = match core::str::from_utf8(&bytes) {
         Ok(s) => s,

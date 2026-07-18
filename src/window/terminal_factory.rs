@@ -188,12 +188,26 @@ pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
 
 /// FAT path the kernel loads when launching the default shell. Staged
 /// from `userland/prebuilt/ZSH.ELF` by `build.sh` / `test.sh`.
-const ZSH_HOST_PATH: &str = "/host/ZSH.ELF";
+pub(crate) const ZSH_HOST_PATH: &str = "/host/ZSH.ELF";
+
+/// Environment used by every default interactive terminal and by the zsh
+/// launch regression. Keeping one shared profile prevents the test path from
+/// silently exercising a smaller initial stack than the desktop path.
+pub(crate) const TERMINAL_SHELL_ENV: [&str; 8] = [
+    "PATH=/bin:/host",
+    "HOME=/root",
+    "USER=root",
+    "LOGNAME=root",
+    "SHELL=/bin/zsh",
+    "TERM=xterm-256color",
+    "COLORTERM=truecolor",
+    "LANG=C",
+];
 
 /// Spawn a kernel-side process whose entry function loads
 /// `/host/ZSH.ELF` and enters ring 3 with stdio bound to `terminal_id`.
-/// The kernel process blocks for the entire zsh session; on exit the
-/// terminal window is closed.
+/// The kernel process blocks for the entire zsh session; on exit the terminal
+/// remains open so its diagnostic banner stays visible.
 fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
     crate::process::spawn_process(
         alloc::string::String::from("zsh"),
@@ -212,18 +226,11 @@ fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
             // entry. COLORTERM=truecolor unlocks 24-bit-color code
             // paths in modern programs.
             let argv = [ZSH_HOST_PATH];
-            let envp: [&str; 8] = [
-                "PATH=/bin:/host",
-                "HOME=/root",
-                "USER=root",
-                "LOGNAME=root",
-                "SHELL=/bin/zsh",
-                "TERM=xterm-256color",
-                "COLORTERM=truecolor",
-                "LANG=C",
-            ];
-
-            match crate::userland::launcher::launch_user_binary(ZSH_HOST_PATH, &argv, &envp) {
+            match crate::userland::launcher::launch_user_binary(
+                ZSH_HOST_PATH,
+                &argv,
+                &TERMINAL_SHELL_ENV,
+            ) {
                 Ok((kind, code)) => {
                     let msg = alloc::format!(
                         "[zsh exited: kind={:?}, code={}]",

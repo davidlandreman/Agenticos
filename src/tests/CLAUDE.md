@@ -6,6 +6,7 @@ This folder holds in-kernel test modules that run under QEMU when the kernel is 
 
 - `basic.rs` — sanity tests.
 - `memory.rs` — memory subsystem tests.
+- `vm.rs` — VMA ordering, splitting, protection coverage, gap reuse, and reserved-hole tests.
 - `heap.rs` — heap allocator and dynamic allocation tests.
 - `arc.rs` — `Arc` / `Weak` reference counting tests.
 - `display.rs` — display and graphics tests.

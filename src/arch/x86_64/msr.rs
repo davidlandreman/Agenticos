@@ -13,19 +13,21 @@
 // `init_gs_base` per AP at bringup; the per-CPU struct address would also
 // have to come from a per-AP allocation rather than a single `static mut`.
 
-use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{
     Efer, EferFlags, FsBase, GsBase, KernelGsBase, LStar, SFMask, Star,
 };
 use x86_64::registers::rflags::RFlags;
 use x86_64::structures::gdt::SegmentSelector;
+use x86_64::VirtAddr;
 
-/// Enable `EFER.SCE` so the `syscall` instruction does not raise `#UD`.
+/// Enable SYSCALL and hardware no-execute page protection.
 ///
 /// Must run on the executing CPU before any user code can issue `syscall`.
 pub fn enable_syscall_extensions() {
     unsafe {
-        Efer::update(|flags| flags.insert(EferFlags::SYSTEM_CALL_EXTENSIONS));
+        Efer::update(|flags| {
+            flags.insert(EferFlags::SYSTEM_CALL_EXTENSIONS | EferFlags::NO_EXECUTE_ENABLE)
+        });
     }
 }
 

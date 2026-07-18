@@ -1,21 +1,31 @@
+use super::frame_allocator::BootInfoFrameAllocator;
+use crate::{debug_error, debug_info, debug_trace};
 use alloc::vec::Vec;
 use bootloader_api::info::MemoryRegions;
 use x86_64::{
     structures::paging::{
-        page_table::PageTableLevel,
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB,
-        PageTableFlags, mapper::MapToError, mapper::UnmapError, Translate,
+        mapper::MapToError, page_table::PageTableLevel, FrameAllocator, Mapper, OffsetPageTable,
+        Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
     },
-    VirtAddr, PhysAddr,
+    PhysAddr, VirtAddr,
 };
-use crate::{debug_info, debug_error, debug_trace};
-use super::frame_allocator::BootInfoFrameAllocator;
 
 /// Base virtual address where a static non-PIE user binary is loaded.
 pub const USER_LOAD_BASE: u64 = 0x0000_0000_0040_0000;
 
+/// Exclusive ceiling of canonical lower-half user virtual memory.
+pub const USER_CANONICAL_END: u64 = 0x0000_8000_0000_0000;
+
+/// Lower-half PML4 entries that remain kernel-owned in every address space.
+pub const KERNEL_HEAP_PML4_SLOT: usize = 136;
+pub const KERNEL_STACK_PML4_SLOT: usize = 170;
+
+pub const fn is_kernel_reserved_slot(slot: usize) -> bool {
+    slot == KERNEL_HEAP_PML4_SLOT || slot == KERNEL_STACK_PML4_SLOT
+}
+
 /// Top of the user stack (exclusive). The stack grows down from here.
-pub const USER_STACK_TOP: u64 = 0x0000_0000_0080_0000;
+pub const USER_STACK_TOP: u64 = 0x0000_7fff_ffff_f000;
 
 /// Demand-grown stack — pages committed at process creation. The loader
 /// maps exactly this many pages immediately below `USER_STACK_TOP`; the
@@ -28,32 +38,25 @@ pub const USER_STACK_TOP: u64 = 0x0000_0000_0080_0000;
 /// transparently.
 pub const USER_STACK_INITIAL_PAGES: u64 = 8;
 
-/// Demand-grown stack — hard per-process cap on total mapped pages.
+/// Demand-grown stack — hard per-process 64 MiB reservation.
 /// Once a process has grown its stack by this many pages, any further
 /// fault into the growth window is treated as overflow and the process
 /// is terminated.
 ///
-/// 768 pages / 3 MiB leaves ~1 MiB of the 4 MiB user-VA slice
-/// (`USER_LOAD_BASE..USER_STACK_TOP`) for the binary's text/data/bss
-/// plus the 64 KiB code-vs-stack guard. The plan calls for measuring
-/// real stack peaks on zsh / BusyBox / future ports before treating
-/// this constant as settled; revisit if any real workload approaches
-/// the cap.
-pub const USER_STACK_MAX_GROWTH_PAGES: u64 = 768;
+/// Only the initial eight pages are committed; the rest costs no physical
+/// memory until faulted in.
+pub const USER_STACK_MAX_GROWTH_PAGES: u64 = (64 * 1024 * 1024) / 0x1000;
 
 /// Demand-grown stack — guard region between the highest mapped PT_LOAD
 /// page and the deepest the stack may ever grow into. A Stack-Clash-
 /// style write that steps past the current stack bottom must land in
 /// unmapped territory and #PF, not silently corrupt a PT_LOAD page.
 ///
-/// 16 pages / 64 KiB is the minimum-viable bar — Linux post-CVE-
-/// 2017-1000364 defaults to a 1 MiB `STACK_GUARD_GAP`, but our 4 MiB
-/// user-VA slice can't accommodate that today. Revisit when untrusted
-/// binaries become a real concern, or when a VA repartition gives the
-/// stack more headroom.
-pub const USER_STACK_GUARD_PAGES: u64 = 16;
+/// One MiB of unmapped space separates the stack reservation from lower
+/// mappings.
+pub const USER_STACK_GUARD_PAGES: u64 = (1024 * 1024) / 0x1000;
 
-/// Base virtual address of the per-process TLS region.
+/// Preferred virtual address of the per-process TLS region.
 ///
 /// Layout (x86-64 TLS variant II):
 /// - `[USER_TLS_IMAGE_VA, USER_TLS_IMAGE_VA + 0x1000)` — TLS image (tdata + tbss)
@@ -64,8 +67,8 @@ pub const USER_STACK_GUARD_PAGES: u64 = 16;
 /// (errno + `__cxa_eh_globals` slots, etc.) is well under 4 KiB. The
 /// loader rejects with `TlsUnsupported` if `p_memsz` exceeds this.
 ///
-/// Sits above the user stack (top 0x80_0000) and well below USER_VA_RANGE_END
-/// at 0x4000_0000, leaving room above for future brk and mmap arenas.
+/// The loader uses these deterministic addresses when free and relocates the
+/// two-page block above PT_LOAD when a large executable occupies them.
 pub const USER_TLS_IMAGE_VA: u64 = 0x0000_0000_0100_0000;
 pub const USER_TCB_VA: u64 = 0x0000_0000_0100_1000;
 
@@ -74,23 +77,15 @@ pub const USER_TCB_VA: u64 = 0x0000_0000_0100_1000;
 /// initial heap fits without colliding with the mmap arena above.
 pub const USER_BRK_BASE: u64 = 0x0000_0000_0200_0000; // 32 MiB
 
-/// Base of the per-process mmap arena. Anonymous-only `mmap` calls bump
-/// upward from this address, allocating `len` rounded up to page granularity
-/// per call. Reaches `USER_VA_RANGE_END` at 1 GiB; the gap between the brk
-/// arena and here is ~16 MiB which is plenty for the milestone heap.
+/// Lower search bound for the per-process mmap arena. `mmap` searches free
+/// VMA gaps top-down above this address, rounding lengths to page granularity.
+/// The separation from the initial brk anchor leaves room for heap growth.
 pub const USER_MMAP_BASE: u64 = 0x0000_0000_0300_0000; // 48 MiB
 
-/// Inclusive lower / exclusive upper bounds of the user-VA range. Anything
-/// outside is reserved for the kernel and `map_user_region` rejects it.
-///
-/// Sized to host a multi-MiB libstdc++ static binary plus its TLS block,
-/// brk arena, mmap arena, and stack. The 1 GiB ceiling at 0x4000_0000 is
-/// the U4+U5 expansion from the original ~9 MiB window — well below any
-/// kernel-side VA region. Sub-region constants for the TLS block, brk
-/// anchor, and mmap arena are introduced by U7 / U9 as those features
-/// land; for now only the load base and stack top are pinned.
+/// Compatibility aliases for the canonical user range. VMA validation also
+/// rejects the two reserved lower-half kernel slots.
 pub const USER_VA_RANGE_START: u64 = USER_LOAD_BASE;
-pub const USER_VA_RANGE_END: u64 = 0x0000_0000_4000_0000;
+pub const USER_VA_RANGE_END: u64 = USER_CANONICAL_END;
 
 /// Permission profile applied to a user-mode mapping. Values are explicit
 /// rather than packed flags so the loader cannot accidentally hand `WRITABLE`
@@ -98,9 +93,7 @@ pub const USER_VA_RANGE_END: u64 = 0x0000_0000_4000_0000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserPerms {
     /// `.text` and the trampoline: present, executable, USER, no write.
-    /// `NO_EXECUTE` is left clear here regardless of the segment permissions
-    /// of `.rodata` etc., per D11 — `EFER.NXE` is not yet enabled, so the
-    /// bit is documentary today.
+    /// `NO_EXECUTE` is left clear; EFER.NXE is enabled during x86-64 init.
     ReadExecute,
     /// `.rodata`: present, USER, no write, NX.
     ReadOnly,
@@ -109,14 +102,12 @@ pub enum UserPerms {
 }
 
 impl UserPerms {
-    fn leaf_flags(self) -> PageTableFlags {
+    pub fn leaf_flags(self) -> PageTableFlags {
         let base = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
         match self {
             UserPerms::ReadExecute => base,
             UserPerms::ReadOnly => base | PageTableFlags::NO_EXECUTE,
-            UserPerms::ReadWrite => {
-                base | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE
-            }
+            UserPerms::ReadWrite => base | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
         }
     }
 }
@@ -140,6 +131,14 @@ pub enum UserMapError {
     PageNotMapped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CowOutcome {
+    NotCow,
+    Upgraded,
+    Copied,
+    OutOfFrames,
+}
+
 impl<S: x86_64::structures::paging::PageSize> From<MapToError<S>> for UserMapError {
     fn from(err: MapToError<S>) -> Self {
         match err {
@@ -153,7 +152,7 @@ impl<S: x86_64::structures::paging::PageSize> From<MapToError<S>> for UserMapErr
 // Global mapper for page fault handling
 pub static mut MAPPER: Option<*mut MemoryMapper> = None;
 
-pub unsafe fn get_mapper() -> Option<&'static mut MemoryMapper> {
+pub(super) unsafe fn get_mapper() -> Option<&'static mut MemoryMapper> {
     MAPPER.map(|ptr| &mut *ptr)
 }
 
@@ -171,7 +170,9 @@ pub static mut KERNEL_L4_FRAME: Option<PhysFrame<Size4KiB>> = None;
 pub fn capture_kernel_l4() {
     use x86_64::registers::control::Cr3;
     let (frame, _) = Cr3::read();
-    unsafe { KERNEL_L4_FRAME = Some(frame); }
+    unsafe {
+        KERNEL_L4_FRAME = Some(frame);
+    }
     debug_info!("captured kernel L4 frame: {:?}", frame);
 }
 
@@ -205,9 +206,7 @@ pub unsafe fn activate_kernel_l4() {
 /// state (i.e. they're the sole owner of the `MemoryMapper` borrow)
 /// and the bootloader's physical-memory offset must already be set up
 /// so the L4 frame is reachable through it.
-pub unsafe fn active_offset_page_table(
-    phys_offset: VirtAddr,
-) -> OffsetPageTable<'static> {
+pub unsafe fn active_offset_page_table(phys_offset: VirtAddr) -> OffsetPageTable<'static> {
     use x86_64::registers::control::Cr3;
     let (frame, _) = Cr3::read();
     let l4_va = phys_offset.as_u64() + frame.start_address().as_u64();
@@ -218,12 +217,12 @@ pub unsafe fn active_offset_page_table(
 /// Translate a virtual address to a physical address
 /// Returns None if the address is not mapped
 pub fn translate_virt_to_phys(virt_addr: u64) -> Option<u64> {
-    unsafe {
-        get_mapper().and_then(|mapper| {
-            mapper.translate_addr(VirtAddr::new(virt_addr))
+    crate::mm::memory::with_memory_mapper(|mapper| {
+            mapper
+                .translate_addr(VirtAddr::new(virt_addr))
                 .map(|phys| phys.as_u64())
         })
-    }
+        .flatten()
 }
 
 pub struct MemoryMapper {
@@ -237,19 +236,21 @@ impl MemoryMapper {
         physical_memory_offset: VirtAddr,
         memory_map: &'static MemoryRegions,
     ) -> Self {
-        debug_info!("Creating memory mapper with offset: {:?}", physical_memory_offset);
-        
+        debug_info!(
+            "Creating memory mapper with offset: {:?}",
+            physical_memory_offset
+        );
+
         let level_4_table = active_level_4_table(physical_memory_offset);
         let mapper = OffsetPageTable::new(level_4_table, physical_memory_offset);
-        let frame_allocator = BootInfoFrameAllocator::init(memory_map);
-        
+        let frame_allocator = BootInfoFrameAllocator::init(memory_map, physical_memory_offset);
+
         Self {
             mapper,
             frame_allocator,
             physical_memory_offset,
         }
     }
-
 
     pub fn translate_addr(&self, addr: VirtAddr) -> Option<PhysAddr> {
         // Phase 4 PR-B: walk whatever L4 is active. The boot-time
@@ -268,6 +269,286 @@ impl MemoryMapper {
         self.frame_allocator.allocate_frame()
     }
 
+    pub fn release_frame(&mut self, frame: PhysFrame<Size4KiB>) -> bool {
+        self.frame_allocator.release_frame(frame).is_ok()
+    }
+
+    pub fn retain_frame(&mut self, frame: PhysFrame<Size4KiB>) -> bool {
+        self.frame_allocator.retain_frame(frame).is_ok()
+    }
+
+    pub fn frame_refcount(&self, frame: PhysFrame<Size4KiB>) -> Option<u32> {
+        self.frame_allocator.refcount(frame)
+    }
+
+    pub fn frame_stats(&self) -> super::frame_allocator::FrameStats {
+        self.frame_allocator.stats()
+    }
+
+    fn table_ptr(&self, frame: PhysFrame<Size4KiB>) -> *mut PageTable {
+        (self.physical_memory_offset.as_u64() + frame.start_address().as_u64()) as *mut PageTable
+    }
+
+    pub fn zero_frame(&self, frame: PhysFrame<Size4KiB>) {
+        unsafe { core::ptr::write_bytes(self.table_ptr(frame) as *mut u8, 0, 0x1000) }
+    }
+
+    fn active_l4_frame(&self) -> PhysFrame<Size4KiB> {
+        use x86_64::registers::control::Cr3;
+        Cr3::read().0
+    }
+
+    fn leaf_entry_ptr(
+        &self,
+        l4_frame: PhysFrame<Size4KiB>,
+        addr: VirtAddr,
+    ) -> Option<*mut x86_64::structures::paging::page_table::PageTableEntry> {
+        let indices = page_indices(addr);
+        let mut table_frame = l4_frame;
+        for level in 0..3 {
+            let table = unsafe { &*self.table_ptr(table_frame) };
+            let entry = &table[indices[level]];
+            if entry.is_unused()
+                || !entry.flags().contains(PageTableFlags::PRESENT)
+                || entry.flags().contains(PageTableFlags::HUGE_PAGE)
+            {
+                return None;
+            }
+            table_frame = PhysFrame::containing_address(entry.addr());
+        }
+        let table = unsafe { &mut *self.table_ptr(table_frame) };
+        Some(&mut table[indices[3]] as *mut _)
+    }
+
+    pub fn leaf_info(
+        &self,
+        l4_frame: PhysFrame<Size4KiB>,
+        addr: VirtAddr,
+    ) -> Option<(PhysFrame<Size4KiB>, PageTableFlags)> {
+        let entry = unsafe { &*self.leaf_entry_ptr(l4_frame, addr)? };
+        if entry.is_unused() || !entry.flags().contains(PageTableFlags::PRESENT) {
+            return None;
+        }
+        Some((PhysFrame::containing_address(entry.addr()), entry.flags()))
+    }
+
+    pub fn set_leaf_flags(
+        &mut self,
+        l4_frame: PhysFrame<Size4KiB>,
+        addr: VirtAddr,
+        flags: PageTableFlags,
+    ) -> Result<(), UserMapError> {
+        let entry = unsafe {
+            &mut *self
+                .leaf_entry_ptr(l4_frame, addr)
+                .ok_or(UserMapError::PageNotMapped)?
+        };
+        entry.set_flags(flags);
+        if self.active_l4_frame() == l4_frame {
+            x86_64::instructions::tlb::flush(addr);
+        }
+        Ok(())
+    }
+
+    pub fn resolve_cow(&mut self, l4_frame: PhysFrame<Size4KiB>, addr: VirtAddr) -> CowOutcome {
+        let Some((old_frame, mut flags)) = self.leaf_info(l4_frame, addr) else {
+            return CowOutcome::NotCow;
+        };
+        if !flags.contains(PageTableFlags::BIT_9) {
+            return CowOutcome::NotCow;
+        }
+        flags.remove(PageTableFlags::BIT_9);
+        flags.insert(PageTableFlags::WRITABLE);
+        if self.frame_allocator.refcount(old_frame) == Some(1) {
+            let _ = self.set_leaf_flags(l4_frame, addr, flags);
+            return CowOutcome::Upgraded;
+        }
+        let Some(new_frame) = self.frame_allocator.allocate_frame() else {
+            return CowOutcome::OutOfFrames;
+        };
+        unsafe {
+            let source = (self.physical_memory_offset.as_u64() + old_frame.start_address().as_u64())
+                as *const u8;
+            let destination = (self.physical_memory_offset.as_u64()
+                + new_frame.start_address().as_u64()) as *mut u8;
+            core::ptr::copy_nonoverlapping(source, destination, 0x1000);
+            let entry = &mut *self.leaf_entry_ptr(l4_frame, addr).unwrap();
+            entry.set_addr(new_frame.start_address(), flags);
+        }
+        let _ = self.frame_allocator.release_frame(old_frame);
+        if self.active_l4_frame() == l4_frame {
+            x86_64::instructions::tlb::flush(addr);
+        }
+        CowOutcome::Copied
+    }
+
+    /// Install one fresh zeroed user leaf in the specified address space.
+    pub fn map_zeroed_page_into(
+        &mut self,
+        l4_frame: PhysFrame<Size4KiB>,
+        addr: VirtAddr,
+        flags: PageTableFlags,
+    ) -> Result<PhysFrame<Size4KiB>, UserMapError> {
+        let page_addr = VirtAddr::new(addr.as_u64() & !0xfff);
+        let page = Page::<Size4KiB>::containing_address(page_addr);
+        let frame = self
+            .frame_allocator
+            .allocate_frame()
+            .ok_or(UserMapError::OutOfFrames)?;
+        self.zero_frame(frame);
+        let l4 = unsafe { &mut *self.table_ptr(l4_frame) };
+        let mut target = unsafe { OffsetPageTable::new(l4, self.physical_memory_offset) };
+        let parent_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let result = unsafe {
+            target.map_to_with_table_flags(
+                page,
+                frame,
+                flags,
+                parent_flags,
+                &mut self.frame_allocator,
+            )
+        };
+        match result {
+            Ok(flush) => {
+                if self.active_l4_frame() == l4_frame {
+                    flush.flush();
+                } else {
+                    flush.ignore();
+                }
+                Ok(frame)
+            }
+            Err(error) => {
+                let _ = self.frame_allocator.release_frame(frame);
+                self.prune_empty_path(l4_frame, page_addr);
+                Err(UserMapError::from(error))
+            }
+        }
+    }
+
+    pub fn frame_bytes_mut(&self, frame: PhysFrame<Size4KiB>) -> &mut [u8; 0x1000] {
+        unsafe {
+            &mut *((self.physical_memory_offset.as_u64() + frame.start_address().as_u64())
+                as *mut [u8; 0x1000])
+        }
+    }
+
+    /// Unmap one present 4 KiB leaf from an arbitrary address space, release
+    /// its frame reference, and prune empty page tables bottom-up.
+    pub fn unmap_page_from(
+        &mut self,
+        l4_frame: PhysFrame<Size4KiB>,
+        addr: VirtAddr,
+    ) -> Result<PhysFrame<Size4KiB>, UserMapError> {
+        let indices = page_indices(addr);
+        let mut tables = [l4_frame; 4];
+        for level in 0..3 {
+            let table = unsafe { &*self.table_ptr(tables[level]) };
+            let entry = &table[indices[level]];
+            if entry.is_unused() || !entry.flags().contains(PageTableFlags::PRESENT) {
+                return Err(UserMapError::PageNotMapped);
+            }
+            if entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                return Err(UserMapError::PageAlreadyMapped);
+            }
+            tables[level + 1] = PhysFrame::containing_address(entry.addr());
+        }
+
+        let leaf_table = unsafe { &mut *self.table_ptr(tables[3]) };
+        let leaf = &mut leaf_table[indices[3]];
+        if leaf.is_unused() || !leaf.flags().contains(PageTableFlags::PRESENT) {
+            return Err(UserMapError::PageNotMapped);
+        }
+        if leaf.flags().contains(PageTableFlags::HUGE_PAGE) {
+            return Err(UserMapError::PageAlreadyMapped);
+        }
+        let leaf_frame = PhysFrame::containing_address(leaf.addr());
+        leaf.set_unused();
+        let released = self.frame_allocator.release_frame(leaf_frame);
+        debug_assert!(released.is_ok(), "user leaf must be allocator-owned");
+        self.prune_empty_path(l4_frame, addr);
+        if self.active_l4_frame() == l4_frame {
+            x86_64::instructions::tlb::flush(addr);
+        }
+        Ok(leaf_frame)
+    }
+
+    fn prune_empty_path(&mut self, l4_frame: PhysFrame<Size4KiB>, addr: VirtAddr) {
+        let indices = page_indices(addr);
+        let mut tables = [l4_frame; 4];
+        let mut depth = 1usize;
+        while depth < 4 {
+            let parent = unsafe { &*self.table_ptr(tables[depth - 1]) };
+            let entry = &parent[indices[depth - 1]];
+            if entry.is_unused()
+                || !entry.flags().contains(PageTableFlags::PRESENT)
+                || entry.flags().contains(PageTableFlags::HUGE_PAGE)
+            {
+                break;
+            }
+            tables[depth] = PhysFrame::containing_address(entry.addr());
+            depth += 1;
+        }
+
+        while depth > 1 {
+            let child_depth = depth - 1;
+            let child = unsafe { &*self.table_ptr(tables[child_depth]) };
+            if child.iter().any(|entry| !entry.is_unused()) {
+                break;
+            }
+            let parent = unsafe { &mut *self.table_ptr(tables[child_depth - 1]) };
+            parent[indices[child_depth - 1]].set_unused();
+            let released = self.frame_allocator.release_frame(tables[child_depth]);
+            debug_assert!(released.is_ok(), "user page table must be allocator-owned");
+            depth -= 1;
+        }
+    }
+
+    /// Destroy all user-owned lower-half subtrees and finally release the L4.
+    pub fn destroy_user_address_space(&mut self, l4_frame: PhysFrame<Size4KiB>) {
+        let l4 = unsafe { &mut *self.table_ptr(l4_frame) };
+        for slot in 0..256 {
+            if is_kernel_reserved_slot(slot) || l4[slot].is_unused() {
+                continue;
+            }
+            assert!(
+                !l4[slot].flags().contains(PageTableFlags::HUGE_PAGE),
+                "huge entry in user-owned PML4 slot {}",
+                slot
+            );
+            let child = PhysFrame::containing_address(l4[slot].addr());
+            l4[slot].set_unused();
+            unsafe { self.destroy_user_table(child, 3) };
+        }
+        let released = self.frame_allocator.release_frame(l4_frame);
+        debug_assert!(released.is_ok(), "user L4 must be allocator-owned");
+    }
+
+    unsafe fn destroy_user_table(&mut self, frame: PhysFrame<Size4KiB>, level: u8) {
+        let table = &mut *self.table_ptr(frame);
+        for entry in table.iter_mut() {
+            if entry.is_unused() || !entry.flags().contains(PageTableFlags::PRESENT) {
+                entry.set_unused();
+                continue;
+            }
+            assert!(
+                !entry.flags().contains(PageTableFlags::HUGE_PAGE),
+                "huge page in user-owned level {} table",
+                level
+            );
+            let owned = PhysFrame::containing_address(entry.addr());
+            entry.set_unused();
+            if level == 1 {
+                let released = self.frame_allocator.release_frame(owned);
+                debug_assert!(released.is_ok(), "user leaf must be allocator-owned");
+            } else {
+                self.destroy_user_table(owned, level - 1);
+            }
+        }
+        let released = self.frame_allocator.release_frame(frame);
+        debug_assert!(released.is_ok(), "user page table must be allocator-owned");
+    }
+
     /// Read-only accessor for the bootloader's physical-memory offset.
     /// Used when mapping a freshly-allocated frame through the
     /// kernel-visible alias to zero or copy into it.
@@ -278,11 +559,15 @@ impl MemoryMapper {
     /// Test-only: allocate one physical frame from the live frame
     /// allocator. Used by `tests::memory::test_live_frame_allocator_throughput`
     /// to confirm the U1 cursor's O(1) claim against the real memory map.
-    /// Each call permanently consumes a frame for the rest of the test run.
     #[cfg(feature = "test")]
     pub fn allocate_test_frame(&mut self) -> Option<PhysFrame> {
         use x86_64::structures::paging::FrameAllocator;
         self.frame_allocator.allocate_frame()
+    }
+
+    #[cfg(feature = "test")]
+    pub fn release_test_frame(&mut self, frame: PhysFrame) -> bool {
+        self.frame_allocator.release_frame(frame).is_ok()
     }
 
     /// Test-only: total frames issued by the live frame allocator.
@@ -290,7 +575,7 @@ impl MemoryMapper {
     pub fn frames_issued(&self) -> u64 {
         self.frame_allocator.frames_issued()
     }
-    
+
     /// Map `num_pages` consecutive 4 KiB pages starting at `virt_start` into
     /// the user-accessible address space. Allocates fresh frames, zeroes them,
     /// and uses `map_to_with_table_flags(parent_flags = PRESENT | WRITABLE |
@@ -314,9 +599,8 @@ impl MemoryMapper {
         let leaf_flags = perms.leaf_flags();
         // Parent flags are uniform across all permission profiles: a parent
         // table may need to host both R-X and R-W leaves on different paths.
-        let parent_flags = PageTableFlags::PRESENT
-            | PageTableFlags::WRITABLE
-            | PageTableFlags::USER_ACCESSIBLE;
+        let parent_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
 
         let phys_offset = self.physical_memory_offset;
         let mut frames: Vec<PhysFrame> = Vec::with_capacity(num_pages as usize);
@@ -332,10 +616,14 @@ impl MemoryMapper {
             let page_addr = VirtAddr::new(virt_start.as_u64() + i * 0x1000);
             let page = Page::<Size4KiB>::containing_address(page_addr);
 
-            let frame = self
-                .frame_allocator
-                .allocate_frame()
-                .ok_or(UserMapError::OutOfFrames)?;
+            let Some(frame) = self.frame_allocator.allocate_frame() else {
+                let l4 = self.active_l4_frame();
+                for installed in (0..frames.len()).rev() {
+                    let va = VirtAddr::new(virt_start.as_u64() + installed as u64 * 0x1000);
+                    let _ = self.unmap_page_from(l4, va);
+                }
+                return Err(UserMapError::OutOfFrames);
+            };
 
             // Zero the freshly allocated frame so user code never observes
             // stale data. The bootloader's offset mapping lets us reach
@@ -345,17 +633,27 @@ impl MemoryMapper {
                 core::ptr::write_bytes(virt as *mut u8, 0u8, 0x1000);
             }
 
-            unsafe {
-                active_mapper
-                    .map_to_with_table_flags(
-                        page,
-                        frame,
-                        leaf_flags,
-                        parent_flags,
-                        &mut self.frame_allocator,
-                    )
-                    .map_err(UserMapError::from)?
-                    .flush();
+            let result = unsafe {
+                active_mapper.map_to_with_table_flags(
+                    page,
+                    frame,
+                    leaf_flags,
+                    parent_flags,
+                    &mut self.frame_allocator,
+                )
+            };
+            match result {
+                Ok(flush) => flush.flush(),
+                Err(error) => {
+                    let _ = self.frame_allocator.release_frame(frame);
+                    let l4 = self.active_l4_frame();
+                    self.prune_empty_path(l4, page_addr);
+                    for installed in (0..frames.len()).rev() {
+                        let va = VirtAddr::new(virt_start.as_u64() + installed as u64 * 0x1000);
+                        let _ = self.unmap_page_from(l4, va);
+                    }
+                    return Err(UserMapError::from(error));
+                }
             }
 
             frames.push(frame);
@@ -363,7 +661,9 @@ impl MemoryMapper {
 
         debug_info!(
             "map_user_region: {} pages at {:?} ({:?})",
-            num_pages, virt_start, perms
+            num_pages,
+            virt_start,
+            perms
         );
         Ok(frames)
     }
@@ -380,29 +680,12 @@ impl MemoryMapper {
     ) -> Result<Vec<PhysFrame>, UserMapError> {
         validate_user_range(virt_start, num_pages)?;
 
-        let phys_offset = self.physical_memory_offset;
         let mut frames: Vec<PhysFrame> = Vec::with_capacity(num_pages as usize);
-
-        // Phase 4 PR-B: same dance as `map_user_region` — operate on
-        // whatever L4 is currently active, which is the per-process
-        // address space during ring-3 lifetime.
-        let mut active_mapper = unsafe { active_offset_page_table(phys_offset) };
+        let l4 = self.active_l4_frame();
 
         for i in 0..num_pages {
             let page_addr = VirtAddr::new(virt_start.as_u64() + i * 0x1000);
-            let page = Page::<Size4KiB>::containing_address(page_addr);
-
-            match active_mapper.unmap(page) {
-                Ok((frame, flush)) => {
-                    flush.flush();
-                    frames.push(frame);
-                }
-                Err(UnmapError::PageNotMapped) => return Err(UserMapError::PageNotMapped),
-                Err(e) => {
-                    debug_error!("unmap_user_region: unexpected error {:?}", e);
-                    return Err(UserMapError::PageNotMapped);
-                }
-            }
+            frames.push(self.unmap_page_from(l4, page_addr)?);
         }
         Ok(frames)
     }
@@ -465,7 +748,9 @@ impl MemoryMapper {
         // Check if this is a physical memory region access
         // Use the actual physical memory offset from our mapper
         let phys_mem_offset = self.physical_memory_offset.as_u64();
-        let frame = if addr.as_u64() >= phys_mem_offset && addr.as_u64() < phys_mem_offset + (1u64 << 40) {
+        let allocator_owned =
+            !(addr.as_u64() >= phys_mem_offset && addr.as_u64() < phys_mem_offset + (1u64 << 40));
+        let frame = if !allocator_owned {
             // For physical memory region, map to the corresponding physical frame
             let phys_addr = addr.as_u64() - phys_mem_offset;
             PhysFrame::containing_address(PhysAddr::new(phys_addr))
@@ -479,7 +764,10 @@ impl MemoryMapper {
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
 
         unsafe {
-            match self.mapper.map_to(page, frame, flags, &mut self.frame_allocator) {
+            match self
+                .mapper
+                .map_to(page, frame, flags, &mut self.frame_allocator)
+            {
                 Ok(flush) => {
                     flush.flush();
                     debug_trace!("Successfully mapped page {:?} to frame {:?}", page, frame);
@@ -487,10 +775,21 @@ impl MemoryMapper {
                 Err(MapToError::PageAlreadyMapped(_)) => {
                     // Page is already mapped, that's fine
                     debug_trace!("Page {:?} was already mapped", page);
+                    if allocator_owned {
+                        let _ = self.frame_allocator.release_frame(frame);
+                    }
                     return Ok(());
                 }
                 Err(e) => {
-                    debug_error!("Failed to map page {:?} to frame {:?}: {:?}", page, frame, e);
+                    if allocator_owned {
+                        let _ = self.frame_allocator.release_frame(frame);
+                    }
+                    debug_error!(
+                        "Failed to map page {:?} to frame {:?}: {:?}",
+                        page,
+                        frame,
+                        e
+                    );
                     return Err(e);
                 }
             }
@@ -514,13 +813,32 @@ fn validate_user_range(virt_start: VirtAddr, num_pages: u64) -> Result<(), UserM
     }
     let end = virt_start
         .as_u64()
-        .checked_add(num_pages.checked_mul(0x1000).ok_or(UserMapError::VaOutOfRange)?)
+        .checked_add(
+            num_pages
+                .checked_mul(0x1000)
+                .ok_or(UserMapError::VaOutOfRange)?,
+        )
         .ok_or(UserMapError::VaOutOfRange)?;
 
     if virt_start.as_u64() < USER_VA_RANGE_START || end > USER_VA_RANGE_END {
         return Err(UserMapError::VaOutOfRange);
     }
+    let first_slot = (virt_start.as_u64() >> 39) as usize;
+    let last_slot = ((end - 1) >> 39) as usize;
+    if (first_slot..=last_slot).any(is_kernel_reserved_slot) {
+        return Err(UserMapError::VaOutOfRange);
+    }
     Ok(())
+}
+
+fn page_indices(addr: VirtAddr) -> [usize; 4] {
+    let value = addr.as_u64();
+    [
+        ((value >> 39) & 0x1ff) as usize,
+        ((value >> 30) & 0x1ff) as usize,
+        ((value >> 21) & 0x1ff) as usize,
+        ((value >> 12) & 0x1ff) as usize,
+    ]
 }
 
 unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {

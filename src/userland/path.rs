@@ -7,7 +7,7 @@
 //!   process's current working directory. Handles `.` / `..` / repeated
 //!   slashes; the result always begins with `/`.
 
-use crate::userland::abi::{user_va_bounds, EFAULT, ENAMETOOLONG};
+use crate::userland::abi::{EFAULT, ENAMETOOLONG};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -28,19 +28,14 @@ pub const MAX_VECTOR_ENTRIES: usize = 256;
 /// `arr_ptr == 0` is treated as an empty vector — same as Linux when
 /// the syscall caller passes NULL.
 pub fn copy_user_cstr_array(arr_ptr: u64) -> Result<alloc::vec::Vec<String>, i64> {
-    use crate::userland::abi::{user_va_bounds, EFAULT, EINVAL};
+    use crate::userland::abi::{EFAULT, EINVAL};
     if arr_ptr == 0 {
         return Ok(alloc::vec::Vec::new());
     }
-    let bounds = user_va_bounds().ok_or(EFAULT)?;
     let mut out: alloc::vec::Vec<String> = alloc::vec::Vec::new();
     for i in 0..MAX_VECTOR_ENTRIES {
         let entry_ptr = arr_ptr.checked_add((i * 8) as u64).ok_or(EFAULT)?;
-        let end = entry_ptr.checked_add(8).ok_or(EFAULT)?;
-        if entry_ptr < bounds.start || end > bounds.end {
-            return Err(EFAULT);
-        }
-        let str_ptr = unsafe { core::ptr::read_unaligned(entry_ptr as *const u64) };
+        let str_ptr = crate::userland::usercopy::read_unaligned::<u64>(entry_ptr)?;
         if str_ptr == 0 {
             return Ok(out);
         }
@@ -60,17 +55,10 @@ pub fn copy_user_cstr(ptr: u64) -> Result<String, i64> {
     if ptr == 0 {
         return Err(EFAULT);
     }
-    let bounds = user_va_bounds().ok_or(EFAULT)?;
-    if ptr < bounds.start {
-        return Err(EFAULT);
-    }
     let mut bytes: Vec<u8> = Vec::new();
     for i in 0..PATH_MAX {
         let addr = ptr.checked_add(i as u64).ok_or(EFAULT)?;
-        if addr >= bounds.end {
-            return Err(EFAULT);
-        }
-        let b = unsafe { core::ptr::read_volatile(addr as *const u8) };
+        let b = crate::userland::usercopy::read_unaligned::<u8>(addr)?;
         if b == 0 {
             return String::from_utf8(bytes).map_err(|_| EFAULT);
         }

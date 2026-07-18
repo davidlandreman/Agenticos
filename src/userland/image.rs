@@ -1,23 +1,18 @@
 //! `UserImage` (U6 / D8).
 //!
-//! Transactional handle returned by the ELF loader on success. Owns:
+//! Program metadata returned by the ELF loader on success.
 //!
-//! - The list of `(virt_addr, page_count)` mapping ranges installed in the
-//!   user VA window — `Drop` walks this list and calls `unmap_user_region` on
-//!   each, so a partial-load failure does not leak page-table state.
-//! - The user-VA bounds the loader sized for the image. U7 stamps these into
-//!   `crate::userland::abi::USER_VA_BOUNDS` so syscall pointer-validation
-//!   will accept user-supplied pointers within the image.
+//! - Construction-time mapping metadata used to seed the AddressSpace VMA
+//!   set. Production setup then transfers page-table ownership to the
+//!   AddressSpace and clears this list.
+//! - Legacy bounds retained for kernel-only fixtures; real syscall pointer
+//!   validation queries the current AddressSpace's VMAs.
 //! - The entry-point virtual address and the user stack top.
 //!
-//! ## Frame freeing
-//!
-//! The kernel's frame allocator (`BootInfoFrameAllocator`) is bump-only — it
-//! never returns frames to the pool. `unmap_user_region` returns the freed
-//! `PhysFrame` list, but `UserImage::Drop` discards it. The plan calls this
-//! out explicitly: per-PID frame tracking is not in scope for U6. The
-//! transactional invariant is "no page-table state survives a failed load,"
-//! not "every frame is reclaimable."
+//! AddressSpace is the whole-tree teardown owner and returns user leaves,
+//! page tables, and its root to the reusable frame allocator. The fallback
+//! `Drop` cleanup below exists only for older tests that load directly into
+//! the kernel L4 without creating an AddressSpace.
 //!
 //! ## Why a `Vec<MappingRange>` rather than per-segment fields
 //!
@@ -29,6 +24,10 @@
 use alloc::vec::Vec;
 use x86_64::VirtAddr;
 
+use crate::fs::File;
+use crate::lib::arc::Arc;
+
+#[cfg(feature = "test")]
 use crate::mm::paging::UserMapError;
 
 /// One installed user-VA mapping. The pair is exactly what
@@ -37,11 +36,32 @@ use crate::mm::paging::UserMapError;
 pub struct MappingRange {
     pub virt_start: VirtAddr,
     pub page_count: u64,
+    pub perms: crate::mm::paging::UserPerms,
 }
 
-/// Transactional handle for a loaded user binary. Drop unmaps every recorded
-/// range. Constructed via `UserImage::new()`; the loader pushes mappings as
-/// it makes them so a mid-load failure that drops the image still cleans up.
+/// File source for a sparse PT_LOAD VMA.
+#[derive(Clone)]
+pub struct ElfBacking {
+    pub start: u64,
+    pub file: Arc<File>,
+    pub file_offset: u64,
+    pub file_len: u64,
+    pub zero_tail: u64,
+}
+
+impl core::fmt::Debug for ElfBacking {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ElfBacking")
+            .field("start", &self.start)
+            .field("file_offset", &self.file_offset)
+            .field("file_len", &self.file_len)
+            .field("zero_tail", &self.zero_tail)
+            .finish()
+    }
+}
+
+/// Metadata handle for a loaded user binary. The loader records mappings as
+/// it constructs them; normal process setup consumes those records into VMAs.
 #[derive(Debug)]
 #[allow(dead_code)] // bounds_{start,end} are read by U7 when entering ring 3
 pub struct UserImage {
@@ -58,6 +78,8 @@ pub struct UserImage {
     /// ring 3.
     pub bounds_start: u64,
     pub bounds_end: u64,
+    /// Page-aligned initial program break derived from the highest PT_LOAD.
+    pub brk_base: u64,
     /// FS_BASE for `arch_prctl(ARCH_SET_FS)` — the address of the TCB the
     /// loader allocated when the binary has a `PT_TLS` segment. `None`
     /// when the binary has no TLS image. Consumers (the initial-stack
@@ -93,40 +115,38 @@ pub struct UserImage {
     /// `unmap_user_stack` so the per-fault growth path doesn't need to
     /// push to a heap-allocated `Vec` from interrupt context.
     mappings: Vec<MappingRange>,
+    elf_backings: Vec<ElfBacking>,
     /// Set to `false` by the destructor to make Drop idempotent in case a
     /// future refactor tries to drop twice.
     dropped: bool,
 }
 
 impl UserImage {
-    pub fn new(
-        entry: VirtAddr,
-        stack_top: VirtAddr,
-        bounds_start: u64,
-        bounds_end: u64,
-    ) -> Self {
+    pub fn new(entry: VirtAddr, stack_top: VirtAddr, bounds_start: u64, bounds_end: u64) -> Self {
         Self {
             entry,
             stack_top,
             bounds_start,
             bounds_end,
+            brk_base: crate::mm::paging::USER_BRK_BASE,
             tls_fs_base: None,
             phdr_bytes: Vec::new(),
             e_phnum: 0,
             stack_initial_bottom: 0,
             stack_max_growth_floor: 0,
             mappings: Vec::new(),
+            elf_backings: Vec::new(),
             dropped: false,
         }
     }
 
+    pub fn set_brk_base(&mut self, brk_base: u64) {
+        self.brk_base = brk_base;
+    }
+
     /// Record the loader-computed stack window. Consumed by U3 to
     /// install the values on `Process`.
-    pub fn set_stack_window(
-        &mut self,
-        initial_bottom: u64,
-        max_growth_floor: u64,
-    ) {
+    pub fn set_stack_window(&mut self, initial_bottom: u64, max_growth_floor: u64) {
         self.stack_initial_bottom = initial_bottom;
         self.stack_max_growth_floor = max_growth_floor;
     }
@@ -147,15 +167,54 @@ impl UserImage {
     /// The drop path replays this list in reverse to call `unmap_user_region`
     /// for each.
     pub fn record_mapping(&mut self, virt_start: VirtAddr, page_count: u64) {
+        self.record_mapping_with_perms(
+            virt_start,
+            page_count,
+            crate::mm::paging::UserPerms::ReadWrite,
+        );
+    }
+
+    pub fn record_mapping_with_perms(
+        &mut self,
+        virt_start: VirtAddr,
+        page_count: u64,
+        perms: crate::mm::paging::UserPerms,
+    ) {
         self.mappings.push(MappingRange {
             virt_start,
             page_count,
+            perms,
         });
     }
 
     /// Number of recorded mappings. Test-visible.
     pub fn mapping_count(&self) -> usize {
         self.mappings.len()
+    }
+
+    pub fn mappings(&self) -> &[MappingRange] {
+        &self.mappings
+    }
+
+    pub fn record_elf_backing(
+        &mut self,
+        start: u64,
+        file: Arc<File>,
+        file_offset: u64,
+        file_len: u64,
+        zero_tail: u64,
+    ) {
+        self.elf_backings.push(ElfBacking {
+            start,
+            file,
+            file_offset,
+            file_len,
+            zero_tail,
+        });
+    }
+
+    pub fn elf_backing(&self, start: u64) -> Option<&ElfBacking> {
+        self.elf_backings.iter().find(|backing| backing.start == start)
     }
 
     /// Total user pages mapped (PT_LOAD + stack). Test-visible.
@@ -169,38 +228,28 @@ impl UserImage {
         self.mappings.get(idx).copied()
     }
 
-    /// Mark the image as already-cleaned-up, suppressing the `Drop`
-    /// unmap pass. Call this when the surrounding `AddressSpace` is
-    /// going away in the same teardown (process exit / reap), so the
-    /// L4 frame and its leaves leak together rather than having
-    /// `unmap_user_region` operate on whatever CR3 happens to be live.
-    ///
-    /// The forward-only frame allocator never reclaims, so "leak"
-    /// here just means the same outcome as `AddressSpace::Drop`: the
-    /// frames stay allocated in physical memory but are no longer
-    /// referenced by any page-table the kernel can reach.
-    ///
-    /// Background: `UserImage::Drop` calls `unmap_user_region` against
-    /// the **active** CR3. That's correct in the execve path (the
-    /// process's own L4 is still active when the old image drops). It
-    /// is catastrophic during reap of a forked child whose L4 is no
-    /// longer active — `unmap_user_region` clobbers the CURRENT
-    /// process's L4 at any VAs that happen to overlap the dead
-    /// process's recorded mappings. For static-non-PIE binaries that
-    /// all link at the same base, that overlap is total.
-    pub fn abandon(&mut self) {
+    /// Transfer all page-table ownership to the surrounding AddressSpace.
+    /// After this point Drop is metadata-only and cannot target the wrong CR3.
+    pub fn transfer_mapping_ownership(&mut self) {
         self.dropped = true;
         self.mappings.clear();
-        // Stack initial-commit is also unmapped by Drop; suppress that
-        // by zeroing the trigger field. The grown-stack region is
-        // handled separately by `Process` (via `unmap_user_stack`) and
-        // is unaffected by this method.
-        self.stack_initial_bottom = 0;
+        self.elf_backings.clear();
     }
 }
 
 impl Drop for UserImage {
     fn drop(&mut self) {
+        // Production page-table ownership always belongs to AddressSpace.
+        // The feature-test fallback keeps historical fixtures isolated: they
+        // deliberately load into the kernel L4 without an AddressSpace.
+        #[cfg(feature = "test")]
+        self.drop_legacy_test_mappings();
+    }
+}
+
+#[cfg(feature = "test")]
+impl UserImage {
+    fn drop_legacy_test_mappings(&mut self) {
         if self.dropped {
             return;
         }
@@ -239,20 +288,13 @@ impl Drop for UserImage {
         // signal "Process already handled the stack range" so we don't
         // double-unmap).
         if self.stack_initial_bottom != 0 && self.stack_top.as_u64() > self.stack_initial_bottom {
-            let page_count =
-                (self.stack_top.as_u64() - self.stack_initial_bottom) / 0x1000;
+            let page_count = (self.stack_top.as_u64() - self.stack_initial_bottom) / 0x1000;
             let res = crate::mm::memory::with_memory_mapper(|m| {
-                m.unmap_user_region(
-                    x86_64::VirtAddr::new(self.stack_initial_bottom),
-                    page_count,
-                )
+                m.unmap_user_region(x86_64::VirtAddr::new(self.stack_initial_bottom), page_count)
             });
             if let Some(Err(e)) = res {
                 if !matches!(e, UserMapError::PageNotMapped) {
-                    crate::debug_warn!(
-                        "UserImage::drop: stack unmap failed: {:?}",
-                        e
-                    );
+                    crate::debug_warn!("UserImage::drop: stack unmap failed: {:?}", e);
                 }
             }
         }

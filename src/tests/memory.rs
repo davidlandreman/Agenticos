@@ -1,15 +1,26 @@
-use crate::{debug_info};
+use crate::debug_info;
 use crate::lib::test_utils::Testable;
 use crate::mm::memory;
 
 fn test_memory_stats() {
     let stats = memory::get_memory_stats();
-    assert!(stats.total_memory > 0, "Total memory should be greater than 0");
-    assert!(stats.usable_memory > 0, "Usable memory should be greater than 0");
-    assert!(stats.usable_memory <= stats.total_memory, "Usable memory should not exceed total memory");
-    debug_info!("Memory - Total: {} MB, Usable: {} MB",
-               stats.total_memory / (1024 * 1024),
-               stats.usable_memory / (1024 * 1024));
+    assert!(
+        stats.total_memory > 0,
+        "Total memory should be greater than 0"
+    );
+    assert!(
+        stats.usable_memory > 0,
+        "Usable memory should be greater than 0"
+    );
+    assert!(
+        stats.usable_memory <= stats.total_memory,
+        "Usable memory should not exceed total memory"
+    );
+    debug_info!(
+        "Memory - Total: {} MB, Usable: {} MB",
+        stats.total_memory / (1024 * 1024),
+        stats.usable_memory / (1024 * 1024)
+    );
 }
 
 fn test_memory_alignment() {
@@ -23,7 +34,10 @@ fn test_memory_alignment() {
 fn test_memory_ranges() {
     let stats = memory::get_memory_stats();
     // Ensure we have reasonable memory amounts (at least 1MB usable)
-    assert!(stats.usable_memory >= 1024 * 1024, "Should have at least 1MB of usable memory");
+    assert!(
+        stats.usable_memory >= 1024 * 1024,
+        "Should have at least 1MB of usable memory"
+    );
 }
 
 // ---------- Frame allocator cursor (U1) ----------
@@ -34,8 +48,8 @@ fn test_memory_ranges() {
 // tests and lets us cover edge cases (region 0 starting at addr 0, exhaustion,
 // non-Usable region skipping) deterministically.
 
-use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 use crate::mm::frame_allocator::test_support::TestCursor;
+use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 
 fn region(start: u64, end: u64, kind: MemoryRegionKind) -> MemoryRegion {
     MemoryRegion { start, end, kind }
@@ -90,7 +104,10 @@ fn test_frame_cursor_skips_non_usable_regions() {
     let first = cursor.next(&regions).unwrap().start_address().as_u64();
     let second = cursor.next(&regions).unwrap().start_address().as_u64();
     assert_eq!(first, 0x10_000);
-    assert_eq!(second, 0x30_000, "must skip Bootloader and UnknownBios regions");
+    assert_eq!(
+        second, 0x30_000,
+        "must skip Bootloader and UnknownBios regions"
+    );
     assert!(cursor.next(&regions).is_none());
 }
 
@@ -142,8 +159,20 @@ fn test_frame_cursor_monotonic_over_4096_calls() {
     let mut count = 0u64;
     while let Some(frame) = cursor.next(&regions) {
         let addr = frame.start_address().as_u64();
-        assert_eq!(addr & 0xFFF, 0, "frame {} not 4 KiB aligned: {:#x}", count, addr);
-        assert!(addr > prev, "frame {} not strictly monotonic: {:#x} <= {:#x}", count, addr, prev);
+        assert_eq!(
+            addr & 0xFFF,
+            0,
+            "frame {} not 4 KiB aligned: {:#x}",
+            count,
+            addr
+        );
+        assert!(
+            addr > prev,
+            "frame {} not strictly monotonic: {:#x} <= {:#x}",
+            count,
+            addr,
+            prev
+        );
         assert_ne!(addr, 0, "null frame returned at iteration {}", count);
         prev = addr;
         count += 1;
@@ -151,56 +180,113 @@ fn test_frame_cursor_monotonic_over_4096_calls() {
             break;
         }
     }
-    assert!(count >= 4096, "did not produce at least 4096 frames; got {}", count);
+    assert!(
+        count >= 4096,
+        "did not produce at least 4096 frames; got {}",
+        count
+    );
 }
 
 // ---------- Live frame allocator throughput (diagnostic) ----------
 //
-// Confirms U1's O(1) claim against the live `BootInfoFrameAllocator`, not
-// just the synthetic cursor exercised above. Permanently consumes 256
-// physical frames (1 MiB) per test run; with ~94 MiB usable that's a rounding
-// error.
+// Confirms allocation throughput and, critically, returns every frame so the
+// test itself cannot hide reclamation regressions.
 
 fn test_live_frame_allocator_throughput() {
     use crate::arch::x86_64::interrupts::get_timer_ticks;
 
     const N: u64 = 256;
 
-    let before = crate::mm::memory::with_memory_mapper(|m| m.frames_issued()).unwrap_or(0);
+    let before = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
 
     let t0 = get_timer_ticks();
-    let allocated = crate::mm::memory::with_memory_mapper(|m| {
-        let mut count = 0u64;
-        for _ in 0..N {
-            if m.allocate_test_frame().is_some() {
-                count += 1;
+    let (frames, allocated) = crate::mm::memory::with_memory_mapper(|m| {
+        let mut frames = [None; N as usize];
+        let mut allocated = 0usize;
+        for slot in frames.iter_mut() {
+            if let Some(frame) = m.allocate_test_frame() {
+                *slot = Some(frame);
+                allocated += 1;
             }
         }
-        count
+        (frames, allocated)
     })
-    .unwrap_or(0);
+    .unwrap();
     let t1 = get_timer_ticks();
 
-    let after = crate::mm::memory::with_memory_mapper(|m| m.frames_issued()).unwrap_or(0);
+    let allocated_stats = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
     let elapsed = t1.saturating_sub(t0);
 
     debug_info!(
-        "[perf] live frame alloc: {} frames in {} ticks ({} ms); frames_issued {} -> {}",
+        "[perf] live frame alloc: {} frames in {} ticks ({} ms); free {} -> {}",
         allocated,
         elapsed,
         elapsed.saturating_mul(10),
-        before,
-        after,
+        before.free,
+        allocated_stats.free,
     );
 
-    assert_eq!(allocated, N, "expected to allocate all {} frames", N);
-    assert_eq!(after - before, allocated, "frames_issued counter must advance by N");
+    assert_eq!(allocated as u64, N, "expected to allocate all {} frames", N);
+    assert_eq!(
+        before.free - allocated_stats.free,
+        N,
+        "free count must fall by N while frames are owned"
+    );
     assert!(
         elapsed < 100,
         "live frame allocator took {} ticks for {} frames — O(1) regression",
         elapsed,
         N
     );
+
+    crate::mm::memory::with_memory_mapper(|m| {
+        for frame in frames.iter().flatten().copied() {
+            assert!(m.release_test_frame(frame), "test frame release failed");
+        }
+        let reused = m.allocate_test_frame().expect("released capacity reusable");
+        assert!(frames.contains(&Some(reused)), "allocator did not reuse a released frame");
+        assert!(m.release_test_frame(reused));
+    })
+    .expect("memory mapper");
+    let after = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
+    assert_eq!(after, before, "live allocate/release must have zero frame delta");
+}
+
+fn test_live_frame_refcounts_and_failure_injection() {
+    let before = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
+    let frame = crate::mm::memory::with_memory_mapper(|m| m.allocate_test_frame())
+        .flatten()
+        .expect("test frame");
+    assert_eq!(
+        crate::mm::memory::with_memory_mapper(|m| m.frame_refcount(frame)).flatten(),
+        Some(1)
+    );
+    assert!(crate::mm::memory::with_memory_mapper(|m| m.retain_frame(frame)).unwrap());
+    assert_eq!(
+        crate::mm::memory::with_memory_mapper(|m| m.frame_refcount(frame)).flatten(),
+        Some(2)
+    );
+    assert!(crate::mm::memory::with_memory_mapper(|m| m.release_test_frame(frame)).unwrap());
+    assert_eq!(
+        crate::mm::memory::with_memory_mapper(|m| m.frame_refcount(frame)).flatten(),
+        Some(1)
+    );
+    assert!(crate::mm::memory::with_memory_mapper(|m| m.release_test_frame(frame)).unwrap());
+    assert_eq!(
+        crate::mm::memory::with_memory_mapper(|m| m.frame_refcount(frame)).flatten(),
+        Some(0)
+    );
+
+    {
+        let _failure = crate::mm::frame_allocator::fail_allocations_after(0);
+        assert!(
+            crate::mm::memory::with_memory_mapper(|m| m.allocate_test_frame())
+                .flatten()
+                .is_none()
+        );
+    }
+    let after = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
+    assert_eq!(after, before, "refcount and failed allocation must unwind exactly");
 }
 
 // ---------- Page-fault demotion baseline (U4) ----------
@@ -257,6 +343,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_frame_cursor_handles_all_non_usable_regions,
         &test_frame_cursor_monotonic_over_4096_calls,
         &test_live_frame_allocator_throughput,
+        &test_live_frame_refcounts_and_failure_injection,
         &test_heap_demand_paging_at_default_log_level,
     ]
 }
