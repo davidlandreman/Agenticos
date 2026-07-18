@@ -212,7 +212,14 @@ impl TerminalWindow {
                 let cell = cells[col];
                 let fg = resolve(cell.fg, /*is_foreground=*/ true);
                 let bg = resolve(cell.bg, /*is_foreground=*/ false);
-                self.text_window.set_cell(row, col, cell.ch, fg, bg);
+                self.text_window.set_cell(
+                    row,
+                    col,
+                    cell.ch,
+                    fg,
+                    bg,
+                    matches!(cell.bg, crate::terminal::colors::ColorSpec::Default),
+                );
             }
         }
 

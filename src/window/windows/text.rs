@@ -16,6 +16,7 @@ struct CharCell {
     ch: char,
     fg_color: Color,
     bg_color: Color,
+    bg_is_default: bool,
 }
 
 impl Default for CharCell {
@@ -24,6 +25,7 @@ impl Default for CharCell {
             ch: ' ',
             fg_color: Color::WHITE,
             bg_color: Color::BLACK,
+            bg_is_default: true,
         }
     }
 }
@@ -45,6 +47,8 @@ pub struct TextWindow {
     current_fg: Color,
     /// Current background color
     current_bg: Color,
+    /// Whether `current_bg` represents the terminal's default background.
+    current_bg_is_default: bool,
     /// Character dimensions
     char_width: usize,
     char_height: usize,
@@ -113,6 +117,7 @@ impl TextWindow {
             cursor_y: 0,
             current_fg: Color::WHITE,
             current_bg: Color::BLACK,
+            current_bg_is_default: true,
             char_width,
             char_height,
             dirty_cells: Vec::new(),
@@ -148,6 +153,7 @@ impl TextWindow {
                 ch,
                 fg_color: self.current_fg,
                 bg_color: self.current_bg,
+                bg_is_default: self.current_bg_is_default,
             };
 
             // Track this cell as dirty for incremental updates
@@ -234,7 +240,15 @@ impl TextWindow {
     /// `Screen` is the source of truth and TextWindow is just the
     /// renderer. The cursor position is not touched; callers manage it
     /// separately via `set_cursor_position`.
-    pub fn set_cell(&mut self, row: usize, col: usize, ch: char, fg: Color, bg: Color) {
+    pub fn set_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        ch: char,
+        fg: Color,
+        bg: Color,
+        bg_is_default: bool,
+    ) {
         if row >= self.rows || col >= self.cols {
             return;
         }
@@ -242,6 +256,7 @@ impl TextWindow {
             ch,
             fg_color: fg,
             bg_color: bg,
+            bg_is_default,
         };
         // Forcing full repaint is the simplest correct policy when an
         // external source overwrites many cells in a single batch.
@@ -267,6 +282,26 @@ impl TextWindow {
             if !self.suppress_invalidation {
                 self.base.invalidate();
             }
+        }
+    }
+
+    /// Paint the active theme's default terminal-well material. On retained
+    /// surfaces this is an exact ARGB replacement; Classic/legacy resolves to
+    /// the same opaque #202020 used before translucent wells were introduced.
+    fn fill_default_background(
+        device: &mut dyn GraphicsDevice,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) {
+        let material = crate::window::theme::terminal_well();
+        if material.alpha == u8::MAX {
+            // Preserve the legacy renderer's opaque bulk-fill path. Its
+            // generic ARGB fallback would otherwise read/blend every pixel.
+            device.fill_rect(x, y, width, height, material.tint);
+        } else {
+            device.fill_rect_argb(x, y, width, height, material.tint, material.alpha);
         }
     }
 }
@@ -424,7 +459,7 @@ impl Window for TextWindow {
                     bounds.y + CONTENT_PADDING as i32 + (min_row * self.char_height) as i32;
                 let fill_w = ((max_col_excl - min_col) * self.char_width) as u32;
                 let fill_h = ((max_row_excl - min_row) * self.char_height) as u32;
-                device.fill_rect(fill_x, fill_y, fill_w, fill_h, Color::new(32, 32, 32));
+                Self::fill_default_background(device, fill_x, fill_y, fill_w, fill_h);
 
                 for row in min_row..max_row_excl {
                     for col in min_col..max_col_excl {
@@ -432,11 +467,10 @@ impl Window for TextWindow {
                         let y = bounds.y + CONTENT_PADDING as i32 + (row * self.char_height) as i32;
                         let cell = &self.buffer[row][col];
 
-                        // Cells with bg == BLACK use the default
-                        // terminal grey from the bounding-rect fill
-                        // above; only paint a per-cell bg when the
-                        // cell explicitly overrides it.
-                        if cell.bg_color != Color::BLACK {
+                        // Default cells use the translucent terminal material
+                        // from the bounding fill. Explicit ANSI backgrounds,
+                        // including indexed black, remain opaque.
+                        if !cell.bg_is_default {
                             device.fill_rect(
                                 x,
                                 y,
@@ -490,14 +524,7 @@ impl Window for TextWindow {
         // Clear dirty cells since we're doing a full repaint
         self.dirty_cells.clear();
 
-        // Clear background with a dark grey instead of black to see if it's rendering
-        device.fill_rect(
-            bounds.x,
-            bounds.y,
-            bounds.width,
-            bounds.height,
-            Color::new(32, 32, 32),
-        );
+        Self::fill_default_background(device, bounds.x, bounds.y, bounds.width, bounds.height);
 
         // Count non-space characters for debugging
         let mut char_count = 0;
@@ -508,8 +535,9 @@ impl Window for TextWindow {
                 let x = bounds.x + CONTENT_PADDING as i32 + (col * self.char_width) as i32;
                 let y = bounds.y + CONTENT_PADDING as i32 + (row * self.char_height) as i32;
 
-                // Draw background if not black
-                if cell.bg_color != Color::BLACK {
+                // Explicit ANSI backgrounds remain opaque; default cells keep
+                // the theme material painted across the whole content well.
+                if !cell.bg_is_default {
                     device.fill_rect(
                         x,
                         y,
