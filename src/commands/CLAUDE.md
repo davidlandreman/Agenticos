@@ -1,30 +1,39 @@
-# `src/commands/` — Kernel-side GUI policy and legacy apps
+# `src/commands/` — Kernel-side GUI policy and legacy app
 
-This directory now contains one kernel-side GUI application (`explorer`) plus
-`guishell`, the desktop/taskbar policy layer. `notepad` was the first
-application migrated to the ring-3 GUI platform; `calc`, `painting`, and the
-Task Manager (`userland/apps/taskmgr/`, replacing the kernel-side `tasks` app
-— see `docs/plans/2026-07-18-003-feat-ring3-task-manager-and-procfs-plan.md`)
-followed. All four live under `userland/apps/`.
+This directory contains `guishell`, the desktop/taskbar policy layer, plus
+the (empty today) GUI launch table. Every GUI application has migrated to
+the ring-3 platform: File Manager, Notepad, Calc, Painting, GL Arena, and
+the Task Manager (`userland/apps/taskmgr/`, replacing the kernel-side
+`tasks` app — see
+`docs/plans/2026-07-18-003-feat-ring3-task-manager-and-procfs-plan.md`) all
+live under `userland/apps/`.
 
-`gui_launch_table` still dispatches the one legacy application for
-`GLAUNCH.ELF` and syscall 5000. Its names must match `GUI_APPLETS` in
-`src/userland/bin_namespace.rs`. The migrated apps are deliberately absent:
-`/bin/calc`, `/bin/notepad`, and `/bin/painting` rewrite directly to
-`/host/CALC.ELF`, `/host/NOTEPAD.ELF`, and `/host/PAINTING.ELF`, and both
-`/bin/taskmgr` and the legacy alias `/bin/tasks` rewrite to
-`/host/TASKMGR.ELF`.
+`gui_launch_table` retains the `GLAUNCH.ELF` / syscall-5000 dispatch
+skeleton for a future workload that genuinely needs ring 0; its match arms
+must stay in sync with `GUI_APPLETS` in `src/userland/bin_namespace.rs`
+(both are empty). The migrated apps' synthetic `/bin` entries rewrite
+directly to staged ELFs under `/host` (`/bin/taskmgr` and the legacy alias
+`/bin/tasks` both resolve to `/host/TASKMGR.ELF`; `explorer` is the
+compatibility name for `FILEMAN.ELF`).
 
-## Launch paths
+## Desktop launch paths
 
-- Start → Notepad, Start → Calc, Start → Painting, and Start → Task Manager
-  call `terminal_factory::spawn_gui_user_app`, which launches the standalone
-  ELF on a blocking kernel wrapper thread.
-- zsh `notepad` / `calc` / `painting` / `taskmgr` / `tasks` resolve through
-  the synthetic `/bin` namespace directly to the staged ELFs.
-- Explorer launches `NOTEPAD.ELF` with the selected text path as `argv[1]`.
-- Explorer itself continues through `GLAUNCH.ELF` →
-  `sys_gui_launch` → `gui_launch_table::spawn_by_name`.
+- Start → Programs contains Terminal, File Manager, Notepad, Painting,
+  Calc, GL Arena, and Task Manager. Standalone apps use
+  `terminal_factory::spawn_gui_user_app`, which launches an ELF on a
+  blocking kernel wrapper thread.
+- Start → Run opens the kernel-owned non-blocking Run dialog. Submitted text is
+  passed unchanged as the single command argument to `/host/ZSH.ELF -c`, using
+  the same `/bin:/host` PATH as interactive terminals.
+- Start → Documents and Settings are disabled placeholders. Start → Shut Down
+  reports that clean shutdown is not implemented; it does not use QEMU's test
+  exit port.
+- zsh `explorer`, `notepad`, `calc`, `painting`, `glgame`, `taskmgr`, and
+  `tasks` resolve through the synthetic `/bin` namespace directly to their
+  standalone ELFs. The historical `explorer` command is the compatibility
+  name for `FILEMAN.ELF`.
+- File Manager launches `NOTEPAD.ELF` for text files and executable ELF files
+  directly with ring-3 `fork` + `execve`.
 
 The old kernel `tasks` app could kill arbitrary kernel threads (including the
 compositor). That capability was deliberately dropped in the migration: the
@@ -35,13 +44,12 @@ kernel threads read-only via `/proc/agenticos/kthreads`.
 
 New native applications should use the ring-3 pattern documented in
 `userland/README.md`: add a no_std workspace app, depend on `runtime` and
-`libs/gui`, and add one manifest row. Add a Start-menu action only when the app
+`libs/gui`, and add one manifest row. Add a Programs action only when the app
 should be pinned there. Do not add new kernel widgets or launch-table arms
 unless the workload genuinely requires ring-0 privileges.
 
-The remaining kernel apps may migrate incrementally. Each migration removes
-its module and launch-table arm and changes its `/bin` entry to a direct ELF
-rewrite, following notepad's pattern.
+The remaining Tasks app may migrate using the same pattern: remove its module
+and launch-table arm and change its `/bin` entry to a direct ELF rewrite.
 
 ## Cross-references
 

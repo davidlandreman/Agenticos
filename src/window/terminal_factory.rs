@@ -278,6 +278,43 @@ pub fn spawn_gui_user_app(path: &'static str, argv: Vec<String>) -> ProcessId {
     })
 }
 
+/// Execute text submitted through the desktop Run dialog with the bundled zsh.
+/// The command is passed as one `-c` argument so zsh remains the sole parser
+/// for quoting, arguments, shell syntax, and PATH lookup.
+pub fn spawn_run_command(command: String) -> ProcessId {
+    crate::process::spawn_process(String::from("run-command"), None, move || {
+        let argv = run_command_argv(&command);
+        match crate::userland::launcher::launch_user_binary(
+            ZSH_HOST_PATH,
+            &argv,
+            &TERMINAL_SHELL_ENV,
+        ) {
+            Ok((kind, 0)) => {
+                crate::debug_info!("Run command exited successfully: kind={:?}", kind);
+            }
+            Ok((kind, code)) => {
+                crate::debug_warn!(
+                    "Run command failed: command={:?}, kind={:?}, code={}",
+                    command,
+                    kind,
+                    code
+                );
+                let message = alloc::format!("Command exited with status {code}: {command}");
+                crate::window::dialogs::show_error("Run", &message);
+            }
+            Err(error) => {
+                crate::debug_error!("Run command {:?} failed to launch: {}", command, error);
+                let message = alloc::format!("Could not run {command}: {error}");
+                crate::window::dialogs::show_error("Run", &message);
+            }
+        }
+    })
+}
+
+pub(crate) fn run_command_argv(command: &str) -> [&str; 3] {
+    [ZSH_HOST_PATH, "-c", command]
+}
+
 /// Spawn a kernel-side process whose entry function loads
 /// `/host/ZSH.ELF` and enters ring 3 with stdio bound to `terminal_id`.
 /// The kernel process blocks for the entire zsh session; on exit the terminal

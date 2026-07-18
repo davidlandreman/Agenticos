@@ -6,7 +6,7 @@ pub mod stack;
 
 pub use context::CpuContext;
 pub use pcb::{BlockReason, ProcessControlBlock, ProcessState, WakeEvents};
-pub use process::{allocate_pid, ProcessId, RunnableProcess};
+pub use process::{allocate_pid, ProcessId};
 pub use scheduler::ProcessInfo;
 
 use crate::window::WindowId;
@@ -67,15 +67,15 @@ where
     );
 
     // Add to scheduler
-    crate::debug_info!("spawn_process: about to lock scheduler");
+    crate::debug_trace!("spawn_process: locking scheduler");
     let pid = {
         let mut sched = scheduler::SCHEDULER.lock();
-        crate::debug_info!("spawn_process: scheduler locked, calling spawn()");
+        crate::debug_trace!("spawn_process: scheduler locked, calling spawn()");
         let p = sched.spawn(pcb);
-        crate::debug_info!("spawn_process: spawn() returned PID {:?}", p);
+        crate::debug_trace!("spawn_process: spawn() returned PID {:?}", p);
         p
     };
-    crate::debug_info!(
+    crate::debug_trace!(
         "spawn_process: scheduler lock released, returning PID {:?}",
         pid
     );

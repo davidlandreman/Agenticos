@@ -32,15 +32,18 @@ userland/
 ├── runtime/            # syscall ABI, startup parsing, brk allocator, GUI events
 ├── libs/
 │   ├── gui/            # Window, Canvas, bitmap text, menus, widgets, dir listing
+│   ├── gl/             # bounded fixed-function OpenGL-style VirGL frontend
 │   └── dialogs/        # FileDialog, MessageBox, ColorPicker modal compositions
 └── apps/
     ├── hello/          # rust app — prints "hello\n", exits 0
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
     ├── guidemo/        # minimal ring-3 GUI reference client
+    ├── fileman/        # standalone Finder/Explorer-style file manager
     ├── notepad/        # standalone editor with userland dialogs + working Save
     ├── taskmgr/        # tabbed task manager over /proc (graphs, End Task)
     ├── calc/           # standalone four-operation calculator
     ├── painting/       # standalone bouncing-shapes GUI demo (self-driven frame loop)
+    ├── glgame/         # GL Arena — windowed real-time colored-geometry 3D game
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
@@ -73,36 +76,36 @@ resolve into multicall or direct binaries staged under `host_share/`:
 
 - **`BB.ELF` — BusyBox** (core utilities plus IPv4 `ping`, `nc`, `nslookup`,
   and HTTP-only `wget`; IPv6 and TLS are not available).
-- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`explorer` only).
-- **`CALC.ELF` / `NOTEPAD.ELF` / `PAINTING.ELF` / `TASKMGR.ELF` — direct
-  standalone ring-3 applications** (`calc`, `notepad`, `painting`;
-  `taskmgr` with legacy alias `tasks`).
+- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (empty today — every
+  GUI app has migrated to ring 3; the mechanism remains for a future
+  ring-0-only workload).
+- **Direct standalone ring-3 applications** — `CALC.ELF`, `FILEMAN.ELF`,
+  `GLGAME.ELF`, `NOTEPAD.ELF`, `PAINTING.ELF`, and `TASKMGR.ELF`
+  (`calc`, compatibility command `explorer`, `glgame`, `notepad`,
+  `painting`; `taskmgr` with legacy alias `tasks`).
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
 to `BB.ELF` with `argv[0]` overwritten to `"ls"`; BusyBox's own
-dispatcher picks the right applet. `execve("/bin/explorer", argv,
-envp)` resolves to `GLAUNCH.ELF` with `argv[0]` overwritten to
-`"explorer"`; GUILAUNCH's `_start` issues the AgenticOS-internal
-`sys_gui_launch("explorer")` syscall, which spawns the kernel-side
-explorer process. No symlinks, no per-applet ELF copies — the
-namespace is pure kernel synthesis.
+dispatcher picks the right applet. No symlinks or per-applet ELF copies
+are needed; the namespace is pure kernel synthesis.
 
-`execve("/bin/notepad", ...)`, `execve("/bin/calc", ...)`, and
-`execve("/bin/painting", ...)` instead rewrite directly to
-`/host/NOTEPAD.ELF` / `/host/CALC.ELF` / `/host/PAINTING.ELF`; there is no
-`GLAUNCH` round trip or kernel-side process for any of them. `/bin/taskmgr`
-and `/bin/tasks` both rewrite to `/host/TASKMGR.ELF` the same way.
+`execve("/bin/explorer", ...)`, `execve("/bin/notepad", ...)`,
+`execve("/bin/calc", ...)`, `execve("/bin/glgame", ...)`,
+`execve("/bin/painting", ...)`, and `execve("/bin/taskmgr", ...)` (or its
+legacy alias `/bin/tasks`) rewrite directly to their staged ELFs. There is
+no `GLAUNCH` round trip or kernel-side application process for any of them.
 
 `stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
 directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
 (`access("/bin/ls", X_OK)` followed by `execve`) finds applets without
 any zsh-side hooks. The terminal's default envp seeds
-`PATH=/bin:/host` so bare `ls`, `cat`, `painting`, etc. all Just Work
+`PATH=/bin:/host` so bare `ls`, `cat`, `explorer`, etc. all Just Work
 in an interactive shell.
 
-The overlay root and `/data` are writable; `/host` remains read-only. Native
-notepad surfaces `-EROFS` in a userland dialog when asked to save under
+The overlay root and `/data` are writable; `/host` remains read-only. File
+Manager exposes these mount capabilities in its actions and status bar; native
+Notepad surfaces `-EROFS` in a userland dialog when asked to save under
 `/host`.
 
 ### `GLAUNCH.ELF` (in-tree, built every run)
@@ -261,6 +264,12 @@ polling, and `Window::present()` performs a full-surface copy. Resize events
 must resize the canvas before the next present; Close remains an application
 decision. Add a direct `/bin` rewrite only when the app should be discoverable
 through `PATH`.
+
+`apps/glgame` is the reference for a self-driven 3D app. `libs/gl` transforms
+fixed-function vertices in userland, triangulates quads, batches validated
+frame packets, and attaches the resulting VirGL texture to the normal GUI
+window. Context creation requires the strict qualified GPU compositor; the app
+shows a CPU-canvas launch hint when that prerequisite is absent.
 
 `libs/gui` also ships retained-mode widgets — `Button`, `TextField`,
 `ListView`, `MenuBar`, `TabBar`, `ColumnListView` (multi-column, sortable

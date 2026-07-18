@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 
+use crate::graphics::composition::ClientGlId;
 use crate::graphics::surface::SurfaceId;
 use crate::window::Rect;
 
@@ -51,8 +52,14 @@ pub enum LayerEffect {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerSource {
+    Canonical(SurfaceId),
+    VirglClient(ClientGlId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layer {
-    pub surface_id: SurfaceId,
+    pub source: LayerSource,
     pub source_rect: Rect,
     pub destination_rect: Rect,
     pub clip_rect: Rect,
@@ -66,7 +73,7 @@ pub struct Layer {
 impl Layer {
     pub fn opaque(surface_id: SurfaceId, destination_rect: Rect) -> Self {
         Self {
-            surface_id,
+            source: LayerSource::Canonical(surface_id),
             source_rect: Rect::new(0, 0, destination_rect.width, destination_rect.height),
             destination_rect,
             clip_rect: destination_rect,
@@ -75,6 +82,32 @@ impl Layer {
             effect: LayerEffect::None,
             z_index: 0,
             visible: true,
+        }
+    }
+
+    pub fn virgl_client(
+        client_id: ClientGlId,
+        source_width: u32,
+        source_height: u32,
+        destination_rect: Rect,
+    ) -> Self {
+        Self {
+            source: LayerSource::VirglClient(client_id),
+            source_rect: Rect::new(0, 0, source_width, source_height),
+            destination_rect,
+            clip_rect: destination_rect,
+            opacity: u8::MAX,
+            transform: Transform2D::IDENTITY,
+            effect: LayerEffect::None,
+            z_index: 0,
+            visible: true,
+        }
+    }
+
+    pub const fn canonical_surface_id(self) -> Option<SurfaceId> {
+        match self.source {
+            LayerSource::Canonical(id) => Some(id),
+            LayerSource::VirglClient(_) => None,
         }
     }
 
@@ -95,6 +128,24 @@ pub fn inflate_rect(rect: Rect, radius: u32) -> Rect {
         rect.width.saturating_add(radius.saturating_mul(2)),
         rect.height.saturating_add(radius.saturating_mul(2)),
     )
+}
+
+/// Split a total backdrop radius across the three box blurs used by both
+/// composition backends. Three box blurs are a cheap Gaussian approximation;
+/// keeping the partition here makes CPU and GPU effects share one contract.
+pub const fn backdrop_box_radii(total: u16) -> [u16; 3] {
+    [total / 3, total / 3, total / 3 + total % 3]
+}
+
+/// Sampling halo required to evaluate every visible backdrop effect in
+/// z-order. Stacked glass layers accumulate their sampling reach.
+pub fn backdrop_halo(layers: &[Layer]) -> u32 {
+    layers.iter().fold(0u32, |halo, layer| {
+        halo.saturating_add(match layer.effect {
+            LayerEffect::BackdropSample { radius } if layer.visible => radius as u32,
+            _ => 0,
+        })
+    })
 }
 
 pub struct SceneFrame {

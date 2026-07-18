@@ -16,6 +16,8 @@ pub enum DialogResult {
     Cancel,
     /// User selected a file path
     FilePath(String),
+    /// User submitted text.
+    Text(String),
     /// Custom result with a numeric value
     Custom(usize),
 }

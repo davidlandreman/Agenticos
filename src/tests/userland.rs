@@ -2126,6 +2126,33 @@ fn test_dispatch_clock_gettime_invalid_clock_einval() {
     teardown_phase2_active_user();
 }
 
+fn test_dispatch_clock_realtime_uses_rtc_epoch() {
+    setup_phase2_active_user();
+    let buf = [0u8; 16];
+    let ptr = buf.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 16,
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::CLOCK_GETTIME;
+    args.rdi = 0; // CLOCK_REALTIME
+    args.rsi = ptr;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let sec_bytes: [u8; 8] = buf[0..8].try_into().unwrap();
+    let seconds = i64::from_ne_bytes(sec_bytes);
+    assert!(
+        seconds > 1_500_000_000,
+        "realtime did not use the RTC-backed Unix epoch: {}",
+        seconds
+    );
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
 fn test_dispatch_getrandom_fills_buffer() {
     setup_phase2_active_user();
     let buf = [0u8; 32];
@@ -4798,6 +4825,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_lseek_on_stream_returns_espipe,
         &test_dispatch_clock_gettime_writes_timespec,
         &test_dispatch_clock_gettime_invalid_clock_einval,
+        &test_dispatch_clock_realtime_uses_rtc_epoch,
         &test_dispatch_getrandom_fills_buffer,
         &test_dispatch_uname_writes_sysname_linux,
         &test_dispatch_fcntl_getfd_setfd_roundtrip,

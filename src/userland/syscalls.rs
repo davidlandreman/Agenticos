@@ -2075,8 +2075,8 @@ const _R_OK: u32 = 4;
 const _W_OK: u32 = 2;
 const _X_OK: u32 = 1;
 
-/// `clock_gettime` clock IDs we recognize. Both anchor at boot for now;
-/// real wall-clock will arrive when an RTC or NTP source is wired up.
+/// `clock_gettime` clock IDs we recognize. Realtime is anchored to the boot
+/// RTC snapshot; monotonic remains PIT uptime.
 const CLOCK_REALTIME: i32 = 0;
 const CLOCK_MONOTONIC: i32 = 1;
 
@@ -2190,13 +2190,6 @@ fn map_fs_err(err: &crate::fs::fs_manager::FsError) -> i64 {
 fn resolve_user_path(ptr: u64) -> Result<String, i64> {
     let raw = copy_user_cstr(ptr)?;
     Ok(with_cwd(|cwd| normalize_path(cwd, &raw)))
-}
-
-/// Coarse monotonic clock — `timer_ticks * 10ms`. Wall-clock equivalence
-/// is intentional: we have no RTC/NTP, so realtime starts at 0 too.
-fn monotonic_ns() -> u64 {
-    let ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
-    ticks.saturating_mul(10_000_000)
 }
 
 // ---------- open / openat / close ----------
@@ -3414,7 +3407,11 @@ pub fn clock_gettime_handler(args: &mut SyscallArgs) -> i64 {
     if clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC {
         return EINVAL;
     }
-    let ns = monotonic_ns();
+    let ns = if clk == CLOCK_REALTIME {
+        crate::time::realtime_ns()
+    } else {
+        crate::time::monotonic_ns()
+    };
     let ts = LinuxTimespec {
         tv_sec: (ns / 1_000_000_000) as i64,
         tv_nsec: (ns % 1_000_000_000) as i64,
@@ -3428,7 +3425,7 @@ pub fn gettimeofday_handler(args: &mut SyscallArgs) -> i64 {
     if tv_ptr == 0 {
         return 0;
     }
-    let ns = monotonic_ns();
+    let ns = crate::time::realtime_ns();
     let tv = LinuxTimeval {
         tv_sec: (ns / 1_000_000_000) as i64,
         tv_usec: ((ns % 1_000_000_000) / 1_000) as i64,
@@ -3451,7 +3448,7 @@ pub fn getrandom_handler(args: &mut SyscallArgs) -> i64 {
     let cap = core::cmp::min(len, 4096);
     let mut bytes = alloc::vec![0u8; cap as usize];
     // xorshift64* — small, fast, deterministic enough for libc seed needs.
-    let mut state: u64 = monotonic_ns() ^ 0x9E37_79B9_7F4A_7C15;
+    let mut state: u64 = crate::time::monotonic_ns() ^ 0x9E37_79B9_7F4A_7C15;
     if state == 0 {
         state = 0xDEAD_BEEF_CAFE_BABE;
     }

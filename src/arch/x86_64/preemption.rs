@@ -349,6 +349,23 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
         return;
     }
 
+    // A protected kernel critical section needs only the clock edge while it
+    // is active. In particular, do not enter the scheduler here: sleep-queue
+    // expiry can allocate and free temporary collections, and running that
+    // allocator-heavy housekeeping asynchronously in the middle of a long
+    // compositor render needlessly expands the interrupt-context surface.
+    //
+    // TIMER_TICKS was already advanced above, so sleepers and watchdog
+    // deadlines retain real elapsed time. The next unprotected tick performs
+    // the deferred scheduler work. Device IRQs remain enabled independently.
+    if !crate::arch::x86_64::preemption_guard::kernel_preemption_allowed() {
+        unsafe {
+            PICS.lock()
+                .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        }
+        return;
+    }
+
     // Check if we're running a spawned process
     let in_process = crate::process::is_in_spawned_process();
 

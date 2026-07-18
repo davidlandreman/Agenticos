@@ -256,12 +256,13 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let accessed_addr = Cr2::read();
 
-    // Immediate debug output to see if we're getting page faults
-    debug_info!(
-        ">>> PAGE FAULT at {:?}, error: {:?}",
-        accessed_addr,
-        error_code
-    );
+    // Routine demand faults are expected and can occur thousands of times
+    // during process startup. Keep per-fault detail available for an
+    // explicitly selected Trace session, but do no UART I/O at the default
+    // level. Fatal paths below log the address, error code, RIP, and context.
+    // UART output from this interrupt path is especially expensive under
+    // QEMU because every byte can require a VM exit.
+    debug_trace!("page fault at {:?}, error: {:?}", accessed_addr, error_code);
 
     // Don't check for physical memory offset access here - let the mapper handle it
     // The mapper knows the actual physical memory offset from the bootloader
@@ -350,8 +351,8 @@ extern "x86-interrupt" fn page_fault_handler(
         // Per-fault trace logging only; routine demand-paging at default
         // log level shouldn't burn UART vmexits. See plan U2
         // (docs/plans/2026-05-09-002-perf-frame-allocator-and-page-fault-hot-path-plan.md).
-        // The opening `>>> PAGE FAULT at ...` line above stays at info so
-        // an unexpected fault is still visible.
+        // Unexpected faults remain visible through the error-level failure
+        // paths below; successful demand faults stay silent by default.
         let region = if addr >= STACK_REGION_START {
             "stack"
         } else {

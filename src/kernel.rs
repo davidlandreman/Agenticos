@@ -46,6 +46,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // hits a valid kernel GS).
     crate::arch::x86_64::syscall::init_syscall_msrs();
     interrupts::init_idt();
+    crate::time::init();
     ps2_controller::init();
 
     // Extract what we need from boot_info before borrowing it
@@ -670,10 +671,10 @@ fn restore_overlay_upper_from_data() {
 pub fn run() -> ! {
     debug_info!("Kernel initialization complete.");
 
-    // The legacy GUI app launcher (`GLAUNCH.ELF`) now serves only
-    // `explorer`; calc, notepad, painting, and the task manager are
-    // standalone ring-3 GUI ELFs. File-utility commands are BusyBox
-    // applets. zsh drives the synthetic /bin namespace.
+    // Every GUI app is a standalone ring-3 ELF now (File Manager, Calc,
+    // Notepad, Painting, GL Arena, Task Manager); the `GLAUNCH.ELF`
+    // launcher list is empty. File-utility commands are BusyBox applets.
+    // zsh drives the synthetic /bin namespace.
 
     // Force an initial render to display the desktop
     window::render_frame();

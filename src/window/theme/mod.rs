@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::drivers::fw_cfg;
 use crate::graphics::color::Color;
+use crate::graphics::scene::LayerEffect;
 use crate::window::renderer::RendererKind;
 use crate::window::{GraphicsDevice, Rect};
 
@@ -98,6 +99,8 @@ pub const AERO_METRICS: FrameMetrics = FrameMetrics {
     button_right_margin: 4,
 };
 
+pub const AERO_BACKDROP_RADIUS: u16 = 4;
+
 pub struct FrameChrome<'a> {
     pub bounds: Rect,
     pub title: &'a str,
@@ -126,7 +129,7 @@ pub fn select_theme(requested: ThemeRequest, renderer: RendererKind) -> ThemeSel
         },
         ThemeRequest::Auto => ThemeSelection {
             requested,
-            selected: if renderer == RendererKind::RetainedCpu {
+            selected: if matches!(renderer, RendererKind::RetainedCpu | RendererKind::Virgl) {
                 ThemeKind::Aero
             } else {
                 ThemeKind::Classic
@@ -151,7 +154,7 @@ pub fn init_boot_policy(renderer: RendererKind) -> ThemeSelection {
     }
 
     let selection = select_theme(request, renderer);
-    ACTIVE.store(selection.selected as u8, Ordering::Release);
+    activate(selection.selected);
     if let Some(reason) = selection.fallback_reason {
         crate::debug_warn!(
             "theme requested={} selected={} reason={}",
@@ -176,8 +179,25 @@ pub fn active() -> ThemeKind {
     }
 }
 
+pub(crate) fn activate(kind: ThemeKind) {
+    ACTIVE.store(kind as u8, Ordering::Release);
+}
+
 pub fn metrics() -> FrameMetrics {
     metrics_for(active())
+}
+
+pub const fn frame_effect_for(kind: ThemeKind) -> LayerEffect {
+    match kind {
+        ThemeKind::Classic => LayerEffect::None,
+        ThemeKind::Aero => LayerEffect::BackdropSample {
+            radius: AERO_BACKDROP_RADIUS,
+        },
+    }
+}
+
+pub fn frame_effect() -> LayerEffect {
+    frame_effect_for(active())
 }
 
 pub const fn metrics_for(kind: ThemeKind) -> FrameMetrics {

@@ -2,7 +2,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::graphics::scene::{inflate_rect, LayerEffect, SceneFrame};
+use crate::graphics::scene::{
+    backdrop_box_radii, backdrop_halo, inflate_rect, LayerEffect, LayerSource, SceneFrame,
+};
 use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
 use crate::window::Rect;
 
@@ -41,8 +43,7 @@ impl CpuCompositionEngine {
         if radius == 0 || rect.is_empty() {
             return pixels;
         }
-        let total = radius as u32;
-        let passes = [total / 3, total / 3, total / 3 + total % 3];
+        let passes = backdrop_box_radii(radius);
         let mut scratch = vec![PremulArgb::TRANSPARENT; pixels.len()];
         for radius in passes {
             if radius == 0 {
@@ -89,12 +90,7 @@ impl CompositionEngine for CpuCompositionEngine {
         }
 
         let output_bounds = Rect::new(0, 0, self.output.width(), self.output.height());
-        let total_halo = scene.layers.iter().fold(0u32, |halo, layer| {
-            halo.saturating_add(match layer.effect {
-                LayerEffect::BackdropSample { radius } if layer.visible => radius as u32,
-                _ => 0,
-            })
-        });
+        let total_halo = backdrop_halo(&scene.layers);
         let mut stats = RenderStats::default();
         for requested in damage {
             let Some(damage_rect) = requested.intersection(&output_bounds) else {
@@ -105,6 +101,7 @@ impl CompositionEngine for CpuCompositionEngine {
                 .unwrap_or(damage_rect);
             let saved = self.copy_region(work_rect);
             self.output.clear(work_rect, PremulArgb::TRANSPARENT);
+            stats.output_damage_regions = stats.output_damage_regions.saturating_add(1);
             stats.output_pixels_damaged = stats
                 .output_pixels_damaged
                 .saturating_add(damage_rect.area());
@@ -113,9 +110,15 @@ impl CompositionEngine for CpuCompositionEngine {
                 if !layer.visible || layer.opacity == 0 {
                     continue;
                 }
+                let surface_id = match layer.source {
+                    LayerSource::Canonical(id) => id,
+                    LayerSource::VirglClient(_) => {
+                        return Err(CompositionError::UnsupportedClientSurface)
+                    }
+                };
                 let source = surfaces
-                    .get(&layer.surface_id)
-                    .ok_or(CompositionError::MissingSurface(layer.surface_id))?;
+                    .get(&surface_id)
+                    .ok_or(CompositionError::MissingSurface(surface_id))?;
                 let layer_bounds = layer.output_bounds();
                 let Some(draw) = work_rect
                     .intersection(&layer_bounds)

@@ -125,6 +125,9 @@ impl FileDialog {
                     entries.push(DirEntry {
                         name: "..".to_string(),
                         is_dir: true,
+                        size: 0,
+                        modified: 0,
+                        mode: 0o040755,
                     });
                 }
                 entries.extend(listed);

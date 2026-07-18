@@ -13,7 +13,6 @@ pub mod label;
 pub mod layout;
 #[cfg(feature = "test")]
 pub mod list;
-pub mod menu;
 #[allow(dead_code)]
 pub mod menu_bar;
 pub mod menu_bar_popup;
@@ -26,6 +25,7 @@ pub mod remote_surface;
 #[allow(dead_code)]
 pub mod scroll_view;
 pub mod splitter;
+pub mod start_menu;
 pub mod status_bar;
 pub mod taskbar;
 pub mod terminal;
@@ -43,22 +43,27 @@ pub use desktop::DesktopWindow;
 pub use frame::FrameWindow;
 pub use label::Label;
 pub use layout::{HBox, Padding, SizeHint, Spacer, VBox};
-pub use menu::MenuWindow;
 #[allow(unused_imports)]
 pub use menu_bar::{MenuBar, MenuItemDef, PendingPopup, MENU_BAR_HEIGHT};
 pub use menu_bar_popup::MenuBarPopup;
 pub use multi_column_list::{Column, MultiColumnList};
+#[allow(unused_imports)]
 pub use path_bar::PathBar;
 pub use remote_surface::RemoteSurface;
+#[allow(unused_imports)]
 pub use scroll_view::ScrollView;
 #[allow(unused_imports)]
 pub use splitter::{Splitter, SplitterOrientation};
+#[allow(unused_imports)]
+pub use start_menu::{StartMenuAction, StartMenuItem, StartMenuWindow};
+#[allow(unused_imports)]
 pub use status_bar::StatusBar;
-pub use taskbar::TaskbarWindow;
+pub use taskbar::{TaskbarTrayWindow, TaskbarWindow};
 pub use terminal::TerminalWindow;
 #[allow(unused_imports)]
 pub use text_editor::TextEditor;
 pub use text_input::TextInput;
+#[allow(unused_imports)]
 pub use toolbar::Toolbar;
 #[allow(unused_imports)]
 pub use tree_view::{NodeId, TreeNode, TreeView};

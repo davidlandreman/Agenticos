@@ -687,6 +687,43 @@ fn test_clean_child_outside_dirty_skips_when_parent_paints() {
 
 // ---- U5 tests: drag/resize bounds-union dirty --------------------------
 
+fn test_non_frame_top_level_window_is_not_draggable() {
+    let (mut wm, _state) = make_manager(800, 600);
+    use crate::window::ScreenMode;
+    let screen_id = wm.create_screen(ScreenMode::Gui);
+    wm.switch_screen(screen_id);
+
+    let root_id = wm.create_window(None);
+    let mut root = Box::new(TestWindow::new(
+        root_id,
+        Rect::new(0, 0, 800, 600),
+        ROOT_COLOR,
+    ));
+    root.focusable = false;
+    wm.set_window_impl(root_id, root);
+    if let Some(screen) = wm.get_active_screen_mut() {
+        screen.set_root_window(root_id);
+    }
+
+    // Models the taskbar: it is a direct child of the desktop, but it has no
+    // frame title/chrome and therefore must never enter drag/resize state.
+    let panel_bounds = Rect::new(0, 568, 800, 32);
+    let panel_id = wm.create_window(Some(root_id));
+    let mut panel = Box::new(TestWindow::new(panel_id, panel_bounds, CHILD0_COLOR));
+    panel.set_parent(Some(root_id));
+    wm.set_window_impl(panel_id, panel);
+
+    quiesce(&mut wm);
+    wm.test_start_drag_if_on_title_bar(100, 580);
+    wm.test_handle_dragging(150, 580, 0x01);
+
+    assert_eq!(
+        wm.window_registry.get(&panel_id).unwrap().bounds(),
+        panel_bounds,
+        "a top-level panel without frame chrome must ignore frame drag hit-testing",
+    );
+}
+
 fn test_drag_tick_marks_bounds_union_not_full_repaint() {
     let (mut wm, _state) = make_manager(800, 600);
     use crate::window::ScreenMode;
@@ -1105,6 +1142,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_full_repaint_clips_to_window_bounds,
         &test_clean_child_outside_dirty_skips_when_parent_paints,
         // U5 — drag/resize bounds-union dirty
+        &test_non_frame_top_level_window_is_not_draggable,
         &test_drag_tick_marks_bounds_union_not_full_repaint,
         &test_drag_tick_with_no_position_change_does_nothing,
         // U9 — opt-in compositor blit path

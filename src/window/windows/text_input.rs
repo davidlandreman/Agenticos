@@ -11,6 +11,10 @@ use alloc::string::String;
 
 /// Callback type for text change events
 pub type TextChangeCallback = Box<dyn FnMut(&str) + Send>;
+/// Callback type for Enter while the input is focused.
+pub type TextSubmitCallback = Box<dyn FnMut(&str) + Send>;
+/// Callback type for Escape while the input is focused.
+pub type TextCancelCallback = Box<dyn FnMut() + Send>;
 
 /// A single-line text input widget
 pub struct TextInput {
@@ -22,6 +26,10 @@ pub struct TextInput {
     max_length: Option<usize>,
     /// Callback for text changes
     on_change: Option<TextChangeCallback>,
+    /// Callback for Enter/submit
+    on_submit: Option<TextSubmitCallback>,
+    /// Callback for Escape/cancel
+    on_cancel: Option<TextCancelCallback>,
     /// Background color
     bg_color: Color,
     /// Text color
@@ -43,6 +51,8 @@ impl TextInput {
             text: String::new(),
             max_length: None,
             on_change: None,
+            on_submit: None,
+            on_cancel: None,
             bg_color: crate::window::PALETTE_CONTENT_BG,
             text_color: crate::window::PALETTE_TEXT,
             border_color: crate::window::PALETTE_BORDER,
@@ -50,21 +60,14 @@ impl TextInput {
         }
     }
 
-    /// Create a new text input (generates its own ID)
-
-    /// Get the current text
+    /// Get the current text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
 
     /// Set the text content
     pub fn set_text(&mut self, text: &str) {
-        let new_text = if let Some(max) = self.max_length {
-            if text.len() > max {
-                String::from(&text[..max])
-            } else {
-                String::from(text)
-            }
-        } else {
-            String::from(text)
-        };
+        let new_text = String::from(self.limit_text(text));
 
         if self.text != new_text {
             self.text = new_text;
@@ -73,15 +76,42 @@ impl TextInput {
         }
     }
 
-    /// Clear the text
+    /// Clear the text.
+    pub fn clear(&mut self) {
+        self.set_text("");
+    }
 
-    /// Set maximum text length
+    /// Set the maximum UTF-8 byte length. Existing text is truncated at a
+    /// character boundary when the limit shrinks.
+    pub fn set_max_length(&mut self, max_length: Option<usize>) {
+        self.max_length = max_length;
+        let text = self.text.clone();
+        self.set_text(&text);
+    }
 
-    /// Set the text change callback
+    /// Set the text change callback.
+    pub fn on_change<F>(&mut self, callback: F)
+    where
+        F: FnMut(&str) + Send + 'static,
+    {
+        self.on_change = Some(Box::new(callback));
+    }
 
-    /// Set background color
+    /// Set the Enter/submit callback.
+    pub fn on_submit<F>(&mut self, callback: F)
+    where
+        F: FnMut(&str) + Send + 'static,
+    {
+        self.on_submit = Some(Box::new(callback));
+    }
 
-    /// Set text color
+    /// Set the Escape/cancel callback.
+    pub fn on_cancel<F>(&mut self, callback: F)
+    where
+        F: FnMut() + Send + 'static,
+    {
+        self.on_cancel = Some(Box::new(callback));
+    }
 
     /// Notify change callback
     fn notify_change(&mut self) {
@@ -90,11 +120,25 @@ impl TextInput {
         }
     }
 
+    fn limit_text<'a>(&self, text: &'a str) -> &'a str {
+        let Some(max) = self.max_length else {
+            return text;
+        };
+        if text.len() <= max {
+            return text;
+        }
+        let mut end = max;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+
     /// Append a character to the text
     fn append_char(&mut self, ch: char) {
         // Check max length
         if let Some(max) = self.max_length {
-            if self.text.len() >= max {
+            if self.text.len().saturating_add(ch.len_utf8()) > max {
                 return;
             }
         }
@@ -188,6 +232,18 @@ impl Window for TextInput {
         match event {
             Event::Keyboard(kbd_event) if kbd_event.pressed => {
                 match kbd_event.key_code {
+                    KeyCode::Enter => {
+                        if let Some(ref mut callback) = self.on_submit {
+                            callback(&self.text);
+                        }
+                        EventResult::Handled
+                    }
+                    KeyCode::Escape => {
+                        if let Some(ref mut callback) = self.on_cancel {
+                            callback();
+                        }
+                        EventResult::Handled
+                    }
                     KeyCode::Backspace => {
                         self.backspace();
                         EventResult::Handled

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Breadcrumb path-bar widget
 //!
 //! Displays a path like "/host/Documents/Projects" as a horizontal strip of

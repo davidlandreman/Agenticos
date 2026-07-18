@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! `Splitter` — two-pane container with a draggable divider.
 //!
 //! A `Splitter` exposes two slots (`first` and `second`) that hold child

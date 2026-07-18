@@ -169,6 +169,15 @@ impl Window {
         }
     }
 
+    pub fn set_title(&self, title: &str) -> Result<(), i64> {
+        let result = runtime::gui_win_set_title(self.handle, title);
+        if result < 0 {
+            Err(result)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn destroy(&mut self) {
         if self.handle != 0 {
             let _ = runtime::gui_win_destroy(self.handle);
@@ -1307,6 +1316,9 @@ impl TimeSeriesGraph {
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
+    pub size: u64,
+    pub modified: i64,
+    pub mode: u32,
 }
 
 pub fn c_path(path: &str) -> Vec<u8> {
@@ -1362,7 +1374,28 @@ pub fn list_dir(path: &str) -> Result<Vec<DirEntry>, i64> {
                     } else {
                         false
                     };
-                    output.push(DirEntry { name, is_dir });
+                    let mut full_path = String::from(directory.trim_end_matches('/'));
+                    if full_path.is_empty() {
+                        full_path.push('/');
+                    } else {
+                        full_path.push('/');
+                    }
+                    full_path.push_str(&name);
+                    let mut stat = runtime::LinuxStat::default();
+                    let stat_path = c_path(&full_path);
+                    let stat_result =
+                        runtime::newfstatat(runtime::AT_FDCWD, &stat_path, &mut stat, 0);
+                    output.push(DirEntry {
+                        name,
+                        is_dir,
+                        size: if stat_result == 0 && stat.st_size > 0 {
+                            stat.st_size as u64
+                        } else {
+                            0
+                        },
+                        modified: if stat_result == 0 { stat.st_mtime } else { 0 },
+                        mode: if stat_result == 0 { stat.st_mode } else { 0 },
+                    });
                 }
             }
             offset += reclen;

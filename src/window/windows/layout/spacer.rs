@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Spacer window and `SizeHint` enum used by the layout containers.
 //!
 //! `Spacer` is a fixed-size empty window used to introduce explicit gaps
