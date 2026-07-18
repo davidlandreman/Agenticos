@@ -26,6 +26,7 @@ pub enum TextAlign {
     Left,
     #[expect(dead_code, reason = "intentional kernel API surface")]
     Center,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Right,
 }
 
@@ -77,6 +78,7 @@ impl Label {
     }
 
     /// Set text alignment
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub fn set_align(&mut self, align: TextAlign) {
         if self.align != align {
             self.align = align;
