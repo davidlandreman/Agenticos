@@ -1,7 +1,6 @@
 use alloc::string::{String, ToString};
 
-use crate::graphics::scene::LayerEffect;
-use crate::window::theme::{self, FrameChrome, ThemeKind};
+use crate::window::theme::{self, FrameChrome};
 use crate::window::{
     CompositorProperties, Event, EventResult, GraphicsDevice, Insets, Rect, Window, WindowId,
 };
@@ -19,9 +18,10 @@ pub struct FrameWindow {
 impl FrameWindow {
     pub fn new(id: WindowId, title: &str) -> Self {
         let mut base = WindowBase::new_with_id(id, Rect::new(0, 0, 800, 600));
-        if theme::active() == ThemeKind::Aero {
+        let effect = theme::frame_effect();
+        if effect != crate::graphics::scene::LayerEffect::None {
             base.set_compositor_properties(CompositorProperties {
-                effect: LayerEffect::BackdropSample { radius: 4 },
+                effect,
                 ..CompositorProperties::OPAQUE
             });
         }
@@ -36,6 +36,12 @@ impl FrameWindow {
     pub fn set_content_window(&mut self, window_id: WindowId) {
         self.content_window_id = Some(window_id);
         self.base.add_child(window_id);
+        self.base.invalidate();
+    }
+
+    pub fn set_title(&mut self, title: &str) {
+        self.title.clear();
+        self.title.push_str(title);
         self.base.invalidate();
     }
 
@@ -105,5 +111,9 @@ impl Window for FrameWindow {
     }
     fn window_title(&self) -> Option<&str> {
         Some(&self.title)
+    }
+
+    fn as_frame_window_mut(&mut self) -> Option<&mut FrameWindow> {
+        Some(self)
     }
 }

@@ -32,7 +32,8 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background), `start_menu.rs` (classic root menu plus Programs fly-out in one active popup), and `taskbar.rs` (task-button geometry plus the minute-updated UTC tray).
 - `windows/remote_surface.rs` — server-decorated client surface for ring-3
   apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
-  events to the owning PID's GUI queue.
+  events to the owning PID's GUI queue. Its enclosing frame title can be
+  updated through the ownership-checked ring-3 GUI ABI.
 - `adapters/` — `GraphicsDevice` implementations: `direct_framebuffer.rs` (fast, used for cursor) and `double_buffered.rs` (smooth).
 - `dialogs/` — kernel dialog-window scaffolding, including the non-blocking Run dialog. Run keeps input state outside the manager registry and launches submitted text through zsh `-c`.
 
@@ -60,7 +61,7 @@ Boot lands in GUI mode:
 - `TerminalWindow` inside the frame.
 - Bottom taskbar with a Start button, dynamically-sized frame buttons, and a
   recessed right-side UTC date/time tray. Start opens the classic menu;
-  Programs launches the four pinned apps, Run opens a modal command field, and
+  Programs launches the five pinned apps, Run opens a modal command field, and
   Shut Down is an explicit safe placeholder until a clean power-off path
   exists. Task-button layout reserves the tray span and never overlaps it.
 
@@ -86,6 +87,17 @@ That save/restore behavior applies only to `legacy`. In `retained`, the cursor
 is drawn as the final canonical output overlay after damaged regions have been
 recomposed; it never restores framebuffer background.
 
+## Window-manager synchronization
+
+`WINDOW_MANAGER` uses `PreemptionMutex`, not `InterruptMutex`: a render may be
+long, so the PIT and device IRQs must remain enabled while its lock is held.
+The timer continues advancing time, but takes only its minimal tick/EOI path;
+scheduler housekeeping and kernel-thread context switches resume after the
+critical section ends. Interrupt handlers must never access the manager
+directly; they enqueue input or work for the compositor thread to consume. This
+invariant prevents same-CPU spin-lock deadlocks, interrupt-context allocator
+activity during rendering, and drag-time clock starvation.
+
 ## Renderer boot policy
 
 `build.sh` passes `opt/agenticos/compositor` (`legacy`, `retained`, `gpu`, or
@@ -97,9 +109,10 @@ fails initialization or panics on a runtime GPU failure instead.
 On macOS, an explicit host-side `gpu` request must first pass the pinned custom
 QEMU verifier; see `docs/macos-virgl-qualification.md`.
 `AGENTICOS_THEME=classic|aero|auto` is passed as `opt/agenticos/theme`. Explicit
-Aero is available on retained CPU and VirGL; the VirGL variant accelerates
-rounded translucent chrome and shadows but leaves backdrop blur disabled.
-Legacy falls back to Classic, and `auto` keeps Classic on VirGL.
+Aero is available on retained CPU and qualified VirGL; VirGL performs the
+radius-4 frame backdrop blur on the host GPU. `auto` selects Aero for retained
+CPU and qualified VirGL. Legacy selects Classic, and a non-strict runtime
+fallback to legacy activates Classic before repainting.
 
 ## Implementation status
 

@@ -740,8 +740,8 @@ impl MemoryMapper {
         // Hot path: per-fault diagnostic logs are at trace level so the
         // default boot doesn't spend UART vmexits on routine demand-paging.
         // See plan U2 (docs/plans/2026-05-09-002-perf-frame-allocator-and-page-fault-hot-path-plan.md).
-        // The opening `>>> PAGE FAULT at ...` line in the IDT handler stays
-        // at info — that one line is what a debugger needs to see.
+        // The IDT handler also logs per-fault address/error detail at trace.
+        // Fatal faults are logged at error with their complete context.
         debug_trace!("Handling page fault for address: {:?}", addr);
 
         let page = Page::containing_address(addr);

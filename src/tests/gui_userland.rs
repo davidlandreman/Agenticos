@@ -4,8 +4,10 @@ use crate::userland::gui::{
     self, GuiEvent, GuiWindowRecord, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_QUEUE_CAPACITY,
     GUI_MOUSE_MOVE, GUI_NONBLOCK,
 };
-use crate::window::event::{Event, KeyCode, KeyModifiers, KeyboardEvent};
-use crate::window::WindowId;
+use crate::window::event::{
+    Event, KeyCode, KeyModifiers, KeyboardEvent, MouseButtons, MouseEvent, MouseEventType,
+};
+use crate::window::{Point, WindowId};
 
 fn test_gui_event_layout_and_encoding() {
     assert_eq!(core::mem::size_of::<GuiEvent>(), 32);
@@ -29,6 +31,38 @@ fn test_gui_event_layout_and_encoding() {
     assert_eq!(event.payload[1], 'A' as u32);
     assert_eq!(event.payload[2], 3);
     assert_eq!(event.payload[3], 1);
+}
+
+fn test_gui_mouse_button_encodes_timestamp_and_modifiers() {
+    let before = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let event = gui::encode_window_event(
+        9,
+        &Event::Mouse(MouseEvent {
+            event_type: MouseEventType::ButtonDown,
+            position: Point::new(12, 34),
+            global_position: Point::new(20, 40),
+            buttons: MouseButtons {
+                left: true,
+                right: false,
+                middle: false,
+            },
+            modifiers: KeyModifiers {
+                shift: true,
+                ctrl: true,
+                alt: false,
+                meta: false,
+            },
+        }),
+    )
+    .expect("mouse event must encode");
+    let after = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let timestamp = event.payload[4] as u64 | ((event.payload[5] as u64) << 32);
+    assert_eq!(event.payload[0], 12);
+    assert_eq!(event.payload[1], 34);
+    assert_eq!(event.payload[2] & 0xff, 1);
+    assert_eq!(event.payload[2] >> 8, 3);
+    assert_eq!(event.payload[3], crate::userland::gui::GUI_MOUSE_DOWN);
+    assert!(timestamp >= before && timestamp <= after);
 }
 
 fn test_gui_queue_coalesces_mouse_moves() {
@@ -169,6 +203,35 @@ fn test_gui_create_destroy_lifecycle() {
         1
     );
 
+    let title = b"Host - File Manager";
+    let title_pointer = title.as_ptr() as u64;
+    crate::userland::abi::set_user_va_bounds(UserVaBounds {
+        start: title_pointer,
+        end: title_pointer + title.len() as u64,
+    });
+    let mut set_title = SyscallArgs::default();
+    set_title.rdi = handle as u64;
+    set_title.rsi = title_pointer;
+    set_title.rdx = title.len() as u64;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_win_set_title_handler(&mut set_title),
+        0
+    );
+    crate::userland::abi::clear_user_va_bounds();
+    let record = gui::window_record(
+        crate::userland::gui_syscalls::TEST_GUI_CALLER_PID,
+        handle as u32,
+    )
+    .expect("window record");
+    let actual_title = crate::window::with_window_manager(|wm| {
+        wm.window_registry
+            .get(&record.frame_id)
+            .and_then(|window| window.window_title())
+            .map(alloc::string::String::from)
+    })
+    .flatten();
+    assert_eq!(actual_title.as_deref(), Some("Host - File Manager"));
+
     let mut destroy = SyscallArgs::default();
     destroy.rdi = handle as u64;
     assert_eq!(
@@ -193,6 +256,7 @@ fn test_gui_create_destroy_lifecycle() {
 pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
     &[
         &test_gui_event_layout_and_encoding,
+        &test_gui_mouse_button_encodes_timestamp_and_modifiers,
         &test_gui_queue_coalesces_mouse_moves,
         &test_gui_queue_drops_oldest_at_capacity,
         &test_gui_cleanup_releases_pid_state,

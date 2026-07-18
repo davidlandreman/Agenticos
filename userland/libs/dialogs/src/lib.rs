@@ -1,5 +1,5 @@
 //! Shared ring-3 common-dialog library: modal `FileDialog`, `MessageBox`, and
-//! `ColorPicker` built from the four GUI syscalls plus `getdents64`/`fstat`.
+//! `ColorPicker` built from the ring-3 GUI syscalls plus `getdents64`/`fstat`.
 //!
 //! # Retained-mode API
 //!

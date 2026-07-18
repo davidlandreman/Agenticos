@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Button widget with mouse click support
 
 use super::base::WindowBase;

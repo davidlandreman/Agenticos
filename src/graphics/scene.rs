@@ -97,6 +97,24 @@ pub fn inflate_rect(rect: Rect, radius: u32) -> Rect {
     )
 }
 
+/// Split a total backdrop radius across the three box blurs used by both
+/// composition backends. Three box blurs are a cheap Gaussian approximation;
+/// keeping the partition here makes CPU and GPU effects share one contract.
+pub const fn backdrop_box_radii(total: u16) -> [u16; 3] {
+    [total / 3, total / 3, total / 3 + total % 3]
+}
+
+/// Sampling halo required to evaluate every visible backdrop effect in
+/// z-order. Stacked glass layers accumulate their sampling reach.
+pub fn backdrop_halo(layers: &[Layer]) -> u32 {
+    layers.iter().fold(0u32, |halo, layer| {
+        halo.saturating_add(match layer.effect {
+            LayerEffect::BackdropSample { radius } if layer.visible => radius as u32,
+            _ => 0,
+        })
+    })
+}
+
 pub struct SceneFrame {
     pub output_size: (u32, u32),
     pub layers: Vec<Layer>,

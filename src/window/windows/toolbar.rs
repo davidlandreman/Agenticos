@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! `Toolbar` — horizontal strip of command buttons.
 //!
 //! `Toolbar` is a thin composition over [`HBox`]. It owns an internal

@@ -852,6 +852,7 @@ impl WindowManager {
                                     "VirGL compositor and retained CPU fallback failed: {:?}; fallback=legacy",
                                     error
                                 );
+                                super::theme::activate(super::theme::ThemeKind::Classic);
                             }
                         }
                     } else {
@@ -859,6 +860,7 @@ impl WindowManager {
                             "retained compositor failed: {:?}; fallback=legacy",
                             error
                         );
+                        super::theme::activate(super::theme::ThemeKind::Classic);
                     }
                     self.compositor.end_frame();
                     self.compositor.dirty.mark_full_repaint();
@@ -1180,7 +1182,7 @@ impl WindowManager {
                 crate::graphics::composition::CompositionEngineKind::Virgl => "virgl",
             };
             crate::debug_info!(
-            "render_stats renderer={} engine={} presenter={} frames={} windows={} surface_pixels={} layers={} upload_bytes={} upload_regions={} texture_hits={} texture_misses={} texture_replacements={} texture_evictions={} texture_creates={} texture_destroys={} pipeline_creates={} sampler_view_creates={} sampler_view_destroys={} vertex_creates={} vertex_destroys={} vertex_capacity={} texture_cache_bytes={} texture_cache_peak={} command_dwords={} gpu_submissions={} readback_bytes={} output_regions={} output_pixels={} scanout_flushes={} cursor_updates={} presents={} cycles_raster={} cycles_upload={} cycles_compose={} cycles_blur={} cycles_fence={} cycles_readback={} cycles_present={} surface_bytes={} surface_peak={}",
+            "render_stats renderer={} engine={} presenter={} frames={} windows={} surface_pixels={} layers={} upload_bytes={} upload_regions={} texture_hits={} texture_misses={} texture_replacements={} texture_evictions={} texture_creates={} texture_destroys={} pipeline_creates={} sampler_view_creates={} sampler_view_destroys={} vertex_creates={} vertex_destroys={} vertex_capacity={} texture_cache_bytes={} texture_cache_peak={} command_dwords={} gpu_submissions={} readback_bytes={} output_regions={} output_pixels={} scanout_flushes={} backdrop_copies={} backdrop_copy_pixels={} blur_passes={} blur_pixels={} blur_scratch_bytes={} cursor_updates={} presents={} cycles_raster={} cycles_upload={} cycles_compose={} cycles_blur={} cycles_fence={} cycles_readback={} cycles_present={} surface_bytes={} surface_peak={}",
             if engine == "virgl" { "gpu" } else { "retained" },
             engine,
             if direct_scanout { "virgl-direct" } else if presented_by_virtio { "virtio-gpu-2d" } else { "boot-framebuffer" },
@@ -1210,6 +1212,11 @@ impl WindowManager {
             stats.output_damage_regions,
             stats.output_pixels_damaged,
             stats.scanout_flushes,
+            stats.backdrop_copies,
+            stats.backdrop_copy_pixels,
+            stats.backdrop_blur_passes,
+            stats.backdrop_blur_pixels,
+            stats.backdrop_scratch_bytes,
             stats.cursor_updates,
             stats.presents,
             stats.surface_raster_cycles,
@@ -2274,9 +2281,9 @@ impl WindowManager {
 ///
 /// SAFETY: only set/read inside `WindowManager::with_window_mut`. The
 /// pointer is valid for the duration of that call because the closure
-/// runs synchronously on the same thread; interrupts that touch the
-/// manager are blocked by the surrounding `with_window_manager`'s
-/// `InterruptGuard`.
+/// runs synchronously on the same thread. The surrounding
+/// `with_window_manager` prevents kernel-thread preemption, and interrupt
+/// handlers never access the manager directly.
 static ACTIVE_MANAGER: AtomicPtr<WindowManager> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Run `f` against the currently-active `WindowManager`. Returns

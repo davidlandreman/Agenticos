@@ -8,7 +8,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
+
+use crate::arch::x86_64::preemption_guard::PreemptionMutex;
 
 pub mod adapters;
 pub mod compositor;
@@ -327,6 +328,11 @@ pub trait Window: Send {
         None
     }
 
+    /// Typed accessor used by the ring-3 title syscall.
+    fn as_frame_window_mut(&mut self) -> Option<&mut windows::frame::FrameWindow> {
+        None
+    }
+
     /// Grid dimensions if this window renders a text grid.
     /// Returns `Some((rows, cols))` for `TextWindow`/`TerminalWindow`,
     /// `None` otherwise. The terminal factory uses this to size the
@@ -380,6 +386,7 @@ pub trait Window: Send {
     /// overrides it to return `Some(self)`. Following the same opt-in
     /// pattern as `is_scroll_view`, this avoids a generic downcast
     /// machinery while keeping the trait small.
+    #[allow(dead_code)]
     fn as_button_mut(&mut self) -> Option<&mut windows::button::Button> {
         None
     }
@@ -404,6 +411,7 @@ pub trait Window: Send {
 
     /// Typed accessor used by app code (e.g. File Explorer) to mutate
     /// a `MultiColumnList`'s rows through the manager.
+    #[allow(dead_code)]
     fn as_multi_column_list_mut(
         &mut self,
     ) -> Option<&mut windows::multi_column_list::MultiColumnList> {
@@ -412,19 +420,21 @@ pub trait Window: Send {
 
     /// Typed accessor used by app code (e.g. File Explorer) to mutate
     /// a `TreeView` through the manager.
+    #[allow(dead_code)]
     fn as_tree_view_mut(&mut self) -> Option<&mut windows::tree_view::TreeView> {
         None
     }
 
     /// Typed accessor used by app code (e.g. File Explorer) to update
     /// a `PathBar`'s path through the manager.
+    #[allow(dead_code)]
     fn as_path_bar_mut(&mut self) -> Option<&mut windows::path_bar::PathBar> {
         None
     }
 }
 
 /// Global window manager instance
-static WINDOW_MANAGER: Mutex<Option<WindowManager>> = Mutex::new(None);
+static WINDOW_MANAGER: PreemptionMutex<Option<WindowManager>> = PreemptionMutex::new(None);
 
 /// Initialize the window manager with a graphics device
 pub fn init_window_manager(device: Box<dyn GraphicsDevice>) {
@@ -434,22 +444,16 @@ pub fn init_window_manager(device: Box<dyn GraphicsDevice>) {
 
 /// Execute a function with the window manager
 ///
-/// IMPORTANT: Disables interrupts while holding the lock to prevent
-/// deadlocks with preemptive multitasking. Uses RAII guard to ensure
-/// interrupts are restored even if the closure panics.
+/// Prevents kernel-thread preemption while holding the lock, avoiding a
+/// single-CPU spin-mutex deadlock without masking the PIT or device IRQs.
+/// Interrupt handlers must never acquire the window manager directly; they
+/// enqueue input/work for the compositor instead.
 pub fn with_window_manager<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut WindowManager) -> R,
 {
-    use crate::arch::x86_64::interrupt_guard::InterruptGuard;
-
-    // RAII guard ensures interrupts are restored even on panic
-    let _guard = InterruptGuard::disable();
-
     let mut wm_lock = WINDOW_MANAGER.lock();
     wm_lock.as_mut().map(f)
-
-    // _guard dropped here, restoring interrupt state
 }
 
 /// Path of the bundled default wallpaper on the FAT root. The basename is
