@@ -2274,9 +2274,9 @@ impl WindowManager {
 ///
 /// SAFETY: only set/read inside `WindowManager::with_window_mut`. The
 /// pointer is valid for the duration of that call because the closure
-/// runs synchronously on the same thread; interrupts that touch the
-/// manager are blocked by the surrounding `with_window_manager`'s
-/// `InterruptGuard`.
+/// runs synchronously on the same thread. The surrounding
+/// `with_window_manager` prevents kernel-thread preemption, and interrupt
+/// handlers never access the manager directly.
 static ACTIVE_MANAGER: AtomicPtr<WindowManager> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Run `f` against the currently-active `WindowManager`. Returns
