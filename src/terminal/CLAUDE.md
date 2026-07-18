@@ -37,9 +37,12 @@ keyboard event ──> terminal::keys::encode ──> pty.master.push_input ─�
 ```
 
 The Screen is the source of truth for *what's on screen*. TextWindow is
-just the renderer — call `set_cell(row, col, ch, fg, bg)` from
-`TerminalWindow::sync_text_window_from_screen` rebuilds the grid from
-Screen each frame.
+just the renderer — `TerminalWindow::sync_text_window_from_screen` calls
+`set_cell(row, col, ch, fg, bg, bg_is_default)` to rebuild the grid after
+Screen changes. Keeping `ColorSpec::Default` as a semantic bit after RGB
+resolution lets Aero/Futurism paint only the default `#202020` well at alpha
+232 over the frame's existing backdrop blur. Explicit indexed/RGB backgrounds,
+glyphs, and the caret stay opaque; Classic/Legacy uses an opaque well.
 
 ## PTY model
 

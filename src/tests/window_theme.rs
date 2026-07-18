@@ -1,9 +1,13 @@
+use alloc::collections::BTreeMap;
+
 use crate::graphics::color::Color;
-use crate::graphics::surface::{Surface, SurfaceDesc};
+use crate::graphics::composition::{CompositionEngine, CpuCompositionEngine};
+use crate::graphics::scene::{Layer, LayerEffect, SceneFrame};
+use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
 use crate::window::renderer::{RendererKind, RetainedRenderer, SurfaceCanvas};
 use crate::window::theme::{
     self, FrameChrome, ThemeKind, ThemeRequest, AERO_BACKDROP_RADIUS, AERO_METRICS,
-    CLASSIC_METRICS, FUTURISM_BACKDROP_RADIUS, FUTURISM_METRICS,
+    CLASSIC_METRICS, FUTURISM_BACKDROP_RADIUS, FUTURISM_METRICS, MODERN_TERMINAL_WELL_ALPHA,
 };
 use crate::window::{GraphicsDevice, Insets, Rect, Window, WindowId};
 
@@ -86,7 +90,164 @@ fn test_all_theme_effect_radii_are_gpu_supported() {
                 );
             }
         }
+        let material = spec.terminal_well;
+        assert_eq!(
+            material.tint,
+            crate::terminal::colors::DEFAULT_BG,
+            "theme {} terminal tint drifted from the terminal default",
+            spec.token,
+        );
+        if material.alpha != u8::MAX {
+            let LayerEffect::BackdropSample { radius } = spec.frame_effect else {
+                panic!(
+                    "theme {} has a translucent terminal well without frame backdrop blur",
+                    spec.token,
+                );
+            };
+            assert!(
+                crate::graphics::composition::gpu_backdrop_radius_supported(radius),
+                "theme {} terminal well uses unsupported backdrop radius {}",
+                spec.token,
+                radius,
+            );
+        }
     }
+    assert_eq!(theme::terminal_well_for(ThemeKind::Classic).alpha, 255);
+    assert_eq!(
+        theme::terminal_well_for(ThemeKind::Aero).alpha,
+        MODERN_TERMINAL_WELL_ALPHA,
+    );
+    assert_eq!(
+        theme::terminal_well_for(ThemeKind::Futurism).alpha,
+        MODERN_TERMINAL_WELL_ALPHA,
+    );
+}
+
+fn test_terminal_well_full_incremental_and_explicit_background_alpha() {
+    let previous = theme::active();
+    let bounds = Rect::new(0, 0, 96, 64);
+
+    theme::activate(ThemeKind::Classic);
+    let mut classic = crate::window::windows::text::TextWindow::new_with_id(WindowId(9020), bounds);
+    let mut classic_surface = Surface::new(SurfaceDesc::new(96, 64)).unwrap();
+    {
+        let mut canvas = SurfaceCanvas::new(&mut classic_surface, (0, 0), (96, 64));
+        classic.paint(&mut canvas);
+    }
+    assert_eq!(classic_surface.pixel(0, 0).unwrap().a(), 255);
+
+    theme::activate(ThemeKind::Futurism);
+    let mut modern = crate::window::windows::text::TextWindow::new_with_id(WindowId(9021), bounds);
+    let mut modern_surface = Surface::new(SurfaceDesc::new(96, 64)).unwrap();
+    {
+        let mut canvas = SurfaceCanvas::new(&mut modern_surface, (0, 0), (96, 64));
+        modern.paint(&mut canvas);
+    }
+    assert_eq!(
+        modern_surface.pixel(0, 0).unwrap().a(),
+        MODERN_TERMINAL_WELL_ALPHA,
+    );
+    assert_eq!(
+        modern_surface.pixel(8, 8).unwrap().a(),
+        MODERN_TERMINAL_WELL_ALPHA,
+    );
+
+    // After the first full paint, writing one blank cell takes the incremental
+    // path. Seed an opaque pixel inside that cell and prove the dirty fill
+    // replaces its alpha instead of blending or leaving an opaque patch.
+    modern.write_char(' ');
+    modern_surface.set_pixel(8, 8, PremulArgb::from_rgba(255, 0, 0, 255));
+    {
+        let mut canvas = SurfaceCanvas::new(&mut modern_surface, (0, 0), (96, 64));
+        modern.paint(&mut canvas);
+    }
+    assert_eq!(
+        modern_surface.pixel(8, 8).unwrap().a(),
+        MODERN_TERMINAL_WELL_ALPHA,
+    );
+
+    // Explicit ANSI black is semantically different from the default
+    // background even though both can resolve to RGB black/dark grey.
+    modern.set_cell(0, 0, ' ', Color::WHITE, Color::BLACK, false);
+    {
+        let mut canvas = SurfaceCanvas::new(&mut modern_surface, (0, 0), (96, 64));
+        modern.paint(&mut canvas);
+    }
+    assert_eq!(
+        modern_surface.pixel(8, 8).unwrap().to_rgba(),
+        (0, 0, 0, 255)
+    );
+
+    // A glyph over the default material must still contribute opaque pixels
+    // for crisp terminal text.
+    modern.set_cell(
+        0,
+        0,
+        'X',
+        Color::WHITE,
+        crate::terminal::colors::DEFAULT_BG,
+        true,
+    );
+    {
+        let mut canvas = SurfaceCanvas::new(&mut modern_surface, (0, 0), (96, 64));
+        modern.paint(&mut canvas);
+    }
+    let font = crate::graphics::fonts::core_font::get_terminal_font();
+    let opaque_glyph_pixel = (8..8 + font.line_height() as usize).any(|y| {
+        (8..8 + font.cell_width() as usize)
+            .any(|x| modern_surface.pixel(x as u32, y as u32).unwrap().a() == 255)
+    });
+    assert!(opaque_glyph_pixel, "terminal glyph did not remain opaque");
+
+    theme::activate(previous);
+}
+
+fn test_terminal_well_material_uses_existing_frame_backdrop_effect() {
+    let backdrop_id = SurfaceId(9030);
+    let terminal_id = SurfaceId(9031);
+    let mut backdrop = Surface::new(SurfaceDesc::new(9, 1)).unwrap();
+    backdrop.clear(Rect::new(0, 0, 9, 1), PremulArgb::from_rgba(0, 0, 0, 255));
+    backdrop.set_pixel(4, 0, PremulArgb::from_rgba(255, 255, 255, 255));
+    let material = theme::terminal_well_for(ThemeKind::Futurism);
+    let mut terminal = Surface::new(SurfaceDesc::new(9, 1)).unwrap();
+    terminal.clear(
+        Rect::new(0, 0, 9, 1),
+        PremulArgb::from_rgba(
+            material.tint.red,
+            material.tint.green,
+            material.tint.blue,
+            material.alpha,
+        ),
+    );
+    let mut surfaces = BTreeMap::new();
+    surfaces.insert(backdrop_id, backdrop);
+    surfaces.insert(terminal_id, terminal);
+
+    let mut sharp_scene = SceneFrame::new(9, 1);
+    sharp_scene.push(Layer::opaque(backdrop_id, Rect::new(0, 0, 9, 1)));
+    sharp_scene.push(Layer::opaque(terminal_id, Rect::new(0, 0, 9, 1)));
+    let mut sharp = CpuCompositionEngine::new(9, 1).unwrap();
+    sharp
+        .compose(&sharp_scene, &surfaces, &[Rect::new(0, 0, 9, 1)])
+        .unwrap();
+
+    let mut blurred_scene = SceneFrame::new(9, 1);
+    blurred_scene.push(Layer::opaque(backdrop_id, Rect::new(0, 0, 9, 1)));
+    let mut glass = Layer::opaque(terminal_id, Rect::new(0, 0, 9, 1));
+    glass.effect = theme::frame_effect_for(ThemeKind::Futurism);
+    blurred_scene.push(glass);
+    let mut blurred = CpuCompositionEngine::new(9, 1).unwrap();
+    let stats = blurred
+        .compose(&blurred_scene, &surfaces, &[Rect::new(0, 0, 9, 1)])
+        .unwrap();
+
+    let sharp_neighbor = sharp.output().pixel(3, 0).unwrap().to_rgba().0;
+    let blurred_neighbor = blurred.output().pixel(3, 0).unwrap().to_rgba().0;
+    let sharp_center = sharp.output().pixel(4, 0).unwrap().to_rgba().0;
+    let blurred_center = blurred.output().pixel(4, 0).unwrap().to_rgba().0;
+    assert!(blurred_neighbor > sharp_neighbor);
+    assert!(blurred_center < sharp_center);
+    assert!(stats.backdrop_blur_passes > 0);
 }
 
 fn test_theme_kind_codes_and_tokens_round_trip() {
@@ -432,6 +593,8 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_theme_kind_codes_and_tokens_round_trip,
         &test_metrics_and_decoration_geometry,
         &test_surface_canvas_argb_is_exact_replacement,
+        &test_terminal_well_full_incremental_and_explicit_background_alpha,
+        &test_terminal_well_material_uses_existing_frame_backdrop_effect,
         &test_retained_surface_uses_decorated_bounds,
         &test_classic_key_pixels_regression,
         &test_aero_alpha_corners_shadow_and_client,
