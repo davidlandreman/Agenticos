@@ -50,16 +50,36 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
 - `fdtable.rs` — per-process file-descriptor table.
 - `gui.rs` — per-PID window ownership plus the bounded, coalescing GUI event
   queue and process-death teardown.
-- `gui_syscalls.rs` — syscalls 5001-5004: create, copy-present, next-event,
-  and destroy.
+- `gui_syscalls.rs` — syscalls 5001-5005: create, copy-present, next-event,
+  destroy, and update a window title.
+- `gui_gl.rs` — validated GL syscalls 5006-5009, per-PID logical-context
+  ownership, bounded packet parsing, mailbox publication, and teardown.
+- `etc.rs` — kernel-managed `/etc` namespace: static account/hosts files,
+  the shipped zsh configuration, DHCP-published `resolv.conf` paths, and
+  `publish_theme`, which writes the boot-resolved Classic/Aero theme to
+  `/etc/theme` for ring-3 GUI apps (read once by `userland/libs/gui`'s
+  `theme` module).
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility
   pointer bounds for synthetic tests, and errno constants. Real processes
   use VMA-aware user-copy validation. Unknown syscall numbers always return
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
-  to BusyBox, the remaining kernel-side GUI apps through `GLAUNCH.ELF`, or
-  standalone ELFs such as `/host/CALC.ELF`, `/host/NOTEPAD.ELF`, and
-  `/host/TCC.ELF` (TinyCC; both `tcc` and the `cc` alias).
+  to BusyBox or standalone ELFs: `/host/CALC.ELF`, `/host/FILEMAN.ELF`
+  (compat command `explorer`), `/host/GLGAME.ELF`, `/host/NOTEPAD.ELF`,
+  `/host/PAINTING.ELF`, `/host/TASKMGR.ELF` (`taskmgr` + legacy
+  `tasks` alias), and `/host/TCC.ELF` (TinyCC; both `tcc` and the `cc`
+  alias). The `GLAUNCH.ELF` GUI-applet list is empty today.
+- `procfs.rs` — synthetic read-only `/proc` namespace, modeled on the
+  `/bin` synthesis pattern. Linux-shaped files (`uptime`, `meminfo`,
+  `stat`, `loadavg`, `net/dev`, `/proc/<pid>/{stat,status,cmdline,statm}`
+  — ring-3 PIDs only) scoped to what BusyBox `ps`/`free`/`uptime` parse,
+  plus AgenticOS TSV tables under `/proc/agenticos/{kthreads,gui,sockets}`.
+  File content is generated **once at open()** into an fd-owned buffer
+  (`FdSlot::VirtualFile`/`VirtualDir`) — no kernel lock is held across
+  user reads and each open sees one consistent snapshot. Also home to
+  the `sysinfo(2)` snapshot helper. Per-process RSS is a read-only
+  page-table walk (`MemoryMapper::count_user_resident_pages`), not a
+  maintained counter.
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
 - `error.rs` — loader-side error enum.
@@ -96,18 +116,34 @@ Each process owns:
   SIGALRM delivery. Timer expiry is processed by kernel housekeeping and the
   inline test dispatcher; a signal-woken blocking syscall re-enters the
   dispatcher as `-EINTR` so its handler runs before the syscall can re-block.
+- `utime_ticks` (CPU time charged by the timer ISR whenever it observes the
+  process at CPL=3 — sampled, so sub-tick syscall time is unattributed) and
+  `cmdline` (retained argv, capped at `CMDLINE_MAX_BYTES`), both read by
+  `/proc/<pid>/*` generators.
 - `sleep_deadline` — restart-stable absolute PIT deadline for a blocking
-  `nanosleep`. Set on first entry, checked on every SYSCALL re-fire, cleared on
-  completion (`lifecycle::nanosleep_deadline`). The process parks on
-  `Ring3BlockReason::Sleeping { deadline_tick }`; `process_expired_sleeps()`
-  wakes it when the deadline elapses. That wake pass runs primarily from the
-  compositor kernel thread's loop (`window::compositor::run`) — the kernel main
-  loop is the idle task under U10 and is starved, so a self-timed animation
-  would otherwise wake only every few seconds; it is also called from the main
-  loop and the inline dispatch loop for the launcher/test paths. Dispatch of the
-  woken process is fast (`scheduler::next_runnable` pops `ring3_ready` each
-  switch). Self-driven ring-3 animation loops (`PAINTING.ELF`) and zsh's
-  `sleep`/`usleep` depend on this; `-EINTR`/remaining-time is not modeled.
+  `nanosleep`. Set on first entry, checked on every SYSCALL re-fire, cleared
+  on completion (`lifecycle::nanosleep_deadline`) or signal interruption. The
+  process parks on `Ring3BlockReason::Sleeping { deadline_tick }`;
+  `process_expired_sleeps()` wakes it at the deadline. That wake pass runs
+  from the PIT ISR every tick — the kernel main loop is the idle task under
+  U10 and can starve for seconds while kernel threads hop between each other
+  via `sleep_ticks`' direct thread→thread switch — with the compositor loop,
+  main loop, and inline dispatch loop as redundant backstops. Prompt dispatch
+  of the woken process comes from `sleep_ticks`' `has_ready_ring3()` check: a
+  voluntarily-sleeping kernel thread bounces through the kernel main loop
+  (whose gate runs `save_kernel_and_resume_ring3`) whenever ring-3 work is
+  pending. Self-driven ring-3 animation loops (`PAINTING.ELF`,
+  `TASKMGR.ELF`) and zsh's `sleep`/`usleep` depend on this. On EINTR the
+  remaining time is not written to `rem` (known POSIX gap).
+
+Signals: `kill(2)` addresses **any** live ring-3 PID (single-user model, no
+permission checks) and wakes a blocked target via `wake_ring3_for_signal`.
+Unhandled fatal-default signals (SIGKILL, SIGTERM-without-trap, …) terminate
+the process at the dispatcher tail (`maybe_deliver_signal`'s fatal check →
+`notify_parent_of_signaled_exit` + `cooperative_exit(128+sig)`). Ignored
+signals (SIGCHLD & co.) stay pending as a notification record but are never
+fatal. Known gap: a CPU-bound ring-3 process that never syscalls can outrun a
+pending fatal signal — the timer ISR does not yet run the fatal check.
 
 Socket slots hold `Arc<net::socket::SocketHandle>`. The handle is a shared
 open-file description: dup/fork share `O_NONBLOCK` and protocol state, while
@@ -115,6 +151,11 @@ open-file description: dup/fork share `O_NONBLOCK` and protocol state, while
 FD-table mutation or hold process/network locks or user pointers across a
 yield. Final handle drop uses the deferred-close queue documented in
 `src/net/CLAUDE.md`.
+
+`CLOCK_MONOTONIC`, scheduler sleeps, polling deadlines, interval timers, and
+watchdogs remain based on the 100 Hz PIT. `CLOCK_REALTIME` and `gettimeofday`
+use the boot CMOS RTC snapshot advanced by PIT ticks through `crate::time`;
+when RTC validation fails they retain the prior uptime-from-zero fallback.
 
 Processes live in `lifecycle::PROCESS_TABLE`, indexed by PID. The
 single field `current_user_pid: Option<u32>` names which process's
@@ -128,19 +169,34 @@ must mask timer preemption until its guard releases the spinlock.
 
 ## Ring-3 GUI ABI
 
-The AgenticOS-private range extends syscall 5000 with four calls:
+The AgenticOS-private range extends syscall 5000 with nine GUI calls:
 
 - 5001 `gui_win_create(width, height, title, title_len, flags)`
 - 5002 `gui_win_present(handle, pixels, width, height, stride)`
 - 5003 `gui_next_event(event, len, flags)`
 - 5004 `gui_win_destroy(handle)`
+- 5005 `gui_win_set_title(handle, title, title_len)`
+- 5006 `gui_gl_context_create(window, flags)`
+- 5007 `gui_gl_submit_frame(context, packet, len, flags)`
+- 5008 `gui_gl_get_info(context, info, len)`
+- 5009 `gui_gl_context_destroy(context)`
 
 Pixels are little-endian XRGB8888 (`u32` value `0x00RRGGBB`). Presents copy a
 full client surface into kernel memory. Events use a fixed 32-byte
 `GuiEvent { kind, window, payload[6] }`; an empty blocking read parks on
 `WaitingForGuiEvent`, while `GUI_NONBLOCK` returns `-EAGAIN`. Each PID has a
 128-entry queue: consecutive motion events coalesce and other overflow drops
-the oldest entry. Removing a process destroys every frame it owns.
+the oldest entry. Mouse button events carry a 64-bit PIT tick in payload slots
+4 and 5; mouse modifier bits occupy payload slot 2 above the button-state byte.
+Title updates and destruction are ownership-checked. Removing a process
+destroys every frame it owns.
+
+GL packets are versioned, self-contained colored-triangle frames capped at
+192 KiB, 1,024 draws, and 4,096 vertices. The kernel validates every offset,
+range, float, viewport, and flag before publishing a one-slot mailbox to the
+single VirGL owner. A GL-backed `RemoteSurface` rejects XRGB presents. Hardware
+depth is advertised only when the VirGL capset supplies a depth format; the
+userland GL library uses bounded painter sorting otherwise.
 
 The ring-3 timer hands control back to `KERNEL_CONTEXT` every second tick,
 saving and requeueing the current user process first. Direct ring3-to-ring3
@@ -152,12 +208,12 @@ cannot starve the compositor or network worker when zsh polls for a child.
 1. Terminal opens → `spawn_zsh_for_terminal` (in `src/window/`)
    spawns a kernel thread that calls
    `launcher::launch_user_binary("/host/ZSH.ELF")`.
-2. `launch_user_binary` holds `BINARY_SETUP_MUTEX` and `BinaryLoadGuard`,
-   reads the ELF bytes while CR3 is still the kernel L4, then performs
+2. `launch_user_binary` reads ELF bytes through asynchronous VirtIO block I/O,
+   then holds `BINARY_SETUP_MUTEX` only while it performs
    `AddressSpace::new → activate → load/map ELF → initialize VMAs once →
    build stack/install Process`. The setup mutex also serializes teardown;
-   kernel-thread preemption remains enabled so FAT-backed page-in and sparse
-   address-space destruction cannot freeze the compositor.
+   kernel-thread preemption remains enabled; block completion wakes the exact
+   saved kernel continuation.
 3. `enter_user_mode_with_aspace` builds the initial user stack,
    inserts the Process into `PROCESS_TABLE` with `saved_user_state`
    populated to the binary's entry frame (rip=entry, rsp=user_rsp,
@@ -265,10 +321,8 @@ Unit status:
   kernel main loop is now pure scheduler housekeeping + `hlt`. A
   busy ring-3 process no longer freezes the desktop — U5's timer ISR
   splits ring-3 slices and the kernel-thread scheduler round-robins
-  the compositor in alongside terminal launchers. The
-  `BinaryLoadGuard` IDE-PIO atomicity gate is preserved (the
-  compositor checks `binary_load_in_progress()` and skips input +
-  render while a binary is loading).
+  the compositor in alongside terminal launchers. VirtIO DMA storage
+  allows input and rendering to continue throughout binary loading.
 - U9 — Signal/page-fault audit for cross-process correctness. **Done.**
   Audit confirmed: `maybe_deliver_signal` / `deliver_signal` /
   `consume_deliverable` all read via `with_current_process` (=

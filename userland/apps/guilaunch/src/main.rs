@@ -3,9 +3,8 @@
 //! One static ring-3 ELF that reads `argv[0]`, issues the AgenticOS
 //! `gui_launch(name)` syscall, and exits. The kernel-side
 //! `/bin/<gui_applet>` rewrite (`src/userland/bin_namespace.rs`) sends
-//! `execve("/bin/painting", ["painting"], envp)` here, so the user
-//! types `painting` in zsh and the kernel-side `PaintingProcess` gets
-//! spawned via the syscall. See
+//! `execve("/bin/tasks", ["tasks"], envp)` here, so the user types
+//! `tasks` in zsh and the kernel-side Tasks process gets spawned. See
 //! `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`.
 
 #![no_std]

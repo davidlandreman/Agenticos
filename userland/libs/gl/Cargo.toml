@@ -1,0 +1,9 @@
+[package]
+name = "gl"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+runtime = { path = "../../runtime" }
+libm = { version = "0.2", default-features = false }

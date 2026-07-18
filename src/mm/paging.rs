@@ -429,13 +429,6 @@ impl MemoryMapper {
         }
     }
 
-    pub fn frame_bytes_mut(&mut self, frame: PhysFrame<Size4KiB>) -> &mut [u8; 0x1000] {
-        unsafe {
-            &mut *((self.physical_memory_offset.as_u64() + frame.start_address().as_u64())
-                as *mut [u8; 0x1000])
-        }
-    }
-
     /// Unmap one present 4 KiB leaf from an arbitrary address space, release
     /// its frame reference, and prune empty page tables bottom-up.
     pub fn unmap_page_from(
@@ -552,6 +545,44 @@ impl MemoryMapper {
         debug_assert!(released.is_ok(), "user page table must be allocator-owned");
     }
 
+    /// Count resident user leaf pages in the address space rooted at
+    /// `l4_frame` (RSS, in 4 KiB pages). Read-only mirror of
+    /// [`Self::destroy_user_address_space`]'s traversal: walks every
+    /// non-kernel-reserved lower-half PML4 slot down to level 1 and
+    /// counts present leaf entries. COW-shared leaves count in every
+    /// address space that maps them (standard RSS semantics). Works
+    /// regardless of which CR3 is active — tables are read through the
+    /// physical-memory offset alias, never the active mapping.
+    pub fn count_user_resident_pages(&self, l4_frame: PhysFrame<Size4KiB>) -> u64 {
+        let l4 = unsafe { &*self.table_ptr(l4_frame) };
+        let mut total = 0u64;
+        for slot in 0..256 {
+            if is_kernel_reserved_slot(slot) || l4[slot].is_unused() {
+                continue;
+            }
+            let child = PhysFrame::containing_address(l4[slot].addr());
+            total += unsafe { self.count_user_table_leaves(child, 3) };
+        }
+        total
+    }
+
+    unsafe fn count_user_table_leaves(&self, frame: PhysFrame<Size4KiB>, level: u8) -> u64 {
+        let table = &*self.table_ptr(frame);
+        let mut total = 0u64;
+        for entry in table.iter() {
+            if entry.is_unused() || !entry.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            if level == 1 {
+                total += 1;
+            } else {
+                let child = PhysFrame::containing_address(entry.addr());
+                total += self.count_user_table_leaves(child, level - 1);
+            }
+        }
+        total
+    }
+
     /// Read-only accessor for the bootloader's physical-memory offset.
     /// Used when mapping a freshly-allocated frame through the
     /// kernel-visible alias to zero or copy into it.
@@ -663,7 +694,7 @@ impl MemoryMapper {
             frames.push(frame);
         }
 
-        debug_info!(
+        debug_trace!(
             "map_user_region: {} pages at {:?} ({:?})",
             num_pages,
             virt_start,
@@ -740,8 +771,8 @@ impl MemoryMapper {
         // Hot path: per-fault diagnostic logs are at trace level so the
         // default boot doesn't spend UART vmexits on routine demand-paging.
         // See plan U2 (docs/plans/2026-05-09-002-perf-frame-allocator-and-page-fault-hot-path-plan.md).
-        // The opening `>>> PAGE FAULT at ...` line in the IDT handler stays
-        // at info — that one line is what a debugger needs to see.
+        // The IDT handler also logs per-fault address/error detail at trace.
+        // Fatal faults are logged at error with their complete context.
         debug_trace!("Handling page fault for address: {:?}", addr);
 
         let page = Page::containing_address(addr);

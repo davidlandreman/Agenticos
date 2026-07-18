@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! `StatusBar` — bottom-anchored horizontal strip of `Label` sections.
 //!
 //! `StatusBar` is a thin composition over [`HBox`]. Sections are
@@ -40,14 +41,6 @@ where
     with_window_manager(|wm| (slot.take().unwrap())(wm))
 }
 
-/// Default section background color — shared content background from
-/// the U15 palette so a default status bar sits flush against a default
-/// container or toolbar.
-const DEFAULT_BG: Color = crate::window::PALETTE_CONTENT_BG;
-
-/// Default text color — shared with the U15 palette.
-const DEFAULT_FG: Color = crate::window::PALETTE_TEXT;
-
 /// Bottom-anchored horizontal strip of `Label` sections.
 pub struct StatusBar {
     hbox: HBox,
@@ -61,13 +54,15 @@ pub struct StatusBar {
 impl StatusBar {
     /// Create a new `StatusBar` covering `bounds`.
 
-    /// Create a new `StatusBar` with a specific `WindowId`.
+    /// Create a new `StatusBar` with a specific `WindowId`. Colors default
+    /// to the active theme's content palette.
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
+        let palette = crate::window::theme::controls::palette();
         StatusBar {
             hbox: HBox::new_with_id(id, bounds),
             sections: Vec::new(),
-            bg_color: DEFAULT_BG,
-            text_color: DEFAULT_FG,
+            bg_color: palette.content_bg,
+            text_color: palette.text,
         }
     }
 

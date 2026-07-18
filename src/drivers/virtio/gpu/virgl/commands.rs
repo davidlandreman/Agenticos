@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use super::super::GpuError;
+use super::super::{protocol::GpuBox, GpuError};
 
 const VIRGL_CCMD_CREATE_OBJECT: u32 = 1;
 const VIRGL_CCMD_BIND_OBJECT: u32 = 2;
@@ -19,6 +19,7 @@ const VIRGL_CCMD_CLEAR: u32 = 7;
 const VIRGL_CCMD_DRAW_VBO: u32 = 8;
 const VIRGL_CCMD_RESOURCE_INLINE_WRITE: u32 = 9;
 const VIRGL_CCMD_SET_SAMPLER_VIEWS: u32 = 10;
+const VIRGL_CCMD_RESOURCE_COPY_REGION: u32 = 17;
 const VIRGL_CCMD_SET_SCISSOR_STATE: u32 = 15;
 const VIRGL_CCMD_BIND_SAMPLER_STATES: u32 = 18;
 const VIRGL_CCMD_BIND_SHADER: u32 = 31;
@@ -32,6 +33,7 @@ const VIRGL_OBJECT_SAMPLER_VIEW: u32 = 6;
 const VIRGL_OBJECT_SAMPLER_STATE: u32 = 7;
 const VIRGL_OBJECT_SURFACE: u32 = 8;
 const PIPE_CLEAR_COLOR0: u32 = 1 << 2;
+const PIPE_CLEAR_DEPTH: u32 = 1 << 0;
 const MAX_ENCODER_DWORDS: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,6 +44,10 @@ impl ClearColor {
     pub const RED: Self = Self([1.0, 0.0, 0.0, 1.0]);
     pub const BLUE: Self = Self([0.0, 0.0, 1.0, 1.0]);
     pub const MAGENTA: Self = Self([1.0, 0.0, 1.0, 1.0]);
+
+    pub const fn from_array(color: [f32; 4]) -> Self {
+        Self(color)
+    }
 }
 
 pub struct VirglCommandEncoder {
@@ -86,13 +92,33 @@ impl VirglCommandEncoder {
         self.emit_words(&[1, 0, color_surface_id])
     }
 
+    pub fn set_framebuffer_with_depth(
+        &mut self,
+        color_surface_id: u32,
+        depth_surface_id: u32,
+    ) -> Result<(), GpuError> {
+        if color_surface_id == 0 || depth_surface_id == 0 {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        self.emit_command(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3)?;
+        self.emit_words(&[1, depth_surface_id, color_surface_id])
+    }
+
     pub fn clear_color(&mut self, color: ClearColor) -> Result<(), GpuError> {
+        self.clear(color, None)
+    }
+
+    pub fn clear_color_depth(&mut self, color: [f32; 4], depth: f64) -> Result<(), GpuError> {
+        self.clear(ClearColor(color), Some(depth))
+    }
+
+    fn clear(&mut self, color: ClearColor, depth: Option<f64>) -> Result<(), GpuError> {
         self.emit_command(VIRGL_CCMD_CLEAR, 0, 8)?;
-        self.emit_word(PIPE_CLEAR_COLOR0)?;
+        self.emit_word(PIPE_CLEAR_COLOR0 | if depth.is_some() { PIPE_CLEAR_DEPTH } else { 0 })?;
         for component in color.0 {
             self.emit_word(component.to_bits())?;
         }
-        let depth = 1.0f64.to_bits();
+        let depth = depth.unwrap_or(1.0).to_bits();
         self.emit_word(depth as u32)?;
         self.emit_word((depth >> 32) as u32)?;
         self.emit_word(0)
@@ -152,6 +178,53 @@ impl VirglCommandEncoder {
         self.emit_padded_bytes(bytes)
     }
 
+    /// Copy one bounded region between distinct VirGL resources.
+    ///
+    /// Layout follows virglrenderer's `VIRGL_CMD_RESOURCE_COPY_REGION_*`
+    /// definitions from the same pinned MIT-licensed protocol revision cited
+    /// at the top of this file.
+    pub fn resource_copy_region(
+        &mut self,
+        destination_resource_id: u32,
+        destination_x: u32,
+        destination_y: u32,
+        destination_z: u32,
+        source_resource_id: u32,
+        source: GpuBox,
+    ) -> Result<(), GpuError> {
+        if destination_resource_id == 0
+            || source_resource_id == 0
+            || destination_resource_id == source_resource_id
+            || source.width == 0
+            || source.height == 0
+            || source.depth == 0
+            || source.x.checked_add(source.width).is_none()
+            || source.y.checked_add(source.height).is_none()
+            || source.z.checked_add(source.depth).is_none()
+            || destination_x.checked_add(source.width).is_none()
+            || destination_y.checked_add(source.height).is_none()
+            || destination_z.checked_add(source.depth).is_none()
+        {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        self.emit_command(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, 13)?;
+        self.emit_words(&[
+            destination_resource_id,
+            0,
+            destination_x,
+            destination_y,
+            destination_z,
+            source_resource_id,
+            0,
+            source.x,
+            source.y,
+            source.z,
+            source.width,
+            source.height,
+            source.depth,
+        ])
+    }
+
     pub fn create_shader(
         &mut self,
         handle: u32,
@@ -207,12 +280,31 @@ impl VirglCommandEncoder {
         self.emit_words(&[0; 7])
     }
 
+    pub fn create_replace_blend(&mut self, handle: u32) -> Result<(), GpuError> {
+        const RGBA_MASK: u32 = 0xf;
+        if handle == 0 {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        self.emit_command(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_BLEND, 11)?;
+        self.emit_words(&[handle, 0, 0, RGBA_MASK << 27])?;
+        self.emit_words(&[0; 7])
+    }
+
     pub fn create_disabled_dsa(&mut self, handle: u32) -> Result<(), GpuError> {
         if handle == 0 {
             return Err(GpuError::InvalidCommandStream);
         }
         self.emit_command(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5)?;
         self.emit_words(&[handle, 0, 0, 0, 0])
+    }
+
+    pub fn create_depth_less_dsa(&mut self, handle: u32) -> Result<(), GpuError> {
+        if handle == 0 {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        // depth_enable=1, depth_writemask=1, PIPE_FUNC_LESS=1.
+        self.emit_command(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5)?;
+        self.emit_words(&[handle, 1 | (1 << 1) | (1 << 2), 0, 0, 0])
     }
 
     pub fn create_rasterizer(&mut self, handle: u32, scissor: bool) -> Result<(), GpuError> {
@@ -224,7 +316,29 @@ impl VirglCommandEncoder {
         self.emit_words(&[handle, state, 0, 0, 0, 0, 0, 0, 0])
     }
 
-    pub fn set_viewport(&mut self, width: u32, height: u32) -> Result<(), GpuError> {
+    pub fn create_rasterizer_cull_back(
+        &mut self,
+        handle: u32,
+        scissor: bool,
+    ) -> Result<(), GpuError> {
+        if handle == 0 {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        // depth_clip=1, PIPE_FACE_BACK=2, scissor optional, front_ccw=1,
+        // and the same half-pixel/bottom-edge rules as the compositor.
+        let state =
+            (1 << 1) | (2 << 8) | ((scissor as u32) << 14) | (1 << 15) | (1 << 29) | (1 << 30);
+        self.emit_command(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_RASTERIZER, 9)?;
+        self.emit_words(&[handle, state, 0, 0, 0, 0, 0, 0, 0])
+    }
+
+    pub fn set_viewport_rect(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), GpuError> {
         if width == 0 || height == 0 {
             return Err(GpuError::InvalidCommandStream);
         }
@@ -236,10 +350,41 @@ impl VirglCommandEncoder {
             half_width.to_bits(),
             half_height.to_bits(),
             0.5f32.to_bits(),
-            half_width.to_bits(),
-            half_height.to_bits(),
+            (x as f32 + half_width).to_bits(),
+            (y as f32 + half_height).to_bits(),
             0.5f32.to_bits(),
         ])
+    }
+
+    /// Set an OpenGL-style viewport on a top-left-origin render target.
+    /// Clip-space +Y maps toward the top of the client surface, matching the
+    /// fixed-function API while retained compositor viewports remain unflipped.
+    pub fn set_gl_viewport_rect(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), GpuError> {
+        if width == 0 || height == 0 {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        let half_width = width as f32 / 2.0;
+        let half_height = height as f32 / 2.0;
+        self.emit_command(VIRGL_CCMD_SET_VIEWPORT_STATE, 0, 7)?;
+        self.emit_words(&[
+            0,
+            half_width.to_bits(),
+            (-half_height).to_bits(),
+            0.5f32.to_bits(),
+            (x as f32 + half_width).to_bits(),
+            (y as f32 + half_height).to_bits(),
+            0.5f32.to_bits(),
+        ])
+    }
+
+    pub fn set_viewport(&mut self, width: u32, height: u32) -> Result<(), GpuError> {
+        self.set_viewport_rect(0, 0, width, height)
     }
 
     pub fn draw_triangles(&mut self, vertex_count: u32) -> Result<(), GpuError> {
@@ -331,11 +476,88 @@ impl VirglCommandEncoder {
         if sampler_handle == 0 || view_handle == 0 {
             return Err(GpuError::InvalidCommandStream);
         }
+        self.set_fragment_sampler_view(view_handle)?;
+        self.bind_fragment_sampler_state(sampler_handle)
+    }
+
+    pub fn set_fragment_sampler_view(&mut self, view_handle: u32) -> Result<(), GpuError> {
+        self.set_fragment_sampler_views(0, &[view_handle])
+    }
+
+    pub fn set_fragment_sampler_views(
+        &mut self,
+        start_slot: u32,
+        view_handles: &[u32],
+    ) -> Result<(), GpuError> {
+        const MAX_FRAGMENT_SAMPLERS: usize = 16;
+        if view_handles.is_empty()
+            || view_handles.iter().any(|handle| *handle == 0)
+            || start_slot as usize >= MAX_FRAGMENT_SAMPLERS
+            || start_slot as usize + view_handles.len() > MAX_FRAGMENT_SAMPLERS
+        {
+            return Err(GpuError::InvalidCommandStream);
+        }
         const FRAGMENT_SHADER: u32 = 1;
-        self.emit_command(VIRGL_CCMD_SET_SAMPLER_VIEWS, 0, 3)?;
-        self.emit_words(&[FRAGMENT_SHADER, 0, view_handle])?;
-        self.emit_command(VIRGL_CCMD_BIND_SAMPLER_STATES, 0, 3)?;
-        self.emit_words(&[FRAGMENT_SHADER, 0, sampler_handle])
+        self.emit_command(
+            VIRGL_CCMD_SET_SAMPLER_VIEWS,
+            0,
+            2 + view_handles.len() as u32,
+        )?;
+        self.emit_words(&[FRAGMENT_SHADER, start_slot])?;
+        self.emit_words(view_handles)
+    }
+
+    pub fn clear_fragment_sampler_view(&mut self) -> Result<(), GpuError> {
+        self.clear_fragment_sampler_views(0, 1)
+    }
+
+    pub fn clear_fragment_sampler_views(
+        &mut self,
+        start_slot: u32,
+        count: u32,
+    ) -> Result<(), GpuError> {
+        const MAX_FRAGMENT_SAMPLERS: u32 = 16;
+        if count == 0
+            || start_slot >= MAX_FRAGMENT_SAMPLERS
+            || start_slot.checked_add(count).is_none()
+            || start_slot + count > MAX_FRAGMENT_SAMPLERS
+        {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        const FRAGMENT_SHADER: u32 = 1;
+        self.emit_command(VIRGL_CCMD_SET_SAMPLER_VIEWS, 0, 2 + count)?;
+        self.emit_words(&[FRAGMENT_SHADER, start_slot])?;
+        for _ in 0..count {
+            self.emit_word(0)?;
+        }
+        Ok(())
+    }
+
+    pub fn bind_fragment_sampler_state(&mut self, sampler_handle: u32) -> Result<(), GpuError> {
+        self.bind_fragment_sampler_states(0, &[sampler_handle])
+    }
+
+    pub fn bind_fragment_sampler_states(
+        &mut self,
+        start_slot: u32,
+        sampler_handles: &[u32],
+    ) -> Result<(), GpuError> {
+        const MAX_FRAGMENT_SAMPLERS: usize = 16;
+        if sampler_handles.is_empty()
+            || sampler_handles.iter().any(|handle| *handle == 0)
+            || start_slot as usize >= MAX_FRAGMENT_SAMPLERS
+            || start_slot as usize + sampler_handles.len() > MAX_FRAGMENT_SAMPLERS
+        {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        const FRAGMENT_SHADER: u32 = 1;
+        self.emit_command(
+            VIRGL_CCMD_BIND_SAMPLER_STATES,
+            0,
+            2 + sampler_handles.len() as u32,
+        )?;
+        self.emit_words(&[FRAGMENT_SHADER, start_slot])?;
+        self.emit_words(sampler_handles)
     }
 
     pub fn destroy_object(&mut self, object: u32, handle: u32) -> Result<(), GpuError> {

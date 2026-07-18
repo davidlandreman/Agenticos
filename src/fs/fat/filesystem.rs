@@ -50,6 +50,9 @@ struct MutableState {
 
 pub struct FatFilesystem<'a> {
     device: &'a dyn BlockDevice,
+    /// Immutable BPB/boot-sector data retained from mount. Reusing it avoids
+    /// an extra block transaction on every demand-paged executable read.
+    boot_sector_data: [u8; 512],
     fat_type: FatType,
     bytes_per_sector: u16,
     sectors_per_cluster: u8,
@@ -190,9 +193,9 @@ fn build_sfn_entry(
     out[0..11].copy_from_slice(sfn_11);
     // Attributes: ARCHIVE for files, DIRECTORY for dirs.
     out[11] = if is_dir { 0x10 } else { 0x20 };
-    // NT-reserved / case bits / creation-time-tenths / time + date
-    // all zero for now — no RTC yet. (Phase D follow-up: real
-    // timestamps once an RTC is wired.)
+    // NT-reserved / case bits / creation-time-tenths / time + date remain
+    // zero. The kernel now has an RTC-backed wall clock, but persisting FAT
+    // create/modify timestamps is a separate filesystem-semantics follow-up.
     let cluster_hi = ((first_cluster.0 >> 16) & 0xFFFF) as u16;
     let cluster_lo = (first_cluster.0 & 0xFFFF) as u16;
     out[20..22].copy_from_slice(&cluster_hi.to_le_bytes());
@@ -244,6 +247,7 @@ impl<'a> FatFilesystem<'a> {
 
         Ok(Self {
             device,
+            boot_sector_data,
             fat_type,
             bytes_per_sector,
             sectors_per_cluster,
@@ -268,8 +272,7 @@ impl<'a> FatFilesystem<'a> {
     /// Idempotent: calling on an already-writable FS is a no-op
     /// (returns Ok).
     pub fn enable_writes(&self, force: bool) -> Result<(), FatError> {
-        let mut state = self.state.lock();
-        if state.writable {
+        if self.state.lock().writable {
             return Ok(());
         }
         // Open a temporary FatTable so we can poke FAT[1].
@@ -294,7 +297,7 @@ impl<'a> FatFilesystem<'a> {
         // Clear the clean bit to indicate "writes in progress".
         // Restored on sync_writes().
         table.write_clean_bit(false)?;
-        state.writable = true;
+        self.state.lock().writable = true;
         Ok(())
     }
 
@@ -302,8 +305,7 @@ impl<'a> FatFilesystem<'a> {
     /// been flushed to disk (i.e. by the public `sync` trait method).
     /// No-op when the mount isn't writable.
     pub fn sync_writes(&self) -> Result<(), FatError> {
-        let state = self.state.lock();
-        if !state.writable {
+        if !self.state.lock().writable {
             return Ok(());
         }
         let mut bs = [0u8; 512];
@@ -312,7 +314,8 @@ impl<'a> FatFilesystem<'a> {
             .map_err(|_| FatError::BlockDeviceError)?;
         let boot = BootSector::from_bytes(&bs)?;
         let table = FatTable::new(self.device, boot, self.fat_type);
-        table.write_clean_bit(true)
+        table.write_clean_bit(true)?;
+        self.device.flush().map_err(|_| FatError::BlockDeviceError)
     }
 
     pub fn is_writable(&self) -> bool {
@@ -341,6 +344,11 @@ impl<'a> FatFilesystem<'a> {
         Ok(())
     }
 
+    fn cached_fat_table(&self) -> Result<FatTable<'_>, FatError> {
+        let boot_sector = BootSector::from_bytes(&self.boot_sector_data)?;
+        Ok(FatTable::new(self.device, boot_sector, self.fat_type))
+    }
+
     pub fn read_file(&self, file: &FileHandle, buffer: &mut [u8]) -> Result<usize, FatError> {
         if file.is_directory {
             return Err(FatError::InvalidPath);
@@ -356,36 +364,50 @@ impl<'a> FatFilesystem<'a> {
         }
 
         let cluster_size = self.sectors_per_cluster as usize * self.bytes_per_sector as usize;
-        let mut bytes_read = 0;
+        let fat_table = self.cached_fat_table()?;
 
-        // Read boot sector to create FAT table
-        let mut boot_sector_data = [0u8; 512];
-        self.device
-            .read_blocks(0, 1, &mut boot_sector_data)
-            .map_err(|_| FatError::BlockDeviceError)?;
-        let boot_sector = BootSector::from_bytes(&boot_sector_data)?;
-
-        let fat_table = FatTable::new(self.device, boot_sector, self.fat_type);
-
-        // Allocate a temporary buffer for reading full clusters
-        let mut cluster_buffer = alloc::vec![0u8; cluster_size];
-
+        let mut clusters = Vec::new();
         fat_table.follow_chain(file.first_cluster, |cluster| {
-            let bytes_to_read = core::cmp::min(cluster_size, file.size as usize - bytes_read);
-
-            if bytes_to_read > 0 {
-                // Read the full cluster into our temporary buffer
-                self.read_cluster(cluster, &mut cluster_buffer)?;
-
-                // Copy only the bytes we need into the output buffer
-                buffer[bytes_read..bytes_read + bytes_to_read]
-                    .copy_from_slice(&cluster_buffer[..bytes_to_read]);
-
-                bytes_read += bytes_to_read;
+            if clusters.len() * cluster_size < file.size as usize {
+                clusters.push(cluster);
             }
-
             Ok(())
         })?;
+
+        let required_clusters = (file.size as usize).div_ceil(cluster_size);
+        if clusters.len() < required_clusters {
+            return Err(FatError::EndOfChain);
+        }
+
+        let full_clusters = file.size as usize / cluster_size;
+        let mut cluster_index = 0usize;
+        while cluster_index < full_clusters {
+            let run_start = cluster_index;
+            while cluster_index + 1 < full_clusters
+                && clusters[cluster_index + 1].0 == clusters[cluster_index].0 + 1
+            {
+                cluster_index += 1;
+            }
+            let run_clusters = cluster_index - run_start + 1;
+            let byte_offset = run_start * cluster_size;
+            let byte_len = run_clusters * cluster_size;
+            self.device
+                .read_blocks(
+                    self.cluster_to_sector(clusters[run_start]) as u64,
+                    (run_clusters * self.sectors_per_cluster as usize) as u32,
+                    &mut buffer[byte_offset..byte_offset + byte_len],
+                )
+                .map_err(|_| FatError::BlockDeviceError)?;
+            cluster_index += 1;
+        }
+
+        let remainder = file.size as usize % cluster_size;
+        if remainder != 0 {
+            let mut last_cluster = alloc::vec![0u8; cluster_size];
+            self.read_cluster(clusters[full_clusters], &mut last_cluster)?;
+            let offset = full_clusters * cluster_size;
+            buffer[offset..offset + remainder].copy_from_slice(&last_cluster[..remainder]);
+        }
 
         Ok(file.size as usize)
     }
@@ -418,54 +440,42 @@ impl<'a> FatFilesystem<'a> {
         let cluster_index = offset as usize / cluster_size;
         let mut cluster_offset = offset as usize % cluster_size;
 
-        let mut boot_sector_data = [0u8; 512];
-        self.device
-            .read_blocks(0, 1, &mut boot_sector_data)
-            .map_err(|_| FatError::BlockDeviceError)?;
-        let boot_sector = BootSector::from_bytes(&boot_sector_data)?;
-        let fat_table = FatTable::new(self.device, boot_sector, self.fat_type);
-
-        let mut current = file.first_cluster;
+        let fat_table = self.cached_fat_table()?;
+        let mut chain = fat_table.chain_cursor(file.first_cluster);
         for _ in 0..cluster_index {
-            if !current.is_valid(self.fat_type) || current.is_bad(self.fat_type) {
-                return Err(FatError::InvalidCluster);
-            }
-            current = fat_table.read_entry(current)?;
-            if current.is_end_of_chain(self.fat_type) {
-                return Err(FatError::EndOfChain);
-            }
+            chain.advance()?;
         }
 
-        let mut sector_buffer = [0u8; 4096];
+        // One read may start part-way through a maximum-size logical sector,
+        // then return a full 4 KiB page. Eight KiB covers that worst case.
+        let mut sector_buffer = [0u8; 8192];
         let mut bytes_read = 0usize;
         while bytes_read < bytes_to_read {
-            if !current.is_valid(self.fat_type) || current.is_bad(self.fat_type) {
-                return Err(FatError::InvalidCluster);
+            let current = chain.current()?;
+            let take = core::cmp::min(cluster_size - cluster_offset, bytes_to_read - bytes_read);
+            let sector_in_cluster = cluster_offset / sector_size;
+            let offset_in_sector = cluster_offset % sector_size;
+            let sectors = (offset_in_sector + take).div_ceil(sector_size);
+            let transfer_len = sectors * sector_size;
+            if transfer_len > sector_buffer.len() {
+                return Err(FatError::BufferTooSmall);
             }
-
-            while cluster_offset < cluster_size && bytes_read < bytes_to_read {
-                let sector_in_cluster = cluster_offset / sector_size;
-                let offset_in_sector = cluster_offset % sector_size;
-                let sector = self.cluster_to_sector(current) + sector_in_cluster as u32;
-                self.device
-                    .read_blocks(sector as u64, 1, &mut sector_buffer[..sector_size])
-                    .map_err(|_| FatError::BlockDeviceError)?;
-
-                let take =
-                    core::cmp::min(sector_size - offset_in_sector, bytes_to_read - bytes_read);
-                buffer[bytes_read..bytes_read + take]
-                    .copy_from_slice(&sector_buffer[offset_in_sector..offset_in_sector + take]);
-                bytes_read += take;
-                cluster_offset += take;
-            }
+            let sector = self.cluster_to_sector(current) + sector_in_cluster as u32;
+            self.device
+                .read_blocks(
+                    sector as u64,
+                    sectors as u32,
+                    &mut sector_buffer[..transfer_len],
+                )
+                .map_err(|_| FatError::BlockDeviceError)?;
+            buffer[bytes_read..bytes_read + take]
+                .copy_from_slice(&sector_buffer[offset_in_sector..offset_in_sector + take]);
+            bytes_read += take;
 
             if bytes_read == bytes_to_read {
                 break;
             }
-            current = fat_table.read_entry(current)?;
-            if current.is_end_of_chain(self.fat_type) {
-                return Err(FatError::EndOfChain);
-            }
+            chain.advance()?;
             cluster_offset = 0;
         }
 
@@ -1050,19 +1060,7 @@ impl<'a> FatFilesystem<'a> {
     }
 
     fn fresh_fat_table(&self) -> Result<FatTable<'_>, FatError> {
-        let mut bs = [0u8; 512];
-        self.device
-            .read_blocks(0, 1, &mut bs)
-            .map_err(|_| FatError::BlockDeviceError)?;
-        // SAFETY: BootSector::from_bytes returns a ref tied to the
-        // buffer's lifetime. We need a FatTable whose lifetime is
-        // tied to &self.device, not the stack buffer. Re-parse with
-        // a long-lived buffer would be ideal; for now, leak a small
-        // heap copy.
-        let boot_box: alloc::boxed::Box<[u8; 512]> = alloc::boxed::Box::new(bs);
-        let boot_ref: &'static [u8; 512] = alloc::boxed::Box::leak(boot_box);
-        let boot = BootSector::from_bytes(boot_ref)?;
-        Ok(FatTable::new(self.device, boot, self.fat_type))
+        self.cached_fat_table()
     }
 
     /// Allocate ONE free cluster, mark it end-of-chain, and return

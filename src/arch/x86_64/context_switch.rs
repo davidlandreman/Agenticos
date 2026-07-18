@@ -103,6 +103,57 @@ pub unsafe extern "C" fn switch_to_context(new_ctx: *const CpuContext) {
     );
 }
 
+/// Restore a kernel entity from a complete saved context and diverge.
+///
+/// Unlike `iretq`, this explicitly installs the target kernel stack before
+/// transferring between two CPL0 contexts. The target RIP is pushed as a
+/// synthetic return address so every GPR, including the scratch register used
+/// as the context pointer, can be restored before `ret`.
+#[unsafe(naked)]
+pub unsafe extern "C" fn restore_kernel_context(new_ctx: *const CpuContext) -> ! {
+    naked_asm!(
+        "mov r11, rdi",
+        "mov rsp, [r11 + 48]",
+        "mov rax, [r11 + 56]",
+        "push rax",
+        // Restore all flags except IF while the register image is partial.
+        // `sti; ret` below uses the architectural interrupt shadow to make
+        // the final transfer atomic with respect to maskable interrupts.
+        "mov rax, [r11 + 64]",
+        "and rax, -513",
+        "push rax",
+        "popfq",
+        "mov rbx, [r11 + 0]",
+        "mov rbp, [r11 + 8]",
+        "mov r12, [r11 + 16]",
+        "mov r13, [r11 + 24]",
+        "mov r14, [r11 + 32]",
+        "mov r15, [r11 + 40]",
+        "mov rax, [r11 + 72]",
+        "mov rcx, [r11 + 80]",
+        "mov rdx, [r11 + 88]",
+        "mov rsi, [r11 + 96]",
+        "mov rdi, [r11 + 104]",
+        "mov r8, [r11 + 112]",
+        "mov r9, [r11 + 120]",
+        "mov r10, [r11 + 128]",
+        "mov r11, [r11 + 136]",
+        "sti",
+        "ret",
+    );
+}
+
+pub unsafe fn resume_kernel_thread(pid: crate::process::ProcessId) -> ! {
+    let context = crate::process::scheduler::SCHEDULER
+        .lock()
+        .get_context(pid)
+        .copied()
+        .expect("resume_kernel_thread: unknown pid");
+    crate::userland::lifecycle::set_current_user_pid(None);
+    crate::process::set_in_spawned_process(true);
+    restore_kernel_context(&context)
+}
+
 /// Context switch that saves callee-saved regs but restores ALL regs.
 ///
 /// Used when switching from kernel to a preempted process:
@@ -181,13 +232,12 @@ pub extern "C" fn process_entry_trampoline() {
         core::arch::asm!("sti");
     }
 
-    // Debug: We reached the trampoline
-    crate::debug_info!(">>> process_entry_trampoline: ENTERED");
+    crate::debug_trace!("process_entry_trampoline: entered");
 
     // Get the current process and call its entry function
-    crate::debug_info!(">>> process_entry_trampoline: about to lock scheduler");
+    crate::debug_trace!("process_entry_trampoline: locking scheduler");
     let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
-    crate::debug_info!(">>> process_entry_trampoline: scheduler locked");
+    crate::debug_trace!("process_entry_trampoline: scheduler locked");
     if let Some(pid) = scheduler.current() {
         if let Some(pcb) = scheduler.get_process_mut(pid) {
             if let Some(entry_fn) = pcb.entry_fn.take() {

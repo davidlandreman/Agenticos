@@ -117,6 +117,29 @@ fn test_3d_transfer_layout_checks_bounds_and_backing() {
     );
 }
 
+fn test_partial_surface_staging_preserves_untouched_backing() {
+    use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc};
+    use crate::window::Rect;
+
+    let mut surface = Surface::new(SurfaceDesc::new(4, 3)).unwrap();
+    for (index, pixel) in surface.pixels_mut().iter_mut().enumerate() {
+        *pixel = PremulArgb(0x1100_0000 | index as u32);
+    }
+    let mut backing = alloc::vec![0xaau8; surface.byte_len()];
+    assert_eq!(
+        crate::graphics::composition::stage_surface_rect_for_test(
+            &surface,
+            &mut backing,
+            Rect::new(1, 1, 2, 1),
+        ),
+        Ok(8)
+    );
+    assert!(backing[..20].iter().all(|byte| *byte == 0xaa));
+    assert_eq!(&backing[20..24], &surface.pixels()[5].0.to_le_bytes());
+    assert_eq!(&backing[24..28], &surface.pixels()[6].0.to_le_bytes());
+    assert!(backing[28..].iter().all(|byte| *byte == 0xaa));
+}
+
 fn test_clear_command_stream_matches_classic_virgl_layout() {
     let mut encoder = VirglCommandEncoder::new();
     encoder
@@ -151,6 +174,95 @@ fn test_clear_command_stream_matches_classic_virgl_layout() {
             3 | (8 << 8) | (1 << 16),
             9,
         ]
+    );
+}
+
+fn test_sampler_view_state_can_persist_and_unbind() {
+    let mut encoder = VirglCommandEncoder::new();
+    encoder.create_nearest_sampler(8).unwrap();
+    encoder.bind_fragment_sampler_state(8).unwrap();
+    encoder
+        .create_sampler_view(9, 17, FORMAT_B8G8R8A8_UNORM)
+        .unwrap();
+    encoder.set_fragment_sampler_view(9).unwrap();
+    encoder.clear_fragment_sampler_view().unwrap();
+    encoder.destroy_object(6, 9).unwrap();
+
+    let words = encoder.words();
+    assert!(words
+        .windows(4)
+        .any(|window| window == [18 | (3 << 16), 1, 0, 8]));
+    assert!(words
+        .windows(4)
+        .any(|window| window == [10 | (3 << 16), 1, 0, 9]));
+    assert!(words
+        .windows(4)
+        .any(|window| window == [10 | (3 << 16), 1, 0, 0]));
+    assert_eq!(&words[words.len() - 2..], &[3 | (6 << 8) | (1 << 16), 9]);
+}
+
+fn test_resource_copy_and_multi_sampler_command_streams() {
+    let mut encoder = VirglCommandEncoder::new();
+    encoder
+        .resource_copy_region(
+            7,
+            3,
+            5,
+            0,
+            9,
+            GpuBox {
+                x: 11,
+                y: 13,
+                z: 0,
+                width: 17,
+                height: 19,
+                depth: 1,
+            },
+        )
+        .unwrap();
+    encoder.set_fragment_sampler_views(0, &[21, 22]).unwrap();
+    encoder.bind_fragment_sampler_states(0, &[8, 8]).unwrap();
+    encoder.clear_fragment_sampler_views(0, 2).unwrap();
+
+    assert_eq!(
+        &encoder.words()[..14],
+        &[17 | (13 << 16), 7, 0, 3, 5, 0, 9, 0, 11, 13, 0, 17, 19, 1,]
+    );
+    assert!(encoder
+        .words()
+        .windows(5)
+        .any(|words| words == [10 | (4 << 16), 1, 0, 21, 22]));
+    assert!(encoder
+        .words()
+        .windows(5)
+        .any(|words| words == [18 | (4 << 16), 1, 0, 8, 8]));
+    assert!(encoder
+        .words()
+        .windows(5)
+        .any(|words| words == [10 | (4 << 16), 1, 0, 0, 0]));
+
+    let mut invalid = VirglCommandEncoder::new();
+    assert_eq!(
+        invalid.resource_copy_region(
+            7,
+            0,
+            0,
+            0,
+            7,
+            GpuBox {
+                x: 0,
+                y: 0,
+                z: 0,
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        ),
+        Err(GpuError::InvalidCommandStream)
+    );
+    assert_eq!(
+        invalid.set_fragment_sampler_views(15, &[1, 2]),
+        Err(GpuError::InvalidCommandStream)
     );
 }
 
@@ -248,7 +360,10 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_fenced_header_wire_bytes,
         &test_scanout_and_cursor_wire_bytes,
         &test_3d_transfer_layout_checks_bounds_and_backing,
+        &test_partial_surface_staging_preserves_untouched_backing,
         &test_clear_command_stream_matches_classic_virgl_layout,
+        &test_sampler_view_state_can_persist_and_unbind,
+        &test_resource_copy_and_multi_sampler_command_streams,
         &test_virtqueue_chain_recycles_all_descriptors,
         &test_virtqueue_timeout_and_capacity,
         &test_dma_buffers_split_at_page_boundaries,

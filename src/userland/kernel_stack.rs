@@ -21,7 +21,7 @@ use x86_64::VirtAddr;
 ///
 /// 16 KiB (the original budget) is not enough for the deepest paths the
 /// kernel reaches today: zsh's musl init drives nested syscalls
-/// (open → FAT chain walk → IDE PIO → allocator) that walk past the bottom
+/// (open → FAT chain walk → block I/O → allocator) that walk past the bottom
 /// of a 16 KiB stack and stomp adjacent heap memory. Because the kernel
 /// stack lives in the heap (boxed slice), the stomped memory is whatever
 /// the allocator placed next to this buffer — typically a free-list node

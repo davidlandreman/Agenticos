@@ -1,6 +1,6 @@
 use crate::userland::lifecycle::{cleanup_user_process, frame_is_user, AbnormalExit};
 use crate::{debug_error, debug_info, debug_trace, println};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin::Mutex;
@@ -96,6 +96,18 @@ lazy_static! {
         }
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Mouse.as_usize()].set_handler_fn(mouse_interrupt_handler);
+        idt[PIC_1_OFFSET as usize + 3].set_handler_fn(pci_irq3_handler);
+        idt[PIC_1_OFFSET as usize + 4].set_handler_fn(pci_irq4_handler);
+        idt[PIC_1_OFFSET as usize + 5].set_handler_fn(pci_irq5_handler);
+        idt[PIC_1_OFFSET as usize + 6].set_handler_fn(pci_irq6_handler);
+        idt[PIC_1_OFFSET as usize + 7].set_handler_fn(pci_irq7_handler);
+        idt[PIC_1_OFFSET as usize + 8].set_handler_fn(pci_irq8_handler);
+        idt[PIC_1_OFFSET as usize + 9].set_handler_fn(pci_irq9_handler);
+        idt[PIC_1_OFFSET as usize + 10].set_handler_fn(pci_irq10_handler);
+        idt[PIC_1_OFFSET as usize + 11].set_handler_fn(pci_irq11_handler);
+        idt[PIC_1_OFFSET as usize + 13].set_handler_fn(pci_irq13_handler);
+        idt[PIC_1_OFFSET as usize + 14].set_handler_fn(pci_irq14_handler);
+        idt[PIC_1_OFFSET as usize + 15].set_handler_fn(pci_irq15_handler);
 
         // The legacy `int 0x80` IDT vector that PR #12 installed has been
         // removed: userland now enters the kernel via the `syscall` instruction
@@ -105,6 +117,53 @@ lazy_static! {
         idt
     };
 }
+
+/// Unmask a routed PCI INTx line after its driver is ready to acknowledge it.
+pub fn enable_pci_irq(irq: u8) -> bool {
+    if irq >= 16 || matches!(irq, 0 | 1 | 2 | 12) {
+        return false;
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        use x86_64::instructions::port::Port;
+        let (port, bit) = if irq < 8 {
+            (0x21, irq)
+        } else {
+            (0xA1, irq - 8)
+        };
+        let mut mask = Port::<u8>::new(port);
+        let current = mask.read();
+        mask.write(current & !(1 << bit));
+    });
+    true
+}
+
+fn handle_pci_irq(irq: u8) {
+    crate::drivers::virtio::block::handle_interrupt(irq);
+    unsafe { PICS.lock().notify_end_of_interrupt(PIC_1_OFFSET + irq) };
+}
+
+macro_rules! pci_irq_handlers {
+    ($(($name:ident, $irq:literal)),+ $(,)?) => {$ (
+        extern "x86-interrupt" fn $name(_frame: InterruptStackFrame) {
+            handle_pci_irq($irq);
+        }
+    )+ };
+}
+
+pci_irq_handlers!(
+    (pci_irq3_handler, 3),
+    (pci_irq4_handler, 4),
+    (pci_irq5_handler, 5),
+    (pci_irq6_handler, 6),
+    (pci_irq7_handler, 7),
+    (pci_irq8_handler, 8),
+    (pci_irq9_handler, 9),
+    (pci_irq10_handler, 10),
+    (pci_irq11_handler, 11),
+    (pci_irq13_handler, 13),
+    (pci_irq14_handler, 14),
+    (pci_irq15_handler, 15),
+);
 
 /// Configure the PIT (Programmable Interval Timer) to fire at the specified frequency
 ///
@@ -256,12 +315,13 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let accessed_addr = Cr2::read();
 
-    // Immediate debug output to see if we're getting page faults
-    debug_info!(
-        ">>> PAGE FAULT at {:?}, error: {:?}",
-        accessed_addr,
-        error_code
-    );
+    // Routine demand faults are expected and can occur thousands of times
+    // during process startup. Keep per-fault detail available for an
+    // explicitly selected Trace session, but do no UART I/O at the default
+    // level. Fatal paths below log the address, error code, RIP, and context.
+    // UART output from this interrupt path is especially expensive under
+    // QEMU because every byte can require a VM exit.
+    debug_trace!("page fault at {:?}, error: {:?}", accessed_addr, error_code);
 
     // Don't check for physical memory offset access here - let the mapper handle it
     // The mapper knows the actual physical memory offset from the bootloader
@@ -350,8 +410,8 @@ extern "x86-interrupt" fn page_fault_handler(
         // Per-fault trace logging only; routine demand-paging at default
         // log level shouldn't burn UART vmexits. See plan U2
         // (docs/plans/2026-05-09-002-perf-frame-allocator-and-page-fault-hot-path-plan.md).
-        // The opening `>>> PAGE FAULT at ...` line above stays at info so
-        // an unexpected fault is still visible.
+        // Unexpected faults remain visible through the error-level failure
+        // paths below; successful demand faults stay silent by default.
         let region = if addr >= STACK_REGION_START {
             "stack"
         } else {
@@ -501,19 +561,9 @@ extern "x86-interrupt" fn alignment_check_handler(
 /// Timer tick counter (atomic for safe access)
 pub static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Flag indicating that a context switch should occur
-/// This is set by the timer interrupt when a process's time slice expires
-pub static PREEMPTION_PENDING: AtomicBool = AtomicBool::new(false);
-
 /// Get the current timer tick count
 pub fn get_timer_ticks() -> u64 {
     TIMER_TICKS.load(Ordering::Relaxed)
-}
-
-/// Check and clear the preemption pending flag
-/// Returns true if preemption was pending
-pub fn check_and_clear_preemption() -> bool {
-    PREEMPTION_PENDING.swap(false, Ordering::SeqCst)
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

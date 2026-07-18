@@ -52,6 +52,7 @@ pub const EAGAIN: i64 = -11;
 pub const EPIPE: i64 = -32;
 pub const EINTR: i64 = -4;
 pub const EPERM: i64 = -1;
+pub const ESRCH: i64 = -3;
 pub const ENOSPC: i64 = -28;
 pub const EBUSY: i64 = -16;
 pub const EXDEV: i64 = -18;
@@ -61,7 +62,9 @@ pub const ENOMEM: i64 = -12;
 pub const ENFILE: i64 = -23;
 pub const EAFNOSUPPORT: i64 = -97;
 pub const EPROTONOSUPPORT: i64 = -93;
+pub const EOPNOTSUPP: i64 = -95;
 pub const ENOTCONN: i64 = -107;
+pub const ENOTSUP: i64 = -95;
 pub const EISCONN: i64 = -106;
 pub const EINPROGRESS: i64 = -115;
 pub const EALREADY: i64 = -114;
@@ -250,6 +253,7 @@ pub mod nr {
     pub const GETTIMEOFDAY: u64 = 96;
     pub const GETRLIMIT: u64 = 97;
     pub const GETRUSAGE: u64 = 98;
+    pub const SYSINFO: u64 = 99;
     pub const READLINK: u64 = 89;
     pub const SET_TID_ADDRESS: u64 = 218;
     pub const CLOCK_GETTIME: u64 = 228;
@@ -273,6 +277,8 @@ pub mod nr {
     pub const RMDIR: u64 = 84;
     pub const CREAT: u64 = 85;
     pub const UNLINK: u64 = 87;
+    pub const LINK: u64 = 86;
+    pub const SYMLINK: u64 = 88;
     pub const CHMOD: u64 = 90;
     pub const FCHMOD: u64 = 91;
     pub const FSYNC: u64 = 74;
@@ -284,6 +290,8 @@ pub mod nr {
     pub const MKDIRAT: u64 = 258;
     pub const UNLINKAT: u64 = 263;
     pub const RENAMEAT: u64 = 264;
+    pub const LINKAT: u64 = 265;
+    pub const SYMLINKAT: u64 = 266;
     pub const SYNCFS: u64 = 306;
     // Phase 4 PR-C: process management
     pub const FORK: u64 = 57;
@@ -313,6 +321,11 @@ pub mod nr {
     pub const GUI_WIN_PRESENT: u64 = 5002;
     pub const GUI_NEXT_EVENT: u64 = 5003;
     pub const GUI_WIN_DESTROY: u64 = 5004;
+    pub const GUI_WIN_SET_TITLE: u64 = 5005;
+    pub const GUI_GL_CONTEXT_CREATE: u64 = 5006;
+    pub const GUI_GL_SUBMIT_FRAME: u64 = 5007;
+    pub const GUI_GL_GET_INFO: u64 = 5008;
+    pub const GUI_GL_CONTEXT_DESTROY: u64 = 5009;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -374,6 +387,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::READLINKAT => syscalls::readlinkat_handler(args),
         nr::GETRLIMIT => syscalls::getrlimit_handler(args),
         nr::GETRUSAGE => syscalls::getrusage_handler(args),
+        nr::SYSINFO => syscalls::sysinfo_handler(args),
         nr::PRLIMIT64 => syscalls::prlimit64_handler(args),
         nr::SETITIMER => syscalls::setitimer_handler(args),
         nr::NANOSLEEP => syscalls::nanosleep_handler(args),
@@ -390,7 +404,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::FCNTL => syscalls::fcntl_handler(args),
         // Phase 2: stat / access
         nr::STAT => syscalls::stat_handler(args),
-        nr::LSTAT => syscalls::stat_handler(args),
+        nr::LSTAT => syscalls::lstat_handler(args),
         nr::FSTAT => syscalls::fstat_handler(args),
         nr::NEWFSTATAT => syscalls::newfstatat_handler(args),
         nr::ACCESS => syscalls::access_handler(args),
@@ -436,6 +450,11 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GUI_WIN_PRESENT => crate::userland::gui_syscalls::gui_win_present_handler(args),
         nr::GUI_NEXT_EVENT => crate::userland::gui_syscalls::gui_next_event_handler(args),
         nr::GUI_WIN_DESTROY => crate::userland::gui_syscalls::gui_win_destroy_handler(args),
+        nr::GUI_WIN_SET_TITLE => crate::userland::gui_syscalls::gui_win_set_title_handler(args),
+        nr::GUI_GL_CONTEXT_CREATE => crate::userland::gui_gl::context_create_handler(args),
+        nr::GUI_GL_SUBMIT_FRAME => crate::userland::gui_gl::submit_frame_handler(args),
+        nr::GUI_GL_GET_INFO => crate::userland::gui_gl::get_info_handler(args),
+        nr::GUI_GL_CONTEXT_DESTROY => crate::userland::gui_gl::context_destroy_handler(args),
         // Phase B: namespace mutations
         nr::MKDIR => syscalls::mkdir_handler(args),
         nr::MKDIRAT => syscalls::mkdirat_handler(args),
@@ -446,6 +465,10 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::UNLINKAT => syscalls::unlinkat_handler(args),
         nr::RENAME => syscalls::rename_handler(args),
         nr::RENAMEAT => syscalls::renameat_handler(args),
+        nr::LINK => syscalls::link_handler(args),
+        nr::LINKAT => syscalls::linkat_handler(args),
+        nr::SYMLINK => syscalls::symlink_handler(args),
+        nr::SYMLINKAT => syscalls::symlinkat_handler(args),
         nr::CREAT => syscalls::creat_handler(args),
         nr::FTRUNCATE => syscalls::ftruncate_handler(args),
         nr::TRUNCATE => syscalls::truncate_handler(args),

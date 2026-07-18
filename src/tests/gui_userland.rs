@@ -1,11 +1,117 @@
 use crate::arch::x86_64::syscall::SyscallArgs;
+use crate::graphics::composition::{ClientGlDraw, ClientGlVertex, CLIENT_GL_DRAW_DEPTH_TEST};
 use crate::userland::abi::{UserVaBounds, EAGAIN, EFAULT, EINVAL, ENOENT};
 use crate::userland::gui::{
     self, GuiEvent, GuiWindowRecord, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_QUEUE_CAPACITY,
     GUI_MOUSE_MOVE, GUI_NONBLOCK,
 };
-use crate::window::event::{Event, KeyCode, KeyModifiers, KeyboardEvent};
-use crate::window::WindowId;
+use crate::window::event::{
+    Event, KeyCode, KeyModifiers, KeyboardEvent, MouseButtons, MouseEvent, MouseEventType,
+};
+use crate::window::{Point, WindowId};
+
+fn append_wire<T: Copy>(packet: &mut alloc::vec::Vec<u8>, value: &T) {
+    // SAFETY: `value` is initialized and remains alive for the duration of
+    // the copy. The wire structs contain only integer and floating fields.
+    let bytes = unsafe {
+        core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
+    };
+    packet.extend_from_slice(bytes);
+}
+
+fn gl_packet(
+    mut header: crate::userland::gui_gl::GlFrameHeader,
+    draws: &[ClientGlDraw],
+    vertices: &[ClientGlVertex],
+) -> alloc::vec::Vec<u8> {
+    let header_bytes = core::mem::size_of::<crate::userland::gui_gl::GlFrameHeader>();
+    header.draw_count = draws.len() as u32;
+    header.vertex_count = vertices.len() as u32;
+    header.draw_offset = header_bytes as u32;
+    header.vertex_offset = (header_bytes + core::mem::size_of_val(draws)) as u32;
+    header.byte_len =
+        (header_bytes + core::mem::size_of_val(draws) + core::mem::size_of_val(vertices)) as u32;
+    let mut packet = alloc::vec::Vec::with_capacity(header.byte_len as usize);
+    append_wire(&mut packet, &header);
+    for draw in draws {
+        append_wire(&mut packet, draw);
+    }
+    for vertex in vertices {
+        append_wire(&mut packet, vertex);
+    }
+    packet
+}
+
+fn valid_gl_packet() -> alloc::vec::Vec<u8> {
+    let header = crate::userland::gui_gl::GlFrameHeader {
+        magic: crate::userland::gui_gl::GL_ABI_MAGIC,
+        version: crate::userland::gui_gl::GL_ABI_VERSION,
+        width: 640,
+        height: 480,
+        viewport_width: 640,
+        viewport_height: 480,
+        clear_color: [0.1, 0.2, 0.3, 1.0],
+        clear_depth: 1.0,
+        ..Default::default()
+    };
+    let draws = [ClientGlDraw {
+        first_vertex: 0,
+        vertex_count: 3,
+        flags: CLIENT_GL_DRAW_DEPTH_TEST,
+        reserved: 0,
+    }];
+    let vertices = [
+        ClientGlVertex {
+            position: [-0.5, -0.5, 0.0, 1.0],
+            color: [1.0, 0.0, 0.0, 1.0],
+        },
+        ClientGlVertex {
+            position: [0.5, -0.5, 0.0, 1.0],
+            color: [0.0, 1.0, 0.0, 1.0],
+        },
+        ClientGlVertex {
+            position: [0.0, 0.5, 0.0, 1.0],
+            color: [0.0, 0.0, 1.0, 1.0],
+        },
+    ];
+    gl_packet(header, &draws, &vertices)
+}
+
+fn test_gui_gl_packet_validation_accepts_canonical_triangle() {
+    let frame = crate::userland::gui_gl::validate_packet_for_test(&valid_gl_packet())
+        .expect("canonical packet must validate");
+    assert_eq!(frame.width, 640);
+    assert_eq!(frame.height, 480);
+    assert_eq!(frame.draws.len(), 1);
+    assert_eq!(frame.vertices.len(), 3);
+    assert_eq!(frame.serial, 0);
+}
+
+fn test_gui_gl_packet_validation_rejects_untrusted_fields() {
+    let mut bad_magic = valid_gl_packet();
+    bad_magic[0] ^= 0xff;
+    assert_eq!(
+        crate::userland::gui_gl::validate_packet_for_test(&bad_magic).unwrap_err(),
+        EINVAL
+    );
+
+    let mut bad_offset = valid_gl_packet();
+    let offset = 72usize;
+    bad_offset[offset..offset + 4].copy_from_slice(&0u32.to_ne_bytes());
+    assert_eq!(
+        crate::userland::gui_gl::validate_packet_for_test(&bad_offset).unwrap_err(),
+        EINVAL
+    );
+
+    let mut nan_vertex = valid_gl_packet();
+    let vertex_offset = core::mem::size_of::<crate::userland::gui_gl::GlFrameHeader>()
+        + core::mem::size_of::<ClientGlDraw>();
+    nan_vertex[vertex_offset..vertex_offset + 4].copy_from_slice(&f32::NAN.to_ne_bytes());
+    assert_eq!(
+        crate::userland::gui_gl::validate_packet_for_test(&nan_vertex).unwrap_err(),
+        EINVAL
+    );
+}
 
 fn test_gui_event_layout_and_encoding() {
     assert_eq!(core::mem::size_of::<GuiEvent>(), 32);
@@ -29,6 +135,38 @@ fn test_gui_event_layout_and_encoding() {
     assert_eq!(event.payload[1], 'A' as u32);
     assert_eq!(event.payload[2], 3);
     assert_eq!(event.payload[3], 1);
+}
+
+fn test_gui_mouse_button_encodes_timestamp_and_modifiers() {
+    let before = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let event = gui::encode_window_event(
+        9,
+        &Event::Mouse(MouseEvent {
+            event_type: MouseEventType::ButtonDown,
+            position: Point::new(12, 34),
+            global_position: Point::new(20, 40),
+            buttons: MouseButtons {
+                left: true,
+                right: false,
+                middle: false,
+            },
+            modifiers: KeyModifiers {
+                shift: true,
+                ctrl: true,
+                alt: false,
+                meta: false,
+            },
+        }),
+    )
+    .expect("mouse event must encode");
+    let after = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let timestamp = event.payload[4] as u64 | ((event.payload[5] as u64) << 32);
+    assert_eq!(event.payload[0], 12);
+    assert_eq!(event.payload[1], 34);
+    assert_eq!(event.payload[2] & 0xff, 1);
+    assert_eq!(event.payload[2] >> 8, 3);
+    assert_eq!(event.payload[3], crate::userland::gui::GUI_MOUSE_DOWN);
+    assert!(timestamp >= before && timestamp <= after);
 }
 
 fn test_gui_queue_coalesces_mouse_moves() {
@@ -169,6 +307,35 @@ fn test_gui_create_destroy_lifecycle() {
         1
     );
 
+    let title = b"Host - File Manager";
+    let title_pointer = title.as_ptr() as u64;
+    crate::userland::abi::set_user_va_bounds(UserVaBounds {
+        start: title_pointer,
+        end: title_pointer + title.len() as u64,
+    });
+    let mut set_title = SyscallArgs::default();
+    set_title.rdi = handle as u64;
+    set_title.rsi = title_pointer;
+    set_title.rdx = title.len() as u64;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_win_set_title_handler(&mut set_title),
+        0
+    );
+    crate::userland::abi::clear_user_va_bounds();
+    let record = gui::window_record(
+        crate::userland::gui_syscalls::TEST_GUI_CALLER_PID,
+        handle as u32,
+    )
+    .expect("window record");
+    let actual_title = crate::window::with_window_manager(|wm| {
+        wm.window_registry
+            .get(&record.frame_id)
+            .and_then(|window| window.window_title())
+            .map(alloc::string::String::from)
+    })
+    .flatten();
+    assert_eq!(actual_title.as_deref(), Some("Host - File Manager"));
+
     let mut destroy = SyscallArgs::default();
     destroy.rdi = handle as u64;
     assert_eq!(
@@ -193,11 +360,14 @@ fn test_gui_create_destroy_lifecycle() {
 pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
     &[
         &test_gui_event_layout_and_encoding,
+        &test_gui_mouse_button_encodes_timestamp_and_modifiers,
         &test_gui_queue_coalesces_mouse_moves,
         &test_gui_queue_drops_oldest_at_capacity,
         &test_gui_cleanup_releases_pid_state,
         &test_gui_next_event_nonblocking_and_bad_pointer,
         &test_gui_syscall_argument_errors,
         &test_gui_create_destroy_lifecycle,
+        &test_gui_gl_packet_validation_accepts_canonical_triangle,
+        &test_gui_gl_packet_validation_rejects_untrusted_fields,
     ]
 }

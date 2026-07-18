@@ -60,6 +60,17 @@ impl GuiProcessState {
 static GUI_STATES: InterruptMutex<BTreeMap<u32, GuiProcessState>> =
     InterruptMutex::new(BTreeMap::new());
 
+/// Owned `(pid, window_count, queued_events)` rows for
+/// `/proc/agenticos/gui`. One short critical section; no per-window
+/// detail leaves this module.
+pub fn ownership_snapshot() -> alloc::vec::Vec<(u32, usize, usize)> {
+    let states = GUI_STATES.lock();
+    states
+        .iter()
+        .map(|(&pid, state)| (pid, state.windows.len(), state.events.len()))
+        .collect()
+}
+
 pub fn allocate_handle(pid: u32) -> Result<u32, i64> {
     if pid == KERNEL_PID {
         return Err(crate::userland::abi::EPERM);
@@ -147,21 +158,27 @@ fn wake_ring3_blocked_on_gui_event(pid: u32) {
     if pid == KERNEL_PID {
         return;
     }
-    let mut table = PROCESS_TABLE.lock();
-    if matches!(
-        table.ring3_blocked.get(&pid),
-        Some(Ring3BlockReason::WaitingForGuiEvent)
-    ) {
-        table.ring3_blocked.remove(&pid);
-        if !table.ring3_ready.iter().any(|candidate| *candidate == pid) {
-            table.ring3_ready.push_back(pid);
+    let should_wake = {
+        let mut table = PROCESS_TABLE.lock();
+        if matches!(
+            table.ring3_blocked.get(&pid),
+            Some(Ring3BlockReason::WaitingForGuiEvent)
+        ) {
+            table.ring3_blocked.remove(&pid);
+            true
+        } else {
+            false
         }
+    };
+    if should_wake {
+        crate::userland::lifecycle::mark_ring3_ready(pid);
     }
 }
 
 /// Drain GUI state before taking the window-manager lock, keeping lock order
 /// one-way even when cleanup follows a fault.
 pub fn cleanup_process(pid: u32) {
+    crate::userland::gui_gl::cleanup_process(pid);
     let records: Vec<GuiWindowRecord> = GUI_STATES
         .lock()
         .remove(&pid)
@@ -196,11 +213,22 @@ pub fn encode_window_event(handle: u32, event: &Event) -> Option<GuiEvent> {
             encoded.payload[1] = mouse.position.y as u32;
             encoded.payload[2] = u32::from(mouse.buttons.left)
                 | (u32::from(mouse.buttons.right) << 1)
-                | (u32::from(mouse.buttons.middle) << 2);
+                | (u32::from(mouse.buttons.middle) << 2)
+                | (modifier_bits(mouse.modifiers) << 8);
             match mouse.event_type {
                 MouseEventType::Move => encoded.payload[3] = GUI_MOUSE_MOVE,
-                MouseEventType::ButtonDown => encoded.payload[3] = GUI_MOUSE_DOWN,
-                MouseEventType::ButtonUp => encoded.payload[3] = GUI_MOUSE_UP,
+                MouseEventType::ButtonDown => {
+                    encoded.payload[3] = GUI_MOUSE_DOWN;
+                    let ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
+                    encoded.payload[4] = ticks as u32;
+                    encoded.payload[5] = (ticks >> 32) as u32;
+                }
+                MouseEventType::ButtonUp => {
+                    encoded.payload[3] = GUI_MOUSE_UP;
+                    let ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
+                    encoded.payload[4] = ticks as u32;
+                    encoded.payload[5] = (ticks >> 32) as u32;
+                }
                 MouseEventType::Scroll { delta_x, delta_y } => {
                     encoded.payload[3] = GUI_MOUSE_SCROLL;
                     encoded.payload[4] = delta_x as u32;
@@ -489,6 +517,7 @@ fn key_char(key: KeyCode, shift: bool) -> char {
 #[cfg(feature = "test")]
 pub fn reset_for_test() {
     GUI_STATES.lock().clear();
+    super::gui_gl::reset_for_test();
 }
 
 #[cfg(feature = "test")]

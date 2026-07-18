@@ -40,7 +40,10 @@ fn network_worker() {
     loop {
         let _changed = poll_once();
         let sleep_ticks = with_stack_mut(NetworkStack::next_poll_ticks).unwrap_or(10);
-        crate::process::sleep_ticks(sleep_ticks);
+        crate::process::sleep_ticks_with_contract(
+            sleep_ticks,
+            Some(crate::process::entity::LatencyContract::new(2)),
+        );
     }
 }
 
@@ -68,9 +71,15 @@ pub fn config() -> NetworkConfig {
     with_stack_mut(|stack| stack.config()).unwrap_or_default()
 }
 
-#[cfg(feature = "test")]
 pub fn counters() -> Option<crate::drivers::virtio::net::NetDriverCounters> {
     with_stack_mut(|stack| stack.counters())
+}
+
+/// Owned snapshot of the socket registry for `/proc/agenticos/sockets`.
+/// Bounded: builds the whole vector inside one `NETWORK` critical
+/// section and returns it by value. Empty when the stack is absent.
+pub fn socket_snapshot() -> alloc::vec::Vec<socket::SocketSnapshot> {
+    with_stack_mut(|stack| stack.socket_snapshot()).unwrap_or_default()
 }
 
 #[cfg(feature = "test")]

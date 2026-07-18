@@ -16,7 +16,9 @@ use super::{
     Screen, ScreenId, ScreenMode, Window, WindowId,
 };
 use crate::drivers::mouse;
-use crate::graphics::composition::{timestamp_cycles, RenderStats};
+use crate::graphics::composition::{
+    timestamp_cycles, ClientGlFrame, ClientGlId, ClientGlInfo, RenderStats,
+};
 use crate::graphics::compositor::Compositor;
 use crate::graphics::present::{BootFramebufferPresenter, Presenter};
 use alloc::boxed::Box;
@@ -169,6 +171,60 @@ impl WindowManager {
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const fn render_stats(&self) -> RenderStats {
         self.last_render_stats
+    }
+
+    pub fn create_gl_client(&mut self, width: u32, height: u32) -> Result<ClientGlId, i64> {
+        if self.renderer_selection.selected != RendererKind::Virgl
+            || !self.renderer_selection.strict
+        {
+            return Err(crate::userland::abi::ENOTSUP);
+        }
+        let RendererState::Retained(renderer) = &mut self.renderer else {
+            return Err(crate::userland::abi::ENOTSUP);
+        };
+        renderer
+            .create_gl_client(width, height)
+            .map_err(|_| crate::userland::abi::EIO)
+    }
+
+    pub fn submit_gl_client_frame(
+        &mut self,
+        surface_id: WindowId,
+        id: ClientGlId,
+        frame: ClientGlFrame,
+    ) -> Result<(), i64> {
+        let RendererState::Retained(renderer) = &mut self.renderer else {
+            return Err(crate::userland::abi::ENOTSUP);
+        };
+        renderer
+            .submit_gl_client_frame(id, frame)
+            .map_err(|_| crate::userland::abi::EIO)?;
+        if let Some((_, bounds)) = self
+            .collect_render_order()
+            .into_iter()
+            .find(|(window_id, _)| *window_id == surface_id)
+        {
+            self.compositor.dirty.mark_dirty(bounds);
+        } else {
+            self.compositor.dirty.mark_full_repaint();
+        }
+        Ok(())
+    }
+
+    pub fn gl_client_info(&self, id: ClientGlId) -> Option<ClientGlInfo> {
+        let RendererState::Retained(renderer) = &self.renderer else {
+            return None;
+        };
+        renderer.gl_client_info(id)
+    }
+
+    pub fn destroy_gl_client(&mut self, id: ClientGlId) -> Result<(), i64> {
+        let RendererState::Retained(renderer) = &mut self.renderer else {
+            return Err(crate::userland::abi::ENOTSUP);
+        };
+        renderer
+            .destroy_gl_client(id)
+            .map_err(|_| crate::userland::abi::EIO)
     }
 
     #[expect(dead_code, reason = "intentional kernel API surface")]
@@ -423,11 +479,11 @@ impl WindowManager {
                     if !menu_bounds.contains_point(global_pos) {
                         // Click outside menu - close it and don't route the click
                         // (user's intent was to close the menu, not click what's underneath)
-                        crate::debug_info!("Click outside menu - closing");
+                        crate::debug_trace!("Click outside menu - closing");
                         self.close_active_menu();
                         return;
                     } else {
-                        crate::debug_info!("Click INSIDE menu {:?} at {:?}", menu_id, global_pos);
+                        crate::debug_trace!("Click inside menu {:?} at {:?}", menu_id, global_pos);
                     }
                 }
             }
@@ -852,6 +908,7 @@ impl WindowManager {
                                     "VirGL compositor and retained CPU fallback failed: {:?}; fallback=legacy",
                                     error
                                 );
+                                super::theme::activate(super::theme::ThemeKind::Classic);
                             }
                         }
                     } else {
@@ -859,6 +916,7 @@ impl WindowManager {
                             "retained compositor failed: {:?}; fallback=legacy",
                             error
                         );
+                        super::theme::activate(super::theme::ThemeKind::Classic);
                     }
                     self.compositor.end_frame();
                     self.compositor.dirty.mark_full_repaint();
@@ -1116,13 +1174,51 @@ impl WindowManager {
             }
         }
 
-        let mut scene = retained.build_scene(&decorated_roots);
-        for (layer, (root, _)) in scene.layers.iter_mut().zip(roots.iter()) {
+        let canonical_scene = retained.build_scene(&decorated_roots);
+        let mut scene = crate::graphics::scene::SceneFrame::new(
+            canonical_scene.output_size.0,
+            canonical_scene.output_size.1,
+        );
+        let mut next_z = 0i32;
+        for ((root, absolute_bounds), mut layer) in
+            roots.iter().zip(canonical_scene.layers.into_iter())
+        {
             if let Some(window) = self.window_registry.get(root) {
                 let properties = window.compositor_properties();
                 layer.opacity = properties.opacity;
                 layer.transform = properties.transform;
                 layer.effect = properties.effect;
+            }
+            layer.z_index = next_z;
+            next_z = next_z.saturating_add(1);
+            scene.push(layer);
+
+            let mut external = Vec::new();
+            let local = self
+                .window_registry
+                .get(root)
+                .map(|window| window.bounds())
+                .unwrap_or(*absolute_bounds);
+            self.collect_external_gl_layers_recursive(
+                *root,
+                absolute_bounds.x.saturating_sub(local.x),
+                absolute_bounds.y.saturating_sub(local.y),
+                &root_ids,
+                &mut external,
+            );
+            for (client_id, destination) in external {
+                let Some(info) = retained.gl_client_info(client_id) else {
+                    continue;
+                };
+                let mut client_layer = crate::graphics::scene::Layer::virgl_client(
+                    client_id,
+                    info.width,
+                    info.height,
+                    destination,
+                );
+                client_layer.z_index = next_z;
+                next_z = next_z.saturating_add(1);
+                scene.push(client_layer);
             }
         }
         compose_regions = Self::expand_backdrop_damage(&scene, &compose_regions);
@@ -1180,7 +1276,7 @@ impl WindowManager {
                 crate::graphics::composition::CompositionEngineKind::Virgl => "virgl",
             };
             crate::debug_info!(
-            "render_stats renderer={} engine={} presenter={} frames={} windows={} surface_pixels={} layers={} upload_bytes={} readback_bytes={} output_pixels={} scanout_flushes={} cursor_updates={} presents={} cycles_raster={} cycles_upload={} cycles_compose={} cycles_blur={} cycles_fence={} cycles_readback={} cycles_present={} surface_bytes={} surface_peak={}",
+            "render_stats renderer={} engine={} presenter={} frames={} windows={} surface_pixels={} layers={} upload_bytes={} upload_regions={} texture_hits={} texture_misses={} texture_replacements={} texture_evictions={} texture_creates={} texture_destroys={} pipeline_creates={} sampler_view_creates={} sampler_view_destroys={} vertex_creates={} vertex_destroys={} vertex_capacity={} texture_cache_bytes={} texture_cache_peak={} command_dwords={} gpu_submissions={} readback_bytes={} output_regions={} output_pixels={} scanout_flushes={} backdrop_copies={} backdrop_copy_pixels={} blur_passes={} blur_pixels={} blur_scratch_bytes={} cursor_updates={} presents={} cycles_raster={} cycles_upload={} cycles_compose={} cycles_blur={} cycles_fence={} cycles_readback={} cycles_present={} surface_bytes={} surface_peak={}",
             if engine == "virgl" { "gpu" } else { "retained" },
             engine,
             if direct_scanout { "virgl-direct" } else if presented_by_virtio { "virtio-gpu-2d" } else { "boot-framebuffer" },
@@ -1189,9 +1285,32 @@ impl WindowManager {
             stats.surface_pixels_updated,
             stats.layers_composed,
             stats.texture_bytes_uploaded,
+            stats.texture_upload_regions,
+            stats.texture_cache_hits,
+            stats.texture_cache_misses,
+            stats.texture_cache_replacements,
+            stats.texture_cache_evictions,
+            stats.texture_resources_created,
+            stats.texture_resources_destroyed,
+            stats.pipeline_objects_created,
+            stats.sampler_views_created,
+            stats.sampler_views_destroyed,
+            stats.vertex_resources_created,
+            stats.vertex_resources_destroyed,
+            stats.vertex_buffer_capacity,
+            stats.texture_cache_bytes,
+            stats.texture_cache_peak_bytes,
+            stats.command_stream_dwords,
+            stats.gpu_submissions,
             stats.gpu_readback_bytes,
+            stats.output_damage_regions,
             stats.output_pixels_damaged,
             stats.scanout_flushes,
+            stats.backdrop_copies,
+            stats.backdrop_copy_pixels,
+            stats.backdrop_blur_passes,
+            stats.backdrop_blur_pixels,
+            stats.backdrop_scratch_bytes,
             stats.cursor_updates,
             stats.presents,
             stats.surface_raster_cycles,
@@ -1246,6 +1365,44 @@ impl WindowManager {
             ));
         }
         roots
+    }
+
+    fn collect_external_gl_layers_recursive(
+        &self,
+        window_id: WindowId,
+        parent_x: i32,
+        parent_y: i32,
+        layer_roots: &[WindowId],
+        output: &mut Vec<(ClientGlId, Rect)>,
+    ) {
+        let Some(window) = self.window_registry.get(&window_id) else {
+            return;
+        };
+        if !window.visible() {
+            return;
+        }
+        let local = window.bounds();
+        let absolute = Rect::new(
+            parent_x.saturating_add(local.x),
+            parent_y.saturating_add(local.y),
+            local.width,
+            local.height,
+        );
+        if let Some(client_id) = window.external_gl_client() {
+            output.push((client_id, absolute));
+        }
+        for child in window.children() {
+            if layer_roots.contains(child) {
+                continue;
+            }
+            self.collect_external_gl_layers_recursive(
+                *child,
+                absolute.x,
+                absolute.y,
+                layer_roots,
+                output,
+            );
+        }
     }
 
     fn subtree_needs_repaint(&self, id: WindowId, layer_roots: &[WindowId]) -> bool {
@@ -1572,6 +1729,13 @@ impl WindowManager {
         self.last_mouse_buttons = 0x01;
     }
 
+    /// Test-only: run the production frame hit-test used on a fresh left
+    /// button press.
+    #[cfg(feature = "test")]
+    pub fn test_start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
+        self.start_drag_if_on_title_bar(mouse_x, mouse_y);
+    }
+
     /// Test-only: invoke `handle_dragging` directly so a test can drive
     /// drag/resize ticks without simulating mouse input through the full
     /// interrupt pipeline.
@@ -1773,7 +1937,7 @@ impl WindowManager {
                     }
                 } else {
                     // Button released - end drag
-                    crate::debug_info!("Window drag ended");
+                    crate::debug_trace!("Window drag ended");
                     self.interaction_state = InteractionState::Idle;
                 }
             }
@@ -1821,7 +1985,7 @@ impl WindowManager {
                     self.update_children_for_resized_window(window);
                 } else {
                     // Button released - end resize
-                    crate::debug_info!("Window resize ended");
+                    crate::debug_trace!("Window resize ended");
                     self.interaction_state = InteractionState::Idle;
                 }
             }
@@ -1832,7 +1996,7 @@ impl WindowManager {
     fn start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
         // If there's an active menu, don't process drag - let the click go to the menu
         if self.active_menu.is_some() {
-            crate::debug_info!(
+            crate::debug_trace!(
                 "start_drag_if_on_title_bar: active_menu present, skipping drag check"
             );
             return;
@@ -1854,7 +2018,11 @@ impl WindowManager {
         // Walk last-to-first so topmost siblings are tested first.
         for &window_id in top_level.iter().rev() {
             if let Some(window) = self.window_registry.get(&window_id) {
-                if !window.visible() {
+                // Only decorated frame windows own the theme's title-bar and
+                // border geometry. Other top-level desktop elements (notably
+                // the taskbar) must still receive clicks, but are never
+                // draggable or resizable.
+                if !window.visible() || window.window_title().is_none() {
                     continue;
                 }
                 let bounds = window.bounds();
@@ -1934,7 +2102,7 @@ impl WindowManager {
 
                 match target_hit {
                     HitTestResult::TitleBar => {
-                        crate::debug_info!(
+                        crate::debug_trace!(
                             "Starting window drag for {:?} at ({}, {})",
                             window_id,
                             bounds.x,
@@ -1948,7 +2116,7 @@ impl WindowManager {
                         self.focus_frame_and_content(window_id);
                     }
                     HitTestResult::Border(edge) => {
-                        crate::debug_info!(
+                        crate::debug_trace!(
                             "Starting window resize for {:?} edge {:?}",
                             window_id,
                             edge
@@ -2256,9 +2424,9 @@ impl WindowManager {
 ///
 /// SAFETY: only set/read inside `WindowManager::with_window_mut`. The
 /// pointer is valid for the duration of that call because the closure
-/// runs synchronously on the same thread; interrupts that touch the
-/// manager are blocked by the surrounding `with_window_manager`'s
-/// `InterruptGuard`.
+/// runs synchronously on the same thread. The surrounding
+/// `with_window_manager` prevents kernel-thread preemption, and interrupt
+/// handlers never access the manager directly.
 static ACTIVE_MANAGER: AtomicPtr<WindowManager> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Run `f` against the currently-active `WindowManager`. Returns

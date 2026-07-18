@@ -13,6 +13,7 @@ use alloc::format;
 pub const ETC_DIR: &str = "/etc";
 pub const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 pub const RESOLV_CONF_TEMP_PATH: &str = "/etc/.resolv.conf.new";
+pub const THEME_PATH: &str = "/etc/theme";
 
 const PASSWD_PATH: &str = "/etc/passwd";
 const GROUP_PATH: &str = "/etc/group";
@@ -56,6 +57,16 @@ pub fn init() {
     write_file(GROUP_PATH, GROUP_CONTENT);
     write_file(HOSTS_PATH, HOSTS_CONTENT);
     seed_zsh_config();
+}
+
+/// Publish the boot-selected frame/control theme as `/etc/theme` so ring-3
+/// GUI apps can match kernel chrome. Called from the boot sequence after
+/// display + window-manager init resolves the final theme (any `auto` or
+/// renderer-fallback decision has been made by then); written once before
+/// any ring-3 process exists, so no temp/rename dance is needed.
+pub fn publish_theme(kind: crate::window::theme::ThemeKind) {
+    let contents = format!("{}\n", kind.as_str());
+    write_file(THEME_PATH, contents.as_bytes());
 }
 
 fn write_file(path: &str, contents: &[u8]) {
@@ -157,8 +168,26 @@ mod tests {
         assert!(!is_managed_path("/host/etc/passwd"));
     }
 
+    fn read_theme() -> alloc::vec::Vec<u8> {
+        File::open_read(THEME_PATH)
+            .and_then(|file| file.read_to_vec())
+            .expect("published theme readable")
+    }
+
+    fn test_publish_theme_writes_theme_name() {
+        publish_theme(crate::window::theme::ThemeKind::Aero);
+        assert_eq!(read_theme(), b"aero\n");
+        publish_theme(crate::window::theme::ThemeKind::Classic);
+        assert_eq!(read_theme(), b"classic\n");
+        // Leave the file matching the actually-active theme, as boot does.
+        publish_theme(crate::window::theme::active());
+    }
+
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
-        &[&test_managed_path_is_component_bounded]
+        &[
+            &test_managed_path_is_component_bounded,
+            &test_publish_theme_writes_theme_name,
+        ]
     }
 }
 

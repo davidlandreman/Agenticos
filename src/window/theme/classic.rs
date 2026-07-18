@@ -2,8 +2,9 @@ use crate::window::theme::{lerp_color, FrameChrome, CLASSIC_METRICS};
 use crate::window::{GraphicsDevice, Rect};
 
 /// Windows 98 "Windows Standard" palette. The bevel colors do not follow focus;
-/// only the caption gradient and caption text do.
-mod colors {
+/// only the caption gradient and caption text do. Shared with
+/// `theme::controls` so classic control bevels reuse the same constants.
+pub(super) mod colors {
     use crate::graphics::color::Color;
 
     /// 3D light — outer top/left bevel ring.

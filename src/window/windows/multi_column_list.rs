@@ -93,8 +93,10 @@ pub struct MultiColumnList {
 }
 
 impl MultiColumnList {
-    /// Create a new multi-column list with a specific ID
+    /// Create a new multi-column list with a specific ID. Colors default to
+    /// the active theme's data-well palette.
     pub fn new_with_id(id: WindowId, bounds: Rect, columns: Vec<Column>) -> Self {
+        let palette = crate::window::theme::controls::palette();
         MultiColumnList {
             base: WindowBase::new_with_id(id, bounds),
             columns,
@@ -108,14 +110,14 @@ impl MultiColumnList {
             on_activate: None,
             last_click_row: None,
             last_click_tick: 0,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
+            bg_color: palette.field_bg,
+            text_color: palette.field_text,
             // Header is slightly distinct from the row body so the
-            // header row reads as a separate band; LIGHT_GRAY is kept.
-            header_bg_color: Color::LIGHT_GRAY,
-            header_text_color: crate::window::PALETTE_TEXT,
-            selected_bg_color: crate::window::PALETTE_HIGHLIGHT_BG,
-            selected_text_color: crate::window::PALETTE_HIGHLIGHT_TEXT,
+            // header row reads as a separate band.
+            header_bg_color: palette.content_bg,
+            header_text_color: palette.text,
+            selected_bg_color: palette.selection_bg,
+            selected_text_color: palette.selection_text,
         }
     }
 

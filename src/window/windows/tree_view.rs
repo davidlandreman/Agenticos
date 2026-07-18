@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! `TreeView` — hierarchical-list widget with expand/collapse nodes,
 //! the unified `Selection` model, and keyboard navigation.
 //!
@@ -100,8 +101,10 @@ impl TreeView {
         Self::new_with_id(WindowId::new(), bounds)
     }
 
-    /// Create a new `TreeView` with a specific window id.
+    /// Create a new `TreeView` with a specific window id. Colors default to
+    /// the active theme's data-well palette.
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
+        let palette = crate::window::theme::controls::palette();
         TreeView {
             base: WindowBase::new_with_id(id, bounds),
             nodes: Vec::new(),
@@ -111,10 +114,10 @@ impl TreeView {
             row_height: 16,
             on_activate: None,
             on_select: None,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
-            selected_bg_color: crate::window::PALETTE_HIGHLIGHT_BG,
-            selected_text_color: crate::window::PALETTE_HIGHLIGHT_TEXT,
+            bg_color: palette.field_bg,
+            text_color: palette.field_text,
+            selected_bg_color: palette.selection_bg,
+            selected_text_color: palette.selection_text,
         }
     }
 

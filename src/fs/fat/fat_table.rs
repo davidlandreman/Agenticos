@@ -11,6 +11,42 @@ pub struct FatTable<'a> {
     num_fats: u8,
 }
 
+/// Allocation-free cursor over one FAT cluster chain. The last FAT sector is
+/// retained while the cursor advances, so seeking to a late executable page
+/// costs one request per FAT sector instead of one request per cluster.
+pub struct FatChainCursor<'table, 'device> {
+    table: &'table FatTable<'device>,
+    current: ClusterId,
+    cached_sector: u32,
+    sector_buffer: [u8; 512],
+}
+
+impl FatChainCursor<'_, '_> {
+    pub fn current(&self) -> Result<ClusterId, FatError> {
+        if !self.current.is_valid(self.table.fat_type) {
+            return Err(FatError::InvalidCluster);
+        }
+        if self.current.is_bad(self.table.fat_type) {
+            return Err(FatError::BadCluster);
+        }
+        Ok(self.current)
+    }
+
+    pub fn advance(&mut self) -> Result<(), FatError> {
+        let current = self.current()?;
+        let next = self.table.read_entry_cached(
+            current,
+            &mut self.cached_sector,
+            &mut self.sector_buffer,
+        )?;
+        if next.is_end_of_chain(self.table.fat_type) {
+            return Err(FatError::EndOfChain);
+        }
+        self.current = next;
+        self.current().map(|_| ())
+    }
+}
+
 impl<'a> FatTable<'a> {
     pub fn new(device: &'a dyn BlockDevice, boot_sector: &BootSector, fat_type: FatType) -> Self {
         let sectors_per_fat = if boot_sector.bpb.sectors_per_fat_16 != 0 {
@@ -50,6 +86,74 @@ impl<'a> FatTable<'a> {
             FatType::Fat16 => self.read_fat16_entry(cluster),
             FatType::Fat32 => self.read_fat32_entry(cluster),
         }
+    }
+
+    pub fn chain_cursor(&self, start: ClusterId) -> FatChainCursor<'_, 'a> {
+        FatChainCursor {
+            table: self,
+            current: start,
+            cached_sector: u32::MAX,
+            sector_buffer: [0u8; 512],
+        }
+    }
+
+    fn read_entry_cached(
+        &self,
+        cluster: ClusterId,
+        cached_sector: &mut u32,
+        buffer: &mut [u8; 512],
+    ) -> Result<ClusterId, FatError> {
+        let fat_offset = match self.fat_type {
+            FatType::Fat12 => cluster.0 + cluster.0 / 2,
+            FatType::Fat16 => cluster.0 * 2,
+            FatType::Fat32 => cluster.0 * 4,
+        };
+        let sector = self.fat_start_sector + fat_offset / self.bytes_per_sector as u32;
+        let offset = (fat_offset % self.bytes_per_sector as u32) as usize;
+        self.load_cached_sector(sector, cached_sector, buffer)?;
+
+        let value = match self.fat_type {
+            FatType::Fat12 => {
+                let low = buffer[offset];
+                let high = if offset + 1 < buffer.len() {
+                    buffer[offset + 1]
+                } else {
+                    self.load_cached_sector(sector + 1, cached_sector, buffer)?;
+                    buffer[0]
+                };
+                let pair = u16::from_le_bytes([low, high]);
+                if cluster.0 & 1 == 0 {
+                    (pair & 0x0fff) as u32
+                } else {
+                    (pair >> 4) as u32
+                }
+            }
+            FatType::Fat16 => u16::from_le_bytes([buffer[offset], buffer[offset + 1]]) as u32,
+            FatType::Fat32 => {
+                u32::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                ]) & 0x0fff_ffff
+            }
+        };
+        Ok(ClusterId(value))
+    }
+
+    fn load_cached_sector(
+        &self,
+        sector: u32,
+        cached_sector: &mut u32,
+        buffer: &mut [u8; 512],
+    ) -> Result<(), FatError> {
+        if *cached_sector != sector {
+            self.device
+                .read_blocks(sector as u64, 1, buffer)
+                .map_err(|_| FatError::BlockDeviceError)?;
+            *cached_sector = sector;
+        }
+        Ok(())
     }
 
     fn read_fat12_entry(&self, cluster: ClusterId) -> Result<ClusterId, FatError> {
@@ -361,6 +465,8 @@ impl<'a> FatTable<'a> {
     ) -> Result<(), FatError> {
         let mut current = start_cluster;
         let mut visited: u32 = 0;
+        let mut cached_sector = u32::MAX;
+        let mut sector_buffer = [0u8; 512];
 
         loop {
             if !current.is_valid(self.fat_type) {
@@ -384,17 +490,17 @@ impl<'a> FatTable<'a> {
             callback(current)?;
             visited += 1;
             if visited.is_multiple_of(32) {
-                crate::debug_info!(
+                crate::debug_trace!(
                     "[fat] follow_chain: {} clusters visited, current={}",
                     visited,
                     current.0
                 );
             }
 
-            current = self.read_entry(current)?;
+            current = self.read_entry_cached(current, &mut cached_sector, &mut sector_buffer)?;
 
             if current.is_end_of_chain(self.fat_type) {
-                crate::debug_info!(
+                crate::debug_trace!(
                     "[fat] follow_chain: end-of-chain after {} clusters",
                     visited
                 );

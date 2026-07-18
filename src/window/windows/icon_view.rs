@@ -74,8 +74,10 @@ impl IconView {
         Self::new_with_id(WindowId::new(), bounds)
     }
 
-    /// Create a new `IconView` with a specific window id.
+    /// Create a new `IconView` with a specific window id. Colors default to
+    /// the active theme's data-well palette.
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
+        let palette = crate::window::theme::controls::palette();
         IconView {
             base: WindowBase::new_with_id(id, bounds),
             tiles: Vec::new(),
@@ -84,10 +86,10 @@ impl IconView {
             selection: Selection::None,
             selection_mode: SelectionMode::Single,
             on_select: None,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
-            selected_bg_color: crate::window::PALETTE_HIGHLIGHT_BG,
-            selected_text_color: crate::window::PALETTE_HIGHLIGHT_TEXT,
+            bg_color: palette.field_bg,
+            text_color: palette.field_text,
+            selected_bg_color: palette.selection_bg,
+            selected_text_color: palette.selection_text,
         }
     }
 

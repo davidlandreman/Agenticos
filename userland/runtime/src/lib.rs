@@ -21,6 +21,9 @@ pub const O_DIRECTORY: u32 = 0o200000;
 pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
 pub const SEEK_END: i32 = 2;
+pub const F_OK: u32 = 0;
+pub const X_OK: u32 = 1;
+pub const WNOHANG: u32 = 1;
 
 pub const GUI_ABI_VERSION: u32 = 1;
 pub const GUI_PIXEL_FORMAT_XRGB8888: u32 = 1;
@@ -34,6 +37,11 @@ pub const GUI_MOUSE_MOVE: u32 = 0;
 pub const GUI_MOUSE_DOWN: u32 = 1;
 pub const GUI_MOUSE_UP: u32 = 2;
 pub const GUI_MOUSE_SCROLL: u32 = 3;
+pub const GL_ABI_MAGIC: u32 = 0x314C_4741;
+pub const GL_ABI_VERSION: u32 = 1;
+pub const GL_DRAW_DEPTH_TEST: u32 = 1 << 0;
+pub const GL_DRAW_CULL_BACK: u32 = 1 << 1;
+pub const CLOCK_MONOTONIC: i32 = 1;
 
 pub const KEY_ESCAPE: u32 = 37;
 pub const KEY_ENTER: u32 = 38;
@@ -49,6 +57,8 @@ pub const KEY_HOME: u32 = 47;
 pub const KEY_END: u32 = 48;
 pub const KEY_PAGE_UP: u32 = 49;
 pub const KEY_PAGE_DOWN: u32 = 50;
+pub const KEY_F2: u32 = 59;
+pub const KEY_F5: u32 = 62;
 
 const NR_READ: u64 = 0;
 const NR_WRITE: u64 = 1;
@@ -56,10 +66,20 @@ const NR_CLOSE: u64 = 3;
 const NR_FSTAT: u64 = 5;
 const NR_LSEEK: u64 = 8;
 const NR_BRK: u64 = 12;
+const NR_ACCESS: u64 = 21;
 const NR_NANOSLEEP: u64 = 35;
+const NR_GETPID: u64 = 39;
+const NR_KILL: u64 = 62;
+const NR_CLOCK_GETTIME: u64 = 228;
+const NR_FORK: u64 = 57;
+const NR_EXECVE: u64 = 59;
+const NR_WAIT4: u64 = 61;
+const NR_RMDIR: u64 = 84;
+const NR_SYNC: u64 = 162;
 const NR_EXIT_GROUP: u64 = 231;
 const NR_GETDENTS64: u64 = 217;
 const NR_OPENAT: u64 = 257;
+const NR_NEWFSTATAT: u64 = 262;
 const NR_FTRUNCATE: u64 = 77;
 const NR_RENAME: u64 = 82;
 const NR_MKDIR: u64 = 83;
@@ -69,6 +89,11 @@ const NR_GUI_WIN_CREATE: u64 = 5001;
 const NR_GUI_WIN_PRESENT: u64 = 5002;
 const NR_GUI_NEXT_EVENT: u64 = 5003;
 const NR_GUI_WIN_DESTROY: u64 = 5004;
+const NR_GUI_WIN_SET_TITLE: u64 = 5005;
+const NR_GUI_GL_CONTEXT_CREATE: u64 = 5006;
+const NR_GUI_GL_SUBMIT_FRAME: u64 = 5007;
+const NR_GUI_GL_GET_INFO: u64 = 5008;
+const NR_GUI_GL_CONTEXT_DESTROY: u64 = 5009;
 
 #[inline]
 unsafe fn syscall0(number: u64) -> i64 {
@@ -183,6 +208,22 @@ pub fn fstat(fd: i32, stat: &mut LinuxStat) -> i64 {
     unsafe { syscall2(NR_FSTAT, fd as u64, stat as *mut _ as u64) }
 }
 
+pub fn newfstatat(dirfd: i32, path: &[u8], stat: &mut LinuxStat, flags: u32) -> i64 {
+    unsafe {
+        syscall4(
+            NR_NEWFSTATAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            stat as *mut _ as u64,
+            flags as u64,
+        )
+    }
+}
+
+pub fn access(path: &[u8], mode: u32) -> i64 {
+    unsafe { syscall2(NR_ACCESS, path.as_ptr() as u64, mode as u64) }
+}
+
 pub fn getdents64(fd: i32, buffer: &mut [u8]) -> i64 {
     unsafe {
         syscall3(
@@ -200,6 +241,10 @@ pub fn mkdir(path: &[u8], mode: u32) -> i64 {
 
 pub fn unlink(path: &[u8]) -> i64 {
     unsafe { syscall1(NR_UNLINK, path.as_ptr() as u64) }
+}
+
+pub fn rmdir(path: &[u8]) -> i64 {
+    unsafe { syscall1(NR_RMDIR, path.as_ptr() as u64) }
 }
 
 pub fn rename(old_path: &[u8], new_path: &[u8]) -> i64 {
@@ -223,6 +268,16 @@ pub struct Timespec {
     pub tv_nsec: i64,
 }
 
+pub fn getpid() -> i64 {
+    unsafe { syscall0(NR_GETPID) }
+}
+
+/// Send `sig` to `pid`. Signal 0 probes liveness. The kernel permits
+/// any live ring-3 PID as the target (single-user model).
+pub fn kill(pid: i32, sig: i32) -> i64 {
+    unsafe { syscall2(NR_KILL, pid as u64, sig as u64) }
+}
+
 pub fn nanosleep(request: &Timespec, remaining: Option<&mut Timespec>) -> i64 {
     unsafe {
         syscall2(
@@ -233,8 +288,43 @@ pub fn nanosleep(request: &Timespec, remaining: Option<&mut Timespec>) -> i64 {
     }
 }
 
+pub fn clock_gettime(clock_id: i32, time: &mut Timespec) -> i64 {
+    unsafe { syscall2(NR_CLOCK_GETTIME, clock_id as u64, time as *mut _ as u64) }
+}
+
 pub fn brk(address: usize) -> i64 {
     unsafe { syscall1(NR_BRK, address as u64) }
+}
+
+pub fn sync() -> i64 {
+    unsafe { syscall0(NR_SYNC) }
+}
+
+pub fn fork() -> i64 {
+    unsafe { syscall0(NR_FORK) }
+}
+
+pub fn execve(path: &[u8], argv: &[*const u8], envp: &[*const u8]) -> i64 {
+    unsafe {
+        syscall3(
+            NR_EXECVE,
+            path.as_ptr() as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        )
+    }
+}
+
+pub fn wait4(pid: i32, status: Option<&mut u32>, options: u32) -> i64 {
+    unsafe {
+        syscall4(
+            NR_WAIT4,
+            pid as u64,
+            status.map_or(0, |value| value as *mut _ as u64),
+            options as u64,
+            0,
+        )
+    }
 }
 
 pub unsafe fn exit(code: i64) -> ! {
@@ -294,6 +384,106 @@ pub fn gui_next_event(event: &mut GuiEvent, flags: u64) -> i64 {
 
 pub fn gui_win_destroy(handle: u32) -> i64 {
     unsafe { syscall1(NR_GUI_WIN_DESTROY, handle as u64) }
+}
+
+pub fn gui_win_set_title(handle: u32, title: &str) -> i64 {
+    unsafe {
+        syscall3(
+            NR_GUI_WIN_SET_TITLE,
+            handle as u64,
+            title.as_ptr() as u64,
+            title.len() as u64,
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GlFrameHeader {
+    pub magic: u32,
+    pub version: u32,
+    pub byte_len: u32,
+    pub flags: u32,
+    pub width: u32,
+    pub height: u32,
+    pub viewport_x: u32,
+    pub viewport_y: u32,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
+    pub clear_color: [f32; 4],
+    pub clear_depth: f32,
+    pub draw_count: u32,
+    pub vertex_count: u32,
+    pub draw_offset: u32,
+    pub vertex_offset: u32,
+    pub reserved: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GlDraw {
+    pub first_vertex: u32,
+    pub vertex_count: u32,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GlVertex {
+    pub position: [f32; 4],
+    pub color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GlInfo {
+    pub version: u32,
+    pub width: u32,
+    pub height: u32,
+    pub max_packet_bytes: u32,
+    pub max_draws: u32,
+    pub max_vertices: u32,
+    pub supported_draw_flags: u32,
+    pub last_error: i32,
+    pub last_submitted_serial: u64,
+    pub last_completed_serial: u64,
+}
+
+const _: [(); 88] = [(); core::mem::size_of::<GlFrameHeader>()];
+const _: [(); 16] = [(); core::mem::size_of::<GlDraw>()];
+const _: [(); 32] = [(); core::mem::size_of::<GlVertex>()];
+const _: [(); 48] = [(); core::mem::size_of::<GlInfo>()];
+
+pub fn gui_gl_context_create(window: u32, flags: u64) -> i64 {
+    unsafe { syscall2(NR_GUI_GL_CONTEXT_CREATE, window as u64, flags) }
+}
+
+pub fn gui_gl_submit_frame(context: u32, packet: &[u8], flags: u64) -> i64 {
+    unsafe {
+        syscall4(
+            NR_GUI_GL_SUBMIT_FRAME,
+            context as u64,
+            packet.as_ptr() as u64,
+            packet.len() as u64,
+            flags,
+        )
+    }
+}
+
+pub fn gui_gl_get_info(context: u32, info: &mut GlInfo) -> i64 {
+    unsafe {
+        syscall3(
+            NR_GUI_GL_GET_INFO,
+            context as u64,
+            info as *mut _ as u64,
+            core::mem::size_of::<GlInfo>() as u64,
+        )
+    }
+}
+
+pub fn gui_gl_context_destroy(context: u32) -> i64 {
+    unsafe { syscall1(NR_GUI_GL_CONTEXT_DESTROY, context as u64) }
 }
 
 #[repr(C)]

@@ -139,6 +139,86 @@ fn test_file_read_full_arial() {
     }
 }
 
+/// Exercise the production wait path: a spawned kernel thread submits block
+/// I/O, parks its PCB, and resumes only after the PCI completion wake is
+/// drained into the scheduler.
+fn test_virtio_block_wakes_kernel_thread() {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+
+    STATE.store(0, Ordering::Release);
+    crate::process::spawn_process(alloc::string::String::from("block-io-test"), None, || {
+        let file = crate::fs::File::open_read("/system.ttf").expect("open from kernel thread");
+        let mut header = [0u8; 16];
+        let count = file.read(&mut header).expect("DMA read from kernel thread");
+        assert_eq!(count, header.len());
+        assert_eq!(&header[..4], &[0, 1, 0, 0]);
+        STATE.store(1, Ordering::Release);
+    });
+
+    let deadline = crate::arch::x86_64::interrupts::get_timer_ticks().saturating_add(500);
+    while STATE.load(Ordering::Acquire) == 0 {
+        let _ = crate::process::drain_kernel_io_wakes();
+        crate::process::try_run_scheduled_processes();
+        assert!(
+            crate::arch::x86_64::interrupts::get_timer_ticks() < deadline,
+            "kernel thread did not resume from VirtIO block completion"
+        );
+        x86_64::instructions::hlt();
+    }
+}
+
+fn test_zsh_image_read_is_coalesced() {
+    let path = "/host/ZSH.ELF";
+    if !crate::fs::exists(path) {
+        return;
+    }
+    let file = crate::fs::File::open_read(path).expect("open staged zsh");
+    let requests_before = crate::drivers::virtio::block::request_count();
+    let ticks_before = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let bytes = file.read_to_vec().expect("read staged zsh");
+    let requests = crate::drivers::virtio::block::request_count() - requests_before;
+    let ticks = crate::arch::x86_64::interrupts::get_timer_ticks() - ticks_before;
+    debug_info!(
+        "[perf] coalesced zsh image read: {} bytes, {} requests, {} ticks",
+        bytes.len(),
+        requests,
+        ticks
+    );
+    assert!(
+        requests <= 40,
+        "zsh image read fragmented into {} block requests",
+        requests
+    );
+}
+
+fn test_busybox_late_page_read_is_bounded() {
+    let path = "/host/BB.ELF";
+    if !crate::fs::exists(path) {
+        return;
+    }
+    let file = crate::fs::File::open_read(path).expect("open staged BusyBox");
+    let offset = (file.size() / 2) & !4095;
+    let mut page = [0u8; 4096];
+    let requests_before = crate::drivers::virtio::block::request_count();
+    let bytes = file
+        .read_at(offset, &mut page)
+        .expect("read late BusyBox page");
+    let requests = crate::drivers::virtio::block::request_count() - requests_before;
+    debug_info!(
+        "[perf] BusyBox page at {}: {} bytes, {} requests",
+        offset,
+        bytes,
+        requests
+    );
+    assert_eq!(bytes, page.len());
+    assert!(
+        requests <= 6,
+        "late BusyBox page fragmented into {} block requests",
+        requests
+    );
+}
+
 // --- Host folder mount tests (vvfat-backed /host) -----------------------
 //
 // These rely on:
@@ -759,15 +839,126 @@ fn test_u11_pointer_flip_is_atomic() {
     }
 }
 
-fn test_data_mkdir_returns_unsupported() {
-    // U10 explicitly defers mkdir on FAT to a follow-up. Userland
-    // should see ENOSYS / UnsupportedOperation, not a misleading
-    // success.
-    let result = crate::fs::vfs::vfs_mkdir("/data/some-dir");
-    assert!(matches!(
-        result,
-        Err(crate::fs::filesystem::FilesystemError::UnsupportedOperation)
-    ));
+fn test_data_ext2_directory_mutations() {
+    let filesystem = crate::fs::vfs::get_vfs()
+        .find_filesystem("/data")
+        .expect("/data resolvable")
+        .0;
+    assert_eq!(filesystem.name(), "ext2");
+    let _ = crate::fs::vfs::vfs_unlink("/data/ext2-dir/renamed.txt");
+    let _ = crate::fs::vfs::vfs_unlink("/data/ext2-dir/nested.txt");
+    let _ = crate::fs::vfs::vfs_rmdir("/data/ext2-dir");
+    crate::fs::vfs::vfs_mkdir("/data/ext2-dir").expect("mkdir on ext2");
+    let file = crate::fs::File::create("/data/ext2-dir/nested.txt").expect("nested create");
+    file.write(b"nested ext2 data").expect("nested write");
+    drop(file);
+    crate::fs::vfs::vfs_rename("/data/ext2-dir/nested.txt", "/data/ext2-dir/renamed.txt")
+        .expect("rename on ext2");
+    crate::fs::vfs::vfs_unlink("/data/ext2-dir/renamed.txt").expect("unlink nested");
+    crate::fs::vfs::vfs_rmdir("/data/ext2-dir").expect("rmdir on ext2");
+}
+
+fn test_data_ext2_truncate_links_and_sparse_files() {
+    for path in [
+        "/data/ext2-target.txt",
+        "/data/ext2-hardlink.txt",
+        "/data/ext2-symlink.txt",
+        "/data/ext2-sparse.bin",
+    ] {
+        let _ = crate::fs::vfs::vfs_unlink(path);
+    }
+
+    let target = crate::fs::File::create("/data/ext2-target.txt").expect("create target");
+    target.write(b"abcdefgh").expect("write target");
+    target.truncate(3).expect("truncate shrink");
+    drop(target);
+    assert_eq!(
+        crate::fs::File::open_read("/data/ext2-target.txt")
+            .expect("reopen target")
+            .read_to_string()
+            .expect("read target"),
+        "abc"
+    );
+
+    crate::fs::vfs::vfs_link("/data/ext2-target.txt", "/data/ext2-hardlink.txt")
+        .expect("hard link");
+    let linked =
+        crate::fs::vfs::vfs_unix_metadata("/data/ext2-target.txt").expect("linked metadata");
+    assert_eq!(linked.links, 2);
+    crate::fs::vfs::vfs_symlink("ext2-target.txt", "/data/ext2-symlink.txt").expect("symlink");
+    assert_eq!(
+        crate::fs::vfs::vfs_read_link("/data/ext2-symlink.txt").expect("readlink"),
+        b"ext2-target.txt"
+    );
+    let symlink_metadata = crate::fs::vfs::vfs_symlink_metadata("/data/ext2-symlink.txt")
+        .expect("lstat-style metadata");
+    assert_eq!(symlink_metadata.mode & 0o170000, 0o120000);
+    assert_eq!(symlink_metadata.size, b"ext2-target.txt".len() as u64);
+    assert_eq!(symlink_metadata.blocks_512, 0);
+    assert_eq!(
+        crate::fs::File::open_read("/data/ext2-symlink.txt")
+            .expect("follow symlink")
+            .read_to_string()
+            .expect("read symlink target"),
+        "abc"
+    );
+
+    let sparse = crate::fs::File::create("/data/ext2-sparse.bin").expect("create sparse");
+    sparse.truncate(16 * 1024).expect("sparse extend");
+    let sparse_meta = sparse.metadata().expect("sparse metadata");
+    assert_eq!(sparse_meta.size, 16 * 1024);
+    assert_eq!(sparse_meta.blocks_512, 0);
+    drop(sparse);
+    let sparse_bytes = crate::fs::File::open_read("/data/ext2-sparse.bin")
+        .expect("open sparse")
+        .read_to_vec()
+        .expect("read sparse");
+    assert_eq!(sparse_bytes.len(), 16 * 1024);
+    assert!(sparse_bytes.iter().all(|byte| *byte == 0));
+
+    crate::fs::vfs::vfs_unlink("/data/ext2-target.txt").expect("unlink original");
+    assert_eq!(
+        crate::fs::File::open_read("/data/ext2-hardlink.txt")
+            .expect("hard link survives")
+            .read_to_string()
+            .expect("read hard link"),
+        "abc"
+    );
+    for path in [
+        "/data/ext2-hardlink.txt",
+        "/data/ext2-symlink.txt",
+        "/data/ext2-sparse.bin",
+    ] {
+        crate::fs::vfs::vfs_unlink(path).expect("cleanup ext2 link fixture");
+    }
+    crate::fs::vfs::vfs_sync_all().expect("sync ext2 fixtures");
+}
+
+fn test_data_ext2_indirect_block_boundaries() {
+    let file = crate::fs::File::create("/data/ext2-indirect.bin").expect("create indirect file");
+    let block_size = file.metadata().expect("indirect metadata").block_size as u64;
+    let fanout = block_size / 4;
+    let locations = [
+        (12 * block_size, 0x51u8),
+        ((12 + fanout) * block_size, 0x62),
+        ((12 + fanout + fanout * fanout) * block_size, 0x73),
+    ];
+    for (offset, marker) in locations {
+        file.seek(offset).expect("seek into indirect range");
+        file.write(&[marker]).expect("write indirect marker");
+    }
+    let metadata = file.metadata().expect("allocated-block metadata");
+    assert_eq!(metadata.blocks_512, 9 * (block_size / 512));
+    drop(file);
+
+    let reopened = crate::fs::File::open_read("/data/ext2-indirect.bin").expect("reopen indirect");
+    for (offset, marker) in locations {
+        let mut byte = [0u8; 1];
+        assert_eq!(reopened.read_at(offset, &mut byte).expect("read marker"), 1);
+        assert_eq!(byte[0], marker);
+    }
+    drop(reopened);
+    crate::fs::vfs::vfs_unlink("/data/ext2-indirect.bin").expect("unlink indirect file");
 }
 
 fn test_data_mount_root_dir_enumerable() {
@@ -875,10 +1066,11 @@ fn test_seek_past_eof_tmpfs_zero_fill() {
     crate::fs::vfs::vfs_unlink("/u2-gap.bin").expect("cleanup");
 }
 
-/// Same on /data (FAT32, 512-byte clusters): the gap spans multiple
-/// freshly allocated clusters, which must be explicitly zeroed — the
-/// chain walk links them without writing their data.
-fn test_seek_past_eof_data_fat_zero_fill() {
+/// Same on /data (ext2): the gap spans block boundaries and reads back
+/// as zeros — ext2 stores it sparsely. (The FAT write path keeps its own
+/// explicit gap zero-fill for FAT-writable configurations; the raw-FAT
+/// cases in `fat_write` cover that surface when /data contains FAT.)
+fn test_seek_past_eof_data_zero_fill() {
     let f = crate::fs::File::create("/data/u2-gap.bin").expect("create");
     assert_eq!(f.write(b"head").expect("head write"), 4);
     assert_eq!(f.seek(1500).expect("seek past EOF"), 1500);
@@ -894,7 +1086,7 @@ fn test_seek_past_eof_data_fat_zero_fill() {
     assert_eq!(&content[..4], b"head");
     assert!(
         content[4..1500].iter().all(|&b| b == 0),
-        "FAT gap clusters must read back as zeros"
+        "gap must read back as zeros"
     );
     assert_eq!(&content[1500..], b"tail");
     crate::fs::vfs::vfs_unlink("/data/u2-gap.bin").expect("cleanup");
@@ -940,13 +1132,16 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_work_directory_provisioned_and_writable,
         &test_seek_past_eof_tmpfs_zero_fill,
-        &test_seek_past_eof_data_fat_zero_fill,
+        &test_seek_past_eof_data_zero_fill,
         &test_seek_past_eof_readonly_rejected,
         &test_filesystem_basic_exists,
         &test_filesystem_metadata,
         &test_file_open_arial,
         &test_file_read_arial_header,
         &test_file_read_full_arial,
+        &test_virtio_block_wakes_kernel_thread,
+        &test_zsh_image_read_is_coalesced,
+        &test_busybox_late_page_read_is_bounded,
         &test_host_mount_present,
         &test_host_mount_can_open_seed_file,
         &test_host_mount_does_not_break_root,
@@ -969,7 +1164,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_data_create_write_read_round_trip,
         &test_data_unlink,
         &test_data_write_larger_than_one_cluster,
-        &test_data_mkdir_returns_unsupported,
+        &test_data_ext2_directory_mutations,
+        &test_data_ext2_truncate_links_and_sparse_files,
+        &test_data_ext2_indirect_block_boundaries,
         &test_u11_serialize_deserialize_round_trip,
         &test_u11_corrupted_blob_rejected,
         &test_u11_flush_then_restore_on_live_data,

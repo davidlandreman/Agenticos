@@ -2,7 +2,7 @@
 
 use alloc::format;
 
-use gui::{Button, Window, COLOR_BORDER, COLOR_PANEL, COLOR_TEXT, COLOR_WHITE};
+use gui::{theme, Button, Window};
 
 use crate::DialogStatus;
 
@@ -68,8 +68,7 @@ impl ColorPicker {
 
     fn slider_track(&self, index: usize) -> (i32, i32, i32) {
         let (_, grid_y) = Self::grid_origin();
-        let grid_bottom =
-            grid_y + SWATCH_ROWS as i32 * (SWATCH_SIZE + SWATCH_GAP) + 12;
+        let grid_bottom = grid_y + SWATCH_ROWS as i32 * (SWATCH_SIZE + SWATCH_GAP) + 12;
         let x = MARGIN + 24;
         let track_w = self.window.canvas().width() as i32 - x - MARGIN - 44;
         let y = grid_bottom + index as i32 * (SLIDER_H + 10);
@@ -113,8 +112,9 @@ impl ColorPicker {
         ];
         let (grid_x, grid_y) = Self::grid_origin();
         let width = self.window.canvas().width() as i32;
+        let palette = theme::palette();
         let canvas = self.window.canvas_mut();
-        canvas.clear(COLOR_PANEL);
+        canvas.clear(palette.content_bg);
 
         // Swatch grid.
         for (index, color) in PALETTE.iter().enumerate() {
@@ -123,7 +123,7 @@ impl ColorPicker {
             let x = grid_x + col * (SWATCH_SIZE + SWATCH_GAP);
             let y = grid_y + row * (SWATCH_SIZE + SWATCH_GAP);
             canvas.fill_rect(x, y, SWATCH_SIZE as u32, SWATCH_SIZE as u32, *color);
-            canvas.rect(x, y, SWATCH_SIZE as u32, SWATCH_SIZE as u32, COLOR_BORDER);
+            canvas.rect(x, y, SWATCH_SIZE as u32, SWATCH_SIZE as u32, palette.border);
         }
 
         // R/G/B sliders.
@@ -131,20 +131,48 @@ impl ColorPicker {
         let values = [r, g, b];
         for index in 0..3 {
             let (track_x, track_y, track_w) = tracks[index];
-            canvas.draw_text(MARGIN, track_y + (SLIDER_H - 8) / 2, labels[index], COLOR_TEXT);
-            canvas.fill_rect(track_x, track_y, track_w as u32, SLIDER_H as u32, COLOR_WHITE);
-            canvas.rect(track_x, track_y, track_w as u32, SLIDER_H as u32, COLOR_BORDER);
+            canvas.draw_text(
+                MARGIN,
+                track_y + (SLIDER_H - 8) / 2,
+                labels[index],
+                palette.text,
+            );
+            canvas.fill_rect(
+                track_x,
+                track_y,
+                track_w as u32,
+                SLIDER_H as u32,
+                palette.field_bg,
+            );
+            canvas.rect(
+                track_x,
+                track_y,
+                track_w as u32,
+                SLIDER_H as u32,
+                palette.border,
+            );
             let knob_x = track_x + (values[index] as i32 * track_w) / 255;
-            canvas.fill_rect(knob_x - 2, track_y - 2, 5, SLIDER_H as u32 + 4, COLOR_TEXT);
+            canvas.fill_rect(
+                knob_x - 2,
+                track_y - 2,
+                5,
+                SLIDER_H as u32 + 4,
+                palette.text,
+            );
             let text = format!("{}", values[index]);
-            canvas.draw_text(track_x + track_w + 8, track_y + (SLIDER_H - 8) / 2, &text, COLOR_TEXT);
+            canvas.draw_text(
+                track_x + track_w + 8,
+                track_y + (SLIDER_H - 8) / 2,
+                &text,
+                palette.text,
+            );
         }
 
         // Preview swatch + hex.
         let preview_y = tracks[2].1 + SLIDER_H + 14;
         canvas.fill_rect(MARGIN, preview_y, 64, 40, value);
-        canvas.rect(MARGIN, preview_y, 64, 40, COLOR_BORDER);
-        canvas.draw_text(MARGIN + 76, preview_y + 16, &hex, COLOR_TEXT);
+        canvas.rect(MARGIN, preview_y, 64, 40, palette.border);
+        canvas.draw_text(MARGIN + 76, preview_y + 16, &hex, palette.text);
         let _ = width;
 
         self.ok.draw(canvas, true);

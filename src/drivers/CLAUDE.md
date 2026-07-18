@@ -1,11 +1,10 @@
 # `src/drivers/` — Hardware Drivers
 
-PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet and network), and the framebuffer display driver.
+PCI bus, VirtIO block storage, PS/2 keyboard and mouse, VirtIO input/network/GPU, and the framebuffer display driver.
 
 ## Key files
 
 - `pci.rs` — PCI bus enumeration, configuration space access, BAR reading.
-- `ide.rs` — IDE/ATA PIO-mode storage driver. Supports up to 4 drives.
 - `block.rs` — `BlockDevice` trait used by `src/fs/`.
 - `ps2_controller.rs` — shared PS/2 controller setup; enables IRQ1 (keyboard) and IRQ12 (mouse).
 - `src/input/keyboard_driver.rs` — PS/2 keyboard state machine (scancode set 2).
@@ -13,6 +12,7 @@ PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet and ne
 - `mouse_old.rs` — legacy mouse code; **triage before relying on it**. If dead, remove in a separate PR; if intentional, document why.
 - `virtio/mod.rs` — VirtIO module init.
 - `virtio/common.rs` — modern VirtIO PCI feature negotiation, page-safe DMA storage, tokenized queue ownership, and descriptor chains.
+- `virtio/block.rs` — interrupt-driven VirtIO-blk. Requests retain owned DMA bounce pages, split transfers at 128 sectors, and wake exact kernel/ring-3 waiters from PCI INTx completion.
 - `virtio/gpu/` — VirtIO 1.3 GPU wire layouts, checked control/cursor queues,
   guest-backed 2D resources, display discovery/events, exact damage transfer +
   flush, scanout lifecycle, and the VirGL transport for capsets, contexts, 3D
@@ -23,13 +23,11 @@ PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet and ne
 - `virtio/net.rs` — polling modern VirtIO-net device, bounded RX/TX DMA pools, and smoltcp Ethernet adapter.
 - `display/` — framebuffer driver. `display.rs` controls single/double buffering (the `USE_DOUBLE_BUFFER` flag lives here even though graphics primitives live in `src/graphics/`). `frame_buffer.rs` is the low-level abstraction; `text_buffer.rs` and `double_buffered_text.rs` handle text rendering; `double_buffer.rs` provides the 8 MiB static back buffer.
 
-## IDE PIO atomicity (load-bearing)
+## VirtIO block completion (load-bearing)
 
-`IdeController::read_sectors` and `write_sectors` disable interrupts (via `InterruptGuard::disable()`) for the entire transaction — drive-select writes, `wait_ready`, `wait_drq`, the 256-word data-port loop, and the trailing `wait_ready`. PIO requires the CPU to read the data port immediately when DRQ becomes set; if the scheduler preempts the caller mid-read, the DRQ window slips and subsequent `wait_drq` calls time out (status `0x58` = DRDY|DSC|DRQ — set just after we gave up spinning).
+Block requests use modern device ID `0x1042`, require `VIRTIO_F_VERSION_1`, and identify root/host/data disks through `VIRTIO_BLK_T_GET_ID`. Each descriptor chain is header + DMA data pages + status byte. The request owns every page until its used-ring entry arrives; callers never expose stack or user virtual addresses to DMA.
 
-This matters under interactive boot, not test mode. Test mode has no GUIShell competing for slices, so the run process completes IDE reads uninterrupted. Interactive boot has GUIShell + compositor running between every preemption tick; without the IRQ-disable, multi-MiB FAT reads timeout consistently. RAII guard ensures IRQs are restored on every exit path including `?`-propagated errors.
-
-The transaction is bounded (at most 128 sectors / 64 KiB per call), so the IRQ-disabled window is small enough to be acceptable for the rest of the system.
+The shared PCI INTx handler reads the VirtIO ISR, reclaims every used descriptor, and wakes the request's exact waiter. Ring-3 storage waits save both the in-progress kernel continuation and the live FS_BASE/FPU image so partially completed syscalls and page faults resume without re-firing or corrupting user SSE state. Any inline wait that can become `KERNEL_CONTEXT` must return from `hlt` with IF enabled; otherwise the eventual ring-3 exit restores an interrupt-disabled kernel caller. Early boot waits with `hlt`. Do not hold ordinary spin locks or the memory-mapper lock across a `BlockDevice` call.
 
 ## Mouse input-method selection
 

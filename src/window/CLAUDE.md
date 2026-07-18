@@ -5,7 +5,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 ## Key files
 
 - `mod.rs` — window-system init and global functions (`render_frame`, `process_terminal_output`, `process_event`).
-- `compositor.rs` — U10 compositor kernel thread. Spawned at boot from `src/kernel.rs`; its loop polls input + processes terminal output + calls `render_frame` then `yield_current`. Pre-U10 this ran inline in the kernel main loop, which froze the desktop under busy ring-3 processes; the kernel-thread scheduler now round-robins the compositor alongside ring-3 work via U5's timer ISR. Honors `binary_load_in_progress()` to keep IDE PIO atomicity intact during large binary loads.
+- `compositor.rs` — U10 compositor kernel thread. Spawned at boot from `src/kernel.rs`; its loop polls input + processes terminal output + calls `render_frame` then `yield_current`. Storage uses interrupt-driven VirtIO DMA, so input and rendering continue during binary loads.
 - `types.rs` — core types: `WindowId`, `ScreenId`, `Rect`, `Point`, `ColorDepth`.
 - `event.rs` — keyboard, mouse, and window events.
 - `graphics.rs` — `GraphicsDevice` trait that abstracts rendering targets.
@@ -16,25 +16,40 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   scene, and uses either the CPU reference engine or the qualified VirGL engine.
   CPU output presents through the boot framebuffer or VirtIO-GPU 2D; VirGL
   presents its host texture directly and uses the VirtIO hardware cursor.
-- `theme/` — boot-selected frame theme. `classic` renders Windows 98 "Windows
-  Standard" chrome — a raised 3D bevel border, a horizontal caption gradient
-  (navy→blue active, grey inactive), an 8pt-ish bold caption font, and a raised
-  ButtonFace close button with a bitmap ✕; the bevel does not follow focus, only
-  the caption does. `aero` supplies translucent rounded glass, shadows, and
-  backdrop blur metadata for retained composition. Caption-button geometry for
-  both is data-driven via `FrameMetrics.button_*`, shared by painting and
-  `manager.rs` hit-testing through `theme::close_button_rect`.
+- `theme/` — boot-selected frame + control theme. `classic` renders Windows 98
+  "Windows Standard" chrome — a raised 3D bevel border, a horizontal caption
+  gradient (navy→blue active, grey inactive), an 8pt-ish bold caption font, and
+  a raised ButtonFace close button with a bitmap ✕; the bevel does not follow
+  focus, only the caption does. `aero` supplies translucent rounded glass,
+  shadows, and backdrop blur metadata for retained composition. Caption-button
+  geometry for both is data-driven via `FrameMetrics.button_*`, shared by
+  painting and `manager.rs` hit-testing through `theme::close_button_rect`.
+  `controls.rs` is the single source of truth for *control* surfaces: a
+  theme-dispatched `ControlPalette` (`controls::palette()`) plus drawing
+  helpers (`draw_button` with Normal/Hot/Pressed/Disabled states,
+  `draw_field`, `draw_raised_panel`, `draw_selection`, `draw_menu_surface`).
+  Every widget in `windows/` delegates its surface rendering there — Classic
+  gets Win98 bevels and navy selection, Aero gets rounded gradient buttons
+  (blue border + glow on the default button) and `#CBE8F6` selection. The
+  former `PALETTE_*` constants in `mod.rs` were replaced by this palette. The
+  resolved theme is also published to ring-3 as `/etc/theme` (see
+  `src/userland/etc.rs::publish_theme`), which `userland/libs/gui`'s `theme`
+  module mirrors. Normative color tables live in
+  `docs/plans/2026-07-18-003-feat-theme-aware-controls-plan.md`.
 - `screen.rs` — virtual screen abstraction (today there is one physical display).
 - `console.rs` — kernel `print!` macro output buffer.
 - `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.
 - `keyboard.rs` — PS/2 scancode-set-2 → `KeyCode` conversion *for window events* (distinct from the lower-level driver in `src/input/`).
 - `terminal.rs`, `terminal_factory.rs` — terminal-window support; the factory wires terminal windows up to the shell.
-- `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background).
+- `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background), `start_menu.rs` (classic root menu plus Programs fly-out in one active popup), and `taskbar.rs` (task-button geometry plus the minute-updated UTC tray).
 - `windows/remote_surface.rs` — server-decorated client surface for ring-3
   apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
-  events to the owning PID's GUI queue.
+  events to the owning PID's GUI queue. Its enclosing frame title can be
+  updated through the ownership-checked ring-3 GUI ABI. Under strict VirGL it
+  may instead own a logical GL client ID whose front texture is inserted as an
+  external retained layer clipped to the content well.
 - `adapters/` — `GraphicsDevice` implementations: `direct_framebuffer.rs` (fast, used for cursor) and `double_buffered.rs` (smooth).
-- `dialogs/` — dialog-window scaffolding.
+- `dialogs/` — kernel dialog-window scaffolding, including the non-blocking Run dialog. Run keeps input state outside the manager registry and launches submitted text through zsh `-c`.
 
 ## Window types
 
@@ -45,7 +60,9 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | `TextWindow` | Grid-based text rendering | Cell size derived from the system TTF (`get_default_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
-| `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer; close requests are delivered to the client. |
+| `StartMenuWindow` | GUIShell Start popup | Windows 95/98 ButtonFace panels, blue rotated `AgenticOS` banner, typed disabled/separator/action rows, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
+| `TaskbarTrayWindow` | Right-side notification tray | Recessed classic panel with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
+| `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer or one attached VirGL client texture; close requests are delivered to the client. |
 
 All windows derive from `WindowBase` for consistent parent-child tracking.
 
@@ -56,6 +73,11 @@ Boot lands in GUI mode:
 - `DesktopWindow` (full-screen). Reads `/WALLPAPR.BMP` from the FAT root via `window::load_default_wallpaper` during `init_guishell`; on success, the BMP is stretched to the full screen via `GraphicsDevice::draw_image_scaled`. Missing or malformed wallpaper degrades to the legacy solid-blue fill — never panics.
 - `FrameWindow` titled "AgenticOS Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller).
 - `TerminalWindow` inside the frame.
+- Bottom taskbar with a Start button, dynamically-sized frame buttons, and a
+  recessed right-side UTC date/time tray. Start opens the classic menu;
+  Programs launches the six pinned apps (including GL Arena), Run opens a modal command field, and
+  Shut Down is an explicit safe placeholder until a clean power-off path
+  exists. Task-button layout reserves the tray span and never overlaps it.
 
 ## TerminalWindow ↔ terminal subsystem
 
@@ -79,6 +101,17 @@ That save/restore behavior applies only to `legacy`. In `retained`, the cursor
 is drawn as the final canonical output overlay after damaged regions have been
 recomposed; it never restores framebuffer background.
 
+## Window-manager synchronization
+
+`WINDOW_MANAGER` uses `PreemptionMutex`, not `InterruptMutex`: a render may be
+long, so the PIT and device IRQs must remain enabled while its lock is held.
+The timer continues advancing time, but takes only its minimal tick/EOI path;
+scheduler housekeeping and kernel-thread context switches resume after the
+critical section ends. Interrupt handlers must never access the manager
+directly; they enqueue input or work for the compositor thread to consume. This
+invariant prevents same-CPU spin-lock deadlocks, interrupt-context allocator
+activity during rendering, and drag-time clock starvation.
+
 ## Renderer boot policy
 
 `build.sh` passes `opt/agenticos/compositor` (`legacy`, `retained`, `gpu`, or
@@ -90,9 +123,10 @@ fails initialization or panics on a runtime GPU failure instead.
 On macOS, an explicit host-side `gpu` request must first pass the pinned custom
 QEMU verifier; see `docs/macos-virgl-qualification.md`.
 `AGENTICOS_THEME=classic|aero|auto` is passed as `opt/agenticos/theme`. Explicit
-Aero is available on retained CPU and VirGL; the VirGL variant accelerates
-rounded translucent chrome and shadows but leaves backdrop blur disabled.
-Legacy falls back to Classic, and `auto` keeps Classic on VirGL.
+Aero is available on retained CPU and qualified VirGL; VirGL performs the
+radius-4 frame backdrop blur on the host GPU. `auto` selects Aero for retained
+CPU and qualified VirGL. Legacy selects Classic, and a non-strict runtime
+fallback to legacy activates Classic before repainting.
 
 ## Implementation status
 

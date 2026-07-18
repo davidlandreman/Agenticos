@@ -1,13 +1,16 @@
 pub mod context;
+pub mod entity;
 pub mod pcb;
 pub mod process;
+pub mod run_queue;
 pub mod scheduler;
 pub mod stack;
+pub mod timer;
 
 pub use context::CpuContext;
 pub use pcb::{BlockReason, ProcessControlBlock, ProcessState, WakeEvents};
-pub use process::{allocate_pid, ProcessId, RunnableProcess};
-pub use scheduler::{ProcessInfo, SCHEDULER};
+pub use process::{allocate_pid, ProcessId};
+pub use scheduler::ProcessInfo;
 
 use crate::window::WindowId;
 use alloc::boxed::Box;
@@ -16,6 +19,9 @@ use alloc::string::String;
 /// Flag indicating whether we're currently running a spawned process
 static IN_SPAWNED_PROCESS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+const IO_WAKE_SLOTS: usize = 64;
+static PENDING_IO_WAKES: [core::sync::atomic::AtomicU32; IO_WAKE_SLOTS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; IO_WAKE_SLOTS];
 
 /// Check if we're currently running a spawned process
 pub fn is_in_spawned_process() -> bool {
@@ -35,6 +41,74 @@ pub fn init_scheduler() {
     scheduler::SCHEDULER.lock().init();
 }
 
+/// Return the current kernel thread when storage is called from a spawned
+/// kernel process. Boot/main-loop callers deliberately return `None` and use
+/// the driver's early-boot halt wait instead.
+pub fn current_io_waiter() -> Option<ProcessId> {
+    if !is_in_spawned_process() {
+        return None;
+    }
+    scheduler::SCHEDULER.lock().current()
+}
+
+/// Queue an IRQ-originated wake without taking the scheduler's non-IRQ-safe
+/// spin lock. The timer and main-loop housekeeping drain this bounded array.
+pub fn queue_kernel_io_wake(pid: ProcessId) {
+    use core::sync::atomic::Ordering;
+    for slot in &PENDING_IO_WAKES {
+        if slot
+            .compare_exchange(0, pid, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    crate::debug_error!("kernel I/O wake queue full for PID {}", pid);
+}
+
+pub fn drain_kernel_io_wakes() -> bool {
+    use core::sync::atomic::Ordering;
+    let Some(mut scheduler) = scheduler::SCHEDULER.try_lock() else {
+        return false;
+    };
+    let mut woke = false;
+    for slot in &PENDING_IO_WAKES {
+        let pid = slot.swap(0, Ordering::AcqRel);
+        if pid != 0 {
+            scheduler.wake(pid);
+            woke = true;
+        }
+    }
+    woke
+}
+
+/// Preserve and park the current kernel thread on asynchronous block I/O.
+/// Completion moves the exact PCB back to the scheduler ready queue.
+pub fn block_current_kernel_thread_on_io(token: u64) {
+    use crate::arch::x86_64::context_switch::switch_context;
+
+    let old_context = {
+        let mut scheduler = scheduler::SCHEDULER.lock();
+        let Some(pid) = scheduler.current() else {
+            return;
+        };
+        let Some(context) = scheduler.get_context_mut(pid) else {
+            return;
+        };
+        let pointer = context as *mut CpuContext;
+        scheduler.block_current(BlockReason::WaitingForBlockIo(token));
+        pointer
+    };
+    set_in_spawned_process(false);
+    unsafe {
+        switch_context(
+            old_context,
+            &raw const crate::arch::x86_64::preemption::KERNEL_CONTEXT,
+        );
+    }
+    set_in_spawned_process(true);
+}
+
 /// Spawn a new process with the given entry function
 ///
 /// # Arguments
@@ -52,6 +126,14 @@ where
     let (stack_base, stack_top) =
         stack::allocate_stack().expect("Failed to allocate process stack");
 
+    // Contexts selected directly from the PIT cannot fault safely while
+    // abandoning an interrupt frame. Materialize the top stack pages now.
+    unsafe {
+        for offset in (0..4096u64 * 4).step_by(4096) {
+            core::ptr::read_volatile((stack_top - offset - 8) as *const u8);
+        }
+    }
+
     // Create the PCB
     let pid = allocate_pid();
     let mut pcb = ProcessControlBlock::new(pid, name);
@@ -67,15 +149,15 @@ where
     );
 
     // Add to scheduler
-    crate::debug_info!("spawn_process: about to lock scheduler");
+    crate::debug_trace!("spawn_process: locking scheduler");
     let pid = {
         let mut sched = scheduler::SCHEDULER.lock();
-        crate::debug_info!("spawn_process: scheduler locked, calling spawn()");
+        crate::debug_trace!("spawn_process: scheduler locked, calling spawn()");
         let p = sched.spawn(pcb);
-        crate::debug_info!("spawn_process: spawn() returned PID {:?}", p);
+        crate::debug_trace!("spawn_process: spawn() returned PID {:?}", p);
         p
     };
-    crate::debug_info!(
+    crate::debug_trace!(
         "spawn_process: scheduler lock released, returning PID {:?}",
         pid
     );
@@ -88,18 +170,8 @@ where
 /// the scheduler picks the next process to run. The current process
 /// will be resumed later by the scheduler.
 ///
-/// **Ring-3 dispatch hand-off:** if we'd otherwise stay on the
-/// current kernel thread (no other kernel thread is ready) AND a
-/// ring-3 process is sitting in `ring3_ready`, switch to
-/// `KERNEL_CONTEXT` instead so the kernel main loop's
-/// `save_kernel_and_resume_ring3` can dispatch it. Without this, a
-/// lone CPU-yielding kernel thread (e.g., the compositor between
-/// renders) keeps getting re-picked by `schedule()` — which resets
-/// its time slice every time — and the main loop never runs, so a
-/// freshly-launched ring-3 zsh never gets its first slice. The user
-/// sees a blank terminal until something else (e.g., launching
-/// notepad) adds a second kernel thread that finally lets the
-/// compositor yield outwards.
+/// Kernel and user entities share the same fair queue, so yielding can
+/// dispatch either privilege class directly.
 pub fn yield_current() {
     use crate::arch::x86_64::context_switch::switch_context;
     use crate::arch::x86_64::interrupts::get_timer_ticks;
@@ -108,6 +180,7 @@ pub fn yield_current() {
 
     enum YieldTarget {
         Process(CpuContext),
+        User(u32),
         Kernel,
     }
 
@@ -125,32 +198,28 @@ pub fn yield_current() {
 
         sched.yield_current();
 
-        // Get the next process
-        let next_pid = match sched.schedule() {
-            Some(pid) => pid,
-            None => return, // No process to switch to
-        };
-
         let old_ctx = match sched.get_context_mut(current_pid) {
             Some(ctx) => ctx as *mut CpuContext,
             None => return,
         };
 
-        if next_pid == current_pid {
-            // Only us in the ready queue. If a ring-3 process is
-            // waiting, give the kernel main loop a chance to dispatch
-            // it; otherwise stay on this thread (no work elsewhere).
-            if crate::userland::lifecycle::peek_next_ring3().is_some() {
-                (old_ctx, YieldTarget::Kernel)
-            } else {
-                return;
+        match sched.schedule_entity() {
+            Some(crate::process::entity::EntityId::KernelThread(next_pid))
+                if next_pid == current_pid =>
+            {
+                return
             }
-        } else {
-            let new_ctx = match sched.get_context(next_pid) {
-                Some(ctx) => *ctx,
-                None => return,
-            };
-            (old_ctx, YieldTarget::Process(new_ctx))
+            Some(crate::process::entity::EntityId::KernelThread(next_pid)) => {
+                let new_ctx = match sched.get_context(next_pid) {
+                    Some(ctx) => *ctx,
+                    None => return,
+                };
+                (old_ctx, YieldTarget::Process(new_ctx))
+            }
+            Some(crate::process::entity::EntityId::UserProcess(pid)) => {
+                (old_ctx, YieldTarget::User(pid))
+            }
+            None => (old_ctx, YieldTarget::Kernel),
         }
     };
 
@@ -174,6 +243,9 @@ pub fn yield_current() {
                 switch_context(old_ctx_ptr, &new_ctx);
             }
         }
+        YieldTarget::User(pid) => unsafe {
+            crate::userland::switch::save_kernel_and_resume_ring3(pid, old_ctx_ptr);
+        },
         YieldTarget::Kernel => {
             // Hand off to the kernel main loop. It'll dispatch the
             // pending ring-3 process and eventually re-pick us via
@@ -195,7 +267,7 @@ pub fn yield_current() {
 /// the scheduler to preempt them. Also updates the activity tick
 /// to show the process is making progress (for watchdog).
 pub fn yield_if_needed() {
-    use crate::arch::x86_64::interrupts::{self, get_timer_ticks};
+    use crate::arch::x86_64::interrupts::get_timer_ticks;
 
     // Always update activity tick to show process is responsive
     // This prevents watchdog from killing processes that are polling
@@ -207,9 +279,7 @@ pub fn yield_if_needed() {
         }
     }
 
-    if interrupts::check_and_clear_preemption() {
-        yield_current();
-    }
+    yield_current();
 }
 
 /// Terminate the current process
@@ -219,62 +289,30 @@ pub fn terminate_current() {
 
     crate::debug_trace!("terminate_current: starting");
 
-    let next_ctx = {
+    let (terminated, target) = {
         let mut sched = scheduler::SCHEDULER.lock();
+        let terminated = sched.current().map(entity::EntityId::KernelThread);
         sched.terminate_current();
-
-        // Try to schedule the next REAL process (not idle)
-        // Check ready_count first - if 0, don't bother calling schedule
-        // because it will just return the idle process
-        if sched.ready_count() > 0 {
-            if let Some(next_pid) = sched.schedule() {
-                crate::debug_trace!("terminate_current: next process is {:?}", next_pid);
-                sched.get_context(next_pid).map(|c| *c)
-            } else {
-                crate::debug_trace!("terminate_current: no more processes");
-                None
-            }
-        } else {
-            crate::debug_trace!("terminate_current: ready queue empty, returning to kernel");
-            None
-        }
+        (terminated, next_switch_target(&mut sched))
     };
-
-    if let Some(ctx) = next_ctx {
-        crate::debug_trace!("terminate_current: switching to next process");
-
-        // Pre-map the stack pages before switching context
-        let stack_top = ctx.rsp;
-        unsafe {
-            let page_size = 4096u64;
-            for offset in (0..page_size * 4).step_by(page_size as usize) {
-                let addr = stack_top - offset - 8;
-                core::ptr::read_volatile(addr as *const u8);
-            }
-        }
-
-        // Switch to next process
-        unsafe {
-            crate::arch::x86_64::context_switch::switch_to_context(&ctx);
-        }
+    if let Some(entity) = terminated {
+        timer::cancel_entity(entity);
     }
 
-    // No more processes to run - return to kernel context
-    if IN_SPAWNED_PROCESS.load(Ordering::Acquire) {
-        crate::debug_trace!("terminate_current: returning to kernel context");
-
-        // Get the saved kernel context and switch to it
-        let kernel_ctx = unsafe { KERNEL_CONTEXT };
-        crate::debug_trace!(
-            "terminate_current: kernel RSP={:#x} RIP={:#x}",
-            kernel_ctx.rsp,
-            kernel_ctx.rip
-        );
-
-        unsafe {
-            crate::arch::x86_64::context_switch::switch_to_context(&kernel_ctx);
+    match target {
+        SwitchTarget::Process(context) => unsafe {
+            crate::arch::x86_64::context_switch::switch_to_context(&context);
+        },
+        SwitchTarget::User(pid) => unsafe {
+            crate::userland::switch::resume_ring3(pid);
+        },
+        SwitchTarget::Kernel => {
+            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
+            let kernel_ctx = unsafe { KERNEL_CONTEXT };
+            unsafe {
+                crate::arch::x86_64::context_switch::switch_to_context(&kernel_ctx);
+            }
         }
-        // Should never reach here
     }
 
     // Fallback: halt if not in spawned process context
@@ -290,8 +328,7 @@ pub fn terminate_current() {
 ///
 /// The kernel thread is marked Blocked in the scheduler with
 /// `BlockReason::WaitingForRing3Exit(pid)`. The scheduler switches
-/// to the next runnable kernel thread (typically idle, which checks
-/// `ring3_ready` and `resume_ring3`s the freshly-Ready process).
+/// directly to the next runnable entity, regardless of privilege level.
 ///
 /// When the ring-3 process exits, `long_jump_to_run_or_halt` calls
 /// `wake_threads_waiting_for_ring3_exit(pid)` which moves us back to
@@ -301,6 +338,8 @@ pub fn terminate_current() {
 /// call below.
 pub fn block_kernel_thread_for_ring3_exit(pid: u32) {
     use crate::arch::x86_64::context_switch::switch_context;
+    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
+    use core::sync::atomic::Ordering;
 
     // Real kernel-thread path: block on the scheduler.
     let block_outcome = {
@@ -313,34 +352,74 @@ pub fn block_kernel_thread_for_ring3_exit(pid: u32) {
 
             sched.block_current(BlockReason::WaitingForRing3Exit(pid));
 
-            let next_pid = match sched.schedule() {
-                Some(p) => p,
-                None => return,
-            };
-            let new_ctx = match sched.get_context(next_pid) {
-                Some(c) => *c,
-                None => return,
-            };
-
-            Some((old_ctx, new_ctx))
+            Some((old_ctx, next_switch_target(&mut sched)))
         } else {
             None
         }
     };
 
-    if let Some((old_ctx_ptr, new_ctx)) = block_outcome {
-        unsafe {
-            switch_context(old_ctx_ptr, &new_ctx);
+    if let Some((old_ctx_ptr, target)) = block_outcome {
+        match target {
+            SwitchTarget::Process(context) => unsafe {
+                switch_context(old_ctx_ptr, &context);
+            },
+            SwitchTarget::User(next_pid) => unsafe {
+                crate::userland::switch::save_kernel_and_resume_ring3(next_pid, old_ctx_ptr);
+            },
+            SwitchTarget::Kernel => {
+                IN_SPAWNED_PROCESS.store(false, Ordering::Release);
+                let kernel = unsafe { KERNEL_CONTEXT };
+                unsafe { switch_context(old_ctx_ptr, &kernel) };
+                IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+            }
         }
         return;
     }
 
-    // U8: no current kernel thread (called from kernel main loop or
-    // test runner). Drive a mini-dispatch loop: dispatch ring3_ready
-    // processes via save_kernel_and_resume_ring3 until our target
+    // No current kernel thread (called from the kernel main loop or test
+    // runner). Drive a compatibility mini-loop until our target
     // process exits. Yield to hlt between dispatches when no ring-3
     // is ready.
     drive_inline_ring3_until_exit(pid);
+}
+
+/// Park the current kernel thread until an explicit wake and switch away.
+pub fn park_current(reason: BlockReason) {
+    use crate::arch::x86_64::context_switch::switch_context;
+    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
+    use core::sync::atomic::Ordering;
+
+    let outcome = {
+        let mut sched = scheduler::SCHEDULER.lock();
+        let current_pid = match sched.current() {
+            Some(pid) => pid,
+            None => return,
+        };
+        let old_ctx = match sched.get_context_mut(current_pid) {
+            Some(context) => context as *mut CpuContext,
+            None => return,
+        };
+        sched.block_current(reason);
+        let target = next_switch_target(&mut sched);
+        (old_ctx, target)
+    };
+
+    match outcome.1 {
+        SwitchTarget::Process(context) => unsafe {
+            switch_context(outcome.0, &context);
+        },
+        SwitchTarget::User(pid) => unsafe {
+            crate::userland::switch::save_kernel_and_resume_ring3(pid, outcome.0);
+        },
+        SwitchTarget::Kernel => {
+            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
+            let kernel = unsafe { KERNEL_CONTEXT };
+            unsafe {
+                switch_context(outcome.0, &kernel);
+            }
+            IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+        }
+    }
 }
 
 /// U8: inline ring-3 dispatch loop for non-kernel-thread contexts
@@ -364,8 +443,10 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
             awaited_pid,
         );
 
-        crate::userland::lifecycle::process_due_real_timers();
-        crate::userland::lifecycle::process_expired_sleeps();
+        if crate::process::timer::take_work_pending() {
+            let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+            let _ = crate::process::timer::process_due(now);
+        }
 
         // Tests and other non-kernel-thread launchers use this inline loop,
         // so the ordinary `net-rx-tx` kernel worker is not scheduled while
@@ -384,103 +465,21 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
         } else {
             // Nothing to dispatch; wait for an interrupt (timer, input)
             // that might unblock our awaited process.
-            unsafe {
-                core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags));
-            }
+            // Keep IF enabled after the wake. The next ring-3 dispatch saves
+            // this kernel context; saving it with IF cleared would return the
+            // test runner/main-loop caller with interrupts permanently off
+            // after the user process exits.
+            x86_64::instructions::interrupts::enable_and_hlt();
         }
     }
 }
 
-/// Handle preemption from the kernel main loop
-///
-/// This should be called when `check_and_clear_preemption()` returns true.
-/// It performs the actual context switch.
-pub fn handle_preemption() {
-    use crate::arch::x86_64::context_switch::{switch_context, switch_to_context};
-
-    let mut sched = scheduler::SCHEDULER.lock();
-
-    // Get current process if any
-    let current_pid = sched.current();
-
-    // Schedule the next process
-    let next_pid = match sched.schedule() {
-        Some(pid) => pid,
-        None => return, // No process to run
-    };
-
-    // If same as current, no switch needed
-    if current_pid == Some(next_pid) {
-        return;
-    }
-
-    // If there was a current process, do a full context switch
-    if let Some(cur_pid) = current_pid {
-        let old_ctx = match sched.get_context_mut(cur_pid) {
-            Some(ctx) => ctx as *mut CpuContext,
-            None => return,
-        };
-        let new_ctx_ptr = match sched.get_context(next_pid) {
-            Some(ctx) => ctx as *const CpuContext,
-            None => return,
-        };
-        let stack_top = unsafe { (*new_ctx_ptr).rsp };
-
-        // Drop the lock before switching
-        drop(sched);
-
-        // Pre-map the stack pages before switching context
-        unsafe {
-            let page_size = 4096u64;
-            for offset in (0..page_size * 4).step_by(page_size as usize) {
-                let addr = stack_top - offset - 8;
-                core::ptr::read_volatile(addr as *const u8);
-            }
-        }
-
-        // Perform the context switch
-        unsafe {
-            switch_context(old_ctx, new_ctx_ptr);
-        }
-    } else {
-        // No current process - just switch to the new one
-        let new_ctx = match sched.get_context(next_pid) {
-            Some(ctx) => *ctx,
-            None => return,
-        };
-        let stack_top = new_ctx.rsp;
-
-        // Drop the lock before switching
-        drop(sched);
-
-        // Pre-map the stack pages before switching context
-        unsafe {
-            let page_size = 4096u64;
-            for offset in (0..page_size * 4).step_by(page_size as usize) {
-                let addr = stack_top - offset - 8;
-                core::ptr::read_volatile(addr as *const u8);
-            }
-        }
-
-        // Switch to new process (no save needed)
-        unsafe {
-            switch_to_context(&new_ctx);
-        }
-    }
-}
-
-/// Try to run any scheduled processes
+/// Dispatch one runnable entity from the kernel idle/main-loop context.
 ///
 /// Call this from the kernel main loop to check if there are processes
 /// waiting to run and switch to them. Saves the kernel context so we can
 /// return here when the process is preempted or terminates.
 ///
-/// With timer-based preemption:
-/// - Kernel switches to a process
-/// - Timer interrupt fires during process execution
-/// - Timer handler saves process context and switches back to kernel
-/// - Kernel runs its loop (input, render) then calls this again
-/// - Kernel switches to the next ready process
 pub fn try_run_scheduled_processes() {
     use crate::arch::x86_64::context_switch::switch_context_full_restore;
     use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
@@ -492,72 +491,25 @@ pub fn try_run_scheduled_processes() {
         _ => return,
     };
 
-    // Only run if there are ready processes
-    if sched.ready_count() == 0 {
+    if sched.ready_entity_count() == 0 {
         return;
     }
 
-    if let Some(next_pid) = sched.schedule() {
-        // Get process name for logging
-        let process_name = sched
-            .get_process(next_pid)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| alloc::string::String::from("unknown"));
+    let target = next_switch_target(&mut sched);
+    drop(sched);
 
-        if let Some(next_ctx) = sched.get_context(next_pid) {
-            let next_ctx = next_ctx as *const CpuContext;
-
-            // Get context values BEFORE dropping the lock
-            let ctx_copy = unsafe { *next_ctx };
-
-            drop(sched);
-
-            crate::debug_trace!(
-                "try_run: Switching to process {:?} '{}'",
-                next_pid,
-                process_name
-            );
-            crate::debug_trace!("try_run:   Target RIP: {:#x}", ctx_copy.rip);
-            crate::debug_trace!("try_run:   Target RSP: {:#x}", ctx_copy.rsp);
-
-            // Pre-map the stack pages before switching context
-            // This is critical because if we page fault with an unmapped stack,
-            // the CPU can't push the exception frame and we get a triple fault
-            let stack_top = ctx_copy.rsp;
-            crate::debug_trace!("try_run: Pre-mapping stack pages near {:#x}", stack_top);
-            unsafe {
-                // Touch a few pages at the top of the stack to ensure they're mapped
-                let page_size = 4096u64;
-                for offset in (0..page_size * 4).step_by(page_size as usize) {
-                    let addr = stack_top - offset - 8;
-                    // Volatile read to trigger page fault (which will map the page)
-                    core::ptr::read_volatile(addr as *const u8);
-                }
-            }
-            crate::debug_trace!("try_run: Stack pages pre-mapped successfully");
-
-            // Mark that we're entering a spawned process
+    match target {
+        SwitchTarget::Process(context) => {
             IN_SPAWNED_PROCESS.store(true, Ordering::Release);
-
-            // Save kernel context to global for timer handler to use
-            // The switch_context_full_restore will save our current state here
-            let kernel_ctx_ptr = &raw mut KERNEL_CONTEXT;
-
-            crate::debug_trace!("try_run: About to switch_context_full_restore");
-
-            // Switch to the process using full context restore
-            // This saves kernel's callee-saved regs and restores ALL process regs
-            // When the timer preempts, it switches back to kernel context
             unsafe {
-                switch_context_full_restore(kernel_ctx_ptr, next_ctx);
+                switch_context_full_restore(&raw mut KERNEL_CONTEXT, &context);
             }
-
-            // We get here when:
-            // 1. Timer preempted the process and switched back to kernel context
-            // 2. Process terminated and switched to kernel context
             IN_SPAWNED_PROCESS.store(false, Ordering::Release);
-            crate::debug_trace!("Returned to kernel from process");
         }
+        SwitchTarget::User(pid) => unsafe {
+            crate::userland::switch::save_kernel_and_resume_ring3(pid, &raw mut KERNEL_CONTEXT);
+        },
+        SwitchTarget::Kernel => {}
     }
 }
 
@@ -578,20 +530,8 @@ pub fn get_process_list() -> alloc::vec::Vec<ProcessInfo> {
 /// This immediately marks the process as terminated and removes it
 /// from the scheduler.
 pub fn terminate_process(pid: ProcessId) {
+    timer::cancel_entity(entity::EntityId::KernelThread(pid));
     scheduler::SCHEDULER.lock().terminate(pid);
-}
-
-/// Update CPU percentages for all processes
-///
-/// Call this periodically (every ~50 ticks / 500ms) to calculate CPU usage.
-/// The percentage represents CPU time used in the elapsed window.
-///
-/// # Arguments
-/// * `elapsed_ticks` - Number of timer ticks since last update
-pub fn update_cpu_percentages(elapsed_ticks: u64) {
-    scheduler::SCHEDULER
-        .lock()
-        .update_cpu_percentages(elapsed_ticks);
 }
 
 // =============================================================================
@@ -606,6 +546,13 @@ pub fn update_cpu_percentages(elapsed_ticks: u64) {
 /// # Arguments
 /// * `ticks` - Number of timer ticks to sleep (minimum 1)
 pub fn sleep_ticks(ticks: u64) {
+    sleep_ticks_with_contract(ticks, None);
+}
+
+pub fn sleep_ticks_with_contract(
+    ticks: u64,
+    latency: Option<crate::process::entity::LatencyContract>,
+) {
     use crate::arch::x86_64::context_switch::switch_context;
     use crate::arch::x86_64::interrupts::get_timer_ticks;
     use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
@@ -613,7 +560,7 @@ pub fn sleep_ticks(ticks: u64) {
 
     let ticks = ticks.max(1);
 
-    let result: Option<(*mut CpuContext, SwitchTarget)> = {
+    let result: Option<(*mut CpuContext, SwitchTarget, ProcessId, u64)> = {
         let mut sched = scheduler::SCHEDULER.lock();
         let current_pid = match sched.current() {
             Some(pid) => pid,
@@ -625,8 +572,8 @@ pub fn sleep_ticks(ticks: u64) {
             pcb.last_activity_tick = get_timer_ticks();
         }
 
-        // Mark as sleeping
-        sched.sleep_current(ticks);
+        let wake_tick = get_timer_ticks().saturating_add(ticks);
+        sched.block_current(BlockReason::SleepingUntilTick(wake_tick));
 
         // Get context pointer for current process
         let old_ctx = match sched.get_context_mut(current_pid) {
@@ -634,29 +581,27 @@ pub fn sleep_ticks(ticks: u64) {
             None => return,
         };
 
-        // Check if there are any real processes to run (not counting idle)
-        let switch_target = if sched.ready_count() > 0 {
-            // Get the next process
-            if let Some(next_pid) = sched.schedule() {
-                if let Some(ctx) = sched.get_context(next_pid) {
-                    SwitchTarget::Process(*ctx)
-                } else {
-                    SwitchTarget::Kernel
-                }
-            } else {
-                SwitchTarget::Kernel
-            }
-        } else {
-            // No ready processes - return to kernel context
-            SwitchTarget::Kernel
-        };
+        let switch_target = next_switch_target(&mut sched);
 
-        Some((old_ctx, switch_target))
+        Some((old_ctx, switch_target, current_pid, wake_tick))
     };
 
-    let Some((old_ctx_ptr, switch_target)) = result else {
+    let Some((old_ctx_ptr, switch_target, current_pid, wake_tick)) = result else {
         return;
     };
+
+    crate::process::timer::arm(
+        crate::process::timer::TimerKey {
+            entity: crate::process::entity::EntityId::KernelThread(current_pid),
+            kind: crate::process::timer::TimerKind::KernelSleep,
+        },
+        wake_tick,
+        crate::process::timer::TimerAction::Wake {
+            entity: crate::process::entity::EntityId::KernelThread(current_pid),
+            latency,
+        },
+    )
+    .expect("timer capacity exceeded while arming kernel sleep");
 
     // Perform the context switch
     match switch_target {
@@ -679,6 +624,9 @@ pub fn sleep_ticks(ticks: u64) {
                 switch_context(old_ctx_ptr, &new_ctx);
             }
         }
+        SwitchTarget::User(pid) => unsafe {
+            crate::userland::switch::save_kernel_and_resume_ring3(pid, old_ctx_ptr);
+        },
         SwitchTarget::Kernel => {
             // Return to kernel context - save our state and switch to kernel
             IN_SPAWNED_PROCESS.store(false, Ordering::Release);
@@ -694,7 +642,20 @@ pub fn sleep_ticks(ticks: u64) {
 /// Target for context switch
 enum SwitchTarget {
     Process(CpuContext),
+    User(u32),
     Kernel,
+}
+
+fn next_switch_target(sched: &mut scheduler::Scheduler) -> SwitchTarget {
+    match sched.schedule_entity() {
+        Some(entity::EntityId::KernelThread(pid)) => sched
+            .get_context(pid)
+            .copied()
+            .map(SwitchTarget::Process)
+            .unwrap_or(SwitchTarget::Kernel),
+        Some(entity::EntityId::UserProcess(pid)) => SwitchTarget::User(pid),
+        None => SwitchTarget::Kernel,
+    }
 }
 
 /// Sleep the current process for approximately N milliseconds
@@ -720,5 +681,9 @@ pub fn sleep_ms(ms: u64) {
 /// * `pid` - The process to signal
 /// * `signal` - The event type to signal
 pub fn signal_process(pid: ProcessId, signal: WakeEvents) {
+    crate::process::timer::cancel(crate::process::timer::TimerKey {
+        entity: crate::process::entity::EntityId::KernelThread(pid),
+        kind: crate::process::timer::TimerKind::KernelSleep,
+    });
     scheduler::SCHEDULER.lock().signal_process(pid, signal);
 }

@@ -91,6 +91,7 @@ impl VirtioTablet {
 
         // Complete initialization
         device.finish_init();
+        device.pci.disable_intx();
 
         debug_info!(
             "VirtIO tablet initialized (status: 0x{:02x})",
@@ -206,7 +207,7 @@ impl VirtioTablet {
                         } else {
                             self.buttons &= !0x01;
                         }
-                        debug_info!(
+                        debug_trace!(
                             "Tablet left button: {}",
                             if pressed { "pressed" } else { "released" }
                         );
@@ -217,7 +218,7 @@ impl VirtioTablet {
                         } else {
                             self.buttons &= !0x02;
                         }
-                        debug_info!(
+                        debug_trace!(
                             "Tablet right button: {}",
                             if pressed { "pressed" } else { "released" }
                         );
@@ -228,7 +229,7 @@ impl VirtioTablet {
                         } else {
                             self.buttons &= !0x04;
                         }
-                        debug_info!(
+                        debug_trace!(
                             "Tablet middle button: {}",
                             if pressed { "pressed" } else { "released" }
                         );

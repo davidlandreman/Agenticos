@@ -3,46 +3,34 @@
 //!
 //! ## Why this exists
 //!
-//! The remaining kernel GUI app launchers (`tasks`,
-//! `explorer`) were previously reachable only as kernel-shell commands
-//! registered in `src/process/manager.rs::ProcessManager`. With zsh as
-//! the default shell, those typed names need to resolve through ring-3
-//! PATH lookup. The `/bin/<gui_applet>` rewrite in
+//! Kernel-side GUI apps were previously reachable only as kernel-shell
+//! commands registered in `src/process/manager.rs::ProcessManager`.
+//! With zsh as the default shell, those typed names resolve through
+//! ring-3 PATH lookup: the `/bin/<gui_applet>` rewrite in
 //! [`crate::userland::bin_namespace`] sends them to the GUILAUNCH
 //! multicall binary, which then issues `gui_launch(<name>)`. This
 //! module is where that syscall lands.
 //!
-//! These legacy GUI apps stay kernel-space. New and migrated apps use the
-//! ring-3 GUI ABI directly; notepad is the first migration.
-//!
-//! ## Source of truth for the applet name list
-//!
-//! [`crate::userland::bin_namespace::GUI_APPLETS`] holds the list that
-//! the kernel exposes under `/bin/`. The `match` below MUST cover every
-//! name in that list. A test asserts the two stay in sync.
+//! **The applet table is empty today** — every GUI app (File Manager,
+//! Notepad, Calc, Painting, GL Arena, Task Manager) has migrated to a
+//! standalone ring-3 ELF with a direct `/bin` rewrite. The dispatch
+//! skeleton stays so a future workload that genuinely requires ring-0
+//! privileges can add an arm; keep any new arm in sync with
+//! [`crate::userland::bin_namespace::GUI_APPLETS`] — a test asserts
+//! the two stay in sync.
 
-use crate::process::{spawn_process, ProcessId, RunnableProcess};
+use crate::process::ProcessId;
 use crate::userland::abi::ENOENT;
-use alloc::{boxed::Box, string::String, vec::Vec};
 
 /// Spawn the GUI app named `name` as a kernel-side process. Returns the
 /// spawned PID on success or `-ENOENT` if the name doesn't match any
-/// known GUI applet.
-///
-/// Keep the match arms in sync with
-/// [`crate::userland::bin_namespace::GUI_APPLETS`].
+/// known GUI applet — which today is every name, since the table is
+/// empty. When re-adding an arm, restore the `spawn_process` +
+/// factory-closure shape that the pre-migration table used (see git
+/// history) and list the name in `GUI_APPLETS`.
 pub fn spawn_by_name(name: &str) -> Result<ProcessId, i64> {
-    let factory: fn(Vec<String>) -> Box<dyn RunnableProcess> = match name {
-        "explorer" => crate::commands::explorer::create_explorer_process,
-        "tasks" => crate::commands::tasks::create_tasks_process,
-        _ => return Err(ENOENT),
-    };
-    let process_name = String::from(name);
-    let pid = spawn_process(process_name.clone(), None, move || {
-        let mut process = factory(Vec::new());
-        process.run();
-    });
-    Ok(pid)
+    let _ = name;
+    Err(ENOENT)
 }
 
 #[cfg(feature = "test")]
@@ -51,14 +39,9 @@ mod tests_internal {
 
     /// Every name in [`GUI_APPLETS`] must be handled by `spawn_by_name`;
     /// otherwise PATH lookup succeeds but execve dispatches to a launcher
-    /// that hits `-ENOENT` from this table. Inverse drift (a name in the
-    /// match but not in `GUI_APPLETS`) is fine — it just means the name
-    /// isn't reachable via `/bin/<name>` from zsh, which is rejectable
-    /// during code review.
+    /// that hits `-ENOENT` from this table. With the table empty, the
+    /// invariant is that `GUI_APPLETS` is empty too.
     fn test_every_gui_applet_dispatches() {
-        // We can't actually call `spawn_by_name` here without standing up
-        // a real scheduler context. Instead, drive the match arms via a
-        // lookup helper that mirrors the match and never spawns.
         for &name in GUI_APPLETS {
             assert!(
                 handler_for(name).is_some(),
@@ -72,16 +55,17 @@ mod tests_internal {
     /// success).
     fn test_unknown_name_is_enoent() {
         assert!(handler_for("not-a-real-gui-app").is_none());
+        assert_eq!(
+            crate::commands::gui_launch_table::spawn_by_name("not-a-real-gui-app"),
+            Err(crate::userland::abi::ENOENT),
+        );
     }
 
     /// Mirror of `spawn_by_name`'s match — returns a unit token for every
     /// name the real function would handle. Used by the test above to
     /// assert coverage without spawning.
-    fn handler_for(name: &str) -> Option<()> {
-        match name {
-            "explorer" | "tasks" => Some(()),
-            _ => None,
-        }
+    fn handler_for(_name: &str) -> Option<()> {
+        None
     }
 
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {

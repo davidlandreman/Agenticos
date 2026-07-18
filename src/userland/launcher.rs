@@ -74,15 +74,11 @@ pub fn launch_user_binary(
     // (the loader uses the active CR3). The mutex is dropped before
     // `wait_for_ring3_exit` so two concurrent ring-3 processes still
     // run concurrently — only their setup phases serialize.
+    // Storage is asynchronous and does not depend on the active CR3, so keep
+    // the potentially long file read outside the address-space setup lock.
+    let (file, bytes) = read_file_bytes(path)?;
     let pid = {
         let _setup_guard = BINARY_SETUP_MUTEX.lock();
-
-        // Pause compositor allocation/render work for the complete load and
-        // setup transaction. Disk I/O remains preemptible, but it happens
-        // before changing CR3 so another kernel thread cannot resume under a
-        // partially-built user address space.
-        let _load_guard = crate::userland::lifecycle::BinaryLoadGuard::enter();
-        let (file, bytes) = read_file_bytes(path)?;
 
         let aspace = crate::userland::address_space::AddressSpace::new()
             .map_err(|e| format!("AddressSpace::new: {:?}", e))?;
@@ -113,7 +109,6 @@ pub fn launch_user_binary(
     // space can take long enough to make the desktop appear frozen.
     {
         let _setup_guard = BINARY_SETUP_MUTEX.lock();
-        let _load_guard = crate::userland::lifecycle::BinaryLoadGuard::enter();
         // `wait_for_ring3_exit` sets this too, but it is global scheduler
         // state and another ring-3 slice may have changed it before this
         // launcher reacquired the setup mutex. Reassert the exact child before

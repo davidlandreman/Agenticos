@@ -1,6 +1,6 @@
 # `src/fs/` — Filesystem Layer
 
-Read-only filesystem stack: block devices → MBR partition table → VFS → FAT12/16/32 with `Arc`-based file handles.
+Filesystem stack: checked block I/O → VFS → ext2/FAT/tmpfs/overlay with mount-pinned `Arc` file handles.
 
 ## Key files
 
@@ -9,6 +9,8 @@ Read-only filesystem stack: block devices → MBR partition table → VFS → FA
 - `vfs.rs` — virtual filesystem layer with mount management and filesystem detection.
 - `file_handle.rs` — `Arc`-based `File` and directory handle API.
 - `fs_manager.rs` — high-level filesystem operations that the rest of the kernel calls.
+- `block_io.rs` — checked byte and filesystem-block I/O over sector devices.
+- `ext2/` — writable ext2 parser and allocator, including indirect blocks, directories, hard links, symlinks, sparse files, and Unix metadata.
 - `fat/` — FAT12/16/32 implementation. `filesystem.rs` (FAT operations + long-name-aware `walk_directory`), `boot_sector.rs` (BPB parsing), `fat_table.rs` (cluster chain following), `directory.rs` (directory entry parsing — `DirectoryIterator` is the SFN-only low-level primitive), `lfn.rs` (VFAT LFN decoding + lowercase-attr-bit short-name formatting), `types.rs`.
 
 ## Architecture (bottom up)
@@ -17,11 +19,11 @@ Read-only filesystem stack: block devices → MBR partition table → VFS → FA
 Block device (src/drivers/block.rs, ide.rs)
   → MBR partition table (partition.rs)
     → VFS / mount manager (vfs.rs)
-      → Concrete filesystem (fat/)
+      → Concrete filesystem (ext2/, fat/, tmpfs/, overlay/)
         → File handles (file_handle.rs, fs_manager.rs)
 ```
 
-Block devices and the IDE driver live in `src/drivers/` — see `src/drivers/CLAUDE.md`. The `Arc` used in handles is the kernel's custom impl in `src/lib/arc.rs` (NOT `alloc::sync::Arc`) — see `src/lib/CLAUDE.md`.
+Block devices and the VirtIO-blk driver live in `src/drivers/` — see `src/drivers/CLAUDE.md`. The `Arc` used in handles is the kernel's custom impl in `src/lib/arc.rs` (NOT `alloc::sync::Arc`) — see `src/lib/CLAUDE.md`.
 
 ## File handle API
 
@@ -39,10 +41,9 @@ Cleanup is automatic when the last `Arc` reference drops.
 
 ## Current limitations
 
-- **FAT mkdir / rmdir / rename on `/data` deferred.** The directory-mutation primitives (`.`/`..` entry generation, empty-dir check, cross-dir rename with proper flush ordering) are not implemented. Userland sees `UnsupportedOperation` for these on `/data`. Single-level file create/write/unlink works.
 - **No subdirectory traversal yet** in some higher-level APIs (FAT subdir reads work via `walk_directory`; some legacy paths still assume single-level).
-- **FAT only on disk.** No other on-disk filesystem implementation.
-- **No real `fsck`.** Crash recovery is best-effort per the per-op flush ordering. Dirty-bit detection refuses writable mount on detected uncleanness; the actual repair sweep is a follow-up.
+- **No in-kernel fsck.** Dirty ext2 volumes mount read-only unless the explicit developer override is set. Use `scripts/fsck-data.sh`; repairs are host-side and opt-in.
+- **Supported ext profile is deliberately narrow.** ext3 journals and ext4-only features are rejected. The generated image uses `filetype`, `sparse_super`, and `large_file` only.
 
 See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for the full plan.
 
@@ -52,19 +53,20 @@ See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for
   /          → overlay(upper = Tmpfs, lower = boot FAT partition)
   /work      → directory on the overlay, provisioned at boot (scratch/compiler output)
   /host      → FAT (vvfat-backed, read-only; /host/sysroot is the TCC musl sysroot)
-  /data      → FAT32 (writable, Secondary Master IDE, persistent)
+  /data      → ext2 (writable, `agenticos-data` VirtIO disk, persistent)
+  /legacy-data → optional old FAT image (read-only, `agenticos-legacy` VirtIO disk)
   /bin/<applet> → synthesized at syscall layer (src/userland/bin_namespace.rs)
 ```
 
 The overlay's upper is a fresh `Tmpfs` constructed at boot in `vfs::mount_overlay_root`; the lower is the bootloader-built FAT image. `/bin` is invisible to the FS layer — the syscall dispatcher intercepts opens/access/stat before reaching the VFS. `/work` is not a mount: `src/kernel.rs` mkdirs it idempotently on the overlay after overlay-state hydration.
 
-**Seek past EOF** is allowed on writable filesystems (`File::seek` gates on `vfs_is_writable`): the gap zero-fills on the next write. tmpfs gets this for free (`resize`); the FAT write path appends explicit zeros from EOF to the write position first, because `write_file_at` links gap clusters while walking to an offset but never writes their data. Read-only mounts keep the historical `SeekOutOfBounds` rejection, as do overlay-lower handles via the delegated FAT-level check.
+**Seek past EOF** is allowed on writable filesystems, with the gap zero-filling on the next write; policy lives per-filesystem (`File::seek` just delegates). tmpfs gets it for free (`resize`), ext2 writes sparse gaps natively, and the FAT write path appends explicit zeros from EOF to the write position first, because `write_file_at` links gap clusters while walking to an offset but never writes their data. Read-only FAT mounts (`/host`, overlay-lower handles, `/legacy-data`) keep the `position > size` rejection at the FAT-level seek.
 
 Writes under `/` go through copy-up into tmpfs; persistence happens via the `sync(2)` syscall (BusyBox `sync` applet) which flushes the upper to `/data/overlay-state.{0,1}` double-buffered blob with a 1-byte pointer commit. On boot, `restore_overlay_upper_from_data` validates the active blob's CRC32 and hydrates the upper tmpfs from it.
 
 Copy-up is size-capped at 64 KiB (`overlay::filesystem::MAX_COPY_UP_BYTES`) to bound the heap-burst risk — bigger files surface as `EFBIG`.
 
-Writes directly to `/data/<file>` skip the overlay and go straight to the FAT writer — persistent and immediate, no `sync` needed.
+Writes directly to `/data/<file>` skip the overlay and go straight to ext2. `fsync`, `fdatasync`, or `sync` checkpoints the filesystem clean bit and flushes the device.
 
 ## tmpfs and overlay
 
@@ -99,5 +101,6 @@ Why it matters: before the fast path, every `File::read` call on a multi-MiB fil
 - **Mount point case is byte-exact.** `vfs.rs::find_filesystem` uses `path.starts_with(mount.path)` so `/host/FOO.TXT` works and `/HOST/FOO.TXT` returns NotFound. The mount POINT is byte-exact lowercase; files inside the mount are matched case-insensitively against their decoded long names.
 - File names within mounts are case-insensitive (ASCII fold). `/system.ttf` and `/SYSTEM.TTF` both resolve to the same file.
 - The FAT cluster-chain follower in `fat_table.rs` does not currently cache; reading a large file walks the FAT each cluster. Acceptable for current sizes; revisit if performance bites.
-- IDE reads are PIO with interrupts disabled per `read_sectors` call — see `src/drivers/CLAUDE.md`. A cluster-walk that issues many `read_sectors` calls is therefore a sequence of small IRQ-disabled windows (one per cluster), not one big window.
+- VirtIO-blk reads and writes use owned DMA pages and sleep their caller until PCI completion; filesystem code must not retain spin locks across block calls.
+- Whole-file FAT reads cache the active FAT sector while walking a cluster chain, then coalesce consecutive clusters into large `read_blocks` calls. This is load-bearing for executable startup: do not regress to one asynchronous request per cluster/FAT entry.
 - The internal FAT `FileHandle.name` field is `[u8; 13]` — a legacy fixed slot. Long names are truncated when stored there, but `stat` and `enumerate_dir` use the full long-name path; the field is only authoritative for SFN-bounded callers.

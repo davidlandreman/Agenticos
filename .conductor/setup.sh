@@ -33,6 +33,37 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
 fi
 echo "✓ qemu-system-x86_64: $(command -v qemu-system-x86_64)"
 
+# e2fsprogs creates and validates the Linux-compatible /data image. Homebrew
+# installs it keg-only, so accept either PATH or the standard opt prefixes.
+find_e2fs_tool() {
+    local tool="$1"
+    local candidate
+    if command -v "$tool" >/dev/null 2>&1; then
+        command -v "$tool"
+        return 0
+    fi
+    for candidate in \
+        "/opt/homebrew/opt/e2fsprogs/sbin/$tool" \
+        "/opt/homebrew/opt/e2fsprogs/bin/$tool" \
+        "/usr/local/opt/e2fsprogs/sbin/$tool" \
+        "/usr/local/opt/e2fsprogs/bin/$tool"; do
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+for ext_tool in mke2fs e2fsck debugfs; do
+    if ! ext_tool_path="$(find_e2fs_tool "$ext_tool")"; then
+        echo "✗ $ext_tool is required for the ext2 /data image." >&2
+        echo "  macOS: brew install e2fsprogs" >&2
+        exit 1
+    fi
+    echo "✓ $ext_tool: $ext_tool_path"
+done
+
 # .claude/settings.local.json is gitignored (personal permissions). Seed it
 # from the main checkout if available; otherwise create an empty allowlist
 # so the agent has somewhere to add per-workspace approvals.

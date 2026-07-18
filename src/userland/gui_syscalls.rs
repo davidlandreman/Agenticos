@@ -1,4 +1,4 @@
-//! AgenticOS ring-3 GUI syscall handlers (5001-5004).
+//! AgenticOS ring-3 GUI syscall handlers (5001-5005).
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -14,10 +14,26 @@ const MAX_TITLE_BYTES: usize = 256;
 const MAX_SURFACE_DIMENSION: u32 = 4096;
 const MAX_PRESENT_BYTES: usize = 64 * 1024 * 1024;
 
+fn copy_title(pointer: u64, length: usize) -> Result<String, i64> {
+    if length > MAX_TITLE_BYTES {
+        return Err(EINVAL);
+    }
+    let mut title_bytes = vec![0u8; length];
+    if crate::userland::usercopy::copy_from_user(&mut title_bytes, pointer).is_err() {
+        return Err(EFAULT);
+    }
+    if title_bytes.is_empty() {
+        return Ok(String::from("AgenticOS Application"));
+    }
+    core::str::from_utf8(&title_bytes)
+        .map(ToString::to_string)
+        .map_err(|_| EINVAL)
+}
+
 #[cfg(feature = "test")]
 pub const TEST_GUI_CALLER_PID: u32 = u32::MAX - 1;
 
-fn caller_pid() -> Result<u32, i64> {
+pub(crate) fn caller_pid() -> Result<u32, i64> {
     match crate::userland::lifecycle::current_user_pid() {
         Some(pid) => Ok(pid),
         None => {
@@ -49,17 +65,9 @@ pub fn gui_win_create_handler(args: &mut SyscallArgs) -> i64 {
     {
         return EINVAL;
     }
-    let mut title_bytes = vec![0u8; title_len];
-    if crate::userland::usercopy::copy_from_user(&mut title_bytes, args.rdx).is_err() {
-        return EFAULT;
-    }
-    let title = if title_bytes.is_empty() {
-        String::from("AgenticOS Application")
-    } else {
-        match core::str::from_utf8(&title_bytes) {
-            Ok(value) => value.to_string(),
-            Err(_) => return EINVAL,
-        }
+    let title = match copy_title(args.rdx, title_len) {
+        Ok(title) => title,
+        Err(error) => return error,
     };
     let pid = match caller_pid() {
         Ok(pid) => pid,
@@ -209,6 +217,7 @@ pub fn gui_win_destroy_handler(args: &mut SyscallArgs) -> i64 {
         Ok(pid) => pid,
         Err(error) => return error,
     };
+    crate::userland::gui_gl::destroy_for_window(pid, args.rdi as u32);
     let record = match gui::take_window(pid, args.rdi as u32) {
         Some(record) => record,
         None => return ENOENT,
@@ -216,5 +225,34 @@ pub fn gui_win_destroy_handler(args: &mut SyscallArgs) -> i64 {
     match crate::window::with_window_manager(|wm| wm.destroy_window(record.frame_id)) {
         Some(()) => 0,
         None => EIO,
+    }
+}
+
+/// `(handle, title_ptr, title_len) -> 0 | -errno`.
+pub fn gui_win_set_title_handler(args: &mut SyscallArgs) -> i64 {
+    let pid = match caller_pid() {
+        Ok(pid) => pid,
+        Err(error) => return error,
+    };
+    let record = match gui::window_record(pid, args.rdi as u32) {
+        Some(record) => record,
+        None => return ENOENT,
+    };
+    let title = match copy_title(args.rsi, args.rdx as usize) {
+        Ok(title) => title,
+        Err(error) => return error,
+    };
+    let mut updated = false;
+    let found = crate::window::with_window_manager(|wm| {
+        wm.with_window_mut(record.frame_id, |window| {
+            if let Some(frame) = window.as_frame_window_mut() {
+                frame.set_title(&title);
+                updated = true;
+            }
+        })
+    });
+    match found {
+        Some(true) if updated => 0,
+        _ => EIO,
     }
 }

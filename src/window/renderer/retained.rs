@@ -3,8 +3,8 @@ use alloc::collections::{BTreeMap, BTreeSet};
 
 use crate::drivers::virtio::gpu::{ScanoutResource, VirtioGpu};
 use crate::graphics::composition::{
-    CompositionEngine, CompositionEngineKind, CpuCompositionEngine, RenderStats,
-    VirglCompositionEngine,
+    ClientGlFrame, ClientGlId, ClientGlInfo, CompositionEngine, CompositionEngineKind,
+    CpuCompositionEngine, RenderStats, VirglCompositionEngine,
 };
 use crate::graphics::scene::{Layer, SceneFrame};
 use crate::graphics::surface::{
@@ -87,6 +87,36 @@ impl RetainedRenderer {
 
     pub fn engine_kind(&self) -> CompositionEngineKind {
         self.engine.kind()
+    }
+
+    pub fn create_gl_client(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<ClientGlId, RetainedRendererError> {
+        self.engine
+            .create_gl_client(width, height)
+            .map_err(|_| RetainedRendererError::Composition)
+    }
+
+    pub fn submit_gl_client_frame(
+        &mut self,
+        id: ClientGlId,
+        frame: ClientGlFrame,
+    ) -> Result<(), RetainedRendererError> {
+        self.engine
+            .submit_gl_client_frame(id, frame)
+            .map_err(|_| RetainedRendererError::Composition)
+    }
+
+    pub fn gl_client_info(&self, id: ClientGlId) -> Option<ClientGlInfo> {
+        self.engine.gl_client_info(id)
+    }
+
+    pub fn destroy_gl_client(&mut self, id: ClientGlId) -> Result<(), RetainedRendererError> {
+        self.engine
+            .destroy_gl_client(id)
+            .map_err(|_| RetainedRendererError::Composition)
     }
 
     pub fn ensure_surface(
@@ -177,10 +207,27 @@ impl RetainedRenderer {
         scene: &SceneFrame,
         damage: &[Rect],
     ) -> Result<RenderStats, RetainedRendererError> {
+        let mut snapshots = BTreeMap::<SurfaceId, alloc::vec::Vec<Rect>>::new();
+        for layer in &scene.layers {
+            let Some(surface_id) = layer.canonical_surface_id() else {
+                continue;
+            };
+            if !layer.visible || layer.opacity == 0 || snapshots.contains_key(&surface_id) {
+                continue;
+            }
+            if let Some(surface) = self.surfaces.get(&surface_id) {
+                snapshots.insert(surface_id, surface.damage_snapshot());
+            }
+        }
         let stats = self
             .engine
             .compose(scene, &self.surfaces, damage)
             .map_err(|_| RetainedRendererError::Composition)?;
+        for (surface_id, snapshot) in snapshots {
+            if let Some(surface) = self.surfaces.get_mut(&surface_id) {
+                let _ = surface.acknowledge_damage(&snapshot);
+            }
+        }
         self.last_stats = stats;
         Ok(stats)
     }

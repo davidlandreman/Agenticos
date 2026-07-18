@@ -7,9 +7,14 @@ Low-level x86_64 plumbing: GDT/TSS, IDT, naked-asm context switching, preemption
 - `gdt.rs` — GDT layout, TSS, IST stacks. Loaded once at boot via `gdt::init()`.
 - `fpu.rs` — `enable_sse()` configures CR0/CR4 for SSE/SSE2 execution. Required before any ring-3 transition; musl + libstdc++ binaries emit SSE2 in `__init_tls` before reaching `main` and would `#UD` without it. The kernel target spec uses `+soft-float`, so the kernel itself never needs SSE — but ring 3 does.
 - `interrupts.rs` — IDT setup, all exception handlers, PIC/PIT configuration, hardware-IRQ entry points.
+- `rtc.rs` — bounded, stable PC CMOS RTC snapshots with BCD/binary and
+  12/24-hour decoding. Sampled once by `crate::time` after PIT initialization;
+  it must always restore NMI-enabled state and degrade to an error rather than
+  stalling boot.
 - `context_switch.rs` — naked-asm `switch_*` functions used by the cooperative scheduler.
-- `preemption.rs` — naked-asm `timer_interrupt_handler_preemptive` and Rust-side `timer_handler_inner`. Round-robin preemptive scheduler. The CPL=3 branch (U5) calls `lifecycle::try_preempt_ring3` and, if another ring-3 process is runnable, diverges via `switch::resume_ring3`; otherwise it iretq's back to the same process. CPL=0 branch handles kernel-thread preemption via the existing `CpuContext` / `KERNEL_CONTEXT` switch path.
-- `interrupt_guard.rs` — RAII guard for `cli`/`sti` regions plus `InterruptMutex`, the required mutex wrapper for state shared by timer-preemptible kernel threads and IF-cleared interrupt/SYSCALL paths. Use the guard anywhere a sequence must be atomic with respect to the scheduler — most importantly inside IDE PIO transactions (see `src/drivers/CLAUDE.md`).
+- `preemption.rs` — naked-asm `timer_interrupt_handler_preemptive` and Rust-side `timer_handler_inner`. Round-robin preemptive scheduler. Each tick first wakes due ring-3 `nanosleep` sleepers (`lifecycle::process_expired_sleeps`, bounded `try_lock` scan — the kernel main loop is not a reliable periodic context). The CPL=3 branch (U5) charges one tick to the current ring-3 process's `utime_ticks` (PROCESS_TABLE `try_lock`; a contended tick is dropped — sampling accounting for `/proc`), then calls `lifecycle::try_preempt_ring3` and, if another ring-3 process is runnable, diverges via `switch::resume_ring3`; otherwise it iretq's back to the same process. CPL=0 branch handles kernel-thread preemption via the existing `CpuContext` / `KERNEL_CONTEXT` switch path.
+- `preemption_guard.rs` — nesting-safe `PreemptionGuard` and `PreemptionMutex`. They leave hardware IRQs enabled so PIT time and device input continue, while the CPL=0 timer path takes a minimal tick/EOI fast path and defers scheduler housekeeping and context switches until the outermost protected critical section ends. The nesting counter is global only because the kernel is single-CPU.
+- `interrupt_guard.rs` — RAII guard for `cli`/`sti` regions plus `InterruptMutex`, the required mutex wrapper for state shared by timer-preemptible kernel threads and IF-cleared interrupt/SYSCALL paths. The VirtIO block registry uses it so PCI completion cannot interrupt a queue mutation (see `src/drivers/CLAUDE.md`).
 
 ## GDT layout (load-bearing)
 
@@ -31,7 +36,7 @@ Single static instance. `privilege_stack_table[0]` (`rsp0`) holds the kernel sta
 
 ## Boot ordering
 
-`gdt::init()` runs *before* `interrupts::init_idt()` in `src/kernel.rs`. The IDT entry for `#DF` references IST index 0 in the TSS; the CPU consults the TSS only at fault time, so loading the IDT before the TSS is in TR is technically safe — but if the very first interrupt arrives between the two calls, IST lookup would fail. Keep the order: GDT → IDT → … .
+`gdt::init()` runs *before* `interrupts::init_idt()` in `src/kernel.rs`. The IDT entry for `#DF` references IST index 0 in the TSS; the CPU consults the TSS only at fault time, so loading the IDT before the TSS is in TR is technically safe — but if the very first interrupt arrives between the two calls, IST lookup would fail. Keep the order: GDT → IDT/PIT → `time::init()` RTC anchor → … .
 
 ## What the userland platform adds
 

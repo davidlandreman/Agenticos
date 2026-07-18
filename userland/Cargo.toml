@@ -13,13 +13,17 @@ exclude = ["build-support"]
 members = [
     "runtime",
     "libs/gui",
+    "libs/gl",
     "libs/dialogs",
     "apps/hello",
     "apps/guilaunch",
     "apps/guidemo",
     "apps/notepad",
+    "apps/taskmgr",
     "apps/calc",
     "apps/painting",
+    "apps/glgame",
+    "apps/fileman",
 ]
 
 # Release profile: small, panic-abort, LTO, strip. The output ELF must be

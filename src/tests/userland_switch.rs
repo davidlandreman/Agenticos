@@ -51,6 +51,8 @@ fn synthetic_process(pid: u32) -> Process {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -59,6 +61,7 @@ fn synthetic_process(pid: u32) -> Process {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     }
 }
@@ -301,6 +304,8 @@ fn insert_synthetic(pid: u32) {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -309,6 +314,7 @@ fn insert_synthetic(pid: u32) {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     };
     insert_process(p);

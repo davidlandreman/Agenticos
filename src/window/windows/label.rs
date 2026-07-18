@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Label widget for displaying static text
 
 use super::base::WindowBase;
@@ -36,7 +37,7 @@ impl Label {
         Label {
             base: WindowBase::new_with_id(id, bounds),
             text: String::from(text),
-            color: crate::window::PALETTE_TEXT,
+            color: crate::window::theme::controls::palette().text,
             background: None,
             align: TextAlign::Left,
         }

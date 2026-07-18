@@ -69,9 +69,9 @@ impl TextEditor {
             modified: false,
             char_width,
             char_height,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
-            cursor_color: crate::window::PALETTE_TEXT,
+            bg_color: crate::window::theme::controls::palette().field_bg,
+            text_color: crate::window::theme::controls::palette().field_text,
+            cursor_color: crate::window::theme::controls::palette().field_text,
             pending_ensure_visible: None,
         }
     }

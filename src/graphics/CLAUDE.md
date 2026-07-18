@@ -14,11 +14,29 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
   compositor and runtime fallback, including the three-pass backdrop blur used
   by Aero glass layers. Optional render telemetry separates surface raster,
   upload, composition, blur, fence, and presentation cycle buckets.
-- `composition/virgl.rs` — qualified accelerated compositor. It uploads
-  canonical surfaces, renders ordered clipped/scissored textured quads with
-  premultiplied source-over, fences, and directly scans out its host texture.
-  Explicit Aero chrome is supported with sharp translucency; GPU backdrop blur
-  remains intentionally unsupported.
+- `composition/virgl.rs` — qualified accelerated compositor. It keeps one
+  bounded host texture per live retained surface, uploads only transactional
+  surface-local damage after the first frame, and gives each cached texture one
+  persistent sampler view. The framebuffer surface, shaders, vertex elements,
+  blend/depth/rasterizer/sampler state, and a geometrically growing vertex
+  resource survive across frames and are torn down before their context.
+  Two fixed render-target/sampler scratch textures and bounded separable TGSI
+  shader variants implement the CPU reference's three-box backdrop blur for
+  effect-expanded damage. Engine construction qualifies the exact copy,
+  ping-pong, multi-sampler combine, transparent-discard, and readback path.
+  Each clipped output-damage rectangle is cleared by a scissored transparent
+  overwrite quad, then only intersecting textured layers are drawn with
+  premultiplied source-over. The result is fenced and directly scanned out from
+  the host texture. Layer opacity is draw state rather than cached pixel data,
+  so movement/focus/opacity-only frames reuse textures without upload or GPU
+  object churn. Qualified VirGL supports Aero's radius-4 blurred glass without
+  ordinary-frame readback; unsupported effect radii fail composition instead
+  of silently rendering sharp glass.
+  The same physical VirGL context owns logical GL client targets: two color
+  buffers, an optional capset-qualified depth attachment, bounded vertex
+  storage, and a one-frame mailbox. `LayerSource::VirglClient` samples the
+  completed front target directly inside the server-owned content clip; ring 3
+  never sees a VirGL handle or submits a raw command.
 - `present/` — scanout boundary. The boot-framebuffer presenter converts only
   damaged pixels; VirtIO-GPU 2D presentation is owned by `src/drivers/`.
 - `fonts/` — font support. `core_font.rs` defines the glyph-centric `Font` trait + `Glyph<'a>` struct (8bpp coverage). `ttf.rs` is the TTF/OTF backend (parses via `ttf-parser`, rasterizes via `ab_glyph_rasterizer`, ASCII pre-rendered into per-glyph `Box<[u8]>` slots, non-ASCII lazy via `BTreeMap`). `embedded_font.rs` is the 8x8 bitmap fallback used only on TTF parse failure. `font_data.rs` holds the embedded font's bit-packed source. The system TTF lives at `assets/system.ttf` and is `include_bytes!`-baked into the kernel; `init_fonts()` parses it once during boot, after heap init.

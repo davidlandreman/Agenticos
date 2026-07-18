@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! `Toolbar` — horizontal strip of command buttons.
 //!
 //! `Toolbar` is a thin composition over [`HBox`]. It owns an internal
@@ -61,11 +62,6 @@ const BUTTON_HORIZONTAL_PADDING: u32 = 16;
 /// Width of a separator slot (a thin gap with a 1-pixel rule).
 const SEPARATOR_WIDTH: u32 = 8;
 
-/// Background color for the toolbar strip — shared content background
-/// from the U15 palette so a default toolbar sits flush against a
-/// default container or status bar.
-const DEFAULT_BG: Color = crate::window::PALETTE_CONTENT_BG;
-
 /// Color used for vertical separator rules.
 const SEPARATOR_COLOR: Color = Color {
     red: 160,
@@ -90,8 +86,6 @@ pub struct Toolbar {
     hbox: HBox,
     /// Per-slot kind, in the same order as `hbox.base().children()`.
     slots: Vec<Slot>,
-    /// Background color.
-    bg_color: Color,
 }
 
 impl Toolbar {
@@ -106,11 +100,8 @@ impl Toolbar {
         Toolbar {
             hbox: HBox::new_with_id(id, bounds),
             slots: Vec::new(),
-            bg_color: DEFAULT_BG,
         }
     }
-
-    /// Set the strip background color.
 
     /// Compute the pixel width a button needs in order to comfortably
     /// hold `label`. Uses the system font's cell width; pads by
@@ -282,14 +273,9 @@ impl Window for Toolbar {
         }
 
         let bounds = self.hbox.base().bounds();
-        // Strip background.
-        device.fill_rect(
-            bounds.x,
-            bounds.y,
-            bounds.width,
-            bounds.height,
-            self.bg_color,
-        );
+        // Themed strip background (flat face in Classic, soft gradient in
+        // Aero) so the toolbar reads as window chrome, not content.
+        crate::window::theme::controls::draw_raised_panel(device, bounds);
 
         // Draw a 1-pixel vertical rule centered inside each separator
         // slot. The HBox's distribution math is a pure function over its
