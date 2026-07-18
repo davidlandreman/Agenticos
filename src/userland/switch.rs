@@ -9,7 +9,7 @@
 //!   from the timer ISR's Rust-side handler (U5) just before deciding
 //!   what to run next.
 //! - [`resume_ring3`] — diverging primitive that loads another
-//!   process's state (CR3, kernel stack, FS_BASE, FPU, all 14 user
+//!   process's state (CR3, kernel stack, FS_BASE, FPU, all 16 user
 //!   GPRs + RIP + RFLAGS + RSP) and `iretq`s into ring 3.
 //!
 //! ## What this unit does NOT do (deferred)
@@ -195,6 +195,8 @@ pub fn save_ring3(p: &mut Process, frame: &InterruptStackFrame) {
         r15: frame.r15,
         rip: frame.rip,
         rflags: frame.rflags,
+        rcx: frame.rcx,
+        r11: frame.r11,
     };
     save_user_cpu_state(p);
 }
@@ -295,7 +297,7 @@ pub unsafe fn resume_ring3(pid: u32) -> ! {
 ///   r10 = 32   r8  = 40   r9  = 48
 ///   rbx = 56   rbp = 64   rsp = 72
 ///   r12 = 80   r13 = 88   r14 = 96   r15 = 104
-///   rip = 112  rflags = 120
+///   rip = 112  rflags = 120  rcx = 128  r11 = 136
 /// ```
 ///
 /// SAFETY: see [`resume_ring3`]. Calling this with invalid offsets,
@@ -338,10 +340,11 @@ pub unsafe extern "sysv64" fn resume_ring3_asm(
         "mov rdx, [r11 + 24]",
         "mov rsi, [r11 + 16]",
         "mov rdi, [r11 + 8]",         // RDI last — was the state ptr.
-        // The SYSCALL ABI clobbers rcx/r11 anyway. Zero for determinism
-        // (matches `enter_user_mode_with_regs_asm`).
-        "xor rcx, rcx",
-        "xor r11, r11",
+        // Unlike a SYSCALL return, a timer interrupt may land while
+        // RCX/R11 contain live values. Restore both, replacing the state
+        // pointer in R11 only after every other indexed load is complete.
+        "mov rcx, [r11 + 128]",
+        "mov r11, [r11 + 136]",
 
         "iretq",
     );
@@ -359,7 +362,7 @@ pub unsafe extern "sysv64" fn resume_ring3_asm(
 /// zombie is yet present, or `read_stdin_blocking` when the input
 /// queue is empty). The flow:
 ///
-/// 1. Capture the user-mode CPU state (all 14 GPRs + RIP + RFLAGS +
+/// 1. Capture the user-mode CPU state (all 16 GPRs + RIP + RFLAGS +
 ///    RSP) into the calling process's [`Process::saved_user_state`].
 ///    RIP is rewound **2 bytes** so the resumed process re-executes
 ///    the `SYSCALL` instruction (`0F 05`, 2 bytes) — the kernel then
@@ -442,6 +445,9 @@ pub unsafe fn block_current_ring3_and_yield(
         r15: saved.r15,
         rip: resumed_rip,
         rflags: user_rflags,
+        // SYSCALL defines RCX/R11 as clobbered on return.
+        rcx: 0,
+        r11: 0,
     };
 
     let me = current_user_pid().expect(

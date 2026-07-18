@@ -1,8 +1,8 @@
 # busybox
 
 Single-binary static-musl BusyBox build, providing `ls`, `cat`, `grep`,
-`sed`, `awk`, `find`, `wc`, `head`, `tail`, `sort`, `uniq`, and ~150
-other applets behind a multicall dispatcher. The kernel exposes a
+`sed`, `awk`, `find`, `wc`, `head`, `tail`, `sort`, `uniq`, plus the selected
+`ping`, `nc`, and `wget` networking applets behind a multicall dispatcher. The kernel exposes a
 virtual `/bin/<applet>` namespace so `execve("/bin/ls", argv, envp)`
 resolves to `BB.ELF` with `argv[0] = "ls"`, and BusyBox's argv[0]-based
 dispatch picks the right applet.
@@ -47,8 +47,11 @@ in lockstep — the SHA verifier hard-fails on mismatch.
 - `CONFIG_PIE=n` — kernel ELF loader rejects ET_DYN.
 - Disabled categories: init/shutdown, login/passwd/accounts, daemons
   (cron, syslog, watchdog, …), module loading, mount/swap/blockdev/mkfs,
-  networking (no kernel net stack), TTY/console manipulation, time/clock
+  unsupported networking daemons/interface tools, TTY/console manipulation, time/clock
   adjustment, IPC, namespaces, free/top/iostat (no /proc).
+- Enabled networking is deliberately limited to IPv4 `ping`, `nc`, and
+  HTTP-only `wget`. HTTPS/TLS, IPv6, `udhcpc`, interface configuration, and
+  resolver-dependent demos remain disabled.
 
 The Makefile applies these as `make defconfig && (strip overridden keys)
 && cat busybox.config >> .config && make oldconfig`, so any new applets
@@ -70,6 +73,22 @@ The kernel's FAT mount is read-only. BusyBox write-side applets (`cp`,
 file-backed FD returns `EROFS`. The applets surface the error cleanly —
 they do not panic the kernel. When write support lands in `src/fs/`,
 they begin to work without further changes here.
+
+## Networking caveat
+
+The kernel currently exposes numeric IPv4 sockets only: DHCP-provided DNS
+servers are recorded, but libc name lookup and TLS are not implemented. In the
+default interactive QEMU network these are representative commands:
+
+```sh
+ping -c 1 10.0.2.2
+nc -z -w 2 10.0.2.2 80
+wget -O- http://10.0.2.2:8000/
+```
+
+The last two require a service listening at the chosen numeric address/port;
+the automated suite provides its own QEMU-local endpoints. Do not advertise
+hostname URLs or HTTPS until the resolver and certificate/time work lands.
 
 ## Applet list ↔ kernel sync
 

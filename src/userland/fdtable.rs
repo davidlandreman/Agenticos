@@ -11,6 +11,7 @@
 
 use crate::fs::file_handle::{Directory, File};
 use crate::lib::arc::Arc;
+use crate::net::socket::SocketHandle;
 use crate::userland::pipe::{PipeReadHandle, PipeWriteHandle};
 
 /// Maximum file descriptors per process. Bounded to keep the table size
@@ -32,7 +33,10 @@ pub enum FdSlot {
     Stderr,
     /// An opened file. `cloexec` is recorded for future `execve` (Phase 4)
     /// — today it has no effect, since there's no exec.
-    File { handle: Arc<File>, cloexec: bool },
+    File {
+        handle: Arc<File>,
+        cloexec: bool,
+    },
     /// An opened directory. `cursor` is the per-fd index into the
     /// directory's snapshotted entries — advanced by `getdents64`,
     /// independent across `dup`'d fds (a deviation from POSIX, which
@@ -52,7 +56,16 @@ pub enum FdSlot {
     /// `cursor` is the per-fd index into `bin_namespace::APPLETS`;
     /// `getdents64` reads and advances it. See
     /// `crate::userland::bin_namespace` for the namespace model.
-    VirtualBinDir { cursor: usize, cloexec: bool },
+    VirtualBinDir {
+        cursor: usize,
+        cloexec: bool,
+    },
+    /// A socket open-file description. Status flags live in the network
+    /// registry entry so dup/fork share them; cloexec remains per descriptor.
+    Socket {
+        handle: Arc<SocketHandle>,
+        cloexec: bool,
+    },
 }
 
 impl FdSlot {
@@ -167,6 +180,7 @@ impl FdTable {
             FdSlot::Directory { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::PipeRead(_, ce) | FdSlot::PipeWrite(_, ce) => *ce = cloexec,
             FdSlot::VirtualBinDir { cloexec: ce, .. } => *ce = cloexec,
+            FdSlot::Socket { cloexec: ce, .. } => *ce = cloexec,
             _ => {}
         }
         Ok(())
@@ -179,6 +193,7 @@ impl FdTable {
             FdSlot::File { cloexec, .. } | FdSlot::Directory { cloexec, .. } => *cloexec,
             FdSlot::PipeRead(_, ce) | FdSlot::PipeWrite(_, ce) => *ce,
             FdSlot::VirtualBinDir { cloexec, .. } => *cloexec,
+            FdSlot::Socket { cloexec, .. } => *cloexec,
             _ => false,
         })
     }

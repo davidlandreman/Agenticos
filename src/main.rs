@@ -11,9 +11,9 @@
 
 extern crate alloc;
 
+mod bootloader_config;
 mod kernel;
 mod panic;
-mod bootloader_config;
 
 // Module structure
 mod arch;
@@ -24,6 +24,7 @@ mod graphics;
 mod input;
 mod lib;
 mod mm;
+mod net;
 mod process;
 mod stdlib;
 mod terminal;
@@ -39,9 +40,9 @@ entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kernel::init(boot_info);
-    
+
     #[cfg(feature = "test")]
     tests::run_tests();
-    
+
     kernel::run();
 }

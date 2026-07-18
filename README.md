@@ -4,24 +4,23 @@ A Rust-based operating system for x86-64 architecture, built from scratch with t
 
 ## Current Status
 
-AgenticOS boots into a GUI desktop with a windowed terminal application. The OS has working memory management, filesystem support, graphics, and input handling.
+AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working memory management, writable overlay/data filesystems, preemptive process scheduling, a Linux static-musl ABI, graphics/input, and a basic IPv4 network stack.
 
 ### Implemented Features
 
 - **GUI Desktop**: Boots directly into graphical mode with a blue desktop background
 - **Window System**: Hierarchical window management with mouse support
-- **Terminal**: Windowed terminal with shell and 13 built-in commands
-- **Memory Management**: Virtual memory with paging and 100 MiB heap
-- **Filesystem**: Read-only FAT12/16/32 with VFS layer
+- **Terminal**: Windowed terminals running static-musl zsh and BusyBox applets
+- **Memory Management**: Virtual memory, demand paging, per-process address spaces, and heap allocation
+- **Filesystem**: FAT12/16/32 VFS, writable `/data`, and persistent overlay writes
 - **Input**: VirtIO tablet (seamless in QEMU) with PS/2 fallback
 - **Graphics**: Framebuffer with double buffering, multiple fonts, BMP images
+- **Networking**: Modern VirtIO-net, DHCPv4, ICMP, UDP, TCP, Linux socket FDs, and numeric-address BusyBox `ping`/`nc`/HTTP `wget`
 
 ### Not Yet Implemented
 
-- Multitasking / async execution
-- Filesystem write support
-- User space / process isolation
-- Networking
+- SMP and a general async runtime
+- DNS lookup, IPv6, TLS, and interrupt-driven network I/O
 - Agent runtime
 
 ## Building
@@ -45,6 +44,9 @@ AgenticOS boots into a GUI desktop with a windowed terminal application. The OS 
 
 # Build only, don't run QEMU
 ./build.sh -n
+
+# Boot without a NIC
+AGENTICOS_NETWORK=off ./build.sh
 ```
 
 ### Testing
@@ -52,7 +54,15 @@ AgenticOS boots into a GUI desktop with a windowed terminal application. The OS 
 ```bash
 # Run kernel tests
 ./test.sh
+
+# Focused hermetic network coverage
+./test.sh --skip-userland network network_userland
 ```
+
+Interactive QEMU uses user-mode NAT and normally leases `10.0.2.15` with
+gateway/host alias `10.0.2.2`. Userland networking is currently numeric IPv4
+only. Tests use `restrict=on` plus repository-owned local forwarding endpoints,
+so they cannot reach the host LAN or public Internet.
 
 ### Host Folder Mount
 
@@ -117,6 +127,8 @@ agenticos/
 │   ├── graphics/            # Graphics primitives, fonts
 │   ├── input/               # Input processing pipeline
 │   ├── mm/                  # Memory management
+│   ├── net/                 # IPv4 stack and socket registry
+│   ├── userland/            # Ring-3 Linux ABI and ELF process platform
 │   ├── window/              # Window system
 │   └── commands/            # Shell commands
 ├── assets/                  # Fonts and images
@@ -133,6 +145,7 @@ AgenticOS is a **modular monolithic kernel** - all code runs in kernel space (ri
 - **Framebuffer graphics**: Modern pixel-based display (not VGA text mode)
 - **Lock-free input**: SPSC queue prevents interrupt handler blocking
 - **VirtIO first**: Uses VirtIO tablet for seamless QEMU mouse, falls back to PS/2
+- **Bounded IPv4 stack**: Polling VirtIO-net and smoltcp behind an AgenticOS-owned Linux socket ABI
 
 ## Parallel Development with Conductor
 

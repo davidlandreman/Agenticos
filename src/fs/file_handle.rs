@@ -153,7 +153,10 @@ impl File {
     }
 
     /// Read without changing the descriptor's shared position. The handle
-    /// lock covers seek/read/restore as one atomic operation.
+    /// lock covers seek/read/restore as one atomic operation. Keep this path
+    /// allocation-free: sparse ELF demand paging calls it from the page-fault
+    /// handler, where attempting a heap allocation is both unnecessary and a
+    /// potential recursive/deadlock hazard.
     pub fn read_at(&self, offset: u64, buffer: &mut [u8]) -> FileResult<usize> {
         let mut inner = self.inner.lock();
         if !inner.is_open {
@@ -162,11 +165,16 @@ impl File {
         if offset > inner.size {
             return Err(FileError::SeekOutOfBounds);
         }
-        let path = inner.path.clone();
-        let original_position = inner.position;
-        let fs_handle = inner.fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
+        let FileHandleInner {
+            path,
+            position,
+            fs_handle,
+            ..
+        } = &mut *inner;
+        let original_position = *position;
         let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
+        let (filesystem, _) = vfs.find_filesystem(path).ok_or(FileError::NotFound)?;
+        let fs_handle = fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
         filesystem
             .seek(fs_handle, offset)
             .map_err(FileError::FilesystemError)?;
@@ -176,7 +184,7 @@ impl File {
         let restore = filesystem
             .seek(fs_handle, original_position)
             .map_err(FileError::FilesystemError);
-        inner.position = original_position;
+        *position = original_position;
         match (result, restore) {
             (Ok(bytes), Ok(_)) => Ok(bytes),
             (Err(error), _) => Err(error),

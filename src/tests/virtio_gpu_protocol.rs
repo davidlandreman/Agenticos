@@ -37,7 +37,7 @@ fn test_backing_entry_layout() {
 }
 
 fn test_virtqueue_chain_recycles_all_descriptors() {
-    let mut queue = Virtqueue::new(4, 0, core::ptr::NonNull::<u16>::dangling().as_ptr());
+    let mut queue = Virtqueue::new(4, 0, core::ptr::NonNull::<u16>::dangling().as_ptr()).unwrap();
     let head = queue
         .add_chain(&[
             VirtqBuffer {
@@ -59,7 +59,7 @@ fn test_virtqueue_chain_recycles_all_descriptors() {
 }
 
 fn test_virtqueue_timeout_and_capacity() {
-    let mut queue = Virtqueue::new(1, 0, core::ptr::NonNull::<u16>::dangling().as_ptr());
+    let mut queue = Virtqueue::new(1, 0, core::ptr::NonNull::<u16>::dangling().as_ptr()).unwrap();
     assert_eq!(queue.wait_used(0, 1), Err(VirtqueueError::Timeout));
     assert_eq!(
         queue.add_chain(&[
@@ -80,7 +80,7 @@ fn test_virtqueue_timeout_and_capacity() {
 
 fn test_dma_buffers_split_at_page_boundaries() {
     let bytes = alloc::vec![0u8; 8192];
-    let segments = VirtqBuffer::from_slice_segments(&bytes, false);
+    let segments = VirtqBuffer::try_from_slice_segments(&bytes, false).unwrap();
     assert!(segments.len() >= 2);
     assert_eq!(
         segments

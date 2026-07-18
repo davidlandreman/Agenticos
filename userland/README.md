@@ -57,8 +57,8 @@ an outbound network fetch.
 The kernel exposes a single virtual `/bin` directory whose entries
 resolve into one of two multicall binaries staged under `host_share/`:
 
-- **`BB.ELF` — BusyBox** (~240 coreutils applets: `ls`, `cat`, `grep`,
-  `sed`, `awk`, `find`, `wc`, `head`, `tail`, `sort`, `uniq`, …).
+- **`BB.ELF` — BusyBox** (core utilities plus numeric IPv4 `ping`, `nc`,
+  and HTTP-only `wget`; DNS, IPv6, and TLS are not available).
 - **`GLAUNCH.ELF` — kernel-side GUI app launcher** (5 entries:
   `painting`, `calc`, `notepad`, `tasks`, `explorer`).
 

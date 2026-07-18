@@ -1,7 +1,7 @@
+use crate::arch::x86_64::interrupt_guard::InterruptMutex;
 use crate::{debug_info, debug_trace};
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
-use spin::Mutex;
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 pub const HEAP_SIZE: usize = 512 * 1024 * 1024; // demand-backed VA arena
@@ -9,11 +9,11 @@ pub const HEAP_SIZE: usize = 512 * 1024 * 1024; // demand-backed VA arena
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-pub struct LockedHeap(Mutex<Option<linked_list_allocator::Heap>>);
+pub struct LockedHeap(InterruptMutex<Option<linked_list_allocator::Heap>>);
 
 impl LockedHeap {
     pub const fn empty() -> Self {
-        LockedHeap(Mutex::new(None))
+        LockedHeap(InterruptMutex::new(None))
     }
 
     pub unsafe fn init(&self, heap_start: usize, heap_size: usize) {

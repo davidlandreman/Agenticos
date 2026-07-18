@@ -59,6 +59,23 @@ pub const EXDEV: i64 = -18;
 pub const EFBIG: i64 = -27;
 pub const ENOTEMPTY: i64 = -39;
 pub const ENOMEM: i64 = -12;
+pub const ENFILE: i64 = -23;
+pub const EAFNOSUPPORT: i64 = -97;
+pub const EPROTONOSUPPORT: i64 = -93;
+pub const ENOTCONN: i64 = -107;
+pub const EISCONN: i64 = -106;
+pub const EINPROGRESS: i64 = -115;
+pub const EALREADY: i64 = -114;
+pub const ECONNREFUSED: i64 = -111;
+pub const EADDRINUSE: i64 = -98;
+pub const EADDRNOTAVAIL: i64 = -99;
+pub const ETIMEDOUT: i64 = -110;
+pub const ENOBUFS: i64 = -105;
+pub const EMSGSIZE: i64 = -90;
+pub const EDESTADDRREQ: i64 = -89;
+pub const ENOPROTOOPT: i64 = -92;
+pub const ENETDOWN: i64 = -100;
+pub const ENETUNREACH: i64 = -101;
 
 /// Active user-VA bounds (inclusive lower, exclusive upper). Populated by
 /// `enter_user_mode` before `iretq`-to-ring-3, cleared on exit. Pointer
@@ -198,6 +215,20 @@ pub mod nr {
     pub const WRITEV: u64 = 20;
     pub const NANOSLEEP: u64 = 35;
     pub const SETITIMER: u64 = 38;
+    pub const SOCKET: u64 = 41;
+    pub const CONNECT: u64 = 42;
+    pub const ACCEPT: u64 = 43;
+    pub const SENDTO: u64 = 44;
+    pub const RECVFROM: u64 = 45;
+    pub const SENDMSG: u64 = 46;
+    pub const RECVMSG: u64 = 47;
+    pub const SHUTDOWN: u64 = 48;
+    pub const BIND: u64 = 49;
+    pub const LISTEN: u64 = 50;
+    pub const GETSOCKNAME: u64 = 51;
+    pub const GETPEERNAME: u64 = 52;
+    pub const SETSOCKOPT: u64 = 54;
+    pub const GETSOCKOPT: u64 = 55;
     pub const ACCESS: u64 = 21;
     pub const DUP: u64 = 32;
     pub const DUP2: u64 = 33;
@@ -228,6 +259,7 @@ pub mod nr {
     pub const PSELECT6: u64 = 270;
     pub const PPOLL: u64 = 271;
     pub const SET_ROBUST_LIST: u64 = 273;
+    pub const ACCEPT4: u64 = 288;
     pub const PRLIMIT64: u64 = 302;
     pub const GETDENTS64: u64 = 217;
     pub const GETRANDOM: u64 = 318;
@@ -289,6 +321,8 @@ pub mod nr {
 pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
     use crate::userland::syscalls;
 
+    crate::userland::lifecycle::clear_stale_network_wait(args.rax);
+
     let result = match args.rax {
         // Phase 1: streams + memory + signal stubs
         nr::READ => syscalls::read_handler(args),
@@ -301,6 +335,21 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::RT_SIGACTION => syscalls::rt_sigaction_handler(args),
         nr::RT_SIGPROCMASK => syscalls::rt_sigprocmask_handler(args),
         nr::IOCTL => syscalls::ioctl_handler(args),
+        nr::SOCKET => crate::userland::network_syscalls::socket_handler(args),
+        nr::CONNECT => crate::userland::network_syscalls::connect_handler(args),
+        nr::ACCEPT => crate::userland::network_syscalls::accept_handler(args),
+        nr::ACCEPT4 => crate::userland::network_syscalls::accept4_handler(args),
+        nr::SENDTO => crate::userland::network_syscalls::sendto_handler(args),
+        nr::RECVFROM => crate::userland::network_syscalls::recvfrom_handler(args),
+        nr::SENDMSG => crate::userland::network_syscalls::sendmsg_handler(args),
+        nr::RECVMSG => crate::userland::network_syscalls::recvmsg_handler(args),
+        nr::SHUTDOWN => crate::userland::network_syscalls::shutdown_handler(args),
+        nr::BIND => crate::userland::network_syscalls::bind_handler(args),
+        nr::LISTEN => crate::userland::network_syscalls::listen_handler(args),
+        nr::GETSOCKNAME => crate::userland::network_syscalls::getsockname_handler(args),
+        nr::GETPEERNAME => crate::userland::network_syscalls::getpeername_handler(args),
+        nr::SETSOCKOPT => crate::userland::network_syscalls::setsockopt_handler(args),
+        nr::GETSOCKOPT => crate::userland::network_syscalls::getsockopt_handler(args),
         // U3: musl-init / zsh-startup surface
         nr::POLL => syscalls::poll_handler(args),
         nr::PPOLL => syscalls::ppoll_handler(args),
