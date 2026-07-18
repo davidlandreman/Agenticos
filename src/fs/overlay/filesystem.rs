@@ -503,6 +503,53 @@ impl Filesystem for Overlay {
         Ok(p)
     }
 
+    fn truncate(&self, handle: &mut FileHandle, size: u64) -> Result<(), FilesystemError> {
+        if !is_upper(handle.inode) {
+            return Err(FilesystemError::ReadOnly);
+        }
+        let mut inner = FileHandle {
+            inode: raw_id(handle.inode),
+            position: handle.position,
+            size: handle.size,
+            mode: handle.mode,
+        };
+        self.upper.truncate(&mut inner, size)?;
+        handle.position = inner.position;
+        handle.size = inner.size;
+        Ok(())
+    }
+
+    fn handle_metadata(
+        &self,
+        handle: &FileHandle,
+    ) -> Result<crate::fs::filesystem::UnixMetadata, FilesystemError> {
+        let inner = FileHandle {
+            inode: raw_id(handle.inode),
+            position: handle.position,
+            size: handle.size,
+            mode: handle.mode,
+        };
+        if is_upper(handle.inode) {
+            self.upper.handle_metadata(&inner)
+        } else {
+            self.lower.handle_metadata(&inner)
+        }
+    }
+
+    fn sync_handle(&self, handle: &FileHandle, data_only: bool) -> Result<(), FilesystemError> {
+        let inner = FileHandle {
+            inode: raw_id(handle.inode),
+            position: handle.position,
+            size: handle.size,
+            mode: handle.mode,
+        };
+        if is_upper(handle.inode) {
+            self.upper.sync_handle(&inner, data_only)
+        } else {
+            self.lower.sync_handle(&inner, data_only)
+        }
+    }
+
     fn mkdir(&self, path: &str) -> Result<(), FilesystemError> {
         // Check if anything is already at this path in the merged
         // view (other than a stale whiteout).

@@ -49,17 +49,19 @@ pub struct ProgressBar {
 }
 
 impl ProgressBar {
-    /// Create a new `ProgressBar` with a specific window ID.
+    /// Create a new `ProgressBar` with a specific window ID. Colors default
+    /// to the active theme (Classic: navy fill; Aero: green fill).
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
+        let palette = crate::window::theme::controls::palette();
         ProgressBar {
             base: WindowBase::new_with_id(id, bounds),
             current: 0,
             total: 0,
             label: None,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            fill_color: crate::window::PALETTE_PROGRESS_FILL,
-            border_color: crate::window::PALETTE_BORDER,
-            text_color: crate::window::PALETTE_TEXT,
+            bg_color: palette.field_bg,
+            fill_color: palette.progress_fill,
+            border_color: palette.border,
+            text_color: palette.text,
         }
     }
 

@@ -28,6 +28,7 @@ fn test_scheduler_fair_queue_revolves() {
             .make_ready(EntityId::UserProcess(pid), None)
             .unwrap();
     }
+    assert_eq!(scheduler.runnable_user_count(), 3);
     for expected in [101, 102, 103, 101, 102, 103] {
         let id = scheduler.schedule_entity().unwrap();
         assert_eq!(id, EntityId::UserProcess(expected));

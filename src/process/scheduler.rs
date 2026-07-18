@@ -34,8 +34,6 @@ pub struct ProcessInfo {
     pub total_runtime: u64,
     /// Stack size in bytes
     pub stack_size: usize,
-    /// Cached CPU percentage (0-100)
-    pub cpu_percentage: u8,
 }
 
 /// Compatibility view of a tagged scheduling decision used by QEMU tests.
@@ -247,12 +245,19 @@ impl Scheduler {
         self.entities.remove(&id);
     }
 
-    #[cfg_attr(
-        not(feature = "test"),
-        expect(dead_code, reason = "scheduler diagnostics API")
-    )]
     pub fn entity_state(&self, id: EntityId) -> Option<RunState> {
         self.entities.get(&id).map(|entity| entity.state)
+    }
+
+    /// Number of user entities currently eligible to execute or running.
+    pub fn runnable_user_count(&self) -> usize {
+        self.entities
+            .iter()
+            .filter(|(id, entity)| {
+                matches!(id, EntityId::UserProcess(_))
+                    && matches!(entity.state, RunState::Ready | RunState::Running)
+            })
+            .count()
     }
 
     fn pick_ready_index(&self, now: u64) -> Option<usize> {
@@ -638,28 +643,8 @@ impl Scheduler {
                 state: pcb.state,
                 total_runtime: pcb.total_runtime,
                 stack_size: pcb.stack_size,
-                cpu_percentage: pcb.cpu_percentage,
             })
             .collect()
-    }
-
-    /// Update CPU percentages for all processes
-    ///
-    /// Call this periodically (every ~50 ticks / 500ms) to calculate CPU usage.
-    /// The percentage represents CPU time used in the elapsed window.
-    ///
-    /// # Arguments
-    /// * `elapsed_ticks` - Number of timer ticks since last update
-    pub fn update_cpu_percentages(&mut self, elapsed_ticks: u64) {
-        for pcb in self.processes.values_mut() {
-            let delta = pcb.total_runtime.saturating_sub(pcb.runtime_last_sample);
-            pcb.cpu_percentage = if elapsed_ticks > 0 {
-                ((delta * 100) / elapsed_ticks).min(100) as u8
-            } else {
-                0
-            };
-            pcb.runtime_last_sample = pcb.total_runtime;
-        }
     }
 
     fn wake_with_event(&mut self, pid: ProcessId, event: WakeEvents) {

@@ -10,6 +10,7 @@ pub mod error;
 pub mod etc;
 pub mod fdtable;
 pub mod gui;
+pub mod gui_gl;
 pub mod gui_syscalls;
 pub mod image;
 pub mod kernel_stack;
@@ -19,6 +20,7 @@ pub mod loader;
 pub mod network_syscalls;
 pub mod path;
 pub mod pipe;
+pub mod procfs;
 pub mod signal;
 pub mod stdin;
 pub mod switch;
@@ -133,8 +135,8 @@ pub fn enter_user_mode_with_aspace(
 }
 
 /// U8 setup phase. Installs the Process, populates its
-/// `saved_user_state` with the binary's entry frame, marks it
-/// `ring3_ready`, and returns the new PID. Does NOT block.
+/// `saved_user_state` with the binary's entry frame, marks its scheduler entity
+/// ready, and returns the new PID. Does NOT block.
 ///
 /// **Caller responsibility (concurrency):** `address_space` must
 /// currently be active on this CPU (CR3 = its L4). The caller must
@@ -207,8 +209,10 @@ pub fn setup_user_process(
             .and_then(|pcb| pcb.terminal_id)
     };
     let exe_path = alloc::string::String::from(argv_slice[0]);
+    let cmdline = crate::userland::lifecycle::capped_cmdline(argv_slice);
     crate::userland::lifecycle::with_process(new_pid, |p| {
         p.exe_path = Some(exe_path);
+        p.cmdline = cmdline;
         p.terminal_id = launcher_terminal_id;
         p.saved_user_state = crate::userland::user_state::UserState {
             rip: entry,

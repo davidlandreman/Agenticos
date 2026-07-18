@@ -7,7 +7,6 @@ use alloc::vec::Vec;
 
 use crate::fs::filesystem::FileType;
 use crate::fs::Directory;
-use crate::graphics::color::Color;
 use crate::window::windows::dialog::{
     clear_dialog_state, close_dialog_with_result, get_dialog_id, get_dialog_result, is_dialog_open,
     set_dialog_state, DialogResult,
@@ -58,7 +57,7 @@ pub fn open_file_dialog() -> WindowId {
         let container_id = wm.create_window(Some(frame_id));
         let mut container = ContainerWindow::new_with_id(container_id, content_area);
         container.set_parent(Some(frame_id));
-        container.set_background_color(Color::new(240, 240, 240));
+        container.set_background_color(crate::window::theme::controls::palette().content_bg);
 
         // Padding wraps the VBox; insets give breathing room around all sides.
         let padding_id = wm.create_window(Some(container_id));
@@ -131,8 +130,7 @@ pub fn open_file_dialog() -> WindowId {
         let open_button_id = wm.create_window(Some(button_row_id));
         let mut open_button = Button::new_with_id(open_button_id, Rect::new(0, 0, 0, 0), "Open");
         open_button.set_parent(Some(button_row_id));
-        open_button.set_bg_color(Color::new(0, 120, 215));
-        open_button.set_text_color(Color::WHITE);
+        open_button.set_default(true);
         open_button.on_click(move || {
             // For now, just close - ideally we'd get the selected item
             close_dialog_with_result(DialogResult::Cancel);

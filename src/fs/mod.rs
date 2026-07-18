@@ -1,3 +1,5 @@
+pub mod block_io;
+pub mod ext2;
 pub mod fat;
 pub mod file_handle;
 pub mod filesystem;

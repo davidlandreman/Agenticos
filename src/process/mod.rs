@@ -9,8 +9,8 @@ pub mod timer;
 
 pub use context::CpuContext;
 pub use pcb::{BlockReason, ProcessControlBlock, ProcessState, WakeEvents};
-pub use process::{allocate_pid, ProcessId, RunnableProcess};
-pub use scheduler::{ProcessInfo, SCHEDULER};
+pub use process::{allocate_pid, ProcessId};
+pub use scheduler::ProcessInfo;
 
 use crate::window::WindowId;
 use alloc::boxed::Box;
@@ -459,19 +459,6 @@ pub fn get_process_list() -> alloc::vec::Vec<ProcessInfo> {
 pub fn terminate_process(pid: ProcessId) {
     timer::cancel_entity(entity::EntityId::KernelThread(pid));
     scheduler::SCHEDULER.lock().terminate(pid);
-}
-
-/// Update CPU percentages for all processes
-///
-/// Call this periodically (every ~50 ticks / 500ms) to calculate CPU usage.
-/// The percentage represents CPU time used in the elapsed window.
-///
-/// # Arguments
-/// * `elapsed_ticks` - Number of timer ticks since last update
-pub fn update_cpu_percentages(elapsed_ticks: u64) {
-    scheduler::SCHEDULER
-        .lock()
-        .update_cpu_percentages(elapsed_ticks);
 }
 
 // =============================================================================

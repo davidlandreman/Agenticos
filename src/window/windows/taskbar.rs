@@ -4,6 +4,7 @@ use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_caption_font;
 use crate::time::DateTime;
+use crate::window::theme::controls;
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 use alloc::format;
 use alloc::string::String;
@@ -112,8 +113,6 @@ pub struct TaskbarButton {
 pub struct TaskbarWindow {
     /// Base window functionality
     base: WindowBase,
-    /// Background color
-    bg_color: Color,
     /// ID of the Start button
     #[expect(dead_code, reason = "intentional kernel API surface")]
     start_button_id: Option<WindowId>,
@@ -140,7 +139,6 @@ impl TaskbarWindow {
 
         TaskbarWindow {
             base: WindowBase::new_with_id(id, bounds),
-            bg_color: crate::window::PALETTE_CONTENT_BG,
             start_button_id: None,
             window_buttons: Vec::new(),
             active_frame_id: None,
@@ -164,16 +162,10 @@ impl Window for TaskbarWindow {
         }
 
         let bounds = self.base.bounds();
-        let x = bounds.x;
-        let y = bounds.y;
-        let width = bounds.width;
-        let height = bounds.height;
 
-        // Draw taskbar background
-        device.fill_rect(x, y, width, height, self.bg_color);
-
-        // Draw top border (highlight)
-        device.draw_line(x, y, x + width as i32 - 1, y, Color::WHITE);
+        // Themed raised panel (Classic: ButtonFace + highlight top edge;
+        // Aero: soft vertical gradient with a 1px edge).
+        controls::draw_raised_panel(device, bounds);
 
         // Note: Child buttons will paint themselves
 

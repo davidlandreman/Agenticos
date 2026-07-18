@@ -156,6 +156,18 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     // kernel CpuContext.
     let frame = unsafe { &*stack_frame };
     if (frame.cs & 3) == 3 {
+        // Charge this tick to the running ring-3 process's CPU-time
+        // accounting. `current_user_pid` names the interrupted process
+        // (resume_ring3's atomic swap invariant). try_lock only: with
+        // IF cleared here no holder can be preempted mid-hold, but a
+        // dropped sample under contention is harmless for accounting.
+        if let Some(mut table) = crate::userland::lifecycle::PROCESS_TABLE.try_lock() {
+            if let Some(pid) = table.current_user_pid {
+                if let Some(p) = table.by_pid.get_mut(&pid) {
+                    p.utime_ticks = p.utime_ticks.saturating_add(1);
+                }
+            }
+        }
         if let Some(mut sched) = crate::process::scheduler::SCHEDULER.try_lock() {
             if let Some(current_pid) = sched.current() {
                 if let Some(pcb) = sched.get_process_mut(current_pid) {

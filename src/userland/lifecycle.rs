@@ -134,6 +134,16 @@ pub struct Process {
     /// in-kernel test launches that bypass argv. `readlink` reads
     /// this for `/proc/self/exe` (see `readlink_handler`).
     pub exe_path: Option<String>,
+    /// Retained argv from launch or the most recent `execve`, capped at
+    /// [`CMDLINE_MAX_BYTES`] total. Read by `/proc/<pid>/cmdline` and
+    /// `/proc/<pid>/stat`'s comm field. Empty for synthetic test
+    /// launches that bypass argv.
+    pub cmdline: alloc::vec::Vec<String>,
+    /// CPU time in 100 Hz PIT ticks, charged by the timer ISR whenever
+    /// it observes this process running at CPL=3. Sampled — ticks
+    /// spent in short syscalls between timer fires are not attributed.
+    /// Read by `/proc/<pid>/stat` and `/proc/stat`.
+    pub utime_ticks: u64,
     /// Demand-grown stack — top of the user stack (exclusive). Constant
     /// per-process; mirrors `image.stack_top` for fast access from the
     /// ring-3 page-fault handler without dereferencing `image`. Zero for
@@ -286,15 +296,21 @@ pub enum Ring3BlockReason {
     WaitingForNetwork {
         deadline_tick: Option<u64>,
     },
-    /// `nanosleep` with a not-yet-elapsed absolute PIT deadline. Wakes when
-    /// [`process_expired_sleeps`] observes `now >= deadline_tick` from kernel
-    /// housekeeping; the re-fired SYSCALL then sees its `sleep_deadline`
-    /// elapsed and returns 0.
+    /// `nanosleep` with a not-yet-elapsed absolute PIT deadline. The shared
+    /// timer service calls [`expire_user_sleep`] once `now >= deadline_tick`;
+    /// the re-fired SYSCALL then sees its `sleep_deadline` elapsed and returns
+    /// 0. A signal can wake it early through [`wake_ring3_for_signal`], which
+    /// clears the deadline and delivers `-EINTR` through
+    /// `pending_syscall_interrupt`.
     Sleeping {
         deadline_tick: u64,
     },
 }
 
+/// Restart-stable deadline state for a re-firing blocking network
+/// syscall. Keyed by `(syscall_nr, identity)`; a mismatched re-entry
+/// clears the state. (`nanosleep`'s analogous restart state is the
+/// dedicated `Process.sleep_deadline` field.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetworkWaitState {
     pub syscall_nr: u64,
@@ -337,6 +353,27 @@ fn ensure_sentinel(g: &mut ProcessTable) {
     }
 }
 
+/// Cap on the total bytes of argv retained in `Process::cmdline`.
+/// Keeps a pathological `execve` with a huge argv from pinning kernel
+/// heap; `/proc/<pid>/cmdline` output is truncated at this bound.
+pub const CMDLINE_MAX_BYTES: usize = 256;
+
+/// Build the retained-argv vector for `Process::cmdline`: copies argv
+/// strings in order until the running byte total would exceed
+/// [`CMDLINE_MAX_BYTES`].
+pub fn capped_cmdline(argv: &[&str]) -> alloc::vec::Vec<String> {
+    let mut out = alloc::vec::Vec::new();
+    let mut total = 0usize;
+    for arg in argv {
+        total += arg.len() + 1;
+        if total > CMDLINE_MAX_BYTES {
+            break;
+        }
+        out.push(String::from(*arg));
+    }
+    out
+}
+
 impl Process {
     /// Default "no current process" sentinel. Allocates nothing (every
     /// heap-backed field is empty). The table keeps one of these
@@ -363,6 +400,8 @@ impl Process {
             signal_state: SignalState::new(),
             kernel_stack: None,
             exe_path: None,
+            cmdline: alloc::vec::Vec::new(),
+            utime_ticks: 0,
             stack_top: 0,
             stack_bottom: 0,
             stack_mapped_bottom: 0,
@@ -1055,6 +1094,42 @@ pub fn clear_stale_network_wait(syscall_nr: u64) {
     });
 }
 
+/// Wake `pid` after a signal raise if it is parked in a blocking
+/// syscall and the raised signal would actually do something (user
+/// handler installed, or fatal default action). Mirrors the ITIMER
+/// expiry wake: remove from `ring3_blocked`, clear any network wait,
+/// set `pending_syscall_interrupt` so the re-fired syscall enters the
+/// dispatcher as `-EINTR`, and requeue as ready.
+pub fn wake_ring3_for_signal(pid: u32) {
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let actionable = g
+        .by_pid
+        .get(&pid)
+        .is_some_and(|p| p.signal_state.has_actionable_pending());
+    if !actionable {
+        return;
+    }
+    let Some(reason) = g.ring3_blocked.remove(&pid) else {
+        return;
+    };
+    if let Some(process) = g.by_pid.get_mut(&pid) {
+        if matches!(reason, Ring3BlockReason::WaitingForNetwork { .. }) {
+            process.network_wait = None;
+        }
+        // Signal-interrupted sleep: drop the restart-stable deadline so
+        // the -EINTR return doesn't leave a stale elapsed deadline for
+        // the next nanosleep call.
+        if matches!(reason, Ring3BlockReason::Sleeping { .. }) {
+            process.sleep_deadline = None;
+        }
+        process.pending_syscall_interrupt = true;
+    }
+    drop(g);
+    mark_ring3_ready(pid);
+}
+
 fn wake_ring3_blocked_by<F>(matcher: F)
 where
     F: Fn(&Ring3BlockReason) -> bool,
@@ -1135,10 +1210,10 @@ pub fn restore_user_cpu_state(p: &Process) {
     crate::arch::x86_64::fpu::restore_fpu(&p.fpu_state);
 }
 
-/// Test-only: drain `ring3_ready` and `ring3_blocked`. Used by
-/// `PreemptTestGuard::drop` in `src/tests/userland_switch.rs` so a
-/// test that pushes synthetic PIDs into the queues and then panics
-/// (or simply forgets to clean up) doesn't poison subsequent tests.
+/// Test-only: drain user scheduler entities and blocked-reason indexes. Used
+/// by `PreemptTestGuard::drop` in `src/tests/userland_switch.rs` so a test that
+/// installs synthetic PIDs and then panics (or forgets cleanup) cannot poison
+/// subsequent tests.
 #[cfg(feature = "test")]
 pub fn clear_ring3_queues_for_test() {
     PROCESS_TABLE.lock().ring3_blocked.clear();
@@ -1290,6 +1365,8 @@ pub fn install_new_process_opt(
         signal_state: SignalState::new(),
         kernel_stack: Some(KernelStack::new()),
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,

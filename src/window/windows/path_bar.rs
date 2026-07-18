@@ -80,8 +80,10 @@ pub struct PathBar {
 }
 
 impl PathBar {
-    /// Create a new PathBar with a specific window id.
+    /// Create a new PathBar with a specific window id. Colors default to the
+    /// active theme's content palette.
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
+        let palette = crate::window::theme::controls::palette();
         PathBar {
             base: WindowBase::new_with_id(id, bounds),
             path: String::new(),
@@ -90,12 +92,12 @@ impl PathBar {
             visible_layout: Vec::new(),
             hover_index: None,
             on_segment_click: None,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
-            // Subtle grey hover (kept distinct from PALETTE_HIGHLIGHT_BG)
+            bg_color: palette.content_bg,
+            text_color: palette.text,
+            // Subtle grey hover (kept distinct from the selection color)
             // — breadcrumb hover shouldn't read as a selection state.
             hover_bg_color: Color::new(200, 200, 200),
-            separator_color: crate::window::PALETTE_BORDER,
+            separator_color: palette.border,
         }
     }
 

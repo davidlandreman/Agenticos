@@ -355,12 +355,12 @@ The block device layer provides a unified interface for all block storage device
 
 ### Architecture Overview
 
-The filesystem layer provides read-only access to FAT-formatted disks:
+The filesystem layer routes multiple writable and read-only mounts:
 
 1. **Filesystem Trait** (`filesystem.rs`)
    - Generic interface for filesystem implementations
-   - Standard operations (open, read, enumerate_dir)
-   - Currently only FAT is implemented
+   - File, directory, metadata, link, truncate, and sync operations
+   - ext2, FAT, tmpfs, and overlay implementations
 
 2. **Arc-based File API** (`file_handle.rs`)
    - Uses custom Arc implementation for shared ownership
@@ -369,15 +369,15 @@ The filesystem layer provides read-only access to FAT-formatted disks:
    - Automatic cleanup when last reference dropped
 
 3. **VFS Layer** (`vfs.rs`)
-   - Single global mount point (no multi-mount yet)
+   - Longest-component multi-mount routing
    - Filesystem type detection
-   - Routes operations to FAT implementation
+   - Mount-pinned open handles survive rename and unlink
 
-4. **Limitations**
-   - Read-only (no write support)
-   - 8.3 filenames only
-   - No subdirectory navigation
-   - FAT12/16/32 only
+4. **Mount topology**
+   - `/`: writable tmpfs-over-FAT overlay
+   - `/data`: persistent writable ext2
+   - `/host`: read-only vvfat
+   - `/legacy-data`: optional read-only FAT migration source
 
 ### FAT Filesystem Implementation (`fs/fat/`)
 
@@ -412,7 +412,8 @@ The system can automatically detect filesystem types:
 - Checks for MBR partition tables
 - Reads partition boot sectors
 - Identifies FAT12/16/32 by signatures
-- Extensible for future filesystem support (ext2/3/4, NTFS)
+- Classifies ext2/ext3/ext4 feature masks and mounts the supported ext2 profile
+- Rejects unsupported ext3/ext4 and NTFS features explicitly
 
 ### Usage Example
 

@@ -143,18 +143,27 @@ echo "Host folder: $HOST_SHARE -> /host (read-only)"
 # reads `opt/agenticos/test_filter` at boot. Commas inside the filter must be
 # escaped as `,,` per QEMU option-parser rules; our filter syntax already uses
 # `,` as the pattern separator so we double them here.
-DATA_IMAGE="${AGENTICOS_DATA_IMAGE:-target/bootloader/data.img}"
-echo "Data disk: $DATA_IMAGE -> /data (writable, snapshot for tests)"
+DATA_IMAGE="${AGENTICOS_DATA_IMAGE:-target/bootloader/data-ext2.img}"
+TEST_DATA_SNAPSHOT="${AGENTICOS_TEST_DATA_SNAPSHOT:-on}"
+case "$TEST_DATA_SNAPSHOT" in on) DATA_DRIVE="format=raw,file=$DATA_IMAGE,if=ide,index=2,snapshot=on" ;; off) DATA_DRIVE="format=raw,file=$DATA_IMAGE,if=ide,index=2" ;; *) echo "AGENTICOS_TEST_DATA_SNAPSHOT must be on or off" >&2; exit 2 ;; esac
+echo "Data disk: $DATA_IMAGE -> /data (writable, snapshot=$TEST_DATA_SNAPSHOT)"
+FORCE_DIRTY_MOUNT="${AGENTICOS_FORCE_DIRTY_MOUNT:-0}"
+case "$FORCE_DIRTY_MOUNT" in 0|1) ;; *) echo "AGENTICOS_FORCE_DIRTY_MOUNT must be 0 or 1" >&2; exit 2 ;; esac
 QEMU_ARGS=(
     -drive "format=raw,file=$BIOS_IMAGE,if=ide,index=0"
     -drive "file=fat:ro:$HOST_SHARE,if=ide,index=1,snapshot=on"
-    -drive "format=raw,file=$DATA_IMAGE,if=ide,index=2,snapshot=on"
+    -drive "$DATA_DRIVE"
+    -fw_cfg "name=opt/agenticos/force_dirty_mount,string=$FORCE_DIRTY_MOUNT"
     -serial stdio
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
     -no-reboot
     -rtc "base=utc"
     -m "${AGENTICOS_TEST_MEMORY:-256M}"
 )
+if [ -n "${AGENTICOS_LEGACY_DATA_IMAGE:-}" ]; then
+    QEMU_ARGS+=(-drive "format=raw,file=$AGENTICOS_LEGACY_DATA_IMAGE,if=ide,index=3,readonly=on,snapshot=on")
+    echo "Legacy FAT data disk: $AGENTICOS_LEGACY_DATA_IMAGE -> /legacy-data (read-only)"
+fi
 if [ "${AGENTICOS_TEST_VIRGL:-0}" = "1" ]; then
     # Reuse the same host qualification and display/device selection as an
     # interactive GPU launch. Keep the guest compositor legacy here: this

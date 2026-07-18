@@ -60,16 +60,6 @@ impl Color {
         green: 128,
         blue: 128,
     };
-    pub const LIGHT_GRAY: Color = Color {
-        red: 192,
-        green: 192,
-        blue: 192,
-    };
-    pub const DARK_GRAY: Color = Color {
-        red: 64,
-        green: 64,
-        blue: 64,
-    };
 
     #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn from_hex(hex: u32) -> Self {

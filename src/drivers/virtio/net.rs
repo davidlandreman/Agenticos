@@ -25,6 +25,8 @@ const FALLBACK_MAC: [u8; 6] = [0x02, 0x41, 0x47, 0x4e, 0x54, 0x01];
 pub struct NetDriverCounters {
     pub rx_frames: u64,
     pub tx_frames: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
     pub rx_drops: u64,
     pub tx_drops: u64,
     pub malformed_completions: u64,
@@ -134,7 +136,6 @@ impl VirtioNet {
         self.mac
     }
 
-    #[cfg(feature = "test")]
     pub fn counters(&self) -> NetDriverCounters {
         self.counters
     }
@@ -205,6 +206,7 @@ impl VirtioNet {
                 self.rxq.notify();
             }
             self.counters.rx_frames += 1;
+            self.counters.rx_bytes += frame_len as u64;
             return Some(NetRxToken {
                 bytes,
                 len: frame_len,
@@ -239,6 +241,7 @@ impl VirtioNet {
             Ok(_) => {
                 self.txq.notify();
                 self.counters.tx_frames += 1;
+                self.counters.tx_bytes += len as u64;
             }
             Err(_) => {
                 self.tx_free.push(token);

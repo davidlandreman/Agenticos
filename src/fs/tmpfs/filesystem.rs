@@ -327,6 +327,10 @@ impl Filesystem for Tmpfs {
         Ok(position)
     }
 
+    fn truncate(&self, handle: &mut FileHandle, size: u64) -> Result<(), FilesystemError> {
+        ftruncate(self, handle, size)
+    }
+
     fn mkdir(&self, path: &str) -> Result<(), FilesystemError> {
         let (parent, leaf) = self
             .resolve_parent(path)
@@ -458,9 +462,8 @@ impl Filesystem for Tmpfs {
 }
 
 /// Truncate a file to `new_size`. Extending writes zeros (POSIX
-/// `ftruncate`). Lives outside the trait until `Filesystem::truncate`
-/// is added in U5.
-#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
+/// `ftruncate`). Kept as a helper so the trait implementation and focused
+/// tmpfs tests exercise the same mutation path.
 pub fn ftruncate(
     fs: &Tmpfs,
     handle: &mut FileHandle,
