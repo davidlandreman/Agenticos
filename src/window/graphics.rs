@@ -1,10 +1,10 @@
 //! Graphics device abstraction for the window system
 
-use bootloader_api::info::PixelFormat;
+use super::types::{ColorDepth, Rect};
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::Font;
 use crate::graphics::images::Image;
-use super::types::{Rect, ColorDepth};
+use bootloader_api::info::PixelFormat;
 
 /// Abstract interface for graphics rendering.
 ///
@@ -78,7 +78,9 @@ pub trait GraphicsDevice: Send {
             if ch == '\n' {
                 break;
             }
-            let Some(glyph) = font.glyph(ch) else { continue };
+            let Some(glyph) = font.glyph(ch) else {
+                continue;
+            };
             let glyph_x = pen_x + glyph.x_offset;
             let glyph_y = baseline + glyph.y_offset;
             let width = glyph.width as i32;
@@ -103,7 +105,6 @@ pub trait GraphicsDevice: Send {
         }
     }
 
-
     /// Blit a parsed image at `(x, y)` at its native resolution.
     ///
     /// The default implementation walks every source pixel and forwards it to
@@ -126,14 +127,7 @@ pub trait GraphicsDevice: Send {
     /// Blit a parsed image at `(x, y)` scaled to `width × height` using
     /// nearest-neighbor sampling. Coordinates and clipping follow the same
     /// contract as `draw_pixel`.
-    fn draw_image_scaled(
-        &mut self,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        image: &dyn Image,
-    ) {
+    fn draw_image_scaled(&mut self, x: i32, y: i32, width: u32, height: u32, image: &dyn Image) {
         if width == 0 || height == 0 {
             return;
         }
@@ -271,7 +265,12 @@ impl WindowBuffer {
     /// this from any `Window::paint_into_backing_store` impl that wants to
     /// be format-agnostic.
     pub fn for_device(width: usize, height: usize, device: &dyn GraphicsDevice) -> Self {
-        Self::new(width, height, device.pixel_format(), device.bytes_per_pixel())
+        Self::new(
+            width,
+            height,
+            device.pixel_format(),
+            device.bytes_per_pixel(),
+        )
     }
 
     /// Reallocate to new dimensions if they differ from the current size.

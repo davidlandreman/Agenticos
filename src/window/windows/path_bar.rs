@@ -319,7 +319,13 @@ impl Window for PathBar {
         let line_height = font.line_height();
 
         // Background.
-        device.fill_rect(bounds.x, bounds.y, bounds.width, bounds.height, self.bg_color);
+        device.fill_rect(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            self.bg_color,
+        );
 
         // Center text vertically.
         let text_y = bounds.y + (bounds.height.saturating_sub(line_height) / 2) as i32;
@@ -337,8 +343,7 @@ impl Window for PathBar {
             );
             // Trailing separator before the first visible segment.
             // Position it just inside the OVERFLOW_INDICATOR_WIDTH slot.
-            let sep_x = bounds.x + OVERFLOW_INDICATOR_WIDTH as i32
-                - SEPARATOR_WIDTH as i32
+            let sep_x = bounds.x + OVERFLOW_INDICATOR_WIDTH as i32 - SEPARATOR_WIDTH as i32
                 + ((SEPARATOR_WIDTH - char_width) / 2) as i32;
             device.draw_text(sep_x, text_y, ">", font.as_font(), self.separator_color);
         }
@@ -366,9 +371,8 @@ impl Window for PathBar {
 
             // Separator between this and the next visible segment.
             if i + 1 < visible_count {
-                let sep_x = abs_x
-                    + layout.width as i32
-                    + ((SEPARATOR_WIDTH - char_width) / 2) as i32;
+                let sep_x =
+                    abs_x + layout.width as i32 + ((SEPARATOR_WIDTH - char_width) / 2) as i32;
                 device.draw_text(sep_x, text_y, ">", font.as_font(), self.separator_color);
             }
         }

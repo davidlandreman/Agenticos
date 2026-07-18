@@ -48,7 +48,6 @@ where
     with_window_manager(|wm| (slot.take().unwrap())(wm))
 }
 
-
 /// Default button height inside a `Toolbar`.
 const BUTTON_HEIGHT: u32 = 24;
 
@@ -177,7 +176,8 @@ impl Toolbar {
         spacer.base_mut().set_parent(Some(toolbar_id));
         let spacer_id = spacer.base().id();
 
-        self.hbox.add_child(spacer_id, SizeHint::Fixed(SEPARATOR_WIDTH));
+        self.hbox
+            .add_child(spacer_id, SizeHint::Fixed(SEPARATOR_WIDTH));
         self.slots.push(Slot::Separator(spacer_id));
 
         with_any_manager(|wm| {
@@ -204,10 +204,7 @@ impl Toolbar {
             .iter()
             .zip(layouts.iter())
             .map(|(slot, slot_rect)| match slot {
-                Slot::Button(id) => (
-                    *id,
-                    Rect::new(slot_rect.x, btn_y, slot_rect.width, btn_h),
-                ),
+                Slot::Button(id) => (*id, Rect::new(slot_rect.x, btn_y, slot_rect.width, btn_h)),
                 Slot::Separator(id) => (*id, *slot_rect),
             })
             .collect();
@@ -286,7 +283,13 @@ impl Window for Toolbar {
 
         let bounds = self.hbox.base().bounds();
         // Strip background.
-        device.fill_rect(bounds.x, bounds.y, bounds.width, bounds.height, self.bg_color);
+        device.fill_rect(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            self.bg_color,
+        );
 
         // Draw a 1-pixel vertical rule centered inside each separator
         // slot. The HBox's distribution math is a pure function over its

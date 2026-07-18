@@ -1,7 +1,7 @@
-use core::mem::size_of;
-use crate::graphics::color::Color;
 use super::image::{Image, ImageFormat, PixelFormat};
 use crate::debug_info;
+use crate::graphics::color::Color;
+use core::mem::size_of;
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
@@ -53,34 +53,40 @@ pub struct BmpImage<'a> {
 impl<'a> BmpImage<'a> {
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, BmpError> {
         debug_info!("BMP: Parsing BMP file, data size: {} bytes", data.len());
-        
+
         if data.len() < size_of::<BmpFileHeader>() + size_of::<BmpInfoHeader>() {
             return Err(BmpError::InsufficientData);
         }
 
-        let file_header = unsafe {
-            *(data.as_ptr() as *const BmpFileHeader)
-        };
+        let file_header = unsafe { *(data.as_ptr() as *const BmpFileHeader) };
 
         let file_size = file_header.file_size;
         let data_offset = file_header.data_offset;
-        debug_info!("BMP: Signature: {:?}, File size: {}, Data offset: {}", 
-                    file_header.signature, file_size, data_offset);
+        debug_info!(
+            "BMP: Signature: {:?}, File size: {}, Data offset: {}",
+            file_header.signature,
+            file_size,
+            data_offset
+        );
 
         if file_header.signature != [b'B', b'M'] {
             return Err(BmpError::InvalidSignature);
         }
 
-        let info_header = unsafe {
-            *(data.as_ptr().add(size_of::<BmpFileHeader>()) as *const BmpInfoHeader)
-        };
+        let info_header =
+            unsafe { *(data.as_ptr().add(size_of::<BmpFileHeader>()) as *const BmpInfoHeader) };
 
         let width = info_header.width;
         let height = info_header.height;
         let bits_per_pixel = info_header.bits_per_pixel;
         let compression = info_header.compression;
-        debug_info!("BMP: Width: {}, Height: {}, BPP: {}, Compression: {}", 
-                    width, height, bits_per_pixel, compression);
+        debug_info!(
+            "BMP: Width: {}, Height: {}, BPP: {}, Compression: {}",
+            width,
+            height,
+            bits_per_pixel,
+            compression
+        );
 
         if info_header.header_size < 40 {
             return Err(BmpError::InvalidHeaderSize);
@@ -102,13 +108,13 @@ impl<'a> BmpImage<'a> {
 
         let width = info_header.width.abs() as usize;
         let height = info_header.height.abs() as usize;
-        
+
         if width == 0 || height == 0 {
             return Err(BmpError::InvalidDimensions);
         }
 
         let row_size = ((bits_per_pixel as usize * width + 31) / 32) * 4;
-        
+
         if data.len() < data_offset as usize {
             return Err(BmpError::InsufficientData);
         }
@@ -119,10 +125,10 @@ impl<'a> BmpImage<'a> {
             let palette_colors = if info_header.colors_used > 0 {
                 info_header.colors_used as usize
             } else {
-                1 << bits_per_pixel  // 2^bits_per_pixel colors
+                1 << bits_per_pixel // 2^bits_per_pixel colors
             };
             let palette_size = palette_colors * 4; // Each palette entry is 4 bytes (BGRA)
-            
+
             if palette_start + palette_size <= data_offset as usize {
                 Some(&data[palette_start..palette_start + palette_size])
             } else {
@@ -132,7 +138,11 @@ impl<'a> BmpImage<'a> {
             None
         };
 
-        debug_info!("BMP: Palette present: {}, bits_per_pixel: {}", palette.is_some(), bits_per_pixel);
+        debug_info!(
+            "BMP: Palette present: {}, bits_per_pixel: {}",
+            palette.is_some(),
+            bits_per_pixel
+        );
 
         Ok(BmpImage {
             width,
@@ -153,7 +163,7 @@ impl<'a> BmpImage<'a> {
         } else {
             y
         };
-        
+
         actual_y * self.row_stride + x * self.bytes_per_pixel
     }
 }
@@ -187,19 +197,19 @@ impl<'a> Image for BmpImage<'a> {
             } else {
                 y
             };
-            
+
             let byte_offset = actual_y * self.row_stride + x / 2;
             if byte_offset >= self.data.len() {
                 return None;
             }
-            
+
             let byte = self.data[byte_offset];
             let nibble = if x % 2 == 0 {
-                (byte >> 4) & 0x0F  // High nibble for even x
+                (byte >> 4) & 0x0F // High nibble for even x
             } else {
-                byte & 0x0F         // Low nibble for odd x
+                byte & 0x0F // Low nibble for odd x
             };
-            
+
             // Look up color in palette
             if let Some(palette) = self.palette {
                 let palette_index = nibble as usize * 4;
@@ -210,14 +220,14 @@ impl<'a> Image for BmpImage<'a> {
                     return Some(Color::new(r, g, b));
                 }
             }
-            
+
             // Fallback to grayscale if no palette
             let gray = (nibble * 17) as u8; // Scale 0-15 to 0-255
             return Some(Color::new(gray, gray, gray));
         }
 
         let offset = self.get_pixel_offset(x, y);
-        
+
         if self.bytes_per_pixel > 0 && offset + self.bytes_per_pixel > self.data.len() {
             return None;
         }

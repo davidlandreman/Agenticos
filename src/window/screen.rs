@@ -1,6 +1,6 @@
 //! Screen abstraction for virtual displays
 
-use super::{WindowId, ScreenId};
+use super::{ScreenId, WindowId};
 
 /// Mode of operation for a screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +31,7 @@ impl Screen {
             mode,
         }
     }
-    
+
     /// Set the root window for this screen
     pub fn set_root_window(&mut self, window_id: WindowId) {
         self.root_window = Some(window_id);

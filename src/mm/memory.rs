@@ -145,7 +145,6 @@ impl MemoryManager {
         self.stats
     }
 
-
     /// Get the physical memory offset used for virtual address translation
     pub fn get_physical_memory_offset(&self) -> Option<u64> {
         self.physical_memory_offset
@@ -155,8 +154,7 @@ impl MemoryManager {
     pub fn phys_to_virt(&self, phys_addr: u64) -> Option<u64> {
         self.physical_memory_offset.map(|offset| phys_addr + offset)
     }
-
-    }
+}
 
 // Global memory manager instance
 static mut MEMORY_MANAGER: MemoryManager = MemoryManager::new();
@@ -218,8 +216,6 @@ pub fn get_physical_memory_offset() -> Option<u64> {
 pub fn phys_to_virt(phys_addr: u64) -> Option<u64> {
     unsafe { (*&raw const MEMORY_MANAGER).phys_to_virt(phys_addr) }
 }
-
-
 
 /// Run a closure with mutable access to the global `MemoryMapper`. Returns
 /// `None` if `init_heap` has not run yet. Used by the userland subsystem

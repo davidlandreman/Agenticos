@@ -38,7 +38,10 @@ pub struct ClickMods {
 
 impl ClickMods {
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
-    pub const NONE: ClickMods = ClickMods { shift: false, ctrl: false };
+    pub const NONE: ClickMods = ClickMods {
+        shift: false,
+        ctrl: false,
+    };
 
     pub const fn new(shift: bool, ctrl: bool) -> Self {
         Self { shift, ctrl }
@@ -117,7 +120,11 @@ impl Selection {
             Selection::Multi(set) => SelectionIter::Multi(set.iter()),
             Selection::Range { anchor, end } => {
                 let (lo, hi) = normalize(*anchor, *end);
-                SelectionIter::Range { next: lo, last: hi, done: false }
+                SelectionIter::Range {
+                    next: lo,
+                    last: hi,
+                    done: false,
+                }
             }
         }
     }
@@ -209,7 +216,10 @@ impl Selection {
 
         if mods.shift && matches!(mode, SelectionMode::Multi) {
             let anchor = self.current_anchor().unwrap_or(current);
-            *self = Selection::Range { anchor, end: target };
+            *self = Selection::Range {
+                anchor,
+                end: target,
+            };
         } else {
             *self = Selection::Single(target);
         }
@@ -285,7 +295,11 @@ pub enum SelectionIter<'a> {
     Empty,
     Single(Option<usize>),
     Multi(alloc::collections::btree_set::Iter<'a, usize>),
-    Range { next: usize, last: usize, done: bool },
+    Range {
+        next: usize,
+        last: usize,
+        done: bool,
+    },
 }
 
 impl<'a> Iterator for SelectionIter<'a> {

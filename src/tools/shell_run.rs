@@ -34,7 +34,9 @@ struct ShellRunArgs {
 pub struct ShellRun;
 
 impl Tool for ShellRun {
-    fn name(&self) -> &'static str { "shell_run" }
+    fn name(&self) -> &'static str {
+        "shell_run"
+    }
 
     fn description(&self) -> &'static str {
         "(disabled) executed kernel-side shell commands; removed when zsh became the default shell"

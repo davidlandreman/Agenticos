@@ -202,7 +202,10 @@ impl MenuBar {
 
         let menu = &self.menus[index];
         self.open_menu_index = Some(index);
-        crate::debug_info!("MenuBar::open_menu - global_offset = {:?}", self.global_offset);
+        crate::debug_info!(
+            "MenuBar::open_menu - global_offset = {:?}",
+            self.global_offset
+        );
 
         // Calculate popup dimensions
         let font = get_default_font();
@@ -213,7 +216,9 @@ impl MenuBar {
             .items
             .iter()
             .map(|item| match item {
-                MenuItemDef::Item { label, shortcut, .. } => {
+                MenuItemDef::Item {
+                    label, shortcut, ..
+                } => {
                     let shortcut_len = shortcut.as_ref().map_or(0, |s| s.len() + 2);
                     label.len() + shortcut_len
                 }
@@ -247,8 +252,13 @@ impl MenuBar {
             menu_index: index,
         });
 
-        crate::debug_info!("MenuBar::open_menu - pending_popup created at ({}, {}), size {}x{}",
-            popup_x, popup_y, popup_width, popup_height);
+        crate::debug_info!(
+            "MenuBar::open_menu - pending_popup created at ({}, {}), size {}x{}",
+            popup_x,
+            popup_y,
+            popup_width,
+            popup_height
+        );
 
         self.base.invalidate();
     }
@@ -370,8 +380,11 @@ impl Window for MenuBar {
                             }
                         }
                         MouseEventType::ButtonDown if mouse_event.buttons.left => {
-                            crate::debug_info!("MenuBar: ButtonDown at x={}, menu_at_x={:?}",
-                                local_x, self.menu_at_x(local_x));
+                            crate::debug_info!(
+                                "MenuBar: ButtonDown at x={}, menu_at_x={:?}",
+                                local_x,
+                                self.menu_at_x(local_x)
+                            );
                             if let Some(idx) = self.menu_at_x(local_x) {
                                 if self.open_menu_index == Some(idx) {
                                     self.close_menu();

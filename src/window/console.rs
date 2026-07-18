@@ -1,9 +1,9 @@
 //! Console output support for the window system
 
-use spin::Mutex;
+use crate::window::WindowId;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::window::WindowId;
+use spin::Mutex;
 
 /// Global console output buffer
 static CONSOLE_BUFFER: Mutex<ConsoleBuffer> = Mutex::new(ConsoleBuffer::new());
@@ -13,7 +13,6 @@ static CONSOLE_BUFFER: Mutex<ConsoleBuffer> = Mutex::new(ConsoleBuffer::new());
 /// This allows code to queue invalidations without holding the WindowManager lock.
 /// The WindowManager processes these at the start of each render cycle.
 static PENDING_INVALIDATIONS: Mutex<Vec<WindowId>> = Mutex::new(Vec::new());
-
 
 /// Take all pending invalidations.
 ///
@@ -82,7 +81,6 @@ pub fn take_output() -> (Vec<String>, String) {
 
     (lines, pending)
 }
-
 
 /// Writer implementation for core::fmt
 pub struct ConsoleWriter;

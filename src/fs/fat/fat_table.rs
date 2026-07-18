@@ -1,6 +1,6 @@
 use crate::drivers::block::BlockDevice;
-use crate::fs::fat::types::{FatType, FatError, ClusterId};
 use crate::fs::fat::boot_sector::BootSector;
+use crate::fs::fat::types::{ClusterId, FatError, FatType};
 
 pub struct FatTable<'a> {
     device: &'a dyn BlockDevice,
@@ -29,7 +29,6 @@ impl<'a> FatTable<'a> {
         }
     }
 
-
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn num_fats(&self) -> u8 {
         self.num_fats
@@ -44,7 +43,7 @@ impl<'a> FatTable<'a> {
     pub fn bytes_per_sector(&self) -> u16 {
         self.bytes_per_sector
     }
-    
+
     pub fn read_entry(&self, cluster: ClusterId) -> Result<ClusterId, FatError> {
         match self.fat_type {
             FatType::Fat12 => self.read_fat12_entry(cluster),
@@ -52,22 +51,24 @@ impl<'a> FatTable<'a> {
             FatType::Fat32 => self.read_fat32_entry(cluster),
         }
     }
-    
+
     fn read_fat12_entry(&self, cluster: ClusterId) -> Result<ClusterId, FatError> {
         let fat_offset = cluster.0 + (cluster.0 / 2);
         let fat_sector = self.fat_start_sector + (fat_offset / self.bytes_per_sector as u32);
         let ent_offset = (fat_offset % self.bytes_per_sector as u32) as usize;
-        
+
         let mut buffer = [0u8; 512];
-        self.device.read_blocks(fat_sector as u64, 1, &mut buffer)
+        self.device
+            .read_blocks(fat_sector as u64, 1, &mut buffer)
             .map_err(|_| FatError::BlockDeviceError)?;
-            
+
         let value = if cluster.0 & 1 == 1 {
             // Odd cluster
             if ent_offset == 511 {
                 // Entry spans sectors
                 let low = buffer[511];
-                self.device.read_blocks(fat_sector as u64 + 1, 1, &mut buffer)
+                self.device
+                    .read_blocks(fat_sector as u64 + 1, 1, &mut buffer)
                     .map_err(|_| FatError::BlockDeviceError)?;
                 let high = buffer[0];
                 ((high as u16) << 8 | low as u16) >> 4
@@ -79,7 +80,8 @@ impl<'a> FatTable<'a> {
             if ent_offset == 511 {
                 // Entry spans sectors
                 let low = buffer[511];
-                self.device.read_blocks(fat_sector as u64 + 1, 1, &mut buffer)
+                self.device
+                    .read_blocks(fat_sector as u64 + 1, 1, &mut buffer)
                     .map_err(|_| FatError::BlockDeviceError)?;
                 let high = buffer[0];
                 (high as u16 & 0x0F) << 8 | low as u16
@@ -87,42 +89,44 @@ impl<'a> FatTable<'a> {
                 u16::from_le_bytes([buffer[ent_offset], buffer[ent_offset + 1]]) & 0x0FFF
             }
         };
-        
+
         Ok(ClusterId(value as u32))
     }
-    
+
     fn read_fat16_entry(&self, cluster: ClusterId) -> Result<ClusterId, FatError> {
         let fat_offset = cluster.0 * 2;
         let fat_sector = self.fat_start_sector + (fat_offset / self.bytes_per_sector as u32);
         let ent_offset = (fat_offset % self.bytes_per_sector as u32) as usize;
-        
+
         let mut buffer = [0u8; 512];
-        self.device.read_blocks(fat_sector as u64, 1, &mut buffer)
+        self.device
+            .read_blocks(fat_sector as u64, 1, &mut buffer)
             .map_err(|_| FatError::BlockDeviceError)?;
-            
+
         let value = u16::from_le_bytes([buffer[ent_offset], buffer[ent_offset + 1]]);
         Ok(ClusterId(value as u32))
     }
-    
+
     fn read_fat32_entry(&self, cluster: ClusterId) -> Result<ClusterId, FatError> {
         let fat_offset = cluster.0 * 4;
         let fat_sector = self.fat_start_sector + (fat_offset / self.bytes_per_sector as u32);
         let ent_offset = (fat_offset % self.bytes_per_sector as u32) as usize;
-        
+
         let mut buffer = [0u8; 512];
-        self.device.read_blocks(fat_sector as u64, 1, &mut buffer)
+        self.device
+            .read_blocks(fat_sector as u64, 1, &mut buffer)
             .map_err(|_| FatError::BlockDeviceError)?;
-            
+
         let value = u32::from_le_bytes([
             buffer[ent_offset],
             buffer[ent_offset + 1],
             buffer[ent_offset + 2],
             buffer[ent_offset + 3],
         ]) & 0x0FFFFFFF; // Mask off upper 4 bits
-        
+
         Ok(ClusterId(value))
     }
-    
+
     // ---------- Write side (Phase C U8) ----------
 
     /// Write `value` to FAT entry `cluster`, mirrored across every FAT
@@ -142,10 +146,16 @@ impl<'a> FatTable<'a> {
         }
     }
 
-    fn write_to_all_fats(&self, sector_offset_in_fat: u32, buffer: &[u8; 512]) -> Result<(), FatError> {
+    fn write_to_all_fats(
+        &self,
+        sector_offset_in_fat: u32,
+        buffer: &[u8; 512],
+    ) -> Result<(), FatError> {
         for fat_idx in 0..self.num_fats as u32 {
-            let absolute_sector = self.fat_start_sector + fat_idx * self.sectors_per_fat + sector_offset_in_fat;
-            self.device.write_blocks(absolute_sector as u64, 1, buffer)
+            let absolute_sector =
+                self.fat_start_sector + fat_idx * self.sectors_per_fat + sector_offset_in_fat;
+            self.device
+                .write_blocks(absolute_sector as u64, 1, buffer)
                 .map_err(|_| FatError::BlockDeviceError)?;
         }
         Ok(())
@@ -159,7 +169,8 @@ impl<'a> FatTable<'a> {
         // Read sector(s); FAT12 entries can straddle a sector boundary.
         let mut buffer = [0u8; 512];
         let absolute_sector = self.fat_start_sector + sector_in_fat;
-        self.device.read_blocks(absolute_sector as u64, 1, &mut buffer)
+        self.device
+            .read_blocks(absolute_sector as u64, 1, &mut buffer)
             .map_err(|_| FatError::BlockDeviceError)?;
 
         let v = (value.0 & 0x0FFF) as u16;
@@ -173,7 +184,8 @@ impl<'a> FatTable<'a> {
                 // Spill into next sector.
                 let mut next = [0u8; 512];
                 let next_abs = absolute_sector + 1;
-                self.device.read_blocks(next_abs as u64, 1, &mut next)
+                self.device
+                    .read_blocks(next_abs as u64, 1, &mut next)
                     .map_err(|_| FatError::BlockDeviceError)?;
                 next[0] = (v >> 4) as u8;
                 self.write_to_all_fats(sector_in_fat + 1, &next)?;
@@ -192,7 +204,8 @@ impl<'a> FatTable<'a> {
                 self.write_to_all_fats(sector_in_fat, &buffer)?;
                 let mut next = [0u8; 512];
                 let next_abs = absolute_sector + 1;
-                self.device.read_blocks(next_abs as u64, 1, &mut next)
+                self.device
+                    .read_blocks(next_abs as u64, 1, &mut next)
                     .map_err(|_| FatError::BlockDeviceError)?;
                 let high_neighbor = next[0] & 0xF0;
                 next[0] = high_neighbor | ((v >> 8) as u8 & 0x0F);
@@ -214,7 +227,8 @@ impl<'a> FatTable<'a> {
 
         let mut buffer = [0u8; 512];
         let absolute_sector = self.fat_start_sector + sector_in_fat;
-        self.device.read_blocks(absolute_sector as u64, 1, &mut buffer)
+        self.device
+            .read_blocks(absolute_sector as u64, 1, &mut buffer)
             .map_err(|_| FatError::BlockDeviceError)?;
 
         let v = value.0 as u16;
@@ -231,7 +245,8 @@ impl<'a> FatTable<'a> {
 
         let mut buffer = [0u8; 512];
         let absolute_sector = self.fat_start_sector + sector_in_fat;
-        self.device.read_blocks(absolute_sector as u64, 1, &mut buffer)
+        self.device
+            .read_blocks(absolute_sector as u64, 1, &mut buffer)
             .map_err(|_| FatError::BlockDeviceError)?;
 
         // FAT32 entries are 28-bit; preserve the high 4 bits (reserved).
@@ -295,7 +310,8 @@ impl<'a> FatTable<'a> {
                 let ent_offset = (fat_offset % self.bytes_per_sector as u32) as usize;
                 let mut buffer = [0u8; 512];
                 let absolute_sector = self.fat_start_sector + sector_in_fat;
-                self.device.read_blocks(absolute_sector as u64, 1, &mut buffer)
+                self.device
+                    .read_blocks(absolute_sector as u64, 1, &mut buffer)
                     .map_err(|_| FatError::BlockDeviceError)?;
                 let mut raw = u32::from_le_bytes([
                     buffer[ent_offset],
@@ -319,7 +335,11 @@ impl<'a> FatTable<'a> {
     /// at `max_cluster`. Returns `Err(DiskFull)` if no free cluster
     /// is found after a full pass. Caller marks the returned cluster
     /// allocated by `write_entry(cluster, EOC)`.
-    pub fn find_free_cluster(&self, hint: ClusterId, max_cluster: u32) -> Result<ClusterId, FatError> {
+    pub fn find_free_cluster(
+        &self,
+        hint: ClusterId,
+        max_cluster: u32,
+    ) -> Result<ClusterId, FatError> {
         let start = hint.0.max(2);
         let total_to_scan = max_cluster.saturating_sub(2);
         let mut idx = 0u32;
@@ -334,31 +354,50 @@ impl<'a> FatTable<'a> {
         Err(FatError::DiskFull)
     }
 
-    pub fn follow_chain(&self, start_cluster: ClusterId, mut callback: impl FnMut(ClusterId) -> Result<(), FatError>) -> Result<(), FatError> {
+    pub fn follow_chain(
+        &self,
+        start_cluster: ClusterId,
+        mut callback: impl FnMut(ClusterId) -> Result<(), FatError>,
+    ) -> Result<(), FatError> {
         let mut current = start_cluster;
         let mut visited: u32 = 0;
 
         loop {
             if !current.is_valid(self.fat_type) {
-                crate::debug_warn!("[fat] follow_chain: invalid cluster {} after {} visits", current.0, visited);
+                crate::debug_warn!(
+                    "[fat] follow_chain: invalid cluster {} after {} visits",
+                    current.0,
+                    visited
+                );
                 return Err(FatError::InvalidCluster);
             }
 
             if current.is_bad(self.fat_type) {
-                crate::debug_warn!("[fat] follow_chain: bad cluster {} after {} visits", current.0, visited);
+                crate::debug_warn!(
+                    "[fat] follow_chain: bad cluster {} after {} visits",
+                    current.0,
+                    visited
+                );
                 return Err(FatError::BadCluster);
             }
 
             callback(current)?;
             visited += 1;
             if visited.is_multiple_of(32) {
-                crate::debug_info!("[fat] follow_chain: {} clusters visited, current={}", visited, current.0);
+                crate::debug_info!(
+                    "[fat] follow_chain: {} clusters visited, current={}",
+                    visited,
+                    current.0
+                );
             }
 
             current = self.read_entry(current)?;
 
             if current.is_end_of_chain(self.fat_type) {
-                crate::debug_info!("[fat] follow_chain: end-of-chain after {} clusters", visited);
+                crate::debug_info!(
+                    "[fat] follow_chain: end-of-chain after {} clusters",
+                    visited
+                );
                 break;
             }
         }

@@ -2,18 +2,24 @@
 //! implementations. Exercises the registry directly without going through the
 //! serial transport — that's the in-kernel consumer R16 promises.
 
-use alloc::string::{String, ToString};
-use alloc::boxed::Box;
+use crate::debug_debug;
 use crate::lib::test_utils::Testable;
 use crate::tools::{Tool, ToolError, ToolRegistry, ToolResult};
-use crate::debug_debug;
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 
 struct FakeOk;
 
 impl Tool for FakeOk {
-    fn name(&self) -> &'static str { "fake_ok" }
-    fn description(&self) -> &'static str { "always-succeeds test tool" }
-    fn schema(&self) -> &'static str { "{}" }
+    fn name(&self) -> &'static str {
+        "fake_ok"
+    }
+    fn description(&self) -> &'static str {
+        "always-succeeds test tool"
+    }
+    fn schema(&self) -> &'static str {
+        "{}"
+    }
     fn call(&self, _args_json: &str) -> Result<ToolResult, ToolError> {
         Ok(ToolResult::json_only(String::from("{\"hello\":\"world\"}")))
     }
@@ -22,9 +28,15 @@ impl Tool for FakeOk {
 struct FakeFail;
 
 impl Tool for FakeFail {
-    fn name(&self) -> &'static str { "fake_fail" }
-    fn description(&self) -> &'static str { "always-fails test tool" }
-    fn schema(&self) -> &'static str { "{}" }
+    fn name(&self) -> &'static str {
+        "fake_fail"
+    }
+    fn description(&self) -> &'static str {
+        "always-fails test tool"
+    }
+    fn schema(&self) -> &'static str {
+        "{}"
+    }
     fn call(&self, _args_json: &str) -> Result<ToolResult, ToolError> {
         Err(ToolError::tool_failed("intentional"))
     }
@@ -33,9 +45,15 @@ impl Tool for FakeFail {
 struct FakeBinary;
 
 impl Tool for FakeBinary {
-    fn name(&self) -> &'static str { "fake_binary" }
-    fn description(&self) -> &'static str { "returns a binary trailer" }
-    fn schema(&self) -> &'static str { "{}" }
+    fn name(&self) -> &'static str {
+        "fake_binary"
+    }
+    fn description(&self) -> &'static str {
+        "returns a binary trailer"
+    }
+    fn schema(&self) -> &'static str {
+        "{}"
+    }
     fn call(&self, _args_json: &str) -> Result<ToolResult, ToolError> {
         Ok(ToolResult::with_binary(
             String::from("{\"len\":3}"),
@@ -57,7 +75,9 @@ fn test_registry_happy_path() {
 fn test_registry_unknown_tool() {
     debug_debug!("Testing unknown_tool error...");
     let reg = ToolRegistry::new();
-    let err = reg.call("nonexistent", "{}").expect_err("should be unknown");
+    let err = reg
+        .call("nonexistent", "{}")
+        .expect_err("should be unknown");
     assert_eq!(err.code, "unknown_tool");
     debug_debug!("Unknown tool error passed!");
 }
@@ -101,9 +121,15 @@ fn test_registry_duplicate_registration_latest_wins() {
 
     struct ShadowOk;
     impl Tool for ShadowOk {
-        fn name(&self) -> &'static str { "fake_ok" }
-        fn description(&self) -> &'static str { "shadow" }
-        fn schema(&self) -> &'static str { "{}" }
+        fn name(&self) -> &'static str {
+            "fake_ok"
+        }
+        fn description(&self) -> &'static str {
+            "shadow"
+        }
+        fn schema(&self) -> &'static str {
+            "{}"
+        }
         fn call(&self, _args_json: &str) -> Result<ToolResult, ToolError> {
             Ok(ToolResult::json_only(String::from("{\"shadowed\":true}")))
         }

@@ -1,14 +1,14 @@
 //! Calculator command using GUI widgets
 
-use crate::process::RunnableProcess;
-use crate::window::{self, Window, WindowId, Rect};
-use crate::window::windows::{ContainerWindow, FrameWindow, Label, Button};
-use crate::window::windows::label::TextAlign;
 use crate::graphics::color::Color;
-use alloc::{vec::Vec, string::String, boxed::Box, format};
+use crate::process::RunnableProcess;
+use crate::window::windows::label::TextAlign;
+use crate::window::windows::{Button, ContainerWindow, FrameWindow, Label};
+use crate::window::{self, Rect, Window, WindowId};
 use alloc::collections::BTreeMap;
-use spin::Mutex;
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
 
 /// Unique ID for each calculator instance
 static NEXT_CALC_ID: AtomicUsize = AtomicUsize::new(1);
@@ -199,13 +199,17 @@ impl RunnableProcess for CalcProcess {
         // Create frame + container window
         let result = window::with_window_manager(|wm| {
             // Get the desktop window (root of the screen)
-            let desktop_id = wm.get_active_screen()
-                .and_then(|s| s.root_window)?;
+            let desktop_id = wm.get_active_screen().and_then(|s| s.root_window)?;
 
             // Create frame window
             let frame_id = wm.create_window(Some(desktop_id));
             let mut frame = FrameWindow::new(frame_id, "Calculator");
-            frame.set_bounds(Rect::new(150 + offset, 80 + offset, frame_width, frame_height));
+            frame.set_bounds(Rect::new(
+                150 + offset,
+                80 + offset,
+                frame_width,
+                frame_height,
+            ));
             frame.set_parent(Some(desktop_id));
 
             // Create container as content
@@ -272,7 +276,11 @@ impl RunnableProcess for CalcProcess {
                     button.set_parent(Some(content_id));
 
                     // Set button colors based on type
-                    let is_digit = label.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+                    let is_digit = label
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false);
                     let is_operator = matches!(label, "+" | "-" | "*" | "/");
                     let is_equals = label == "=";
                     let is_clear = label == "C";
@@ -294,19 +302,17 @@ impl RunnableProcess for CalcProcess {
                     // Set up callback based on button type
                     // Each callback captures the calc_id for this specific calculator
                     let label_owned = String::from(label);
-                    button.on_click(move || {
-                        match label_owned.as_str() {
-                            "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
-                                handle_digit(calc_id, label_owned.chars().next().unwrap());
-                            }
-                            "+" => handle_operator(calc_id, Op::Add),
-                            "-" => handle_operator(calc_id, Op::Sub),
-                            "*" => handle_operator(calc_id, Op::Mul),
-                            "/" => handle_operator(calc_id, Op::Div),
-                            "=" => handle_equals(calc_id),
-                            "C" => handle_clear(calc_id),
-                            _ => {}
+                    button.on_click(move || match label_owned.as_str() {
+                        "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
+                            handle_digit(calc_id, label_owned.chars().next().unwrap());
                         }
+                        "+" => handle_operator(calc_id, Op::Add),
+                        "-" => handle_operator(calc_id, Op::Sub),
+                        "*" => handle_operator(calc_id, Op::Mul),
+                        "/" => handle_operator(calc_id, Op::Div),
+                        "=" => handle_equals(calc_id),
+                        "C" => handle_clear(calc_id),
+                        _ => {}
                     });
 
                     wm.set_window_impl(btn_id, Box::new(button));
@@ -386,19 +392,16 @@ impl RunnableProcess for CalcProcess {
                     wm.window_registry.remove(&display_id);
 
                     // Get content bounds
-                    let content_bounds = if let Some(content) = wm.window_registry.get(&content_id) {
+                    let content_bounds = if let Some(content) = wm.window_registry.get(&content_id)
+                    {
                         content.bounds()
                     } else {
                         return;
                     };
 
                     // Create new display label with updated text
-                    let display_bounds = Rect::new(
-                        10,
-                        10,
-                        (content_bounds.width as i32 - 20) as u32,
-                        40,
-                    );
+                    let display_bounds =
+                        Rect::new(10, 10, (content_bounds.width as i32 - 20) as u32, 40);
                     let mut display = Label::new_with_id(display_id, display_bounds, &display_text);
                     display.set_background(Some(Color::new(40, 40, 40)));
                     display.set_color(Color::WHITE);
@@ -422,9 +425,9 @@ impl RunnableProcess for CalcProcess {
             crate::process::yield_if_needed();
 
             // Check if window still exists
-            let exists = window::with_window_manager(|wm| {
-                wm.window_registry.contains_key(&content_id)
-            }).unwrap_or(false);
+            let exists =
+                window::with_window_manager(|wm| wm.window_registry.contains_key(&content_id))
+                    .unwrap_or(false);
 
             if !exists {
                 break;

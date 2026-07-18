@@ -2,11 +2,11 @@
 //!
 //! Supports multiple terminal windows with per-terminal output routing.
 
-use spin::Mutex;
+use super::{with_window_manager, WindowId};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
-use super::{WindowId, with_window_manager};
+use spin::Mutex;
 
 /// Global terminal window ID for print macros (the default/focused terminal)
 static TERMINAL_WINDOW: Mutex<Option<WindowId>> = Mutex::new(None);
@@ -51,10 +51,12 @@ pub fn get_current_output_terminal() -> Option<WindowId> {
 /// with [`sync_terminal_winsize`] once the hosting window's grid is
 /// known.
 pub fn register_terminal(window_id: WindowId) {
-    TERMINAL_BUFFERS.lock().entry(window_id).or_insert_with(Vec::new);
+    TERMINAL_BUFFERS
+        .lock()
+        .entry(window_id)
+        .or_insert_with(Vec::new);
     crate::userland::stdin::install_for_terminal(window_id);
 }
-
 
 /// Update the pty's `Winsize` for `terminal_id` to match the rendered
 /// grid. Raises `SIGWINCH` on every process bound to this terminal
@@ -97,7 +99,6 @@ pub fn write_to_terminal_id(terminal_id: WindowId, text: &str) {
     }
 }
 
-
 /// Take pending output for a terminal. Drains the pty master's output
 /// queue first (where ring-3 writes + kernel `write_to_terminal_id`
 /// land), then any leftover from the legacy string buffer (for
@@ -121,7 +122,6 @@ pub fn take_terminal_output(terminal_id: WindowId) -> Vec<String> {
     }
     out
 }
-
 
 /// Compositor-side: invalidate every terminal window with pending
 /// buffered output. Called from

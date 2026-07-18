@@ -39,10 +39,7 @@ impl Window for PlainWidget {
         &mut self.base
     }
     fn paint(&mut self, _device: &mut dyn crate::window::GraphicsDevice) {}
-    fn handle_event(
-        &mut self,
-        _event: crate::window::Event,
-    ) -> crate::window::EventResult {
+    fn handle_event(&mut self, _event: crate::window::Event) -> crate::window::EventResult {
         crate::window::EventResult::Ignored
     }
     // Deliberately overrides the default `false` so the override test
@@ -66,7 +63,10 @@ fn test_default_methods_route_through_base() {
     // Every read-only default method must mirror `WindowBase`.
     assert_eq!(widget.id(), id, "id() should delegate to base");
     assert_eq!(widget.bounds(), rect, "bounds() should delegate to base");
-    assert!(widget.visible(), "visible() should delegate to base (default true)");
+    assert!(
+        widget.visible(),
+        "visible() should delegate to base (default true)"
+    );
     assert_eq!(widget.parent(), None, "parent() should delegate to base");
     assert!(
         widget.children().is_empty(),
@@ -93,10 +93,7 @@ fn test_can_focus_override_beats_default() {
     // A `Spacer` returns the trait default (false) since it does not
     // override `can_focus`.
     let spacer = crate::window::windows::Spacer::new(Rect::new(0, 0, 1, 1));
-    assert!(
-        !spacer.can_focus(),
-        "default can_focus() must return false"
-    );
+    assert!(!spacer.can_focus(), "default can_focus() must return false");
 }
 
 fn test_invalidate_default_sets_needs_repaint_on_base() {

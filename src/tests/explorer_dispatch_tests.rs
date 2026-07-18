@@ -63,10 +63,7 @@ fn test_leading_dot_only_treated_as_extension() {
 fn test_empty_path_does_not_panic() {
     // Defensive: an empty path should map to extensionless ->
     // Unsupported(""), not panic.
-    assert_eq!(
-        dispatch_open(""),
-        OpenAction::Unsupported(String::new())
-    );
+    assert_eq!(dispatch_open(""), OpenAction::Unsupported(String::new()));
 }
 
 pub fn get_tests() -> &'static [&'static dyn Testable] {

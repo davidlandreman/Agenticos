@@ -7,8 +7,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::fs::filesystem::{
-    DirectoryEntry, DirectoryIterator, FileAttributes, FileHandle, FileMode, FileType,
-    Filesystem, FilesystemError, FilesystemStats,
+    DirectoryEntry, DirectoryIterator, FileAttributes, FileHandle, FileMode, FileType, Filesystem,
+    FilesystemError, FilesystemStats,
 };
 use crate::lib::arc::Arc;
 
@@ -41,7 +41,7 @@ impl TmpNode {
     pub fn is_dir(&self) -> bool {
         matches!(self, TmpNode::Dir(_))
     }
-        pub fn size(&self) -> u64 {
+    pub fn size(&self) -> u64 {
         match self {
             TmpNode::File(body) => body.lock().len() as u64,
             TmpNode::Dir(_) => 0,
@@ -213,7 +213,11 @@ impl Filesystem for Tmpfs {
         let mut entry = DirectoryEntry {
             name: [0u8; 256],
             name_len: copy,
-            file_type: if node.is_dir() { FileType::Directory } else { FileType::File },
+            file_type: if node.is_dir() {
+                FileType::Directory
+            } else {
+                FileType::File
+            },
             size: node.size(),
             attributes: FileAttributes {
                 read_only: false,
@@ -423,12 +427,14 @@ impl Filesystem for Tmpfs {
 
         // Identify src and dst maps via pointer equality.
         let same_as_src = Arc::ptr_eq(a, &src_parent);
-        let (src_dir, dst_dir): (&mut BTreeMap<String, TmpNode>, &mut BTreeMap<String, TmpNode>) =
-            if same_as_src {
-                (&mut *a_dir, &mut *b_dir)
-            } else {
-                (&mut *b_dir, &mut *a_dir)
-            };
+        let (src_dir, dst_dir): (
+            &mut BTreeMap<String, TmpNode>,
+            &mut BTreeMap<String, TmpNode>,
+        ) = if same_as_src {
+            (&mut *a_dir, &mut *b_dir)
+        } else {
+            (&mut *b_dir, &mut *a_dir)
+        };
 
         let node = src_dir.remove(src_leaf).ok_or(FilesystemError::NotFound)?;
         let node_is_dir = node.is_dir();
@@ -455,7 +461,11 @@ impl Filesystem for Tmpfs {
 /// `ftruncate`). Lives outside the trait until `Filesystem::truncate`
 /// is added in U5.
 #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
-pub fn ftruncate(fs: &Tmpfs, handle: &mut FileHandle, new_size: u64) -> Result<(), FilesystemError> {
+pub fn ftruncate(
+    fs: &Tmpfs,
+    handle: &mut FileHandle,
+    new_size: u64,
+) -> Result<(), FilesystemError> {
     let entry = {
         let tbl = fs.open.lock();
         let of = tbl.get(&handle.inode).ok_or(FilesystemError::IoError)?;
@@ -549,10 +559,7 @@ mod tests {
         let fs = Tmpfs::new();
         fs.mkdir("/dir").expect("mkdir");
         open_write_read(&fs, "/dir/x", b"y");
-        assert!(matches!(
-            fs.rmdir("/dir"),
-            Err(FilesystemError::NotEmpty)
-        ));
+        assert!(matches!(fs.rmdir("/dir"), Err(FilesystemError::NotEmpty)));
         fs.unlink("/dir/x").expect("unlink x");
         fs.rmdir("/dir").expect("rmdir empty");
     }

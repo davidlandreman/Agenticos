@@ -68,8 +68,7 @@ pub enum FdSlot {
     },
 }
 
-impl FdSlot {
-    }
+impl FdSlot {}
 
 #[derive(Clone)]
 pub struct FdTable {

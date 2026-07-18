@@ -71,18 +71,18 @@ pub struct FileAttributes {
 /// Directory entry information
 #[derive(Clone)]
 pub struct DirectoryEntry {
-    pub name: [u8; 256],  // Max filename length
+    pub name: [u8; 256], // Max filename length
     pub name_len: usize,
     pub file_type: FileType,
     pub size: u64,
     #[expect(dead_code, reason = "intentional kernel API surface")]
     pub attributes: FileAttributes,
     #[expect(dead_code, reason = "intentional kernel API surface")]
-    pub created: u64,      // Timestamp
+    pub created: u64, // Timestamp
     #[expect(dead_code, reason = "intentional kernel API surface")]
-    pub modified: u64,     // Timestamp
+    pub modified: u64, // Timestamp
     #[expect(dead_code, reason = "intentional kernel API surface")]
-    pub accessed: u64,     // Timestamp
+    pub accessed: u64, // Timestamp
 }
 
 impl DirectoryEntry {
@@ -118,7 +118,7 @@ impl FileMode {
         create: false,
         truncate: false,
     };
-    
+
     #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const READ_WRITE: Self = Self {
         read: true,
@@ -144,61 +144,64 @@ pub struct FilesystemStats {
 pub trait Filesystem {
     /// Get the name/type of this filesystem
     fn name(&self) -> &str;
-    
+
     /// Check if this filesystem is read-only
     fn is_read_only(&self) -> bool;
-    
+
     /// Get filesystem statistics
     #[expect(dead_code, reason = "intentional kernel API surface")]
     fn stats(&self) -> Result<FilesystemStats, FilesystemError>;
-    
+
     /// List directory contents
     fn read_dir(&self, path: &str) -> Result<DirectoryIterator<'_>, FilesystemError>;
-    
+
     /// Enumerate directory entries into a Vec (convenience method)
-    fn enumerate_dir(&self, path: &str) -> Result<alloc::vec::Vec<DirectoryEntry>, FilesystemError> {
+    fn enumerate_dir(
+        &self,
+        path: &str,
+    ) -> Result<alloc::vec::Vec<DirectoryEntry>, FilesystemError> {
         // Default implementation that tries to use read_dir
         // Individual filesystems can override this for better performance
         let mut entries = alloc::vec::Vec::new();
         let mut dir_iter = self.read_dir(path)?;
-        
+
         while let Some(entry) = dir_iter.next_entry() {
             entries.push(entry);
         }
-        
+
         Ok(entries)
     }
-    
+
     /// Get file/directory metadata
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError>;
-    
+
     /// Open a file
     fn open(&self, path: &str, mode: FileMode) -> Result<FileHandle, FilesystemError>;
-    
+
     /// Close a file
     fn close(&self, handle: &mut FileHandle) -> Result<(), FilesystemError>;
-    
+
     /// Read from a file
     fn read(&self, handle: &mut FileHandle, buffer: &mut [u8]) -> Result<usize, FilesystemError>;
-    
+
     /// Write to a file
     fn write(&self, handle: &mut FileHandle, buffer: &[u8]) -> Result<usize, FilesystemError>;
-    
+
     /// Seek in a file
     fn seek(&self, handle: &mut FileHandle, position: u64) -> Result<u64, FilesystemError>;
-    
+
     /// Create a directory
     fn mkdir(&self, path: &str) -> Result<(), FilesystemError>;
-    
+
     /// Remove a file
     fn unlink(&self, path: &str) -> Result<(), FilesystemError>;
-    
+
     /// Remove a directory
     fn rmdir(&self, path: &str) -> Result<(), FilesystemError>;
-    
+
     /// Rename a file or directory
     fn rename(&self, old_path: &str, new_path: &str) -> Result<(), FilesystemError>;
-    
+
     /// Flush all pending writes
     fn sync(&self) -> Result<(), FilesystemError>;
 }
@@ -222,7 +225,7 @@ impl<'a> DirectoryIterator<'a> {
         let path_bytes = path.as_bytes();
         let len = path_bytes.len().min(256);
         path_buf[..len].copy_from_slice(&path_bytes[..len]);
-        
+
         Self {
             filesystem,
             path: path_buf,
@@ -232,7 +235,7 @@ impl<'a> DirectoryIterator<'a> {
             loaded: false,
         }
     }
-    
+
     /// Get the path as a string slice
 
     /// Load directory entries from the filesystem
@@ -240,26 +243,26 @@ impl<'a> DirectoryIterator<'a> {
         if self.loaded {
             return;
         }
-        
+
         // For now, we'll use a workaround since we can't easily access the FAT-specific
         // directory iteration from the generic filesystem trait.
         // This is a bridge implementation that could be improved with better filesystem abstractions.
-        
+
         // We can't directly access filesystem-specific directory reading here since
         // the trait doesn't expose it. For a complete implementation, we'd need to
         // either:
         // 1. Add a method to the Filesystem trait to enumerate entries
-        // 2. Use filesystem-specific casting 
+        // 2. Use filesystem-specific casting
         // 3. Store entries when the DirectoryIterator is created
-        
+
         // For now, this will remain empty, but the framework is in place
         self.loaded = true;
     }
-    
+
     /// Get the next directory entry
     pub fn next_entry(&mut self) -> Option<DirectoryEntry> {
         self.load_entries();
-        
+
         if self.index < self.entries.len() {
             let entry = self.entries[self.index].clone();
             self.index += 1;
@@ -272,7 +275,7 @@ impl<'a> DirectoryIterator<'a> {
 
 impl<'a> Iterator for DirectoryIterator<'a> {
     type Item = DirectoryEntry;
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         self.next_entry()
     }
@@ -296,20 +299,21 @@ pub enum FilesystemType {
 /// Detect filesystem type from a block device (or partition)
 pub fn detect_filesystem(device: &dyn BlockDevice) -> Result<FilesystemType, FilesystemError> {
     let mut buffer = [0u8; 512];
-    
+
     // Read the first sector (boot sector/superblock)
-    device.read_blocks(0, 1, &mut buffer)
+    device
+        .read_blocks(0, 1, &mut buffer)
         .map_err(|_| FilesystemError::IoError)?;
-    
+
     // Check for FAT filesystem signatures
     if buffer[510] == 0x55 && buffer[511] == 0xAA {
         // Valid boot sector signature, might be FAT
-        
+
         // Check for FAT32 signature
         if &buffer[82..87] == b"FAT32" {
             return Ok(FilesystemType::Fat32);
         }
-        
+
         // Check for FAT12/16 signature
         if &buffer[54..59] == b"FAT12" {
             return Ok(FilesystemType::Fat12);
@@ -317,28 +321,29 @@ pub fn detect_filesystem(device: &dyn BlockDevice) -> Result<FilesystemType, Fil
         if &buffer[54..59] == b"FAT16" {
             return Ok(FilesystemType::Fat16);
         }
-        
+
         // Additional FAT detection based on cluster count
         // This would require parsing the BPB, which we can do if needed
     }
-    
+
     // Check for ext2/3/4 filesystem
     // Ext superblock starts at offset 1024 (block 1 for 1K blocks, or within block 0 for larger blocks)
     let mut ext_buffer = [0u8; 512];
-    device.read_blocks(2, 1, &mut ext_buffer)  // Read sectors 2-3 (bytes 1024-1535)
+    device
+        .read_blocks(2, 1, &mut ext_buffer) // Read sectors 2-3 (bytes 1024-1535)
         .map_err(|_| FilesystemError::IoError)?;
-    
+
     // Check ext2/3/4 magic number at offset 56 of superblock (0x438 from start of partition)
     if ext_buffer[56] == 0x53 && ext_buffer[57] == 0xEF {
         // This is an ext2/3/4 filesystem
         // We could further distinguish between them by checking features
-        return Ok(FilesystemType::Ext2);  // For now, just return Ext2
+        return Ok(FilesystemType::Ext2); // For now, just return Ext2
     }
-    
+
     // Check for NTFS
     if &buffer[3..7] == b"NTFS" {
         return Ok(FilesystemType::Ntfs);
     }
-    
+
     Ok(FilesystemType::Unknown)
 }

@@ -92,7 +92,6 @@ impl AddressSpace {
         &mut self.vmas
     }
 
-
     pub fn initialize_vmas_from_image(
         &mut self,
         image: &crate::userland::image::UserImage,
@@ -116,9 +115,10 @@ impl AddressSpace {
                     file_len: elf.file_len,
                     zero_tail: elf.zero_tail,
                 }
-            } else if image.tls_fs_base.is_some_and(|tcb| {
-                start == tcb.as_u64() || end == tcb.as_u64()
-            }) {
+            } else if image
+                .tls_fs_base
+                .is_some_and(|tcb| start == tcb.as_u64() || end == tcb.as_u64())
+            {
                 VmaBacking::Tls
             } else {
                 VmaBacking::ElfResident

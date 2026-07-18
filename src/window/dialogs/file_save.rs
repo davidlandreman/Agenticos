@@ -5,8 +5,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::fs::Directory;
 use crate::fs::filesystem::FileType;
+use crate::fs::Directory;
 use crate::graphics::color::Color;
 use crate::window::windows::dialog::{
     clear_dialog_state, close_dialog_with_result, get_dialog_result, is_dialog_open,
@@ -81,8 +81,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
 
         // Path label
         let path_label_id = wm.create_window(Some(vbox_id));
-        let mut path_label =
-            Label::new_with_id(path_label_id, Rect::new(0, 0, 0, 0), "Save in: /");
+        let mut path_label = Label::new_with_id(path_label_id, Rect::new(0, 0, 0, 0), "Save in: /");
         path_label.set_parent(Some(vbox_id));
 
         let spacer_after_path_id = wm.create_window(Some(vbox_id));
@@ -120,8 +119,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
         fn_label.set_parent(Some(fn_row_id));
 
         let filename_input_id = wm.create_window(Some(fn_row_id));
-        let mut filename_input =
-            TextInput::new_with_id(filename_input_id, Rect::new(0, 0, 0, 0));
+        let mut filename_input = TextInput::new_with_id(filename_input_id, Rect::new(0, 0, 0, 0));
         filename_input.set_text(default_name);
         filename_input.set_parent(Some(fn_row_id));
 
@@ -238,8 +236,8 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
     while is_dialog_open() {
         crate::process::yield_if_needed();
 
-        let exists = with_window_manager(|wm| wm.window_registry.contains_key(&frame_id))
-            .unwrap_or(false);
+        let exists =
+            with_window_manager(|wm| wm.window_registry.contains_key(&frame_id)).unwrap_or(false);
 
         if !exists {
             break;

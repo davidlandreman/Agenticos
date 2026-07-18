@@ -1,7 +1,7 @@
-use crate::{println};
-use crate::lib::test_utils::Testable;
 use crate::drivers::display::display;
 use crate::graphics::color::Color;
+use crate::lib::test_utils::Testable;
+use crate::println;
 
 fn test_display_colors() {
     display::set_color(Color::RED);
@@ -17,19 +17,19 @@ fn test_color_values() {
     assert_eq!(Color::RED.red, 255);
     assert_eq!(Color::RED.green, 0);
     assert_eq!(Color::RED.blue, 0);
-    
+
     assert_eq!(Color::GREEN.red, 0);
     assert_eq!(Color::GREEN.green, 255);
     assert_eq!(Color::GREEN.blue, 0);
-    
+
     assert_eq!(Color::BLUE.red, 0);
     assert_eq!(Color::BLUE.green, 0);
     assert_eq!(Color::BLUE.blue, 255);
-    
+
     assert_eq!(Color::WHITE.red, 255);
     assert_eq!(Color::WHITE.green, 255);
     assert_eq!(Color::WHITE.blue, 255);
-    
+
     assert_eq!(Color::BLACK.red, 0);
     assert_eq!(Color::BLACK.green, 0);
     assert_eq!(Color::BLACK.blue, 0);
@@ -48,9 +48,5 @@ fn test_color_print() {
 }
 
 pub fn get_tests() -> &'static [&'static dyn Testable] {
-    &[
-        &test_display_colors,
-        &test_color_values,
-        &test_color_print,
-    ]
+    &[&test_display_colors, &test_color_values, &test_color_print]
 }

@@ -2,8 +2,8 @@
 
 use crate::lib::arc::{Arc, Weak};
 use crate::lib::test_utils::Testable;
-use alloc::vec;
 use alloc::string::String;
+use alloc::vec;
 
 /// Test basic Arc creation and dereferencing
 fn test_arc_new() {
@@ -17,13 +17,13 @@ fn test_arc_new() {
 fn test_arc_clone() {
     let arc1 = Arc::new(100);
     assert_eq!(Arc::strong_count(&arc1), 1);
-    
+
     let arc2 = arc1.clone();
     assert_eq!(Arc::strong_count(&arc1), 2);
     assert_eq!(Arc::strong_count(&arc2), 2);
     assert_eq!(*arc1, 100);
     assert_eq!(*arc2, 100);
-    
+
     let arc3 = arc2.clone();
     assert_eq!(Arc::strong_count(&arc1), 3);
     assert_eq!(Arc::strong_count(&arc2), 3);
@@ -35,12 +35,12 @@ fn test_arc_drop() {
     let arc1 = Arc::new(String::from("Hello"));
     let arc2 = arc1.clone();
     let arc3 = arc2.clone();
-    
+
     assert_eq!(Arc::strong_count(&arc1), 3);
-    
+
     drop(arc3);
     assert_eq!(Arc::strong_count(&arc1), 2);
-    
+
     drop(arc2);
     assert_eq!(Arc::strong_count(&arc1), 1);
 }
@@ -52,7 +52,7 @@ fn test_arc_complex_types() {
     let vec_clone = vec_arc.clone();
     assert_eq!(vec_arc[2], 3);
     assert_eq!(vec_clone.len(), 5);
-    
+
     // Test with String
     let string_arc = Arc::new(String::from("AgenticOS"));
     let string_clone = string_arc.clone();
@@ -63,13 +63,13 @@ fn test_arc_complex_types() {
 /// Test Arc::get_mut
 fn test_arc_get_mut() {
     let mut arc = Arc::new(10);
-    
+
     // Should get mutable reference when unique
     if let Some(val) = Arc::get_mut(&mut arc) {
         *val = 20;
     }
     assert_eq!(*arc, 20);
-    
+
     // Should not get mutable reference when not unique
     let _arc2 = arc.clone();
     assert!(Arc::get_mut(&mut arc).is_none());
@@ -83,7 +83,7 @@ fn test_arc_try_unwrap() {
         Ok(val) => assert_eq!(val, "unique"),
         Err(_) => panic!("try_unwrap should succeed"),
     }
-    
+
     // Should fail when not unique
     let arc1 = Arc::new(42);
     let _arc2 = arc1.clone();
@@ -105,12 +105,12 @@ fn test_weak_new() {
 fn test_arc_downgrade() {
     let arc = Arc::new(100);
     let weak = Arc::downgrade(&arc);
-    
+
     assert_eq!(Arc::strong_count(&arc), 1);
     assert_eq!(Arc::weak_count(&arc), 1);
     assert_eq!(weak.strong_count(), 1);
     assert_eq!(weak.weak_count(), 1);
-    
+
     // Upgrade should succeed while Arc exists
     if let Some(upgraded) = weak.upgrade() {
         assert_eq!(*upgraded, 100);
@@ -124,11 +124,11 @@ fn test_arc_downgrade() {
 fn test_weak_after_drop() {
     let arc = Arc::new(String::from("temporary"));
     let weak = Arc::downgrade(&arc);
-    
+
     assert!(weak.upgrade().is_some());
-    
+
     drop(arc);
-    
+
     assert_eq!(weak.strong_count(), 0);
     assert!(weak.upgrade().is_none());
 }
@@ -139,13 +139,13 @@ fn test_multiple_weak_refs() {
     let weak1 = Arc::downgrade(&arc);
     let weak2 = Arc::downgrade(&arc);
     let weak3 = weak1.clone();
-    
+
     assert_eq!(Arc::weak_count(&arc), 3);
     assert_eq!(weak1.weak_count(), 3);
-    
+
     drop(weak3);
     assert_eq!(Arc::weak_count(&arc), 2);
-    
+
     drop(arc);
     assert!(weak1.upgrade().is_none());
     assert!(weak2.upgrade().is_none());
@@ -156,7 +156,7 @@ fn test_arc_equality() {
     let arc1 = Arc::new(42);
     let arc2 = Arc::new(42);
     let arc3 = Arc::new(43);
-    
+
     assert_eq!(arc1, arc2);
     assert_ne!(arc1, arc3);
     assert!(arc1 < arc3);
@@ -166,10 +166,10 @@ fn test_arc_equality() {
 /// Test Arc with zero-sized types
 fn test_arc_zst() {
     struct ZeroSized;
-    
+
     let arc1 = Arc::new(ZeroSized);
     let arc2 = arc1.clone();
-    
+
     assert_eq!(Arc::strong_count(&arc1), 2);
     drop(arc2);
     assert_eq!(Arc::strong_count(&arc1), 1);
@@ -183,7 +183,7 @@ fn test_arc_deallocation() {
         let _clone = arc.clone();
         // Both will be dropped at end of scope
     }
-    
+
     // Create Arc with weak references
     for _ in 0..100 {
         let arc = Arc::new(String::from("test"));

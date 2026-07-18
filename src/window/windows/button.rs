@@ -1,12 +1,12 @@
 //! Button widget with mouse click support
 
-use alloc::boxed::Box;
-use alloc::string::String;
+use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
-use crate::window::{Window, WindowId, Rect, Point, Event, EventResult, GraphicsDevice};
 use crate::window::event::MouseEventType;
-use super::base::WindowBase;
+use crate::window::{Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId};
+use alloc::boxed::Box;
+use alloc::string::String;
 
 /// Callback type for button click events
 pub type ButtonCallback = Box<dyn FnMut() + Send>;
@@ -209,9 +209,7 @@ impl Window for Button {
                 match mouse_event.event_type {
                     // Disabled buttons ignore press/release entirely so
                     // they neither flip pressed state nor fire callbacks.
-                    MouseEventType::ButtonDown | MouseEventType::ButtonUp
-                        if !self.enabled =>
-                    {
+                    MouseEventType::ButtonDown | MouseEventType::ButtonUp if !self.enabled => {
                         EventResult::Ignored
                     }
                     MouseEventType::ButtonDown if in_bounds && mouse_event.buttons.left => {
@@ -243,5 +241,4 @@ impl Window for Button {
             _ => EventResult::Ignored,
         }
     }
-
 }

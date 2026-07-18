@@ -36,10 +36,8 @@ fn test_backdrop_damage_reaches_adjacent_glass() {
     let mut glass = Layer::opaque(SurfaceId(1), Rect::new(10, 5, 10, 10));
     glass.effect = LayerEffect::BackdropSample { radius: 4 };
     scene.push(glass);
-    let damage = crate::window::WindowManager::test_expand_backdrop_damage(
-        &scene,
-        &[Rect::new(6, 8, 1, 1)],
-    );
+    let damage =
+        crate::window::WindowManager::test_expand_backdrop_damage(&scene, &[Rect::new(6, 8, 1, 1)]);
     assert!(damage
         .iter()
         .any(|rect| rect.contains_point(crate::window::Point::new(10, 8))));

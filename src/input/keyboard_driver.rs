@@ -154,8 +154,7 @@ impl KeyboardDriver {
     pub fn current_modifiers(&self) -> KeyModifiers {
         self.modifiers.to_key_modifiers()
     }
-
-    }
+}
 
 /// Convert PS/2 Scancode Set 2 (non-extended) to KeyCode.
 fn scancode_to_keycode(scancode: u8) -> Option<KeyCode> {
@@ -270,7 +269,6 @@ fn scancode_extended_to_keycode(scancode: u8) -> Option<KeyCode> {
         // 0x1F => Some(KeyCode::LeftMeta),
         // 0x27 => Some(KeyCode::RightMeta),
         // 0x2F => Some(KeyCode::Menu),
-
         _ => None,
     }
 }

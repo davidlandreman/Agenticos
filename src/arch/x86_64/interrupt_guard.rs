@@ -91,8 +91,7 @@ impl InterruptGuard {
         x86_64::instructions::interrupts::disable();
         Self { was_enabled }
     }
-
-    }
+}
 
 impl Drop for InterruptGuard {
     fn drop(&mut self) {

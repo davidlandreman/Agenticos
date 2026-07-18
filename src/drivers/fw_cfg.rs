@@ -23,8 +23,8 @@ const FILE_NAME_LEN: usize = 56;
 /// One entry in the file directory.
 #[repr(C)]
 struct FwCfgFile {
-    size: [u8; 4],     // big-endian
-    select: [u8; 2],   // big-endian
+    size: [u8; 4],   // big-endian
+    select: [u8; 2], // big-endian
     _reserved: [u8; 2],
     name: [u8; FILE_NAME_LEN],
 }

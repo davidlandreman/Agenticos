@@ -1,14 +1,14 @@
-use crate::{debug_info, debug_error};
 use crate::lib::test_utils::Testable;
+use crate::{debug_error, debug_info};
 
 fn test_filesystem_basic_exists() {
     debug_info!("Testing filesystem exists() function...");
-    
+
     // Test that /system.ttf exists
     let exists = crate::fs::exists("/system.ttf");
     debug_info!("fs::exists(\"/system.ttf\") = {}", exists);
     assert!(exists, "/system.ttf should exist in filesystem");
-    
+
     // Test a file that shouldn't exist
     let not_exists = crate::fs::exists("/nonexistent.file");
     debug_info!("fs::exists(\"/nonexistent.file\") = {}", not_exists);
@@ -17,14 +17,17 @@ fn test_filesystem_basic_exists() {
 
 fn test_filesystem_metadata() {
     debug_info!("Testing filesystem metadata for /system.ttf...");
-    
+
     match crate::fs::metadata("/system.ttf") {
         Ok(metadata) => {
             debug_info!("Successfully got metadata for /system.ttf");
             debug_info!("  Name: {}", metadata.name_str());
             debug_info!("  Size: {} bytes", metadata.size);
             debug_info!("  File type: {:?}", metadata.file_type);
-            assert!(metadata.size > 0, "System font file should have non-zero size");
+            assert!(
+                metadata.size > 0,
+                "System font file should have non-zero size"
+            );
         }
         Err(e) => {
             debug_error!("Failed to get metadata for /system.ttf: {:?}", e);
@@ -35,7 +38,7 @@ fn test_filesystem_metadata() {
 
 fn test_file_open_arial() {
     debug_info!("Testing File::open_read(\"/system.ttf\")...");
-    
+
     match crate::fs::File::open_read("/system.ttf") {
         Ok(file) => {
             debug_info!("Successfully opened /system.ttf");
@@ -54,26 +57,30 @@ fn test_file_open_arial() {
 
 fn test_file_read_arial_header() {
     debug_info!("Testing reading first few bytes of /system.ttf...");
-    
+
     match crate::fs::File::open_read("/system.ttf") {
         Ok(file) => {
             debug_info!("File opened, attempting to read header...");
-            
+
             let mut header = [0u8; 16];
             match file.read(&mut header) {
                 Ok(bytes_read) => {
                     debug_info!("Successfully read {} bytes from /system.ttf", bytes_read);
                     debug_info!("Header bytes: {:02x?}", &header[..bytes_read]);
-                    
+
                     // TTF files should start with version info
                     if bytes_read >= 4 {
-                        let version = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+                        let version =
+                            u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
                         debug_info!("TTF version: 0x{:08x}", version);
                         // Should be 0x00010000 (1.0) or 0x74727565 ('true')
-                        assert!(version == 0x00010000 || version == 0x74727565, 
-                               "Should be valid TTF version, got 0x{:08x}", version);
+                        assert!(
+                            version == 0x00010000 || version == 0x74727565,
+                            "Should be valid TTF version, got 0x{:08x}",
+                            version
+                        );
                     }
-                    
+
                     assert!(bytes_read > 0, "Should read at least some bytes");
                     debug_info!("File read test passed!");
                 }
@@ -92,27 +99,31 @@ fn test_file_read_arial_header() {
 
 fn test_file_read_full_arial() {
     debug_info!("Testing reading entire /system.ttf file...");
-    
+
     match crate::fs::File::open_read("/system.ttf") {
         Ok(file) => {
             let size = file.size();
             debug_info!("File size: {} bytes, attempting full read...", size);
-            
+
             // Read entire file
             let mut buffer = alloc::vec![0u8; size as usize];
             match file.read(&mut buffer) {
                 Ok(bytes_read) => {
                     debug_info!("Successfully read {} of {} bytes", bytes_read, size);
                     assert_eq!(bytes_read, size as usize, "Should read entire file");
-                    
+
                     // Verify TTF structure
                     if bytes_read >= 12 {
-                        let version = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+                        let version =
+                            u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
                         let num_tables = u16::from_be_bytes([buffer[4], buffer[5]]);
                         debug_info!("TTF version: 0x{:08x}, tables: {}", version, num_tables);
-                        assert!(num_tables > 0 && num_tables < 100, "Should have reasonable number of tables");
+                        assert!(
+                            num_tables > 0 && num_tables < 100,
+                            "Should have reasonable number of tables"
+                        );
                     }
-                    
+
                     debug_info!("Full file read test passed!");
                 }
                 Err(e) => {
@@ -190,11 +201,17 @@ fn test_host_mount_does_not_break_root() {
     // Regression check for the U3 multi-mount refactor: reading a known root
     // file must still succeed once a second FAT mount is in the slot array.
 
-    assert!(crate::fs::exists("/system.ttf"), "/system.ttf should still exist on root");
+    assert!(
+        crate::fs::exists("/system.ttf"),
+        "/system.ttf should still exist on root"
+    );
 
     match crate::fs::File::open_read("/system.ttf") {
         Ok(file) => {
-            assert!(file.size() > 0, "/system.ttf should still have non-zero size");
+            assert!(
+                file.size() > 0,
+                "/system.ttf should still have non-zero size"
+            );
             debug_info!("/system.ttf still readable from root mount");
         }
         Err(e) => {
@@ -217,15 +234,13 @@ fn test_host_mount_does_not_break_root() {
 fn test_read_to_vec_matches_explicit_read() {
     debug_info!("Testing read_to_vec returns the same bytes as a pre-zeroed read...");
 
-    let file = crate::fs::File::open_read("/system.ttf")
-        .expect("open /system.ttf");
+    let file = crate::fs::File::open_read("/system.ttf").expect("open /system.ttf");
     let size = file.size() as usize;
 
     let via_read_to_vec = file.read_to_vec().expect("read_to_vec");
     assert_eq!(via_read_to_vec.len(), size, "length must equal file size");
 
-    let file2 = crate::fs::File::open_read("/system.ttf")
-        .expect("re-open /system.ttf");
+    let file2 = crate::fs::File::open_read("/system.ttf").expect("re-open /system.ttf");
     let mut explicit = alloc::vec![0u8; size];
     let n = file2.read(&mut explicit).expect("explicit read");
     assert_eq!(n, size, "explicit read should fill the buffer");
@@ -350,7 +365,12 @@ fn test_fat_read_throughput_host_hellocpp() {
 
     let file = crate::fs::File::open_read(path).expect("open hellocpp");
     let size = file.size();
-    debug_info!("[perf] reading {} ({} bytes / {} MiB)...", path, size, size / (1024 * 1024));
+    debug_info!(
+        "[perf] reading {} ({} bytes / {} MiB)...",
+        path,
+        size,
+        size / (1024 * 1024)
+    );
 
     let t0 = get_timer_ticks();
     let bytes = file.read_to_vec().expect("read_to_vec hellocpp");
@@ -420,7 +440,10 @@ fn test_run_hellocpp_end_to_end() {
     // For the assertion, we re-check the active-user slot is now empty and
     // that user_active() is false — i.e. the run command cleaned up.
     let still_active = with_active_user(|au| au.image.is_some());
-    assert!(!still_active, "active-user slot should be empty after run() returns");
+    assert!(
+        !still_active,
+        "active-user slot should be empty after run() returns"
+    );
 
     let _ = ExitKind::None; // silence unused import on the success path
 
@@ -525,7 +548,10 @@ fn test_data_mount_present() {
     for mount in vfs.list_mounts() {
         if mount.path == "/data" {
             found = true;
-            debug_info!("  /data is mounted with filesystem: {}", mount.filesystem.name());
+            debug_info!(
+                "  /data is mounted with filesystem: {}",
+                mount.filesystem.name()
+            );
             // U10 makes /data writable.
             assert!(
                 !mount.filesystem.is_read_only(),
@@ -587,9 +613,9 @@ fn test_data_write_larger_than_one_cluster() {
 // --- U11 / Phase D: overlay persistence to /data ---------------------
 
 fn test_u11_serialize_deserialize_round_trip() {
+    use crate::fs::filesystem::{FileMode, Filesystem};
     use crate::fs::overlay::sync::{deserialize_blob, serialize_upper};
     use crate::fs::tmpfs::Tmpfs;
-    use crate::fs::filesystem::{FileMode, Filesystem};
 
     let upper = Tmpfs::new();
     upper.mkdir("/etc").expect("mkdir /etc");
@@ -625,7 +651,11 @@ fn test_u11_serialize_deserialize_round_trip() {
 
     let blob = serialize_upper(&upper);
     let entries = deserialize_blob(&blob).expect("deserialize");
-    debug_info!("  serialized {} bytes, {} entries", blob.len(), entries.len());
+    debug_info!(
+        "  serialized {} bytes, {} entries",
+        blob.len(),
+        entries.len()
+    );
     assert!(entries.len() >= 2);
 }
 
@@ -642,8 +672,8 @@ fn test_u11_flush_then_restore_on_live_data() {
     // End-to-end: write a file under `/`, sync (flushes to /data),
     // construct a fresh tmpfs, restore from /data — fresh tmpfs
     // should now contain the file.
-    use crate::fs::overlay::sync::{flush_upper_to_disk, restore_upper_from_disk};
     use crate::fs::filesystem::{FileMode, Filesystem};
+    use crate::fs::overlay::sync::{flush_upper_to_disk, restore_upper_from_disk};
     use crate::fs::tmpfs::Tmpfs;
 
     // Get the live overlay's upper layer.
@@ -653,8 +683,7 @@ fn test_u11_flush_then_restore_on_live_data() {
         debug_info!("  / is not overlay; skipping");
         return;
     }
-    let overlay_ptr =
-        root as *const dyn Filesystem as *const crate::fs::overlay::Overlay;
+    let overlay_ptr = root as *const dyn Filesystem as *const crate::fs::overlay::Overlay;
     let overlay: &crate::fs::overlay::Overlay = unsafe { &*overlay_ptr };
     let upper_dyn = overlay.upper();
     let upper_ptr = upper_dyn as *const dyn Filesystem as *const Tmpfs;
@@ -686,15 +715,16 @@ fn test_u11_flush_then_restore_on_live_data() {
 fn test_u11_pointer_flip_is_atomic() {
     // Two successive flushes should land in alternating slots so the
     // commit is single-byte atomic.
-    use crate::fs::overlay::sync::flush_upper_to_disk;
     use crate::fs::filesystem::Filesystem;
+    use crate::fs::overlay::sync::flush_upper_to_disk;
     use crate::fs::tmpfs::Tmpfs;
 
     let vfs = crate::fs::vfs::get_vfs();
     let root = vfs.find_filesystem("/").expect("/ resolvable").0;
-    if root.name() != "overlay" { return; }
-    let overlay_ptr =
-        root as *const dyn Filesystem as *const crate::fs::overlay::Overlay;
+    if root.name() != "overlay" {
+        return;
+    }
+    let overlay_ptr = root as *const dyn Filesystem as *const crate::fs::overlay::Overlay;
     let overlay: &crate::fs::overlay::Overlay = unsafe { &*overlay_ptr };
     let upper_dyn = overlay.upper();
     let upper_ptr = upper_dyn as *const dyn Filesystem as *const Tmpfs;
@@ -803,7 +833,10 @@ fn test_overlay_root_unlink_lower_creates_whiteout() {
     // view).
     //
     // Use test.txt which is small and present in lower.
-    assert!(crate::fs::exists("/test.txt"), "/test.txt must exist in lower");
+    assert!(
+        crate::fs::exists("/test.txt"),
+        "/test.txt must exist in lower"
+    );
     crate::fs::vfs::vfs_unlink("/test.txt").expect("unlink /test.txt");
     assert!(!crate::fs::exists("/test.txt"));
     // Re-create with new content; whiteout should clear.

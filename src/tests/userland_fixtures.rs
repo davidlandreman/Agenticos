@@ -402,7 +402,7 @@ pub fn fork_execve_badpath_elf() -> Vec<u8> {
     code.extend_from_slice(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00]);
     let lea_disp_at = code.len() - 4; // start of the 4-byte displacement
     let lea_end = code.len(); // RIP after the lea instruction
-    // xor rsi, rsi
+                              // xor rsi, rsi
     code.extend_from_slice(&[0x48, 0x31, 0xF6]);
     // xor rdx, rdx
     code.extend_from_slice(&[0x48, 0x31, 0xD2]);
@@ -814,9 +814,9 @@ pub fn auxv_walker_elf() -> Vec<u8> {
     let exit_block = |exit_code: u8, code: &mut Vec<u8>| -> usize {
         let target = code.len();
         code.extend_from_slice(&[0xBF, exit_code, 0x00, 0x00, 0x00]); // mov edi, code
-        code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]);       // mov eax, 231
-        code.extend_from_slice(&[0x0F, 0x05]);                          // syscall
-        code.push(0xF4);                                                // hlt safety
+        code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]); // mov eax, 231
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.push(0xF4); // hlt safety
         target
     };
 
@@ -828,19 +828,25 @@ pub fn auxv_walker_elf() -> Vec<u8> {
     let fail_random_null = exit_block(6, &mut code);
 
     // Patch all the rel8 forward jumps.
-    let patch = |code: &mut Vec<u8>, instr_at: usize, target: usize, patches: &mut Vec<(usize, usize)>| {
-        let next = instr_at + 1;
-        let off = target as i32 - next as i32;
-        assert!(off >= -128 && off <= 127, "rel8 out of range: {}", off);
-        code[instr_at] = off as i8 as u8;
-        patches.push((instr_at, target));
-    };
+    let patch =
+        |code: &mut Vec<u8>, instr_at: usize, target: usize, patches: &mut Vec<(usize, usize)>| {
+            let next = instr_at + 1;
+            let off = target as i32 - next as i32;
+            assert!(off >= -128 && off <= 127, "rel8 out of range: {}", off);
+            code[instr_at] = off as i8 as u8;
+            patches.push((instr_at, target));
+        };
     patch(&mut code, jne_argc_at, fail_argc, &mut patches);
     patch(&mut code, je_argv0_at, fail_argv0, &mut patches);
     patch(&mut code, jne_argv1_at, fail_argv1, &mut patches);
     patch(&mut code, jne_envp0_at, fail_envp0, &mut patches);
     patch(&mut code, je_no_random_at, fail_no_random, &mut patches);
-    patch(&mut code, je_found_random_at, found_random_target, &mut patches);
+    patch(
+        &mut code,
+        je_found_random_at,
+        found_random_target,
+        &mut patches,
+    );
     patch(&mut code, je_random_null_at, fail_random_null, &mut patches);
 
     runnable_elf_rx(&code)
@@ -983,11 +989,7 @@ pub fn write_i64(buf: &mut [u8], at: usize, v: i64) {
 /// The binary has two PT_LOADs: an R-X "text" page at 0x40_0000 and an R-W
 /// "data" page at 0x40_1000 where the GOT slot lives (so the relocation walk
 /// has somewhere legal to write).
-pub fn elf_with_one_reloc(
-    sym_name: &str,
-    rela_type: u32,
-    rela_offset: u64,
-) -> Vec<u8> {
+pub fn elf_with_one_reloc(sym_name: &str, rela_type: u32, rela_offset: u64) -> Vec<u8> {
     // Layout (file offsets):
     //   ehdr 0
     //   phdr 64

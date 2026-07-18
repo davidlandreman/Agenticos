@@ -1,9 +1,9 @@
 use alloc::vec::Vec;
 
+use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::images::{BmpImage, Image};
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowBuffer, WindowId};
-use super::base::WindowBase;
 
 /// A desktop window that provides a background.
 ///
@@ -123,13 +123,7 @@ impl Window for DesktopWindow {
 
         if let Some(bytes) = self.wallpaper.as_ref() {
             if let Ok(image) = BmpImage::from_bytes(bytes) {
-                device.draw_image_scaled(
-                    bounds.x,
-                    bounds.y,
-                    bounds.width,
-                    bounds.height,
-                    &image,
-                );
+                device.draw_image_scaled(bounds.x, bounds.y, bounds.width, bounds.height, &image);
                 painted = true;
             }
         }
@@ -169,9 +163,7 @@ impl Window for DesktopWindow {
                 // overwrites it.
             }
             _ => {
-                self.backing_store = Some(WindowBuffer::for_device(
-                    target_w, target_h, device,
-                ));
+                self.backing_store = Some(WindowBuffer::for_device(target_w, target_h, device));
             }
         }
 

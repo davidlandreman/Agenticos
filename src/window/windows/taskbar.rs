@@ -1,10 +1,10 @@
 //! Taskbar window that displays Start button and window buttons
 
+use super::base::WindowBase;
+use crate::graphics::color::Color;
+use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::graphics::color::Color;
-use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice};
-use super::base::WindowBase;
 
 /// Height of the taskbar in pixels
 pub const TASKBAR_HEIGHT: u32 = 32;
@@ -73,8 +73,7 @@ impl TaskbarWindow {
             screen_width,
         }
     }
-
-    }
+}
 
 impl Window for TaskbarWindow {
     fn base(&self) -> &WindowBase {

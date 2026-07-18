@@ -140,9 +140,18 @@ fn test_vbox_resize_propagates_to_children() {
         vbox.add_child(child_c, SizeHint::Fill(1));
 
         // Insert children into the registry.
-        wm.set_window_impl(child_a, Box::new(Spacer::new_with_id(child_a, Rect::new(0, 0, 0, 0))));
-        wm.set_window_impl(child_b, Box::new(Spacer::new_with_id(child_b, Rect::new(0, 0, 0, 0))));
-        wm.set_window_impl(child_c, Box::new(Spacer::new_with_id(child_c, Rect::new(0, 0, 0, 0))));
+        wm.set_window_impl(
+            child_a,
+            Box::new(Spacer::new_with_id(child_a, Rect::new(0, 0, 0, 0))),
+        );
+        wm.set_window_impl(
+            child_b,
+            Box::new(Spacer::new_with_id(child_b, Rect::new(0, 0, 0, 0))),
+        );
+        wm.set_window_impl(
+            child_c,
+            Box::new(Spacer::new_with_id(child_c, Rect::new(0, 0, 0, 0))),
+        );
         wm.set_window_impl(vbox_id, Box::new(vbox));
 
         // Trigger a real resize through the active-manager flow.
@@ -169,17 +178,14 @@ fn test_padding_resize_propagates_to_child() {
         let child = wm.create_window(None);
         let padding_id = wm.create_window(None);
 
-        let mut padding = Padding::new_with_id(
-            padding_id,
-            Rect::new(0, 0, 100, 100),
-            10,
-            10,
-            10,
-            10,
-        );
+        let mut padding =
+            Padding::new_with_id(padding_id, Rect::new(0, 0, 100, 100), 10, 10, 10, 10);
         padding.set_child(child);
 
-        wm.set_window_impl(child, Box::new(Spacer::new_with_id(child, Rect::new(0, 0, 0, 0))));
+        wm.set_window_impl(
+            child,
+            Box::new(Spacer::new_with_id(child, Rect::new(0, 0, 0, 0))),
+        );
         wm.set_window_impl(padding_id, Box::new(padding));
 
         wm.with_window_mut(padding_id, |w| {

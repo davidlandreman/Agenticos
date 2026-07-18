@@ -215,8 +215,7 @@ impl InputProcessor {
             modifiers: self.keyboard.current_modifiers(),
         }))
     }
-
-    }
+}
 
 impl Default for InputProcessor {
     fn default() -> Self {

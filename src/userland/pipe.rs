@@ -135,7 +135,9 @@ impl PipeReadHandle {
 impl Clone for PipeReadHandle {
     fn clone(&self) -> Self {
         self.pipe.reader_count.fetch_add(1, Ordering::Release);
-        Self { pipe: self.pipe.clone() }
+        Self {
+            pipe: self.pipe.clone(),
+        }
     }
 }
 
@@ -170,7 +172,9 @@ impl PipeWriteHandle {
 impl Clone for PipeWriteHandle {
     fn clone(&self) -> Self {
         self.pipe.writer_count.fetch_add(1, Ordering::Release);
-        Self { pipe: self.pipe.clone() }
+        Self {
+            pipe: self.pipe.clone(),
+        }
     }
 }
 

@@ -2,11 +2,11 @@
 //! path before the window system is up. Sizes its character grid from the
 //! current default font.
 
-use crate::graphics::color::Color;
 use super::double_buffer::DoubleBufferedFrameBuffer;
+use crate::graphics::color::Color;
+use crate::graphics::fonts::core_font::{get_default_font, FontRef};
 use core::fmt;
 use spin::Mutex;
-use crate::graphics::fonts::core_font::{get_default_font, FontRef};
 
 const BACKGROUND_COLOR: Color = Color::BLACK;
 const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB static buffer
@@ -76,12 +76,12 @@ impl DoubleBufferedText {
                     self.buffer.draw_pixel(dst_x, dst_y, color);
                 } else {
                     let bg = self.buffer.get_pixel(dst_x, dst_y);
-                    self.buffer.draw_pixel(dst_x, dst_y, bg.blend(&color, alpha));
+                    self.buffer
+                        .draw_pixel(dst_x, dst_y, bg.blend(&color, alpha));
                 }
             }
         }
     }
-
 
     pub fn write_string(&mut self, s: &str) {
         let font = get_default_font();
@@ -98,7 +98,13 @@ impl DoubleBufferedText {
                     let x = self.cursor_x * self.cell_width;
                     let y = self.cursor_y * self.line_height;
 
-                    self.buffer.fill_rect(x, y, self.cell_width, self.line_height, BACKGROUND_COLOR);
+                    self.buffer.fill_rect(
+                        x,
+                        y,
+                        self.cell_width,
+                        self.line_height,
+                        BACKGROUND_COLOR,
+                    );
                     self.draw_glyph(&font, ch, x, y);
 
                     self.cursor_x += 1;
@@ -131,7 +137,6 @@ impl fmt::Write for DoubleBufferedText {
 }
 
 static WRITER: Mutex<Option<DoubleBufferedText>> = Mutex::new(None);
-
 
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;

@@ -266,8 +266,7 @@ impl VirtioTablet {
     pub fn get_buttons(&self) -> u8 {
         self.buttons
     }
-
-    }
+}
 
 /// Initialize the global VirtIO tablet if available
 pub fn init(screen_width: u32, screen_height: u32) -> bool {
@@ -302,7 +301,6 @@ pub fn init(screen_width: u32, screen_height: u32) -> bool {
     debug_info!("Failed to initialize any VirtIO input device");
     false
 }
-
 
 /// Poll for events (call from main loop or interrupt handler)
 pub fn poll() -> bool {

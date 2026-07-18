@@ -100,9 +100,8 @@ pub fn ensure_user_range(ptr: u64, len: u64, write: bool) -> Result<(), i64> {
         return Ok(());
     }
     let end = ptr.checked_add(len).ok_or(EFAULT)?;
-    let has_address_space = crate::userland::lifecycle::with_current_process(|process| {
-        process.address_space.is_some()
-    });
+    let has_address_space =
+        crate::userland::lifecycle::with_current_process(|process| process.address_space.is_some());
     if !has_address_space {
         let bounds = crate::userland::abi::user_va_bounds().ok_or(EFAULT)?;
         return (ptr >= bounds.start && end <= bounds.end)

@@ -3,15 +3,15 @@
 //! The PCB contains all information needed to manage a process,
 //! including its CPU context, stack, and I/O associations.
 
-use alloc::collections::VecDeque;
-use alloc::string::String;
-use alloc::boxed::Box;
-use core::ops::BitOr;
-use spin::Mutex;
+use super::context::CpuContext;
+use super::process::ProcessId;
 use crate::lib::arc::Arc;
 use crate::window::WindowId;
-use super::process::ProcessId;
-use super::context::CpuContext;
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use core::ops::BitOr;
+use spin::Mutex;
 
 /// Events that can wake a sleeping process
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,8 +67,7 @@ impl SignalFlags {
     pub fn set(&mut self, flag: u32) {
         self.0 |= flag;
     }
-
-    }
+}
 
 /// Process execution state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,8 +181,7 @@ impl ProcessControlBlock {
             last_activity_tick: 0, // Will be set when process is spawned
         }
     }
-
-    }
+}
 
 impl core::fmt::Debug for ProcessControlBlock {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

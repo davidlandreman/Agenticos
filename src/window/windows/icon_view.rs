@@ -421,7 +421,13 @@ impl Window for IconView {
         // Background fill for the entire content rect (when wrapped in a
         // ScrollView the bounds are temporarily extended to cover the
         // content area).
-        device.fill_rect(bounds.x, bounds.y, bounds.width, bounds.height, self.bg_color);
+        device.fill_rect(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            self.bg_color,
+        );
 
         if self.tiles.is_empty() {
             self.base.clear_needs_repaint();
@@ -468,7 +474,7 @@ impl Window for IconView {
 
             // Label: truncate to fit within `tile_w` (subtract a small
             // padding on each side). Truncation is byte-wise but only at
-                // ASCII boundaries — the system font is ASCII-only, so this
+            // ASCII boundaries — the system font is ASCII-only, so this
             // keeps the implementation simple without breaking glyph
             // rendering.
             let pad: u32 = 2;

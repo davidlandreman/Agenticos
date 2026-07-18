@@ -26,12 +26,20 @@ use crate::window::{ColorDepth, GraphicsDevice, Rect, Window};
 struct StubDevice;
 
 impl GraphicsDevice for StubDevice {
-    fn width(&self) -> usize { 1280 }
-    fn height(&self) -> usize { 720 }
-    fn color_depth(&self) -> ColorDepth { ColorDepth::Bit32 }
+    fn width(&self) -> usize {
+        1280
+    }
+    fn height(&self) -> usize {
+        720
+    }
+    fn color_depth(&self) -> ColorDepth {
+        ColorDepth::Bit32
+    }
     fn clear(&mut self, _color: Color) {}
     fn draw_pixel(&mut self, _x: i32, _y: i32, _color: Color) {}
-    fn read_pixel(&self, _x: i32, _y: i32) -> Color { Color::BLACK }
+    fn read_pixel(&self, _x: i32, _y: i32) -> Color {
+        Color::BLACK
+    }
     fn draw_line(&mut self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _color: Color) {}
     fn draw_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
     fn fill_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}

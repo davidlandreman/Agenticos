@@ -23,13 +23,21 @@ struct RecordingDevice {
 }
 
 impl GraphicsDevice for RecordingDevice {
-    fn width(&self) -> usize { 1280 }
-    fn height(&self) -> usize { 720 }
-    fn color_depth(&self) -> ColorDepth { ColorDepth::Bit32 }
+    fn width(&self) -> usize {
+        1280
+    }
+    fn height(&self) -> usize {
+        720
+    }
+    fn color_depth(&self) -> ColorDepth {
+        ColorDepth::Bit32
+    }
 
     fn clear(&mut self, _color: Color) {}
     fn draw_pixel(&mut self, _x: i32, _y: i32, _color: Color) {}
-    fn read_pixel(&self, _x: i32, _y: i32) -> Color { Color::BLACK }
+    fn read_pixel(&self, _x: i32, _y: i32) -> Color {
+        Color::BLACK
+    }
     fn draw_line(&mut self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _color: Color) {}
     fn draw_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
 
@@ -82,7 +90,7 @@ fn tiny_bmp() -> Vec<u8> {
     bmp.extend_from_slice(&0i32.to_le_bytes()); // y ppm
     bmp.extend_from_slice(&0u32.to_le_bytes()); // colors used
     bmp.extend_from_slice(&0u32.to_le_bytes()); // colors important
-    // -- pixel data: BGR, padded --
+                                                // -- pixel data: BGR, padded --
     bmp.extend_from_slice(&[0xCC, 0xBB, 0xAA, 0x00]);
     bmp
 }
@@ -133,7 +141,10 @@ fn test_paint_clears_needs_repaint_for_wallpaper_branch() {
     let mut desktop = DesktopWindow::new_with_wallpaper(WindowId::new(), bounds, tiny_bmp());
     let mut device = RecordingDevice::default();
 
-    assert!(desktop.needs_repaint(), "newly-created desktop should need a repaint");
+    assert!(
+        desktop.needs_repaint(),
+        "newly-created desktop should need a repaint"
+    );
     desktop.paint(&mut device);
     assert!(!desktop.needs_repaint(), "paint must clear the dirty flag");
 }

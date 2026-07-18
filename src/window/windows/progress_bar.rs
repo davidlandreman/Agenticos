@@ -153,8 +153,7 @@ impl Window for ProgressBar {
             } else {
                 // Promote to u128 so multiplication never overflows
                 // even for u64::MAX inputs.
-                let f = (self.current as u128 * inner_width as u128
-                    / self.total as u128) as u64;
+                let f = (self.current as u128 * inner_width as u128 / self.total as u128) as u64;
                 // Defensive clamp; the math above already keeps
                 // `f <= inner_width` whenever `current < total`.
                 if f > inner_width as u64 {

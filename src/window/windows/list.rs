@@ -17,15 +17,15 @@
 //!   item_height`); a wrapping `ScrollView` clips and translates as
 //!   needed.
 
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
+use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
 use crate::window::event::MouseEventType;
 use crate::window::selection::{ArrowDirection, ClickMods, Selection, SelectionMode};
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
-use super::base::WindowBase;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Callback invoked when the user changes the selection.
 ///
@@ -129,7 +129,8 @@ impl List {
     /// Get the selected item text (first selected item in ascending order).
     #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn selected_item(&self) -> Option<&str> {
-        self.selected().and_then(|i| self.items.get(i).map(|s| s.as_str()))
+        self.selected()
+            .and_then(|i| self.items.get(i).map(|s| s.as_str()))
     }
 
     /// Set the selected index. Passing `None` clears the selection. The
@@ -270,7 +271,8 @@ impl List {
             return;
         }
         let before = self.selection.clone();
-        self.selection.arrow(direction, self.items.len(), mods, self.selection_mode);
+        self.selection
+            .arrow(direction, self.items.len(), mods, self.selection_mode);
         if before != self.selection {
             self.base.invalidate();
             if let Some(ref mut callback) = self.on_select {
@@ -341,13 +343,7 @@ impl Window for List {
             };
 
             let text_y = item_y + (item_height - line_h as i32) / 2;
-            device.draw_text(
-                x + padding,
-                text_y,
-                item_text,
-                font.as_font(),
-                text_color,
-            );
+            device.draw_text(x + padding, text_y, item_text, font.as_font(), text_color);
         }
 
         self.base.clear_needs_repaint();

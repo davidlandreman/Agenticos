@@ -255,9 +255,15 @@ mod tests {
 
     pub(super) fn test_plain_enter_backspace_tab() {
         assert_eq!(encode_keystroke(KeyCode::Enter, no_mods()), b"\r".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::Backspace, no_mods()), alloc::vec![0x7F]);
+        assert_eq!(
+            encode_keystroke(KeyCode::Backspace, no_mods()),
+            alloc::vec![0x7F]
+        );
         assert_eq!(encode_keystroke(KeyCode::Tab, no_mods()), b"\t".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::Escape, no_mods()), alloc::vec![0x1B]);
+        assert_eq!(
+            encode_keystroke(KeyCode::Escape, no_mods()),
+            alloc::vec![0x1B]
+        );
     }
 
     pub(super) fn test_ctrl_letter() {
@@ -268,19 +274,34 @@ mod tests {
 
     pub(super) fn test_arrow_bare() {
         assert_eq!(encode_keystroke(KeyCode::Up, no_mods()), b"\x1b[A".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::Down, no_mods()), b"\x1b[B".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::Right, no_mods()), b"\x1b[C".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::Left, no_mods()), b"\x1b[D".to_vec());
+        assert_eq!(
+            encode_keystroke(KeyCode::Down, no_mods()),
+            b"\x1b[B".to_vec()
+        );
+        assert_eq!(
+            encode_keystroke(KeyCode::Right, no_mods()),
+            b"\x1b[C".to_vec()
+        );
+        assert_eq!(
+            encode_keystroke(KeyCode::Left, no_mods()),
+            b"\x1b[D".to_vec()
+        );
     }
 
     pub(super) fn test_arrow_shift() {
         // Shift+Up = ESC[1;2A
-        assert_eq!(encode_keystroke(KeyCode::Up, shift()), b"\x1b[1;2A".to_vec());
+        assert_eq!(
+            encode_keystroke(KeyCode::Up, shift()),
+            b"\x1b[1;2A".to_vec()
+        );
     }
 
     pub(super) fn test_arrow_ctrl() {
         // Ctrl+Right = ESC[1;5C
-        assert_eq!(encode_keystroke(KeyCode::Right, ctrl()), b"\x1b[1;5C".to_vec());
+        assert_eq!(
+            encode_keystroke(KeyCode::Right, ctrl()),
+            b"\x1b[1;5C".to_vec()
+        );
     }
 
     pub(super) fn test_arrow_ctrl_shift() {
@@ -294,18 +315,36 @@ mod tests {
     }
 
     pub(super) fn test_home_end() {
-        assert_eq!(encode_keystroke(KeyCode::Home, no_mods()), b"\x1b[H".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::End, no_mods()), b"\x1b[F".to_vec());
+        assert_eq!(
+            encode_keystroke(KeyCode::Home, no_mods()),
+            b"\x1b[H".to_vec()
+        );
+        assert_eq!(
+            encode_keystroke(KeyCode::End, no_mods()),
+            b"\x1b[F".to_vec()
+        );
     }
 
     pub(super) fn test_pageup_pagedown() {
-        assert_eq!(encode_keystroke(KeyCode::PageUp, no_mods()), b"\x1b[5~".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::PageDown, no_mods()), b"\x1b[6~".to_vec());
+        assert_eq!(
+            encode_keystroke(KeyCode::PageUp, no_mods()),
+            b"\x1b[5~".to_vec()
+        );
+        assert_eq!(
+            encode_keystroke(KeyCode::PageDown, no_mods()),
+            b"\x1b[6~".to_vec()
+        );
     }
 
     pub(super) fn test_insert_delete() {
-        assert_eq!(encode_keystroke(KeyCode::Insert, no_mods()), b"\x1b[2~".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::Delete, no_mods()), b"\x1b[3~".to_vec());
+        assert_eq!(
+            encode_keystroke(KeyCode::Insert, no_mods()),
+            b"\x1b[2~".to_vec()
+        );
+        assert_eq!(
+            encode_keystroke(KeyCode::Delete, no_mods()),
+            b"\x1b[3~".to_vec()
+        );
     }
 
     pub(super) fn test_f1_f4_ss3() {
@@ -316,9 +355,18 @@ mod tests {
     }
 
     pub(super) fn test_f5_f12_csi_tilde() {
-        assert_eq!(encode_keystroke(KeyCode::F5, no_mods()), b"\x1b[15~".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::F6, no_mods()), b"\x1b[17~".to_vec());
-        assert_eq!(encode_keystroke(KeyCode::F12, no_mods()), b"\x1b[24~".to_vec());
+        assert_eq!(
+            encode_keystroke(KeyCode::F5, no_mods()),
+            b"\x1b[15~".to_vec()
+        );
+        assert_eq!(
+            encode_keystroke(KeyCode::F6, no_mods()),
+            b"\x1b[17~".to_vec()
+        );
+        assert_eq!(
+            encode_keystroke(KeyCode::F12, no_mods()),
+            b"\x1b[24~".to_vec()
+        );
     }
 
     pub(super) fn test_alt_letter_prefix() {

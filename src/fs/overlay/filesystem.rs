@@ -4,8 +4,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::fs::filesystem::{
-    DirectoryEntry, DirectoryIterator, FileAttributes, FileHandle, FileMode, FileType,
-    Filesystem, FilesystemError, FilesystemStats,
+    DirectoryEntry, DirectoryIterator, FileAttributes, FileHandle, FileMode, FileType, Filesystem,
+    FilesystemError, FilesystemStats,
 };
 
 /// Maximum file size we will copy-up from lower into upper in a
@@ -34,11 +34,17 @@ const HANDLE_LAYER_BIT: u64 = 1u64 << 63;
 const HANDLE_ID_MASK: u64 = !HANDLE_LAYER_BIT;
 
 fn encode_upper(id: u64) -> u64 {
-    debug_assert!(id & HANDLE_LAYER_BIT == 0, "upper handle id collides with layer bit");
+    debug_assert!(
+        id & HANDLE_LAYER_BIT == 0,
+        "upper handle id collides with layer bit"
+    );
     id | HANDLE_LAYER_BIT
 }
 fn encode_lower(id: u64) -> u64 {
-    debug_assert!(id & HANDLE_LAYER_BIT == 0, "lower handle id collides with layer bit");
+    debug_assert!(
+        id & HANDLE_LAYER_BIT == 0,
+        "lower handle id collides with layer bit"
+    );
     id
 }
 fn is_upper(h: u64) -> bool {
@@ -108,7 +114,6 @@ impl Overlay {
     pub fn upper(&self) -> &'static dyn Filesystem {
         self.upper
     }
-
 
     /// Has the parent directory of `path` been marked opaque in upper?
     fn parent_is_opaque(&self, path: &str) -> bool {
@@ -293,21 +298,24 @@ impl Filesystem for Overlay {
     fn enumerate_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FilesystemError> {
         // Path must resolve to a directory in at least one layer.
         let (layer, _meta) = self.locate(path).or_else(|e| match e {
-            FilesystemError::NotFound if path == "/" => Ok((Layer::Lower, DirectoryEntry {
-                name: [0; 256],
-                name_len: 0,
-                file_type: FileType::Directory,
-                size: 0,
-                attributes: FileAttributes {
-                    read_only: false,
-                    hidden: false,
-                    system: false,
-                    archive: false,
+            FilesystemError::NotFound if path == "/" => Ok((
+                Layer::Lower,
+                DirectoryEntry {
+                    name: [0; 256],
+                    name_len: 0,
+                    file_type: FileType::Directory,
+                    size: 0,
+                    attributes: FileAttributes {
+                        read_only: false,
+                        hidden: false,
+                        system: false,
+                        archive: false,
+                    },
+                    created: 0,
+                    modified: 0,
+                    accessed: 0,
                 },
-                created: 0,
-                modified: 0,
-                accessed: 0,
-            })),
+            )),
             _ => Err(e),
         })?;
         let _ = layer;
@@ -322,8 +330,7 @@ impl Filesystem for Overlay {
         // Build a set of names that upper either owns or whiteouts.
         let mut whiteouted: alloc::collections::BTreeSet<String> =
             alloc::collections::BTreeSet::new();
-        let mut owned: alloc::collections::BTreeSet<String> =
-            alloc::collections::BTreeSet::new();
+        let mut owned: alloc::collections::BTreeSet<String> = alloc::collections::BTreeSet::new();
         let mut opaque = false;
         let mut merged: Vec<DirectoryEntry> = Vec::new();
 
@@ -706,9 +713,7 @@ mod tests {
             .expect("open create");
         let mut total = 0;
         while total < content.len() {
-            let n = fs
-                .write(&mut h, &content[total..])
-                .expect("write");
+            let n = fs.write(&mut h, &content[total..]).expect("write");
             assert!(n > 0);
             total += n;
         }
@@ -796,10 +801,7 @@ mod tests {
         let o = Overlay::new(upper, lower);
         o.mkdir("/var").expect("mkdir");
         assert!(upper.stat("/var").is_ok());
-        assert!(matches!(
-            lower.stat("/var"),
-            Err(FilesystemError::NotFound)
-        ));
+        assert!(matches!(lower.stat("/var"), Err(FilesystemError::NotFound)));
     }
 
     fn test_overlay_readdir_merges_layers() {
@@ -814,7 +816,10 @@ mod tests {
         let mut names: alloc::vec::Vec<String> =
             entries.iter().map(|e| e.name_str().to_string()).collect();
         names.sort();
-        assert_eq!(names, alloc::vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            names,
+            alloc::vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     fn test_overlay_readdir_skips_whiteouts() {

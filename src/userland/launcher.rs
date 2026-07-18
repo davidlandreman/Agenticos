@@ -127,9 +127,7 @@ pub fn launch_user_binary(
     Ok(result)
 }
 
-fn read_file_bytes(
-    path: &str,
-) -> Result<(crate::lib::arc::Arc<crate::fs::File>, Vec<u8>), String> {
+fn read_file_bytes(path: &str) -> Result<(crate::lib::arc::Arc<crate::fs::File>, Vec<u8>), String> {
     use crate::fs::File;
     let file = File::open_read(path).map_err(|e| format!("open '{}': {}", path, e))?;
     let bytes = file

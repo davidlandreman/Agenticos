@@ -6,9 +6,9 @@
 //! against a bootloader framebuffer.
 
 use crate::lib::test_utils::Testable;
-use crate::window::Rect;
 use crate::window::adapters::clip::{clip_line, clip_rect, pixel_visible};
 use crate::window::types::{clamp_drag_x, clamp_drag_y, MIN_TITLEBAR_VISIBLE};
+use crate::window::Rect;
 
 // -- clip_rect ------------------------------------------------------------
 
@@ -164,7 +164,10 @@ fn test_drag_clamp_y_at_top_clamps_to_zero() {
 
 fn test_drag_clamp_y_at_bottom_keeps_titlebar_visible() {
     let result = clamp_drag_y(10_000, 600);
-    assert_eq!(result, 600 - crate::window::theme::metrics().title_bar_height as i32);
+    assert_eq!(
+        result,
+        600 - crate::window::theme::metrics().title_bar_height as i32
+    );
 }
 
 fn test_drag_clamp_y_within_screen_unchanged() {

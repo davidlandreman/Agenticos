@@ -104,9 +104,7 @@ pub unsafe fn read_user_callee_saved(
 /// the SYSCALL stub pushed (at `args + 112`).
 ///
 /// SAFETY: as for [`read_user_callee_saved`].
-pub unsafe fn read_user_r12(
-    args: *const crate::arch::x86_64::syscall::SyscallArgs,
-) -> u64 {
+pub unsafe fn read_user_r12(args: *const crate::arch::x86_64::syscall::SyscallArgs) -> u64 {
     let p = args as *const u64;
     core::ptr::read(p.add(14))
 }

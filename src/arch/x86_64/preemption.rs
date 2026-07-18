@@ -5,9 +5,9 @@
 //! execution, this handler saves the full CPU state and can switch to another
 //! process without any cooperation from the running process.
 
+use crate::process::context::CpuContext;
 use core::arch::naked_asm;
 use core::sync::atomic::AtomicU64;
-use crate::process::context::CpuContext;
 
 /// Watchdog timeout in timer ticks (1000 ticks = 10 seconds at 100Hz).
 /// If a process runs this long without yielding, sleeping, or making progress,
@@ -268,8 +268,8 @@ const _: () = {
 /// Checks if preemption is needed and sets up context switch if so.
 #[no_mangle]
 extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
+    use crate::arch::x86_64::interrupts::{InterruptIndex, PICS, TIMER_TICKS};
     use core::sync::atomic::Ordering;
-    use crate::arch::x86_64::interrupts::{TIMER_TICKS, PICS, InterruptIndex};
 
     // Increment tick counter
     let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -306,16 +306,15 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
         // tick. Interrupts are disabled in this handler, so EOI'ing
         // early can't cause re-entry.
         unsafe {
-            PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+            PICS.lock()
+                .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
         }
         // Give kernel threads a regular share of the CPU. Direct ring3→ring3
         // switching alone can starve the network worker and compositor when
         // a shell remains runnable while its child blocks. Every second tick
         // saves/requeues the current user process and returns to the kernel
         // main loop; intervening ticks retain the low-latency direct switch.
-        if ticks.is_multiple_of(2)
-            && crate::userland::lifecycle::preempt_ring3_to_kernel(frame)
-        {
+        if ticks.is_multiple_of(2) && crate::userland::lifecycle::preempt_ring3_to_kernel(frame) {
             unsafe {
                 crate::userland::switch::yield_to_kernel_main_loop();
             }
@@ -353,7 +352,9 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
                                 if WATCHDOG_KILL_PID.load(Ordering::Relaxed) == 0 {
                                     crate::debug_warn!(
                                         "WATCHDOG: Process {:?} '{}' unresponsive for {} ticks",
-                                        current_pid, pcb.name, elapsed
+                                        current_pid,
+                                        pcb.name,
+                                        elapsed
                                     );
                                     WATCHDOG_KILL_PID.store(current_pid as u64, Ordering::Release);
                                 }
@@ -404,7 +405,11 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
                     ctx.cs = frame.cs;
                     ctx.ss = frame.ss;
 
-                    crate::debug_trace!("Saved context for PID {:?}, RIP={:#x}", current_pid, ctx.rip);
+                    crate::debug_trace!(
+                        "Saved context for PID {:?}, RIP={:#x}",
+                        current_pid,
+                        ctx.rip
+                    );
                 }
 
                 // Move current to ready queue
@@ -416,13 +421,16 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
                     SWITCH_TO_KERNEL = true;
                     DO_CONTEXT_SWITCH = true;
                 }
-                crate::debug_trace!("Preempting back to kernel, RIP={:#x}", unsafe { KERNEL_CONTEXT.rip });
+                crate::debug_trace!("Preempting back to kernel, RIP={:#x}", unsafe {
+                    KERNEL_CONTEXT.rip
+                });
             }
         }
     }
 
     // Send EOI
     unsafe {
-        PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
 }

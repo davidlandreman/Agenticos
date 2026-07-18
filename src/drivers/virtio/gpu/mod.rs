@@ -226,8 +226,6 @@ impl VirtioGpu {
         Ok(())
     }
 
-
-
     fn unref(&mut self, resource_id: u32) -> Result<(), GpuError> {
         self.control.submit_nodata(&ResourceRef {
             header: CtrlHeader::command(CMD_RESOURCE_UNREF),
@@ -235,8 +233,6 @@ impl VirtioGpu {
             padding: 0,
         })
     }
-
-
 
     /// Reset the whole device after a malformed response/timeout so VGA
     /// compatibility can resume instead of leaving a stale scanout active.

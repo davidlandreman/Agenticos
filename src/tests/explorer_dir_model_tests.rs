@@ -8,8 +8,8 @@ extern crate alloc;
 use alloc::string::String;
 
 use crate::commands::explorer::dir_model::{
-    child_path, extract_extension, format_size, format_type, parent_path, read_directory,
-    DirEntry, EntryKind,
+    child_path, extract_extension, format_size, format_type, parent_path, read_directory, DirEntry,
+    EntryKind,
 };
 use crate::lib::test_utils::Testable;
 

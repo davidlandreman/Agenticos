@@ -5,8 +5,8 @@
 //! - Cursor overlay with proper background save/restore
 //! - Frame lifecycle (begin_frame/end_frame)
 
-use alloc::vec::Vec;
 use crate::window::types::Rect;
+use alloc::vec::Vec;
 
 /// Maximum number of dirty regions to track before forcing full repaint.
 const MAX_DIRTY_REGIONS: usize = 16;

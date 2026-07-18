@@ -43,7 +43,6 @@ impl Com2 {
         }
     }
 
-
     pub fn write_all(&self, bytes: &[u8]) {
         let mut port = self.port.lock();
         for &b in bytes {

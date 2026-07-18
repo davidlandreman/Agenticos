@@ -3,8 +3,8 @@
 //! This module provides the low-level context switch function that saves
 //! the current process's CPU state and restores another process's state.
 
-use core::arch::naked_asm;
 use crate::process::context::CpuContext;
+use core::arch::naked_asm;
 
 /// Perform a context switch from one process to another.
 ///
@@ -23,10 +23,7 @@ use crate::process::context::CpuContext;
 /// * `old_ctx` - Pointer to save the current context
 /// * `new_ctx` - Pointer to the context to switch to
 #[unsafe(naked)]
-pub unsafe extern "C" fn switch_context(
-    old_ctx: *mut CpuContext,
-    new_ctx: *const CpuContext,
-) {
+pub unsafe extern "C" fn switch_context(old_ctx: *mut CpuContext, new_ctx: *const CpuContext) {
     // The CpuContext layout (offsets in bytes):
     // 0:  rbx
     // 8:  rbp
@@ -46,23 +43,19 @@ pub unsafe extern "C" fn switch_context(
         "mov [rdi + 24], r13",
         "mov [rdi + 32], r14",
         "mov [rdi + 40], r15",
-
         // Save stack pointer (adjust for the return address on stack)
         // We save RSP+8 because when we restore and JMP (not RET),
         // we want RSP to be where it was before the CALL to switch_context
         "lea rax, [rsp + 8]",
         "mov [rdi + 48], rax",
-
         // Save return address as RIP (address after this function returns)
         // The return address is at [rsp] since we were just called
         "mov rax, [rsp]",
         "mov [rdi + 56], rax",
-
         // Save flags
         "pushfq",
         "pop rax",
         "mov [rdi + 64], rax",
-
         // Load callee-saved registers from new context (rsi = new_ctx)
         "mov rbx, [rsi + 0]",
         "mov rbp, [rsi + 8]",
@@ -70,15 +63,12 @@ pub unsafe extern "C" fn switch_context(
         "mov r13, [rsi + 24]",
         "mov r14, [rsi + 32]",
         "mov r15, [rsi + 40]",
-
         // Load flags
         "mov rax, [rsi + 64]",
         "push rax",
         "popfq",
-
         // Load stack pointer
         "mov rsp, [rsi + 48]",
-
         // Jump to new RIP
         "jmp [rsi + 56]",
     );
@@ -102,15 +92,12 @@ pub unsafe extern "C" fn switch_to_context(new_ctx: *const CpuContext) {
         "mov r13, [rdi + 24]",
         "mov r14, [rdi + 32]",
         "mov r15, [rdi + 40]",
-
         // Load flags
         "mov rax, [rdi + 64]",
         "push rax",
         "popfq",
-
         // Load stack pointer
         "mov rsp, [rdi + 48]",
-
         // Jump to RIP
         "jmp [rdi + 56]",
     );
@@ -144,29 +131,24 @@ pub unsafe extern "C" fn switch_context_full_restore(
         "mov [rdi + 24], r13",
         "mov [rdi + 32], r14",
         "mov [rdi + 40], r15",
-
         // Save stack pointer (adjust for the return address on stack)
         "lea rax, [rsp + 8]",
         "mov [rdi + 48], rax",
-
         // Save return address as RIP
         "mov rax, [rsp]",
         "mov [rdi + 56], rax",
-
         // Save flags
         "pushfq",
         "pop rax",
         "mov [rdi + 64], rax",
-
         // ===== RESTORE ALL registers from new context (rsi = new_ctx) =====
         // Set up iretq frame on CURRENT stack. CS/SS come from the saved
         // CpuContext at offsets 144/152 — preserves ring level on resume.
-        "push qword ptr [rsi + 152]",  // SS
-        "push qword ptr [rsi + 48]",   // RSP
-        "push qword ptr [rsi + 64]",   // RFLAGS
-        "push qword ptr [rsi + 144]",  // CS
-        "push qword ptr [rsi + 56]",   // RIP
-
+        "push qword ptr [rsi + 152]", // SS
+        "push qword ptr [rsi + 48]",  // RSP
+        "push qword ptr [rsi + 64]",  // RFLAGS
+        "push qword ptr [rsi + 144]", // CS
+        "push qword ptr [rsi + 56]",  // RIP
         // Restore all registers from context
         "mov rbx, [rsi + 0]",
         "mov rbp, [rsi + 8]",
@@ -174,17 +156,15 @@ pub unsafe extern "C" fn switch_context_full_restore(
         "mov r13, [rsi + 24]",
         "mov r14, [rsi + 32]",
         "mov r15, [rsi + 40]",
-
         "mov rax, [rsi + 72]",
         "mov rcx, [rsi + 80]",
         "mov rdx, [rsi + 88]",
-        "mov rdi, [rsi + 104]",  // Restore rdi before rsi
+        "mov rdi, [rsi + 104]", // Restore rdi before rsi
         "mov r8, [rsi + 112]",
         "mov r9, [rsi + 120]",
         "mov r10, [rsi + 128]",
         "mov r11, [rsi + 136]",
-        "mov rsi, [rsi + 96]",   // Restore rsi last
-
+        "mov rsi, [rsi + 96]", // Restore rsi last
         // Return via iretq
         "iretq",
     );
@@ -197,7 +177,9 @@ pub unsafe extern "C" fn switch_context_full_restore(
 #[no_mangle]
 pub extern "C" fn process_entry_trampoline() {
     // Re-enable interrupts now that we're safely on the new stack
-    unsafe { core::arch::asm!("sti"); }
+    unsafe {
+        core::arch::asm!("sti");
+    }
 
     // Debug: We reached the trampoline
     crate::debug_info!(">>> process_entry_trampoline: ENTERED");

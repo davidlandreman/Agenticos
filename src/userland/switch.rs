@@ -53,8 +53,8 @@
 use crate::arch::x86_64::preemption::InterruptStackFrame;
 use crate::arch::x86_64::syscall::SyscallArgs;
 use crate::userland::lifecycle::{
-    Process, PROCESS_TABLE, Ring3BlockReason, current_user_pid, mark_ring3_blocked,
-    pop_next_ring3, restore_user_cpu_state, save_user_cpu_state, set_current_user_pid,
+    current_user_pid, mark_ring3_blocked, pop_next_ring3, restore_user_cpu_state,
+    save_user_cpu_state, set_current_user_pid, Process, Ring3BlockReason, PROCESS_TABLE,
 };
 use crate::userland::user_state::UserState;
 
@@ -78,8 +78,8 @@ use crate::userland::user_state::UserState;
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn save_kernel_and_resume_ring3(
-    _pid: u32,                                          // RDI
-    _kernel_save: *mut crate::process::CpuContext,      // RSI
+    _pid: u32,                                     // RDI
+    _kernel_save: *mut crate::process::CpuContext, // RSI
 ) {
     core::arch::naked_asm!(
         // Save kernel callee-saved registers into [rsi].
@@ -247,10 +247,7 @@ pub unsafe fn resume_ring3(pid: u32) -> ! {
     // staying on the kernel L4 + global rsp0 stack.
     let (state_copy, l4_frame, kstack_top) = {
         let mut g = PROCESS_TABLE.lock();
-        let p = g
-            .by_pid
-            .get_mut(&pid)
-            .expect("resume_ring3: unknown pid");
+        let p = g.by_pid.get_mut(&pid).expect("resume_ring3: unknown pid");
         let state = p.saved_user_state;
         let l4 = p.address_space.as_ref().map(|a| a.l4_frame());
         let top = p.kernel_stack.as_ref().map(|k| k.top());
@@ -315,15 +312,14 @@ pub unsafe extern "sysv64" fn resume_ring3_asm(
     core::arch::naked_asm!(
         // Build iretq frame (CPU pops in order RIP, CS, RFLAGS, RSP, SS;
         // we push reverse: SS, RSP, RFLAGS, CS, RIP).
-        "push rdx",                   // SS
+        "push rdx", // SS
         "mov rax, [rdi + 72]",
-        "push rax",                   // user RSP
+        "push rax", // user RSP
         "mov rax, [rdi + 120]",
-        "push rax",                   // RFLAGS
-        "push rsi",                   // CS
+        "push rax", // RFLAGS
+        "push rsi", // CS
         "mov rax, [rdi + 112]",
-        "push rax",                   // RIP
-
+        "push rax", // RIP
         // Load user GPRs. Keep RDI live as the state pointer until
         // the very last move so the other loads can index off it.
         "mov r11, rdi",
@@ -339,13 +335,12 @@ pub unsafe extern "sysv64" fn resume_ring3_asm(
         "mov r9,  [r11 + 48]",
         "mov rdx, [r11 + 24]",
         "mov rsi, [r11 + 16]",
-        "mov rdi, [r11 + 8]",         // RDI last — was the state ptr.
+        "mov rdi, [r11 + 8]", // RDI last — was the state ptr.
         // Unlike a SYSCALL return, a timer interrupt may land while
         // RCX/R11 contain live values. Restore both, replacing the state
         // pointer in R11 only after every other indexed load is complete.
         "mov rcx, [r11 + 128]",
         "mov r11, [r11 + 136]",
-
         "iretq",
     );
 }
@@ -400,10 +395,7 @@ pub unsafe extern "sysv64" fn resume_ring3_asm(
 /// after Rust's prologue had already clobbered them with scratch
 /// values, corrupting user rbx/rbp/r13-r15 across blocking syscalls.
 /// See `docs/solutions/learnings/` for the post-mortem.)
-pub unsafe fn block_current_ring3_and_yield(
-    args: &SyscallArgs,
-    reason: Ring3BlockReason,
-) -> ! {
+pub unsafe fn block_current_ring3_and_yield(args: &SyscallArgs, reason: Ring3BlockReason) -> ! {
     // Read user state from the SYSCALL stub's saved slots above
     // SyscallArgs. Layout post-stub-fix:
     //   args +  56 = saved RCX (user RIP, post-SYSCALL)
@@ -415,12 +407,8 @@ pub unsafe fn block_current_ring3_and_yield(
         let p = args as *const SyscallArgs as *const u64;
         (core::ptr::read(p.add(7)), core::ptr::read(p.add(8)))
     };
-    let saved = crate::userland::user_state::read_user_callee_saved(
-        args as *const SyscallArgs,
-    );
-    let user_r12 = crate::userland::user_state::read_user_r12(
-        args as *const SyscallArgs,
-    );
+    let saved = crate::userland::user_state::read_user_callee_saved(args as *const SyscallArgs);
+    let user_r12 = crate::userland::user_state::read_user_r12(args as *const SyscallArgs);
 
     // SYSCALL is 2 bytes (0F 05). Rewinding RIP makes the resumed
     // process re-execute it — the kernel re-enters this syscall
@@ -429,7 +417,7 @@ pub unsafe fn block_current_ring3_and_yield(
     let resumed_rip = user_rip_post.wrapping_sub(2);
 
     let snapshot = UserState {
-        rax: args.rax,    // original syscall number — needed for re-fire dispatch
+        rax: args.rax, // original syscall number — needed for re-fire dispatch
         rdi: args.rdi,
         rsi: args.rsi,
         rdx: args.rdx,
@@ -450,9 +438,7 @@ pub unsafe fn block_current_ring3_and_yield(
         r11: 0,
     };
 
-    let me = current_user_pid().expect(
-        "block_current_ring3_and_yield: no current ring-3 process",
-    );
+    let me = current_user_pid().expect("block_current_ring3_and_yield: no current ring-3 process");
 
     // Stamp snapshot + CPU state (FS_BASE + FPU) into the slot, then
     // mark blocked. Order matters: snapshot first so the wake path

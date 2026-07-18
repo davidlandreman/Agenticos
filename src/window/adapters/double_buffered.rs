@@ -1,11 +1,11 @@
 //! Double-buffered framebuffer adapter - provides smooth rendering with back buffer
 
-use bootloader_api::info::{FrameBuffer, PixelFormat};
+use crate::drivers::display::double_buffer::DoubleBufferedFrameBuffer;
 use crate::graphics::color::Color;
 use crate::graphics::images::Image;
-use crate::drivers::display::double_buffer::DoubleBufferedFrameBuffer;
-use crate::window::{GraphicsDevice, Rect, ColorDepth};
 use crate::window::adapters::clip::{clip_line, clip_rect, pixel_visible};
+use crate::window::{ColorDepth, GraphicsDevice, Rect};
+use bootloader_api::info::{FrameBuffer, PixelFormat};
 use spin::Mutex;
 
 /// Graphics device that uses double buffering for smooth rendering
@@ -46,9 +46,8 @@ impl DoubleBufferedDevice {
     /// Create using the global static back buffer
     pub fn new_with_static_buffer(framebuffer: &'static mut FrameBuffer) -> Self {
         // Get the static buffer from the display module
-        let back_buffer = unsafe {
-            crate::drivers::display::double_buffered_text::get_static_back_buffer()
-        };
+        let back_buffer =
+            unsafe { crate::drivers::display::double_buffered_text::get_static_back_buffer() };
 
         Self::new(framebuffer, back_buffer)
     }
@@ -75,7 +74,9 @@ impl GraphicsDevice for DoubleBufferedDevice {
     }
 
     fn draw_pixel(&mut self, x: i32, y: i32, color: Color) {
-        if let Some((px, py)) = pixel_visible(x, y, self.width, self.height, self.clip_rect.as_ref()) {
+        if let Some((px, py)) =
+            pixel_visible(x, y, self.width, self.height, self.clip_rect.as_ref())
+        {
             self.buffer.lock().draw_pixel(px, py, color);
             self.dirty = true;
         }
@@ -89,9 +90,15 @@ impl GraphicsDevice for DoubleBufferedDevice {
     }
 
     fn draw_line(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: Color) {
-        let Some(((cx1, cy1), (cx2, cy2))) =
-            clip_line(x1, y1, x2, y2, self.width, self.height, self.clip_rect.as_ref())
-        else {
+        let Some(((cx1, cy1), (cx2, cy2))) = clip_line(
+            x1,
+            y1,
+            x2,
+            y2,
+            self.width,
+            self.height,
+            self.clip_rect.as_ref(),
+        ) else {
             return;
         };
 
@@ -136,9 +143,15 @@ impl GraphicsDevice for DoubleBufferedDevice {
     }
 
     fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
-        if let Some((cx, cy, cw, ch)) =
-            clip_rect(x, y, width, height, self.width, self.height, self.clip_rect.as_ref())
-        {
+        if let Some((cx, cy, cw, ch)) = clip_rect(
+            x,
+            y,
+            width,
+            height,
+            self.width,
+            self.height,
+            self.clip_rect.as_ref(),
+        ) {
             self.buffer.lock().fill_rect(cx, cy, cw, ch, color);
             self.dirty = true;
         }
@@ -158,7 +171,13 @@ impl GraphicsDevice for DoubleBufferedDevice {
         }
 
         let Some((dst_x, dst_y, dst_w, dst_h)) = clip_rect(
-            x, y, img_w, img_h, self.width, self.height, self.clip_rect.as_ref(),
+            x,
+            y,
+            img_w,
+            img_h,
+            self.width,
+            self.height,
+            self.clip_rect.as_ref(),
         ) else {
             return;
         };
@@ -183,14 +202,7 @@ impl GraphicsDevice for DoubleBufferedDevice {
     }
 
     /// Bulk scaled image blit. Same one-lock pattern as `draw_image`.
-    fn draw_image_scaled(
-        &mut self,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        image: &dyn Image,
-    ) {
+    fn draw_image_scaled(&mut self, x: i32, y: i32, width: u32, height: u32, image: &dyn Image) {
         if width == 0 || height == 0 {
             return;
         }
@@ -201,7 +213,13 @@ impl GraphicsDevice for DoubleBufferedDevice {
         }
 
         let Some((dst_x, dst_y, dst_w, dst_h)) = clip_rect(
-            x, y, width, height, self.width, self.height, self.clip_rect.as_ref(),
+            x,
+            y,
+            width,
+            height,
+            self.width,
+            self.height,
+            self.clip_rect.as_ref(),
         ) else {
             return;
         };
@@ -318,11 +336,7 @@ impl GraphicsDevice for DoubleBufferedDevice {
                         PixelFormat::Rgb => Color::new(bytes[0], bytes[1], bytes[2]),
                         _ => Color::new(bytes[2], bytes[1], bytes[0]),
                     };
-                    self.draw_pixel(
-                        dst_x as i32 + bx as i32,
-                        dst_y as i32 + by as i32,
-                        color,
-                    );
+                    self.draw_pixel(dst_x as i32 + bx as i32, dst_y as i32 + by as i32, color);
                 }
             }
             return;

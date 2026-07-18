@@ -1,18 +1,49 @@
 //! Cursor rendering with background save/restore
 
-use crate::graphics::color::Color;
 use super::{GraphicsDevice, Rect};
+use crate::graphics::color::Color;
 
 /// Size of the cursor save buffer (cursor footprint + outline margin)
 const CURSOR_BUFFER_SIZE: usize = 17;
 
 /// The cursor shape as relative pixel offsets (white fill)
 const CURSOR_PIXELS: &[(i32, i32)] = &[
-    (0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8), (0, 9), (0, 10),
-    (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8), (1, 9),
-    (2, 2), (2, 3), (2, 4), (2, 5), (2, 6), (2, 7), (2, 8),
-    (3, 3), (3, 4), (3, 5), (3, 6), (3, 7),
-    (4, 4), (4, 5), (4, 6),
+    (0, 0),
+    (0, 1),
+    (0, 2),
+    (0, 3),
+    (0, 4),
+    (0, 5),
+    (0, 6),
+    (0, 7),
+    (0, 8),
+    (0, 9),
+    (0, 10),
+    (1, 0),
+    (1, 1),
+    (1, 2),
+    (1, 3),
+    (1, 4),
+    (1, 5),
+    (1, 6),
+    (1, 7),
+    (1, 8),
+    (1, 9),
+    (2, 2),
+    (2, 3),
+    (2, 4),
+    (2, 5),
+    (2, 6),
+    (2, 7),
+    (2, 8),
+    (3, 3),
+    (3, 4),
+    (3, 5),
+    (3, 6),
+    (3, 7),
+    (4, 4),
+    (4, 5),
+    (4, 6),
     (5, 5),
 ];
 

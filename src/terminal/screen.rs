@@ -339,7 +339,6 @@ impl Screen {
 
     // ---- cursor primitives ----
 
-
     fn move_to(&mut self, row: usize, col: usize) {
         self.cursor_row = row.min(self.rows - 1);
         self.cursor_col = col.min(self.cols - 1);
@@ -809,11 +808,7 @@ impl Screen {
     fn set_scroll_region(&mut self, top: u16, bot: u16) {
         // 1-indexed inputs; 0 means "use default" per VT100.
         let top = if top == 0 { 1 } else { top };
-        let bot = if bot == 0 {
-            self.rows as u16
-        } else {
-            bot
-        };
+        let bot = if bot == 0 { self.rows as u16 } else { bot };
         let top0 = (top - 1) as usize;
         let bot0 = (bot - 1) as usize;
         if top0 < bot0 && bot0 < self.rows {
@@ -920,9 +915,7 @@ impl Perform for Screen {
         // Determine private-marker prefix (?, >, <, =) and the real
         // intermediates (space, etc.).
         let (private, real_inter): (Option<u8>, &[u8]) = match intermediates.first() {
-            Some(&b) if matches!(b, b'?' | b'>' | b'<' | b'=') => {
-                (Some(b), &intermediates[1..])
-            }
+            Some(&b) if matches!(b, b'?' | b'>' | b'<' | b'=') => (Some(b), &intermediates[1..]),
             _ => (None, intermediates),
         };
 
@@ -1016,7 +1009,11 @@ impl Perform for Screen {
             // Scroll region.
             (b'r', &[], None) => {
                 let top = p1(1);
-                let bot = params.get(1).copied().filter(|&v| v != 0).unwrap_or(self.rows as u16);
+                let bot = params
+                    .get(1)
+                    .copied()
+                    .filter(|&v| v != 0)
+                    .unwrap_or(self.rows as u16);
                 self.set_scroll_region(top, bot);
             }
 
@@ -1420,11 +1417,11 @@ mod tests {
         let mut s = Screen::new(5, 3);
         feed(&mut s, b"AAA\r\nBBB\r\nCCC\r\nDDD\r\nEEE");
         feed(&mut s, b"\x1b[2;4r"); // scroll region rows 2..4 (0-indexed 1..=3)
-        // After setting region, cursor goes to home.
-        // Move cursor to bottom of region (row 4, 1-indexed) and LF.
+                                    // After setting region, cursor goes to home.
+                                    // Move cursor to bottom of region (row 4, 1-indexed) and LF.
         feed(&mut s, b"\x1b[4;1H");
         feed(&mut s, b"\n"); // should scroll the region
-        // Row 0 (outside region) unchanged.
+                             // Row 0 (outside region) unchanged.
         assert_eq!(read_row_chars(&s, 0), "AAA");
         // Rows inside region shifted up: row1=CCC, row2=DDD, row3=blank.
         assert_eq!(read_row_chars(&s, 1), "CCC");
@@ -1639,8 +1636,8 @@ mod tests {
         let mut s = Screen::new(1, 5);
         feed(&mut s, b"\x1b[41m"); // set bg = red
         feed(&mut s, b"\x1b[2K"); // erase line
-        // All cells should have bg = Indexed(1), even though they're
-        // visually blank.
+                                  // All cells should have bg = Indexed(1), even though they're
+                                  // visually blank.
         for col in 0..s.cols() {
             assert_eq!(s.cell(0, col).bg, ColorSpec::Indexed(1));
             assert_eq!(s.cell(0, col).ch, ' ');

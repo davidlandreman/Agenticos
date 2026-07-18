@@ -93,24 +93,28 @@ static DEFAULT_FONT: Once<FontRef> = Once::new();
 /// the embedded fallback. The kernel boots and is usable, just with the
 /// 8x8 bitmap font.
 pub fn init_fonts() {
-    DEFAULT_FONT.call_once(|| match TtfFont::from_data(SYSTEM_TTF_DATA, SYSTEM_FONT_PX) {
-        Some(font) => {
-            crate::debug_info!(
-                "init_fonts: parsed system.ttf at {}px (cell {}x{}, ascent {})",
-                SYSTEM_FONT_PX,
-                font.cell_width(),
-                font.line_height(),
-                font.ascent(),
-            );
-            // Box::leak: fonts live for the entire kernel lifetime.
-            let leaked: &'static TtfFont = Box::leak(Box::new(font));
-            FontRef::new(leaked)
-        }
-        None => {
-            crate::debug_warn!("init_fonts: system.ttf failed to parse; using embedded 8x8 fallback");
-            FontRef::new(&DEFAULT_8X8_FONT as &dyn Font)
-        }
-    });
+    DEFAULT_FONT.call_once(
+        || match TtfFont::from_data(SYSTEM_TTF_DATA, SYSTEM_FONT_PX) {
+            Some(font) => {
+                crate::debug_info!(
+                    "init_fonts: parsed system.ttf at {}px (cell {}x{}, ascent {})",
+                    SYSTEM_FONT_PX,
+                    font.cell_width(),
+                    font.line_height(),
+                    font.ascent(),
+                );
+                // Box::leak: fonts live for the entire kernel lifetime.
+                let leaked: &'static TtfFont = Box::leak(Box::new(font));
+                FontRef::new(leaked)
+            }
+            None => {
+                crate::debug_warn!(
+                    "init_fonts: system.ttf failed to parse; using embedded 8x8 fallback"
+                );
+                FontRef::new(&DEFAULT_8X8_FONT as &dyn Font)
+            }
+        },
+    );
 }
 
 /// Return the system default font. Before [`init_fonts`] runs (or if it fails),

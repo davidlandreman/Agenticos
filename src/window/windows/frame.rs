@@ -52,7 +52,6 @@ impl FrameWindow {
                 .saturating_sub(metrics.title_bar_height + 2 * border),
         )
     }
-
 }
 
 impl Window for FrameWindow {

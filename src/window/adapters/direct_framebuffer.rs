@@ -1,10 +1,10 @@
 //! Direct framebuffer adapter - writes directly to physical display memory
 
-use bootloader_api::info::FrameBuffer;
-use crate::graphics::color::Color;
 use crate::drivers::display::frame_buffer::FrameBufferWriter;
-use crate::window::{GraphicsDevice, Rect, ColorDepth};
+use crate::graphics::color::Color;
 use crate::window::adapters::clip::{clip_line, clip_rect, pixel_visible};
+use crate::window::{ColorDepth, GraphicsDevice, Rect};
+use bootloader_api::info::FrameBuffer;
 use spin::Mutex;
 
 /// Graphics device that writes directly to the physical framebuffer
@@ -57,7 +57,9 @@ impl GraphicsDevice for DirectFrameBufferDevice {
     }
 
     fn draw_pixel(&mut self, x: i32, y: i32, color: Color) {
-        if let Some((px, py)) = pixel_visible(x, y, self.width, self.height, self.clip_rect.as_ref()) {
+        if let Some((px, py)) =
+            pixel_visible(x, y, self.width, self.height, self.clip_rect.as_ref())
+        {
             self.writer.lock().draw_pixel(px, py, color);
         }
     }
@@ -70,9 +72,15 @@ impl GraphicsDevice for DirectFrameBufferDevice {
     }
 
     fn draw_line(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: Color) {
-        let Some(((cx1, cy1), (cx2, cy2))) =
-            clip_line(x1, y1, x2, y2, self.width, self.height, self.clip_rect.as_ref())
-        else {
+        let Some(((cx1, cy1), (cx2, cy2))) = clip_line(
+            x1,
+            y1,
+            x2,
+            y2,
+            self.width,
+            self.height,
+            self.clip_rect.as_ref(),
+        ) else {
             return;
         };
 
@@ -119,9 +127,15 @@ impl GraphicsDevice for DirectFrameBufferDevice {
     }
 
     fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
-        if let Some((cx, cy, cw, ch)) =
-            clip_rect(x, y, width, height, self.width, self.height, self.clip_rect.as_ref())
-        {
+        if let Some((cx, cy, cw, ch)) = clip_rect(
+            x,
+            y,
+            width,
+            height,
+            self.width,
+            self.height,
+            self.clip_rect.as_ref(),
+        ) {
             self.writer.lock().fill_rect(cx, cy, cw, ch, color);
         }
     }
@@ -133,5 +147,4 @@ impl GraphicsDevice for DirectFrameBufferDevice {
     fn flush(&mut self) {
         // Direct framebuffer doesn't need flushing
     }
-
 }

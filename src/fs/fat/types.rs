@@ -98,7 +98,7 @@ impl ClusterId {
     #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const INVALID: Self = Self(0);
     pub const ROOT_FAT16: Self = Self(0);
-    
+
     pub fn is_valid(&self, fat_type: FatType) -> bool {
         match fat_type {
             FatType::Fat12 => self.0 >= 2 && self.0 < 0xFF7,
@@ -106,7 +106,7 @@ impl ClusterId {
             FatType::Fat32 => self.0 >= 2 && self.0 < 0x0FFFFFF7,
         }
     }
-    
+
     pub fn is_end_of_chain(&self, fat_type: FatType) -> bool {
         match fat_type {
             FatType::Fat12 => self.0 >= 0xFF8,
@@ -114,7 +114,7 @@ impl ClusterId {
             FatType::Fat32 => self.0 >= 0x0FFFFFF8,
         }
     }
-    
+
     pub fn is_bad(&self, fat_type: FatType) -> bool {
         match fat_type {
             FatType::Fat12 => self.0 == 0xFF7,

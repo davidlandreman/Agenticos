@@ -77,11 +77,13 @@ impl StackAllocator {
         //         ^base      ^            ^top
         let slot_start = STACK_REGION_START + (index as u64 * STACK_SLOT_SIZE as u64);
         let stack_base = slot_start + GUARD_PAGE_SIZE as u64; // Above guard page
-        let stack_top = slot_start + STACK_SLOT_SIZE as u64;  // Top of stack
+        let stack_top = slot_start + STACK_SLOT_SIZE as u64; // Top of stack
 
         crate::debug_info!(
             "StackAllocator: Allocated stack {} at base={:#x} top={:#x}",
-            index, stack_base, stack_top
+            index,
+            stack_base,
+            stack_top
         );
 
         // Pre-fault every page of the stack right now, so the spawned process
@@ -134,8 +136,7 @@ impl StackAllocator {
             );
         }
     }
-
-    }
+}
 
 /// Allocate a stack using the global allocator
 pub fn allocate_stack() -> Result<(u64, u64), &'static str> {

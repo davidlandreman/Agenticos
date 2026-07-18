@@ -10,11 +10,13 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::process::{WakeEvents, ProcessId};
-use crate::window::{self, WindowId, Rect, Window};
-use crate::window::windows::{DesktopWindow, TaskbarWindow, Button, MenuWindow};
-use crate::window::windows::taskbar::{START_BUTTON_WIDTH, BUTTON_GAP, BUTTON_HEIGHT, BUTTON_Y_OFFSET, MAX_WINDOW_BUTTON_WIDTH};
+use crate::process::{ProcessId, WakeEvents};
 use crate::window::windows::menu::MENU_ITEM_HEIGHT;
+use crate::window::windows::taskbar::{
+    BUTTON_GAP, BUTTON_HEIGHT, BUTTON_Y_OFFSET, MAX_WINDOW_BUTTON_WIDTH, START_BUTTON_WIDTH,
+};
+use crate::window::windows::{Button, DesktopWindow, MenuWindow, TaskbarWindow};
+use crate::window::{self, Rect, Window, WindowId};
 
 /// GUIShell state
 pub struct GUIShellState {
@@ -67,7 +69,10 @@ pub fn queue_action(action: PendingAction) {
     // Use lock() instead of try_lock() to ensure the action is always queued
     // try_lock() was silently dropping actions when the lock was briefly held
     let mut state = GUISHELL_STATE.lock();
-    crate::debug_info!("GUIShell: Queuing action {:?}", core::mem::discriminant(&action));
+    crate::debug_info!(
+        "GUIShell: Queuing action {:?}",
+        core::mem::discriminant(&action)
+    );
     state.pending_action = Some(action);
 
     // Signal the GUIShell process to wake up and handle the action
@@ -105,7 +110,11 @@ pub fn init_guishell() {
         let desktop_id = wm.create_window(None);
         let desktop_bounds = Rect::new(0, 0, width, height);
         let desktop_window: Box<dyn window::Window> = match wallpaper {
-            Some(bytes) => Box::new(DesktopWindow::new_with_wallpaper(desktop_id, desktop_bounds, bytes)),
+            Some(bytes) => Box::new(DesktopWindow::new_with_wallpaper(
+                desktop_id,
+                desktop_bounds,
+                bytes,
+            )),
             None => Box::new(DesktopWindow::new(desktop_id, desktop_bounds)),
         };
         wm.set_window_impl(desktop_id, desktop_window);
@@ -175,8 +184,12 @@ pub fn init_guishell() {
         // Force a full screen repaint
         wm.force_full_repaint();
 
-        crate::debug_info!("GUIShell: Desktop initialized (desktop={:?}, taskbar={:?}, start={:?})",
-            desktop_id, taskbar_id, start_button_id);
+        crate::debug_info!(
+            "GUIShell: Desktop initialized (desktop={:?}, taskbar={:?}, start={:?})",
+            desktop_id,
+            taskbar_id,
+            start_button_id
+        );
     });
 
     state.initialized = true;
@@ -203,7 +216,9 @@ fn show_start_menu() {
 
     window::with_window_manager(|wm| {
         // Get taskbar position
-        let taskbar_bounds = wm.window_registry.get(&taskbar_id)
+        let taskbar_bounds = wm
+            .window_registry
+            .get(&taskbar_id)
             .map(|w| w.bounds())
             .unwrap_or(Rect::new(0, 0, 0, 0));
 
@@ -216,7 +231,8 @@ fn show_start_menu() {
 
         // Create menu window as child of desktop (so it's in the render hierarchy)
         let menu_id = wm.create_window(Some(desktop_id));
-        let mut menu = MenuWindow::new_with_id(menu_id, Rect::new(menu_x, menu_y, menu_width, menu_height));
+        let mut menu =
+            MenuWindow::new_with_id(menu_id, Rect::new(menu_x, menu_y, menu_width, menu_height));
         menu.set_parent(Some(desktop_id));
 
         // Add menu items
@@ -227,14 +243,12 @@ fn show_start_menu() {
 
         // Set up callback for menu selection
         // Use deferred actions to avoid deadlock
-        menu.on_select(|index| {
-            match index {
-                0 => queue_action(PendingAction::SpawnTerminal),
-                1 => queue_action(PendingAction::SpawnNotepad),
-                2 => queue_action(PendingAction::SpawnPainting),
-                3 => queue_action(PendingAction::SpawnCalc),
-                _ => {}
-            }
+        menu.on_select(|index| match index {
+            0 => queue_action(PendingAction::SpawnTerminal),
+            1 => queue_action(PendingAction::SpawnNotepad),
+            2 => queue_action(PendingAction::SpawnPainting),
+            3 => queue_action(PendingAction::SpawnCalc),
+            _ => {}
         });
 
         wm.set_window_impl(menu_id, Box::new(menu));
@@ -327,11 +341,13 @@ fn spawn_notepad() {
     crate::debug_info!("GUIShell: spawn_notepad() completed");
 }
 
-
 /// Toggle the Start menu (show if hidden, hide if shown)
 fn toggle_start_menu() {
     let menu_open = GUISHELL_STATE.lock().menu_id.is_some();
-    crate::debug_info!("GUIShell: toggle_start_menu called, menu_open={}", menu_open);
+    crate::debug_info!(
+        "GUIShell: toggle_start_menu called, menu_open={}",
+        menu_open
+    );
     if menu_open {
         close_start_menu();
     } else {
@@ -349,9 +365,8 @@ fn sync_taskbar_buttons() {
     drop(state);
 
     // Get current frame windows
-    let frame_windows = window::with_window_manager(|wm| {
-        wm.get_frame_windows()
-    }).unwrap_or_else(Vec::new);
+    let frame_windows =
+        window::with_window_manager(|wm| wm.get_frame_windows()).unwrap_or_else(Vec::new);
 
     // Find frame windows that need buttons (with their titles)
     let mut frames_needing_buttons: Vec<(WindowId, alloc::string::String)> = Vec::new();
@@ -440,7 +455,11 @@ fn add_window_button(frame_id: WindowId, title: &str) {
 
     if let Some(button_id) = button_id {
         state.window_buttons.push((button_id, frame_id));
-        crate::debug_trace!("GUIShell: Added window button {:?} for frame {:?}", button_id, frame_id);
+        crate::debug_trace!(
+            "GUIShell: Added window button {:?} for frame {:?}",
+            button_id,
+            frame_id
+        );
     }
 }
 
@@ -529,10 +548,6 @@ fn focus_window(frame_id: WindowId) {
     });
 }
 
-
-
-
-
 // =============================================================================
 // Process-Based GUIShell
 // =============================================================================
@@ -593,12 +608,15 @@ fn process_pending_actions() {
     {
         let mut state = GUISHELL_STATE.lock();
         if let Some(menu_id) = state.menu_id {
-            let menu_exists = window::with_window_manager(|wm| {
-                wm.window_registry.contains_key(&menu_id)
-            }).unwrap_or(false);
+            let menu_exists =
+                window::with_window_manager(|wm| wm.window_registry.contains_key(&menu_id))
+                    .unwrap_or(false);
 
             if !menu_exists {
-                crate::debug_info!("GUIShell: Menu {:?} was destroyed externally, clearing state", menu_id);
+                crate::debug_info!(
+                    "GUIShell: Menu {:?} was destroyed externally, clearing state",
+                    menu_id
+                );
                 state.menu_id = None;
             }
         }

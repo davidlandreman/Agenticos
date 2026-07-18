@@ -244,12 +244,18 @@ fn test_live_frame_allocator_throughput() {
             assert!(m.release_test_frame(frame), "test frame release failed");
         }
         let reused = m.allocate_test_frame().expect("released capacity reusable");
-        assert!(frames.contains(&Some(reused)), "allocator did not reuse a released frame");
+        assert!(
+            frames.contains(&Some(reused)),
+            "allocator did not reuse a released frame"
+        );
         assert!(m.release_test_frame(reused));
     })
     .expect("memory mapper");
     let after = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
-    assert_eq!(after, before, "live allocate/release must have zero frame delta");
+    assert_eq!(
+        after, before,
+        "live allocate/release must have zero frame delta"
+    );
 }
 
 fn test_live_frame_refcounts_and_failure_injection() {
@@ -286,7 +292,10 @@ fn test_live_frame_refcounts_and_failure_injection() {
         );
     }
     let after = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
-    assert_eq!(after, before, "refcount and failed allocation must unwind exactly");
+    assert_eq!(
+        after, before,
+        "refcount and failed allocation must unwind exactly"
+    );
 }
 
 // ---------- Page-fault demotion baseline (U4) ----------

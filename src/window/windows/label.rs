@@ -1,10 +1,10 @@
 //! Label widget for displaying static text
 
-use alloc::string::String;
+use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
-use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice};
-use super::base::WindowBase;
+use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
+use alloc::string::String;
 
 /// A simple label widget for displaying text
 pub struct Label {

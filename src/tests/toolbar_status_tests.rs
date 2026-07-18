@@ -14,9 +14,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::lib::arc::Arc;
 
 use crate::lib::test_utils::Testable;
-use crate::window::event::{
-    Event, KeyModifiers, MouseButtons, MouseEvent, MouseEventType,
-};
+use crate::window::event::{Event, KeyModifiers, MouseButtons, MouseEvent, MouseEventType};
 use crate::window::types::Point;
 use crate::window::windows::button::Button;
 use crate::window::windows::layout::{SizeHint, Spacer, VBox};
@@ -100,12 +98,13 @@ fn test_disabled_button_ignores_button_down_and_up() {
     // callback exactly once on a normal button.
     let down = button.handle_event(click_at(Point::new(10, 10)));
     let up = button.handle_event(release_at(Point::new(10, 10)));
-    assert_eq!(counter.load(Ordering::SeqCst), 0, "callback fired while disabled");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "callback fired while disabled"
+    );
     // Both press and release report Ignored when disabled.
-    assert!(matches!(
-        down,
-        crate::window::EventResult::Ignored
-    ));
+    assert!(matches!(down, crate::window::EventResult::Ignored));
     assert!(matches!(up, crate::window::EventResult::Ignored));
 }
 
@@ -154,9 +153,12 @@ fn test_toolbar_three_buttons_left_aligned() {
     // Each button should land at the X immediately after the previous
     // one — verify left-to-right ordering with monotonically increasing
     // x positions and zero gap between them.
-    let bounds_a = with_window_manager(|wm| wm.window_registry.get(&id_a).unwrap().bounds()).unwrap();
-    let bounds_b = with_window_manager(|wm| wm.window_registry.get(&id_b).unwrap().bounds()).unwrap();
-    let bounds_c = with_window_manager(|wm| wm.window_registry.get(&id_c).unwrap().bounds()).unwrap();
+    let bounds_a =
+        with_window_manager(|wm| wm.window_registry.get(&id_a).unwrap().bounds()).unwrap();
+    let bounds_b =
+        with_window_manager(|wm| wm.window_registry.get(&id_b).unwrap().bounds()).unwrap();
+    let bounds_c =
+        with_window_manager(|wm| wm.window_registry.get(&id_c).unwrap().bounds()).unwrap();
 
     assert_eq!(bounds_a.x, 0);
     assert_eq!(bounds_b.x, bounds_a.x + bounds_a.width as i32);
@@ -335,7 +337,10 @@ fn test_status_bar_text_wider_than_section_does_not_overflow_into_neighbour() {
     let bounds_a = with_window_manager(|wm| wm.window_registry.get(&a).unwrap().bounds()).unwrap();
     let bounds_b = with_window_manager(|wm| wm.window_registry.get(&b).unwrap().bounds()).unwrap();
     assert_eq!(bounds_a.width, 300, "wide text should not stretch the slot");
-    assert_eq!(bounds_b.x, 300, "neighbour slot should start exactly at 300");
+    assert_eq!(
+        bounds_b.x, 300,
+        "neighbour slot should start exactly at 300"
+    );
     assert_eq!(bounds_b.width, 300);
 
     with_window_manager(|wm| {

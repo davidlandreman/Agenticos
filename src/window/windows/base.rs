@@ -1,7 +1,7 @@
 //! Base window implementation with common functionality
 
+use crate::window::{CompositorProperties, Rect, WindowId};
 use alloc::vec::Vec;
-use crate::window::{CompositorProperties, WindowId, Rect};
 
 /// Base window structure that provides common functionality
 pub struct WindowBase {
@@ -46,29 +46,29 @@ impl WindowBase {
     pub fn new(bounds: Rect) -> Self {
         Self::new_with_id(WindowId::new(), bounds)
     }
-    
+
     /// Set the parent window
     pub fn set_parent(&mut self, parent: Option<WindowId>) {
         self.parent = parent;
     }
-    
+
     /// Add a child window
     pub fn add_child(&mut self, child: WindowId) {
         if !self.children.contains(&child) {
             self.children.push(child);
         }
     }
-    
+
     /// Remove a child window
     pub fn remove_child(&mut self, child: WindowId) {
         self.children.retain(|&id| id != child);
     }
-    
+
     /// Set whether this window can receive focus
     pub fn set_can_focus(&mut self, can_focus: bool) {
         self.can_focus = can_focus;
     }
-    
+
     /// Update the window bounds
     pub fn set_bounds(&mut self, bounds: Rect) {
         // Only invalidate if bounds actually changed
@@ -83,7 +83,7 @@ impl WindowBase {
     pub fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
         self.bounds = bounds;
     }
-    
+
     /// Set visibility
     pub fn set_visible(&mut self, visible: bool) {
         if self.visible != visible {
@@ -95,28 +95,54 @@ impl WindowBase {
 
 // Implement getters for the Window trait
 impl WindowBase {
-    pub fn id(&self) -> WindowId { self.id }
-    pub fn bounds(&self) -> Rect { self.bounds }
-    pub fn visible(&self) -> bool { self.visible }
-    pub fn parent(&self) -> Option<WindowId> { self.parent }
-    pub fn children(&self) -> &[WindowId] { &self.children }
-    pub fn needs_repaint(&self) -> bool { self.needs_repaint }
-    pub fn can_focus(&self) -> bool { self.can_focus }
-    pub fn has_focus(&self) -> bool { self.has_focus }
-    
-    pub fn invalidate(&mut self) { self.needs_repaint = true; }
-    pub fn clear_needs_repaint(&mut self) { self.needs_repaint = false; }
-    pub fn compositor_properties(&self) -> CompositorProperties { self.compositor_properties }
-    pub fn composition_dirty(&self) -> bool { self.composition_dirty }
+    pub fn id(&self) -> WindowId {
+        self.id
+    }
+    pub fn bounds(&self) -> Rect {
+        self.bounds
+    }
+    pub fn visible(&self) -> bool {
+        self.visible
+    }
+    pub fn parent(&self) -> Option<WindowId> {
+        self.parent
+    }
+    pub fn children(&self) -> &[WindowId] {
+        &self.children
+    }
+    pub fn needs_repaint(&self) -> bool {
+        self.needs_repaint
+    }
+    pub fn can_focus(&self) -> bool {
+        self.can_focus
+    }
+    pub fn has_focus(&self) -> bool {
+        self.has_focus
+    }
+
+    pub fn invalidate(&mut self) {
+        self.needs_repaint = true;
+    }
+    pub fn clear_needs_repaint(&mut self) {
+        self.needs_repaint = false;
+    }
+    pub fn compositor_properties(&self) -> CompositorProperties {
+        self.compositor_properties
+    }
+    pub fn composition_dirty(&self) -> bool {
+        self.composition_dirty
+    }
     pub fn set_compositor_properties(&mut self, properties: CompositorProperties) {
         if self.compositor_properties != properties {
             self.compositor_properties = properties;
             self.composition_dirty = true;
         }
     }
-    pub fn clear_composition_dirty(&mut self) { self.composition_dirty = false; }
-    
-    pub fn set_focus(&mut self, focused: bool) { 
+    pub fn clear_composition_dirty(&mut self) {
+        self.composition_dirty = false;
+    }
+
+    pub fn set_focus(&mut self, focused: bool) {
         self.has_focus = focused;
         self.needs_repaint = true;
     }

@@ -40,7 +40,6 @@ where
     with_window_manager(|wm| (slot.take().unwrap())(wm))
 }
 
-
 /// Default section background color — shared content background from
 /// the U15 palette so a default status bar sits flush against a default
 /// container or toolbar.
@@ -128,8 +127,7 @@ impl StatusBar {
             });
         });
     }
-
-    }
+}
 
 impl Window for StatusBar {
     fn base(&self) -> &WindowBase {
@@ -162,7 +160,13 @@ impl Window for StatusBar {
             return;
         }
         let bounds = self.hbox.base().bounds();
-        device.fill_rect(bounds.x, bounds.y, bounds.width, bounds.height, self.bg_color);
+        device.fill_rect(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            self.bg_color,
+        );
         self.hbox.base_mut().clear_needs_repaint();
     }
 

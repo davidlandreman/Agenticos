@@ -80,8 +80,6 @@ pub mod userland_fixtures;
 #[cfg(feature = "test")]
 pub mod userland_switch;
 #[cfg(feature = "test")]
-pub mod window_theme;
-#[cfg(feature = "test")]
 pub mod virtio_gpu_protocol;
 #[cfg(feature = "test")]
 pub mod vm;
@@ -91,6 +89,8 @@ pub mod window_buffer;
 pub mod window_clipping;
 #[cfg(feature = "test")]
 pub mod window_manager_render;
+#[cfg(feature = "test")]
+pub mod window_theme;
 
 #[cfg(feature = "test")]
 type GetTestsFn = fn() -> &'static [&'static dyn crate::lib::test_utils::Testable];

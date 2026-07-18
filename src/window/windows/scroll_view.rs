@@ -15,7 +15,7 @@
 //! everything (clipping is handled by the active clip rect).
 
 use crate::graphics::color::Color;
-use crate::window::event::{MouseEventType};
+use crate::window::event::MouseEventType;
 use crate::window::manager::with_active_manager;
 use crate::window::windows::base::WindowBase;
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
@@ -243,8 +243,7 @@ impl ScrollView {
 
         // Thumb height is proportional to viewport / content, with a
         // minimum so it stays grabbable for very long content.
-        let thumb_h_raw =
-            (viewport_h as u64 * track_h as u64) / (self.content_h as u64);
+        let thumb_h_raw = (viewport_h as u64 * track_h as u64) / (self.content_h as u64);
         let thumb_h = (thumb_h_raw as u32).max(MIN_THUMB_SIZE).min(track_h);
 
         // Thumb position: scroll_y / (content - viewport) * (track - thumb).
@@ -276,9 +275,7 @@ impl ScrollView {
     /// parent-relative, same as `bounds`). Returns `true` if the event
     /// was consumed (i.e. the click landed on the thumb).
     fn try_begin_thumb_drag(&mut self, mouse_y: i32) -> bool {
-        let Some((_track_top, _track_h, thumb_top, thumb_h)) =
-            self.vbar_geometry()
-        else {
+        let Some((_track_top, _track_h, thumb_top, thumb_h)) = self.vbar_geometry() else {
             return false;
         };
         let thumb_bottom = thumb_top + thumb_h as i32;
@@ -294,8 +291,7 @@ impl ScrollView {
         let Some(grab) = self.thumb_grab else {
             return;
         };
-        let Some((track_top, track_h, _thumb_top, thumb_h)) = self.vbar_geometry()
-        else {
+        let Some((track_top, track_h, _thumb_top, thumb_h)) = self.vbar_geometry() else {
             return;
         };
         let (_, viewport_h) = self.viewport_size();
@@ -346,7 +342,13 @@ impl Window for ScrollView {
 
         // Background fill for the entire ScrollView outer bounds (so
         // areas not covered by the child still look right).
-        device.fill_rect(bounds.x, bounds.y, bounds.width, bounds.height, self.bg_color);
+        device.fill_rect(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            self.bg_color,
+        );
 
         // Draw vertical scrollbar (track + thumb). Coordinates from
         // `vbar_geometry` are already in the same frame as `bounds`.
@@ -361,13 +363,7 @@ impl Window for ScrollView {
                 Color::LIGHT_GRAY,
             );
             // Thumb
-            device.fill_rect(
-                track_x,
-                thumb_top,
-                SCROLLBAR_WIDTH,
-                thumb_h,
-                Color::GRAY,
-            );
+            device.fill_rect(track_x, thumb_top, SCROLLBAR_WIDTH, thumb_h, Color::GRAY);
         }
 
         // Draw horizontal scrollbar (track + thumb), if enabled and overflowing.
@@ -383,8 +379,7 @@ impl Window for ScrollView {
             );
             // Horizontal thumb math, mirror of vertical.
             if track_w > 0 && self.content_w > 0 {
-                let thumb_w_raw =
-                    (viewport_w as u64 * track_w as u64) / (self.content_w as u64);
+                let thumb_w_raw = (viewport_w as u64 * track_w as u64) / (self.content_w as u64);
                 let thumb_w = (thumb_w_raw as u32).max(MIN_THUMB_SIZE).min(track_w);
                 let scroll_range = (self.content_w as i32 - viewport_w as i32).max(1);
                 let thumb_range = (track_w as i32 - thumb_w as i32).max(0);

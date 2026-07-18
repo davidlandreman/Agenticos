@@ -78,12 +78,7 @@ impl Padding {
         let vertical = self.top.saturating_add(self.bottom);
         let inner_w = outer.width.saturating_sub(horizontal);
         let inner_h = outer.height.saturating_sub(vertical);
-        Rect::new(
-            self.left as i32,
-            self.top as i32,
-            inner_w,
-            inner_h,
-        )
+        Rect::new(self.left as i32, self.top as i32, inner_w, inner_h)
     }
 
     /// Walk the single child and write its computed bounds back through

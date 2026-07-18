@@ -2,15 +2,14 @@
 //!
 //! A popup window that displays menu items with labels, shortcuts, and separators.
 
-use alloc::vec::Vec;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
 use crate::window::event::MouseEventType;
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
+use alloc::vec::Vec;
 
 use super::base::WindowBase;
 use super::menu_bar::MenuItemDef;
-
 
 /// A popup window for displaying menu bar dropdowns
 pub struct MenuBarPopup {
@@ -32,7 +31,12 @@ pub struct MenuBarPopup {
 
 impl MenuBarPopup {
     /// Create a new popup window
-    pub fn new_with_id(id: WindowId, bounds: Rect, menu_bar_id: WindowId, items: Vec<MenuItemDef>) -> Self {
+    pub fn new_with_id(
+        id: WindowId,
+        bounds: Rect,
+        menu_bar_id: WindowId,
+        items: Vec<MenuItemDef>,
+    ) -> Self {
         MenuBarPopup {
             base: WindowBase::new_with_id(id, bounds),
             items,
@@ -110,7 +114,9 @@ impl Window for MenuBarPopup {
         let mut item_y: i32 = y + 2;
         for (i, item) in self.items.iter().enumerate() {
             match item {
-                MenuItemDef::Item { label, shortcut, .. } => {
+                MenuItemDef::Item {
+                    label, shortcut, ..
+                } => {
                     let item_height: u32 = 24;
 
                     // Highlight if hovered
@@ -146,7 +152,8 @@ impl Window for MenuBarPopup {
                         } else {
                             Color::new(128, 128, 128)
                         };
-                        let shortcut_x = x + width as i32 - 8
+                        let shortcut_x = x + width as i32
+                            - 8
                             - (shortcut.len() as i32 * font.cell_width() as i32);
                         device.draw_text(
                             shortcut_x,
@@ -161,13 +168,7 @@ impl Window for MenuBarPopup {
                 }
                 MenuItemDef::Separator => {
                     item_y += 4;
-                    device.fill_rect(
-                        x + 4,
-                        item_y,
-                        width - 8,
-                        1,
-                        Color::new(180, 180, 180),
-                    );
+                    device.fill_rect(x + 4, item_y, width - 8, 1, Color::new(180, 180, 180));
                     item_y += 4;
                 }
             }
@@ -201,10 +202,16 @@ impl Window for MenuBarPopup {
                         MouseEventType::ButtonUp => {
                             // Set pending selection for the window manager to process
                             // Note: on ButtonUp, buttons.left is false since the button was just released
-                            crate::debug_info!("MenuBarPopup: ButtonUp, hover_index={:?}", self.hover_index);
+                            crate::debug_info!(
+                                "MenuBarPopup: ButtonUp, hover_index={:?}",
+                                self.hover_index
+                            );
                             if let Some(idx) = self.hover_index {
                                 self.pending_selection = Some(idx);
-                                crate::debug_info!("MenuBarPopup: pending_selection set to {}", idx);
+                                crate::debug_info!(
+                                    "MenuBarPopup: pending_selection set to {}",
+                                    idx
+                                );
                             }
                             return EventResult::Handled;
                         }
@@ -232,6 +239,8 @@ impl Window for MenuBarPopup {
     fn set_focus(&mut self, _focused: bool) {}
 
     fn poll_pending_popup_selection(&mut self) -> Option<(WindowId, usize)> {
-        self.pending_selection.take().map(|idx| (self.menu_bar_id, idx))
+        self.pending_selection
+            .take()
+            .map(|idx| (self.menu_bar_id, idx))
     }
 }

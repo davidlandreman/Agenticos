@@ -11,14 +11,10 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use crate::lib::test_utils::Testable;
-use crate::window::event::{
-    Event, KeyModifiers, MouseButtons, MouseEvent, MouseEventType,
-};
+use crate::window::event::{Event, KeyModifiers, MouseButtons, MouseEvent, MouseEventType};
 use crate::window::types::Point;
 use crate::window::windows::layout::Spacer;
-use crate::window::windows::splitter::{
-    Splitter, SplitterOrientation, DIVIDER_WIDTH,
-};
+use crate::window::windows::splitter::{Splitter, SplitterOrientation, DIVIDER_WIDTH};
 use crate::window::{with_window_manager, Rect, WindowId};
 
 // ---------------------------------------------------------------------------
@@ -177,7 +173,12 @@ fn test_horizontal_splitter_writes_child_bounds() {
         assert_eq!(bounds_a, Rect::new(10, 20, 100, 150));
         assert_eq!(
             bounds_b,
-            Rect::new(10, 20 + 150 + DIVIDER_WIDTH as i32, 100, 300 - 150 - DIVIDER_WIDTH)
+            Rect::new(
+                10,
+                20 + 150 + DIVIDER_WIDTH as i32,
+                100,
+                300 - 150 - DIVIDER_WIDTH
+            )
         );
 
         wm.destroy_window(splitter_id);
@@ -206,15 +207,9 @@ fn test_drag_grows_first_shrinks_second() {
 
         // ButtonDown on the divider strip (local x = 200, anywhere on y).
         wm.with_window_mut(splitter_id, |w| {
-            let _ = w.handle_event(left_event(
-                MouseEventType::ButtonDown,
-                Point::new(200, 50),
-            ));
+            let _ = w.handle_event(left_event(MouseEventType::ButtonDown, Point::new(200, 50)));
             // Move the divider to x = 280.
-            let _ = w.handle_event(left_event(
-                MouseEventType::Move,
-                Point::new(280, 50),
-            ));
+            let _ = w.handle_event(left_event(MouseEventType::Move, Point::new(280, 50)));
             let _ = w.handle_event(release_event(Point::new(280, 50)));
         });
 
@@ -251,14 +246,8 @@ fn test_drag_clamped_by_minimums() {
         // Drag toward the right edge — should stop at
         // 600 - 200 - DIVIDER_WIDTH = 396.
         wm.with_window_mut(splitter_id, |w| {
-            let _ = w.handle_event(left_event(
-                MouseEventType::ButtonDown,
-                Point::new(300, 50),
-            ));
-            let _ = w.handle_event(left_event(
-                MouseEventType::Move,
-                Point::new(700, 50),
-            ));
+            let _ = w.handle_event(left_event(MouseEventType::ButtonDown, Point::new(300, 50)));
+            let _ = w.handle_event(left_event(MouseEventType::Move, Point::new(700, 50)));
             let _ = w.handle_event(release_event(Point::new(700, 50)));
         });
 
@@ -278,10 +267,7 @@ fn test_drag_clamped_by_minimums() {
                 // Currently the divider sits at 396, so click on it.
                 Point::new(396, 50),
             ));
-            let _ = w.handle_event(left_event(
-                MouseEventType::Move,
-                Point::new(0, 50),
-            ));
+            let _ = w.handle_event(left_event(MouseEventType::Move, Point::new(0, 50)));
             let _ = w.handle_event(release_event(Point::new(0, 50)));
         });
 
@@ -362,15 +348,9 @@ fn test_buttondown_outside_divider_does_not_drag() {
 
         // Click well left of the divider (which sits at x=200..204).
         wm.with_window_mut(splitter_id, |w| {
-            let _ = w.handle_event(left_event(
-                MouseEventType::ButtonDown,
-                Point::new(50, 50),
-            ));
+            let _ = w.handle_event(left_event(MouseEventType::ButtonDown, Point::new(50, 50)));
             // A Move now should be ignored (no drag in progress).
-            let _ = w.handle_event(left_event(
-                MouseEventType::Move,
-                Point::new(80, 50),
-            ));
+            let _ = w.handle_event(left_event(MouseEventType::Move, Point::new(80, 50)));
             let _ = w.handle_event(release_event(Point::new(80, 50)));
         });
 

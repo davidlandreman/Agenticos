@@ -1,6 +1,5 @@
-
-use crate::fs::vfs::vfs_stat;
 use crate::fs::filesystem::DirectoryEntry;
+use crate::fs::vfs::vfs_stat;
 use core::fmt;
 
 pub struct FileSystemManager;
@@ -39,32 +38,21 @@ impl fmt::Display for FsError {
 pub type FsResult<T> = Result<T, FsError>;
 
 impl FileSystemManager {
-
     pub fn exists(path: &str) -> bool {
         vfs_stat(path).is_ok()
     }
 
     pub fn metadata(path: &str) -> FsResult<DirectoryEntry> {
-        vfs_stat(path)
-            .map_err(|_| FsError::FileNotFound)
+        vfs_stat(path).map_err(|_| FsError::FileNotFound)
     }
-
-
-
-    }
+}
 
 #[expect(dead_code, reason = "intentional kernel API surface")]
 pub struct Path<'a> {
     path: &'a str,
 }
 
-impl<'a> Path<'a> {
-
-
-
-
-
-    }
+impl<'a> Path<'a> {}
 
 #[expect(dead_code, reason = "intentional kernel API surface")]
 pub struct PathComponents<'a> {
@@ -72,8 +60,7 @@ pub struct PathComponents<'a> {
     position: usize,
 }
 
-impl<'a> PathComponents<'a> {
-    }
+impl<'a> PathComponents<'a> {}
 
 impl<'a> Iterator for PathComponents<'a> {
     type Item = &'a str;
@@ -94,11 +81,6 @@ impl<'a> Iterator for PathComponents<'a> {
         }
     }
 }
-
-
-
-
-
 
 pub fn exists(path: &str) -> bool {
     FileSystemManager::exists(path)

@@ -90,7 +90,9 @@ struct MouseButtonsEntry {
 pub struct SendInput;
 
 impl Tool for SendInput {
-    fn name(&self) -> &'static str { "send_input" }
+    fn name(&self) -> &'static str {
+        "send_input"
+    }
 
     fn description(&self) -> &'static str {
         "synthesize keyboard and/or mouse events into the window event pipeline"
@@ -132,7 +134,9 @@ impl Tool for SendInput {
         }
         for m in &args.mouse {
             let event_type = parse_mouse_event_type(&m.event_type, m.delta_x, m.delta_y)
-                .ok_or_else(|| ToolError::bad_args(format!("unknown event_type {:?}", m.event_type)))?;
+                .ok_or_else(|| {
+                    ToolError::bad_args(format!("unknown event_type {:?}", m.event_type))
+                })?;
             events.push(Event::Mouse(MouseEvent {
                 event_type,
                 position: Point { x: m.x, y: m.y },
@@ -171,18 +175,42 @@ impl Tool for SendInput {
 #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 fn parse_key_code(s: &str) -> Option<KeyCode> {
     Some(match s {
-        "A" => KeyCode::A, "B" => KeyCode::B, "C" => KeyCode::C, "D" => KeyCode::D,
-        "E" => KeyCode::E, "F" => KeyCode::F, "G" => KeyCode::G, "H" => KeyCode::H,
-        "I" => KeyCode::I, "J" => KeyCode::J, "K" => KeyCode::K, "L" => KeyCode::L,
-        "M" => KeyCode::M, "N" => KeyCode::N, "O" => KeyCode::O, "P" => KeyCode::P,
-        "Q" => KeyCode::Q, "R" => KeyCode::R, "S" => KeyCode::S, "T" => KeyCode::T,
-        "U" => KeyCode::U, "V" => KeyCode::V, "W" => KeyCode::W, "X" => KeyCode::X,
-        "Y" => KeyCode::Y, "Z" => KeyCode::Z,
-        "0" | "Key0" => KeyCode::Key0, "1" | "Key1" => KeyCode::Key1,
-        "2" | "Key2" => KeyCode::Key2, "3" | "Key3" => KeyCode::Key3,
-        "4" | "Key4" => KeyCode::Key4, "5" | "Key5" => KeyCode::Key5,
-        "6" | "Key6" => KeyCode::Key6, "7" | "Key7" => KeyCode::Key7,
-        "8" | "Key8" => KeyCode::Key8, "9" | "Key9" => KeyCode::Key9,
+        "A" => KeyCode::A,
+        "B" => KeyCode::B,
+        "C" => KeyCode::C,
+        "D" => KeyCode::D,
+        "E" => KeyCode::E,
+        "F" => KeyCode::F,
+        "G" => KeyCode::G,
+        "H" => KeyCode::H,
+        "I" => KeyCode::I,
+        "J" => KeyCode::J,
+        "K" => KeyCode::K,
+        "L" => KeyCode::L,
+        "M" => KeyCode::M,
+        "N" => KeyCode::N,
+        "O" => KeyCode::O,
+        "P" => KeyCode::P,
+        "Q" => KeyCode::Q,
+        "R" => KeyCode::R,
+        "S" => KeyCode::S,
+        "T" => KeyCode::T,
+        "U" => KeyCode::U,
+        "V" => KeyCode::V,
+        "W" => KeyCode::W,
+        "X" => KeyCode::X,
+        "Y" => KeyCode::Y,
+        "Z" => KeyCode::Z,
+        "0" | "Key0" => KeyCode::Key0,
+        "1" | "Key1" => KeyCode::Key1,
+        "2" | "Key2" => KeyCode::Key2,
+        "3" | "Key3" => KeyCode::Key3,
+        "4" | "Key4" => KeyCode::Key4,
+        "5" | "Key5" => KeyCode::Key5,
+        "6" | "Key6" => KeyCode::Key6,
+        "7" | "Key7" => KeyCode::Key7,
+        "8" | "Key8" => KeyCode::Key8,
+        "9" | "Key9" => KeyCode::Key9,
         "Escape" => KeyCode::Escape,
         "Enter" => KeyCode::Enter,
         "Space" => KeyCode::Space,
@@ -204,10 +232,18 @@ fn parse_key_code(s: &str) -> Option<KeyCode> {
         "RightCtrl" => KeyCode::RightCtrl,
         "LeftAlt" => KeyCode::LeftAlt,
         "RightAlt" => KeyCode::RightAlt,
-        "F1" => KeyCode::F1, "F2" => KeyCode::F2, "F3" => KeyCode::F3,
-        "F4" => KeyCode::F4, "F5" => KeyCode::F5, "F6" => KeyCode::F6,
-        "F7" => KeyCode::F7, "F8" => KeyCode::F8, "F9" => KeyCode::F9,
-        "F10" => KeyCode::F10, "F11" => KeyCode::F11, "F12" => KeyCode::F12,
+        "F1" => KeyCode::F1,
+        "F2" => KeyCode::F2,
+        "F3" => KeyCode::F3,
+        "F4" => KeyCode::F4,
+        "F5" => KeyCode::F5,
+        "F6" => KeyCode::F6,
+        "F7" => KeyCode::F7,
+        "F8" => KeyCode::F8,
+        "F9" => KeyCode::F9,
+        "F10" => KeyCode::F10,
+        "F11" => KeyCode::F11,
+        "F12" => KeyCode::F12,
         "Comma" => KeyCode::Comma,
         "Period" => KeyCode::Period,
         "Slash" => KeyCode::Slash,

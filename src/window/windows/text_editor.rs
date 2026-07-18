@@ -493,7 +493,13 @@ impl Window for TextEditor {
             let cursor_rect = self.cursor_rect_local();
             let cursor_x = bounds.x + cursor_rect.x;
             let cursor_y = bounds.y + cursor_rect.y;
-            device.fill_rect(cursor_x, cursor_y, 2, self.char_height as u32, self.cursor_color);
+            device.fill_rect(
+                cursor_x,
+                cursor_y,
+                2,
+                self.char_height as u32,
+                self.cursor_color,
+            );
         }
 
         self.base.clear_needs_repaint();
