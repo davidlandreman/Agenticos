@@ -43,13 +43,17 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   state and buffers remain in `src/net/`.
 - `signal.rs` — POSIX signal dispositions, blocked/pending masks.
 - `fdtable.rs` — per-process file-descriptor table.
+- `gui.rs` — per-PID window ownership plus the bounded, coalescing GUI event
+  queue and process-death teardown.
+- `gui_syscalls.rs` — syscalls 5001-5004: create, copy-present, next-event,
+  and destroy.
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility
   pointer bounds for synthetic tests, and errno constants. Real processes
   use VMA-aware user-copy validation. Unknown syscall numbers always return
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
-  to BusyBox (`/host/BB.ELF`) or kernel-side GUI apps via
-  `GLAUNCH.ELF` + `sys_gui_launch`.
+  to BusyBox, the remaining kernel-side GUI apps through `GLAUNCH.ELF`, or
+  standalone ELFs such as `/host/NOTEPAD.ELF`.
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
 - `error.rs` — loader-side error enum.
@@ -103,6 +107,22 @@ that makes the "current" field meaningful as a per-instant pointer.
 load-bearing on the single CPU: timer-preemptible launcher/compositor threads
 and IF-cleared page-fault/SYSCALL paths share the table, so every acquisition
 must mask timer preemption until its guard releases the spinlock.
+
+## Ring-3 GUI ABI
+
+The AgenticOS-private range extends syscall 5000 with four calls:
+
+- 5001 `gui_win_create(width, height, title, title_len, flags)`
+- 5002 `gui_win_present(handle, pixels, width, height, stride)`
+- 5003 `gui_next_event(event, len, flags)`
+- 5004 `gui_win_destroy(handle)`
+
+Pixels are little-endian XRGB8888 (`u32` value `0x00RRGGBB`). Presents copy a
+full client surface into kernel memory. Events use a fixed 32-byte
+`GuiEvent { kind, window, payload[6] }`; an empty blocking read parks on
+`WaitingForGuiEvent`, while `GUI_NONBLOCK` returns `-EAGAIN`. Each PID has a
+128-entry queue: consecutive motion events coalesce and other overflow drops
+the oldest entry. Removing a process destroys every frame it owns.
 
 The ring-3 timer hands control back to `KERNEL_CONTEXT` every second tick,
 saving and requeueing the current user process first. Direct ring3-to-ring3

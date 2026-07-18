@@ -271,6 +271,8 @@ pub enum Ring3BlockReason {
     /// SYSCALL re-fires and `read_stdin_blocking` re-checks the
     /// queue.
     WaitingForInput,
+    /// `gui_next_event` with an empty per-process GUI event queue.
+    WaitingForGuiEvent,
     /// `read(fd, ...)` on a pipe whose ring buffer is empty but at
     /// least one writer still exists. Wakes when any pipe write
     /// appends bytes, or when the last writer drops (allowing the
@@ -452,6 +454,7 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     g.ring3_blocked.remove(&pid);
     let removed = g.by_pid.remove(&pid)?;
     drop(g);
+    crate::userland::gui::cleanup_process(pid);
     Some(removed)
 }
 
@@ -531,6 +534,7 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
             *target == -1 || *target == child_pid as i32
         }
         Some(Ring3BlockReason::WaitingForInput)
+        | Some(Ring3BlockReason::WaitingForGuiEvent)
         | Some(Ring3BlockReason::WaitingForPipeRead)
         | Some(Ring3BlockReason::WaitingForPipeWrite)
         | Some(Ring3BlockReason::WaitingForNetwork { .. })
@@ -1753,6 +1757,10 @@ fn long_jump_to_run_or_halt() -> ! {
     // is a synthetic test path; no kernel thread to wake.
     let exiting_pid = current_user_pid();
     if let Some(pid) = exiting_pid {
+        // GUI resources are process-owned and must disappear at death, not
+        // only when a parent or launcher eventually reaps the zombie slot.
+        // `remove_process` repeats this cleanup as an idempotent backstop.
+        crate::userland::gui::cleanup_process(pid);
         // Wake any kernel thread blocked on this process's exit. The
         // thread's `block_kernel_thread_for_ring3_exit` returns when
         // scheduler picks it; it reads exit_kind/exit_code from

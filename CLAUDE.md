@@ -16,7 +16,7 @@ See `docs/ai-context-conventions.md` for the convention in detail (when to add a
 
 AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch with the eventual goal of supporting agent-based computing capabilities.
 
-**Current State**: The OS has memory management, writable overlay/data filesystems, display/graphics, preemptive kernel and ring-3 scheduling, and a Linux static-musl process platform. A window system provides hierarchical window management, event routing, and mouse support. The OS boots into a GUI desktop; clicking Start → Terminal opens a windowed terminal that launches ring-3 `zsh` (`/host/ZSH.ELF`) directly as its shell. A static BusyBox (`BB.ELF`) provides core utilities plus numeric-address `ping`, `nc`, and HTTP-only `wget` through the virtual `/bin/<applet>` namespace. A single-interface, polling-driven IPv4 stack uses modern VirtIO-net + smoltcp for DHCPv4, ICMP, UDP, and TCP. DNS servers are recorded but name lookup, IPv6, TLS, and interrupt-driven NIC I/O are deferred. The "Agentic" runtime is not yet implemented.
+**Current State**: The OS has memory management, writable overlay/data filesystems, display/graphics, preemptive kernel and ring-3 scheduling, and a Linux static-musl process platform. A window system provides hierarchical window management, event routing, mouse support, and copy-blit ring-3 client surfaces. The OS boots into a GUI desktop; Start → Terminal launches ring-3 zsh and Start → Notepad launches the standalone ring-3 `NOTEPAD.ELF`, which can edit and save through the real filesystem syscalls. A static BusyBox (`BB.ELF`) provides core utilities plus numeric-address `ping`, `nc`, and HTTP-only `wget` through the virtual `/bin/<applet>` namespace. A single-interface, polling-driven IPv4 stack uses modern VirtIO-net + smoltcp for DHCPv4, ICMP, UDP, and TCP. DNS servers are recorded but name lookup, IPv6, TLS, and interrupt-driven NIC I/O are deferred. The "Agentic" runtime is not yet implemented.
 
 The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.
 
@@ -69,7 +69,7 @@ The project follows a modular monolithic kernel design with clear separation of 
 Each entry below points to the folder's own `CLAUDE.md`, which carries the detailed context for that subsystem. Folder files load on demand when Claude reads files in that directory.
 
 - `src/arch/` — Architecture-specific code (x86_64 IDT, interrupts). No folder file yet — currently thin.
-- `src/commands/` — Kernel-side GUI app launchers (`painting`, `calc`, `notepad`, `tasks`, `explorer`) + `guishell` (desktop/taskbar manager). Invoked via `sys_gui_launch` from ring-3 (`GLAUNCH.ELF`) or directly from boot in the case of `guishell`. See [`src/commands/CLAUDE.md`](src/commands/CLAUDE.md).
+- `src/commands/` — Remaining kernel-side GUI apps (`painting`, `calc`, `tasks`, `explorer`) + `guishell`. Notepad is a ring-3 ELF under `userland/apps/`. See [`src/commands/CLAUDE.md`](src/commands/CLAUDE.md).
 - `src/drivers/` — Hardware drivers (PCI, IDE, PS/2, VirtIO, framebuffer display). See [`src/drivers/CLAUDE.md`](src/drivers/CLAUDE.md).
 - `src/fs/` — Read-only FAT12/16/32 filesystem with `Arc`-based handles. See [`src/fs/CLAUDE.md`](src/fs/CLAUDE.md).
 - `src/graphics/` — Drawing primitives, text rendering, image loading, compositor. See [`src/graphics/CLAUDE.md`](src/graphics/CLAUDE.md).
@@ -81,7 +81,7 @@ Each entry below points to the folder's own `CLAUDE.md`, which carries the detai
 - `src/stdlib/` — `Read`/`Write` traits, async waker. No folder file yet — currently thin.
 - `src/terminal/` — VT100/xterm terminal emulation: PTY pair, ANSI/VT parser, character grid + scrollback + alt-screen, caret, per-pty termios/winsize, key encoding. See [`src/terminal/CLAUDE.md`](src/terminal/CLAUDE.md).
 - `src/tests/` — In-kernel test modules. See [`src/tests/CLAUDE.md`](src/tests/CLAUDE.md).
-- `src/userland/` — Ring-3 ELF loader, Linux x86-64 ABI, lifecycle (`enter_user_mode`, `cleanup_user_process`, `BinaryLoadGuard`). No folder file yet; design lives in `docs/plans/2026-05-08-004-feat-userland-app-platform-plan.md` and `docs/plans/2026-05-09-001-feat-userland-linux-abi-cpp-hello-plan.md`.
+- `src/userland/` — Ring-3 ELF loader, Linux x86-64 ABI, lifecycle, and GUI syscalls/event ownership. See [`src/userland/CLAUDE.md`](src/userland/CLAUDE.md).
 - `src/window/` — Window system (hierarchy, types, default desktop, cursor rendering). See [`src/window/CLAUDE.md`](src/window/CLAUDE.md).
 
 ### Configuration files

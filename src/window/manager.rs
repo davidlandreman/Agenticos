@@ -1829,10 +1829,18 @@ impl WindowManager {
                         self.focus_frame_and_content(window_id);
                     }
                     HitTestResult::CloseButton => {
-                        // Close button clicked - destroy the window
                         crate::debug_info!("Close button clicked for {:?}", window_id);
-                        self.destroy_window(window_id);
-                        self.compositor.dirty.mark_full_repaint();
+                        if let Some(client_id) = self.first_close_request_descendant(window_id) {
+                            self.route_event_to_window(
+                                client_id,
+                                Event::Close(crate::window::event::CloseEvent {
+                                    window: window_id,
+                                }),
+                            );
+                        } else {
+                            self.destroy_window(window_id);
+                            self.compositor.dirty.mark_full_repaint();
+                        }
                     }
                     _ => {}
                 }
@@ -1862,6 +1870,21 @@ impl WindowManager {
                     return Some(child_id);
                 }
                 if let Some(found) = self.first_focusable_descendant(child_id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    fn first_close_request_descendant(&self, id: WindowId) -> Option<WindowId> {
+        let window = self.window_registry.get(&id)?;
+        for &child_id in window.children() {
+            if let Some(child) = self.window_registry.get(&child_id) {
+                if child.accepts_close_request() {
+                    return Some(child_id);
+                }
+                if let Some(found) = self.first_close_request_descendant(child_id) {
                     return Some(found);
                 }
             }

@@ -1,0 +1,9 @@
+[package]
+name = "gui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+runtime = { path = "../../runtime" }
+fontdata = { path = "../../../shared/fontdata" }

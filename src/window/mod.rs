@@ -388,6 +388,17 @@ pub trait Window: Send {
         None
     }
 
+    /// Whether a frame close-button click should be delivered to this client
+    /// instead of immediately destroying the frame.
+    fn accepts_close_request(&self) -> bool {
+        false
+    }
+
+    /// Typed accessor used by the ring-3 present syscall.
+    fn as_remote_surface_mut(&mut self) -> Option<&mut windows::remote_surface::RemoteSurface> {
+        None
+    }
+
     /// Typed accessor used by app code (e.g. File Explorer) to mutate
     /// a `MultiColumnList`'s rows through the manager.
     fn as_multi_column_list_mut(

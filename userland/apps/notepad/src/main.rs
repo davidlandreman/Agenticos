@@ -1,0 +1,846 @@
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
+use gui::{
+    Canvas, MenuBar, Window, COLOR_BORDER, COLOR_HIGHLIGHT, COLOR_PANEL, COLOR_TEXT, COLOR_WHITE,
+    GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE, GUI_MOUSE_DOWN,
+    GUI_MOUSE_SCROLL,
+};
+
+const FILE_ITEMS: &[&str] = &["New", "Open...", "Save", "Save As...", "Exit"];
+const STATUS_HEIGHT: u32 = 18;
+const LINE_HEIGHT: u32 = 10;
+
+struct Editor {
+    text: String,
+    cursor: usize,
+    anchor: Option<usize>,
+    first_line: usize,
+}
+
+impl Editor {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+            anchor: None,
+            first_line: 0,
+        }
+    }
+
+    fn set_text(&mut self, text: String) {
+        self.text = text;
+        self.cursor = 0;
+        self.anchor = None;
+        self.first_line = 0;
+    }
+
+    fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        if anchor == self.cursor {
+            None
+        } else {
+            Some((anchor.min(self.cursor), anchor.max(self.cursor)))
+        }
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection() else {
+            return false;
+        };
+        self.text.replace_range(start..end, "");
+        self.cursor = start;
+        self.anchor = None;
+        true
+    }
+
+    fn begin_move(&mut self, shift: bool) {
+        if shift {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.cursor);
+            }
+        } else {
+            self.anchor = None;
+        }
+    }
+
+    fn insert(&mut self, character: char) {
+        self.delete_selection();
+        self.text.insert(self.cursor, character);
+        self.cursor += character.len_utf8();
+    }
+
+    fn backspace(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if self.cursor == 0 {
+            return false;
+        }
+        let previous = previous_boundary(&self.text, self.cursor);
+        self.text.replace_range(previous..self.cursor, "");
+        self.cursor = previous;
+        true
+    }
+
+    fn delete(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if self.cursor == self.text.len() {
+            return false;
+        }
+        let next = next_boundary(&self.text, self.cursor);
+        self.text.replace_range(self.cursor..next, "");
+        true
+    }
+
+    fn move_horizontal(&mut self, right: bool, shift: bool) {
+        self.begin_move(shift);
+        self.cursor = if right {
+            if self.cursor < self.text.len() {
+                next_boundary(&self.text, self.cursor)
+            } else {
+                self.cursor
+            }
+        } else if self.cursor > 0 {
+            previous_boundary(&self.text, self.cursor)
+        } else {
+            0
+        };
+    }
+
+    fn line_col(&self) -> (usize, usize) {
+        line_col_at(&self.text, self.cursor)
+    }
+
+    fn move_vertical(&mut self, delta: isize, shift: bool) {
+        let (line, column) = self.line_col();
+        let target = if delta < 0 {
+            line.saturating_sub(delta.unsigned_abs())
+        } else {
+            line.saturating_add(delta as usize)
+        };
+        self.begin_move(shift);
+        self.cursor = index_for_line_col(&self.text, target, column);
+    }
+
+    fn home_end(&mut self, end: bool, shift: bool) {
+        let (line, _) = self.line_col();
+        self.begin_move(shift);
+        self.cursor = index_for_line_col(&self.text, line, if end { usize::MAX } else { 0 });
+    }
+
+    fn ensure_visible(&mut self, visible_lines: usize) {
+        let (line, _) = self.line_col();
+        if line < self.first_line {
+            self.first_line = line;
+        }
+        if line >= self.first_line.saturating_add(visible_lines.max(1)) {
+            self.first_line = line + 1 - visible_lines.max(1);
+        }
+    }
+
+    fn click(&mut self, row: usize, column: usize) {
+        self.cursor = index_for_line_col(&self.text, self.first_line + row, column);
+        self.anchor = None;
+    }
+
+    fn draw(&self, canvas: &mut Canvas, top: u32, bottom: u32, focused: bool) {
+        canvas.fill_rect(
+            0,
+            top as i32,
+            canvas.width(),
+            bottom.saturating_sub(top),
+            COLOR_WHITE,
+        );
+        let selected = self.selection();
+        let mut line = 0usize;
+        let mut column = 0usize;
+        for (index, character) in self.text.char_indices() {
+            if character == '\n' {
+                line += 1;
+                column = 0;
+                continue;
+            }
+            if line >= self.first_line {
+                let visible_line = line - self.first_line;
+                let y = top as i32 + visible_line as i32 * LINE_HEIGHT as i32 + 1;
+                if y + 8 < bottom as i32 {
+                    let x = 4 + column as i32 * 8;
+                    if selected
+                        .map(|(start, end)| index >= start && index < end)
+                        .unwrap_or(false)
+                    {
+                        canvas.fill_rect(x, y - 1, 8, LINE_HEIGHT, COLOR_HIGHLIGHT);
+                        canvas.draw_char(x, y, character, COLOR_WHITE);
+                    } else {
+                        canvas.draw_char(x, y, character, COLOR_TEXT);
+                    }
+                }
+            }
+            column += 1;
+        }
+        if focused {
+            let (cursor_line, cursor_column) = self.line_col();
+            if cursor_line >= self.first_line {
+                let y = top as i32 + (cursor_line - self.first_line) as i32 * LINE_HEIGHT as i32;
+                if y + LINE_HEIGHT as i32 <= bottom as i32 {
+                    canvas.vertical_line(4 + cursor_column as i32 * 8, y + 1, 9, COLOR_TEXT);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PathMode {
+    Open,
+    SaveAs,
+}
+
+enum Modal {
+    Path {
+        window: Window,
+        mode: PathMode,
+        input: String,
+        entries: Vec<gui::DirEntry>,
+    },
+    Message {
+        window: Window,
+        text: String,
+        confirm_exit: bool,
+    },
+}
+
+impl Modal {
+    fn handle(&self) -> u32 {
+        match self {
+            Modal::Path { window, .. } | Modal::Message { window, .. } => window.handle(),
+        }
+    }
+}
+
+struct Notepad {
+    window: Window,
+    editor: Editor,
+    menu: MenuBar<'static>,
+    path: Option<String>,
+    dirty: bool,
+    focused: bool,
+    modal: Option<Modal>,
+}
+
+impl Notepad {
+    fn new(initial_path: Option<String>) -> Result<Self, i64> {
+        let mut app = Self {
+            window: Window::new(720, 480, "Notepad")?,
+            editor: Editor::new(),
+            menu: MenuBar {
+                label: "File",
+                items: FILE_ITEMS,
+                open: false,
+            },
+            path: None,
+            dirty: false,
+            focused: true,
+            modal: None,
+        };
+        if let Some(path) = initial_path {
+            app.load_from(&path);
+        }
+        Ok(app)
+    }
+
+    fn run(&mut self) -> i64 {
+        self.render();
+        loop {
+            let event = match gui::next_event() {
+                Ok(event) => event,
+                Err(error) => return error,
+            };
+            let exit = if event.window == self.window.handle() {
+                self.handle_main(event)
+            } else if self.modal.as_ref().map(Modal::handle) == Some(event.window) {
+                self.handle_modal(event)
+            } else {
+                false
+            };
+            if exit {
+                return 0;
+            }
+        }
+    }
+
+    fn render(&mut self) {
+        let height = self.window.canvas().height();
+        let editor_bottom = height.saturating_sub(STATUS_HEIGHT);
+        let path = self.path.as_deref().unwrap_or("Untitled");
+        let dirty = self.dirty;
+        let focused = self.focused && self.modal.is_none();
+        let canvas = self.window.canvas_mut();
+        canvas.clear(COLOR_PANEL);
+        self.editor
+            .draw(canvas, MenuBar::HEIGHT, editor_bottom, focused);
+        canvas.fill_rect(
+            0,
+            editor_bottom as i32,
+            canvas.width(),
+            STATUS_HEIGHT,
+            COLOR_PANEL,
+        );
+        canvas.horizontal_line(0, editor_bottom as i32, canvas.width(), COLOR_BORDER);
+        canvas.draw_text(6, editor_bottom as i32 + 5, path, COLOR_TEXT);
+        if dirty {
+            canvas.draw_text(
+                canvas.width() as i32 - 80,
+                editor_bottom as i32 + 5,
+                "Modified",
+                0xA03020,
+            );
+        }
+        self.menu.draw(canvas);
+        let _ = self.window.present();
+    }
+
+    fn handle_main(&mut self, event: runtime::GuiEvent) -> bool {
+        match event.kind {
+            GUI_EVENT_CLOSE => return self.request_exit(),
+            gui::GUI_EVENT_FOCUS_CHANGE => self.focused = event.payload[0] != 0,
+            GUI_EVENT_RESIZE => {
+                self.window.resize(event.payload[0], event.payload[1]);
+                let lines = self.visible_lines();
+                self.editor.ensure_visible(lines);
+            }
+            GUI_EVENT_KEY if event.payload[3] != 0 && self.modal.is_none() => {
+                if self.handle_key(event.payload) {
+                    return true;
+                }
+            }
+            GUI_EVENT_MOUSE if self.modal.is_none() => {
+                if self.handle_mouse(event.payload) {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+        self.render();
+        false
+    }
+
+    fn handle_key(&mut self, payload: [u32; 6]) -> bool {
+        let key = payload[0];
+        let character = char::from_u32(payload[1]).unwrap_or('\0');
+        let shift = payload[2] & 1 != 0;
+        let ctrl = payload[2] & 2 != 0;
+        if ctrl {
+            match character.to_ascii_lowercase() {
+                'n' => self.new_file(),
+                'o' => self.open_path_dialog(PathMode::Open),
+                's' if shift => self.open_path_dialog(PathMode::SaveAs),
+                's' => self.save(),
+                _ => {}
+            }
+            return false;
+        }
+        let changed = match key {
+            runtime::KEY_BACKSPACE => self.editor.backspace(),
+            runtime::KEY_DELETE => self.editor.delete(),
+            runtime::KEY_LEFT => {
+                self.editor.move_horizontal(false, shift);
+                false
+            }
+            runtime::KEY_RIGHT => {
+                self.editor.move_horizontal(true, shift);
+                false
+            }
+            runtime::KEY_UP => {
+                self.editor.move_vertical(-1, shift);
+                false
+            }
+            runtime::KEY_DOWN => {
+                self.editor.move_vertical(1, shift);
+                false
+            }
+            runtime::KEY_HOME => {
+                self.editor.home_end(false, shift);
+                false
+            }
+            runtime::KEY_END => {
+                self.editor.home_end(true, shift);
+                false
+            }
+            runtime::KEY_ENTER => {
+                self.editor.insert('\n');
+                true
+            }
+            runtime::KEY_TAB => {
+                for _ in 0..4 {
+                    self.editor.insert(' ');
+                }
+                true
+            }
+            _ if character >= ' ' && character != '\u{7f}' => {
+                self.editor.insert(character);
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.dirty = true;
+        }
+        self.editor.ensure_visible(self.visible_lines());
+        false
+    }
+
+    fn handle_mouse(&mut self, payload: [u32; 6]) -> bool {
+        let x = payload[0] as i32;
+        let y = payload[1] as i32;
+        if payload[3] == GUI_MOUSE_SCROLL {
+            let delta = payload[5] as i32;
+            if delta < 0 {
+                self.editor.first_line = self.editor.first_line.saturating_sub((-delta) as usize);
+            } else {
+                self.editor.first_line = self.editor.first_line.saturating_add(delta as usize);
+            }
+            return false;
+        }
+        if payload[3] != GUI_MOUSE_DOWN {
+            return false;
+        }
+        if let Some(index) = self.menu.click(x, y) {
+            match index {
+                0 => self.new_file(),
+                1 => self.open_path_dialog(PathMode::Open),
+                2 => self.save(),
+                3 => self.open_path_dialog(PathMode::SaveAs),
+                4 => return self.request_exit(),
+                _ => {}
+            }
+        } else if y >= MenuBar::HEIGHT as i32 {
+            let row = ((y - MenuBar::HEIGHT as i32) / LINE_HEIGHT as i32).max(0) as usize;
+            let column = ((x - 4) / 8).max(0) as usize;
+            self.editor.click(row, column);
+        }
+        false
+    }
+
+    fn visible_lines(&self) -> usize {
+        self.window
+            .canvas()
+            .height()
+            .saturating_sub(MenuBar::HEIGHT + STATUS_HEIGHT) as usize
+            / LINE_HEIGHT as usize
+    }
+
+    fn new_file(&mut self) {
+        self.editor.set_text(String::new());
+        self.path = None;
+        self.dirty = false;
+    }
+
+    fn save(&mut self) {
+        if let Some(path) = self.path.clone() {
+            self.save_to(&path);
+        } else {
+            self.open_path_dialog(PathMode::SaveAs);
+        }
+    }
+
+    fn save_to(&mut self, path: &str) {
+        let cpath = gui::c_path(path);
+        let fd = runtime::openat(
+            runtime::AT_FDCWD,
+            &cpath,
+            runtime::O_WRONLY | runtime::O_CREAT | runtime::O_TRUNC,
+            0o644,
+        );
+        if fd < 0 {
+            self.show_error(format!("Save failed ({fd})"));
+            return;
+        }
+        let fd = fd as i32;
+        let bytes = self.editor.text.as_bytes();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let written = runtime::write(fd, &bytes[offset..]);
+            if written <= 0 {
+                let _ = runtime::close(fd);
+                self.show_error(format!("Write failed ({written})"));
+                return;
+            }
+            offset += written as usize;
+        }
+        let _ = runtime::close(fd);
+        self.path = Some(path.to_string());
+        self.dirty = false;
+    }
+
+    fn load_from(&mut self, path: &str) {
+        let cpath = gui::c_path(path);
+        let fd = runtime::openat(runtime::AT_FDCWD, &cpath, runtime::O_RDONLY, 0);
+        if fd < 0 {
+            self.show_error(format!("Open failed ({fd})"));
+            return;
+        }
+        let fd = fd as i32;
+        let mut bytes = Vec::new();
+        let mut chunk = vec![0u8; 4096];
+        loop {
+            let count = runtime::read(fd, &mut chunk);
+            if count < 0 {
+                let _ = runtime::close(fd);
+                self.show_error(format!("Read failed ({count})"));
+                return;
+            }
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count as usize]);
+        }
+        let _ = runtime::close(fd);
+        match String::from_utf8(bytes) {
+            Ok(text) => {
+                self.editor.set_text(text);
+                self.path = Some(path.to_string());
+                self.dirty = false;
+            }
+            Err(_) => self.show_error("File is not UTF-8 text".to_string()),
+        }
+    }
+
+    fn open_path_dialog(&mut self, mode: PathMode) {
+        if self.modal.is_some() {
+            return;
+        }
+        let input = match mode {
+            PathMode::Open => "/host/".to_string(),
+            PathMode::SaveAs => self
+                .path
+                .clone()
+                .unwrap_or_else(|| "/UNTITLED.TXT".to_string()),
+        };
+        let directory = directory_for_input(&input);
+        let entries = gui::list_dir(directory).unwrap_or_default();
+        let title = match mode {
+            PathMode::Open => "Open File",
+            PathMode::SaveAs => "Save File As",
+        };
+        match Window::new(540, 360, title) {
+            Ok(window) => {
+                self.modal = Some(Modal::Path {
+                    window,
+                    mode,
+                    input,
+                    entries,
+                });
+                self.render_modal();
+            }
+            Err(error) => self.show_error(format!("Dialog failed ({error})")),
+        }
+    }
+
+    fn show_error(&mut self, text: String) {
+        if let Ok(window) = Window::new(420, 150, "Notepad") {
+            self.modal = Some(Modal::Message {
+                window,
+                text,
+                confirm_exit: false,
+            });
+            self.render_modal();
+        }
+    }
+
+    fn request_exit(&mut self) -> bool {
+        if !self.dirty {
+            return true;
+        }
+        if self.modal.is_none() {
+            if let Ok(window) = Window::new(460, 160, "Unsaved Changes") {
+                self.modal = Some(Modal::Message {
+                    window,
+                    text: "Unsaved changes. Enter exits; Esc returns.".to_string(),
+                    confirm_exit: true,
+                });
+                self.render_modal();
+            }
+        }
+        false
+    }
+
+    fn render_modal(&mut self) {
+        let Some(modal) = self.modal.as_mut() else {
+            return;
+        };
+        match modal {
+            Modal::Path {
+                window,
+                mode,
+                input,
+                entries,
+            } => {
+                let canvas = window.canvas_mut();
+                canvas.clear(COLOR_PANEL);
+                canvas.draw_text(
+                    12,
+                    14,
+                    match mode {
+                        PathMode::Open => "Open path:",
+                        PathMode::SaveAs => "Save path:",
+                    },
+                    COLOR_TEXT,
+                );
+                canvas.fill_rect(12, 34, canvas.width().saturating_sub(24), 24, COLOR_WHITE);
+                canvas.rect(12, 34, canvas.width().saturating_sub(24), 24, COLOR_BORDER);
+                canvas.draw_text(18, 42, input, COLOR_TEXT);
+                canvas.draw_text(12, 70, "Directory entries (click to choose):", COLOR_TEXT);
+                for (index, entry) in entries.iter().take(24).enumerate() {
+                    let x = 14 + (index / 12) as i32 * 260;
+                    let y = 88 + (index % 12) as i32 * 20;
+                    if entry.is_dir {
+                        canvas.draw_text(x, y, "[DIR]", COLOR_HIGHLIGHT);
+                    }
+                    canvas.draw_text(
+                        x + if entry.is_dir { 48 } else { 0 },
+                        y,
+                        &entry.name,
+                        COLOR_TEXT,
+                    );
+                }
+                canvas.draw_text(
+                    12,
+                    canvas.height() as i32 - 20,
+                    "Enter confirms - Esc cancels",
+                    COLOR_TEXT,
+                );
+                let _ = window.present();
+            }
+            Modal::Message {
+                window,
+                text,
+                confirm_exit,
+            } => {
+                let canvas = window.canvas_mut();
+                canvas.clear(COLOR_PANEL);
+                canvas.draw_text(18, 28, text, COLOR_TEXT);
+                canvas.draw_text(
+                    18,
+                    92,
+                    if *confirm_exit {
+                        "Enter: Exit    Esc: Cancel"
+                    } else {
+                        "Enter or Esc: Close"
+                    },
+                    COLOR_TEXT,
+                );
+                let _ = window.present();
+            }
+        }
+    }
+
+    fn handle_modal(&mut self, event: runtime::GuiEvent) -> bool {
+        let Some(mut modal) = self.modal.take() else {
+            return false;
+        };
+        let mut keep = true;
+        let mut exit = false;
+        match &mut modal {
+            Modal::Message { confirm_exit, .. } => match event.kind {
+                GUI_EVENT_CLOSE => keep = false,
+                GUI_EVENT_KEY if event.payload[3] != 0 => {
+                    if *confirm_exit && event.payload[0] == runtime::KEY_ENTER {
+                        exit = true;
+                    }
+                    keep = false;
+                }
+                GUI_EVENT_RESIZE => {
+                    if let Modal::Message { window, .. } = &mut modal {
+                        window.resize(event.payload[0], event.payload[1]);
+                    }
+                }
+                _ => {}
+            },
+            Modal::Path {
+                mode,
+                input,
+                entries,
+                window,
+            } => match event.kind {
+                GUI_EVENT_CLOSE => keep = false,
+                GUI_EVENT_RESIZE => window.resize(event.payload[0], event.payload[1]),
+                GUI_EVENT_KEY if event.payload[3] != 0 => {
+                    let key = event.payload[0];
+                    let character = char::from_u32(event.payload[1]).unwrap_or('\0');
+                    if key == runtime::KEY_ESCAPE {
+                        keep = false;
+                    } else if key == runtime::KEY_BACKSPACE {
+                        input.pop();
+                    } else if key == runtime::KEY_ENTER {
+                        let path = input.clone();
+                        let action = *mode;
+                        keep = false;
+                        match action {
+                            PathMode::Open => self.load_from(&path),
+                            PathMode::SaveAs => self.save_to(&path),
+                        }
+                    } else if character >= ' ' {
+                        input.push(character);
+                    }
+                }
+                GUI_EVENT_MOUSE if event.payload[3] == GUI_MOUSE_DOWN => {
+                    let x = event.payload[0] as usize;
+                    let y = event.payload[1] as i32;
+                    if y >= 88 {
+                        let column = if x >= 274 { 1 } else { 0 };
+                        let row = ((y - 88) / 20).max(0) as usize;
+                        let index = column * 12 + row;
+                        if let Some(entry) = entries.get(index).cloned() {
+                            let directory = directory_for_input(input);
+                            *input = join_path(directory, &entry.name, entry.is_dir);
+                            if entry.is_dir {
+                                *entries = gui::list_dir(input).unwrap_or_default();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+        }
+        if keep {
+            self.modal = Some(modal);
+            self.render_modal();
+        }
+        self.render();
+        exit
+    }
+}
+
+fn previous_boundary(text: &str, index: usize) -> usize {
+    text[..index]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn next_boundary(text: &str, index: usize) -> usize {
+    text[index..]
+        .char_indices()
+        .nth(1)
+        .map(|(next, _)| index + next)
+        .unwrap_or(text.len())
+}
+
+fn line_col_at(text: &str, index: usize) -> (usize, usize) {
+    let mut line = 0usize;
+    let mut column = 0usize;
+    for character in text[..index].chars() {
+        if character == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
+fn index_for_line_col(text: &str, target_line: usize, target_column: usize) -> usize {
+    let mut line = 0usize;
+    let mut column = 0usize;
+    for (index, character) in text.char_indices() {
+        if line == target_line && (column == target_column || character == '\n') {
+            return index;
+        }
+        if character == '\n' {
+            line += 1;
+            column = 0;
+        } else if line == target_line {
+            column += 1;
+        }
+        if line > target_line {
+            return index;
+        }
+    }
+    text.len()
+}
+
+fn parent_directory(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) | None => "/",
+        Some(index) => &trimmed[..index],
+    }
+}
+
+fn directory_for_input(path: &str) -> &str {
+    if path.ends_with('/') {
+        let directory = path.trim_end_matches('/');
+        if directory.is_empty() {
+            "/"
+        } else {
+            directory
+        }
+    } else {
+        parent_directory(path)
+    }
+}
+
+fn join_path(directory: &str, name: &str, is_dir: bool) -> String {
+    let mut path = if directory == "/" {
+        format!("/{name}")
+    } else {
+        format!("{directory}/{name}")
+    };
+    if is_dir {
+        path.push('/');
+    }
+    path
+}
+
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn _start() -> ! {
+    core::arch::naked_asm!(
+        "mov rdi, rsp",
+        "and rsp, -16",
+        "call {}",
+        "ud2",
+        sym notepad_main,
+    );
+}
+
+unsafe extern "C" fn notepad_main(stack: *const u64) -> ! {
+    let startup = runtime::startup_from_stack(stack);
+    let initial_path = startup.argv.get(1).and_then(|pointer| c_string(*pointer));
+    let code = match Notepad::new(initial_path) {
+        Ok(mut app) => app.run(),
+        Err(error) => error,
+    };
+    runtime::exit(if code == 0 { 0 } else { 1 })
+}
+
+unsafe fn c_string(pointer: *const u8) -> Option<String> {
+    if pointer.is_null() {
+        return None;
+    }
+    let mut length = 0usize;
+    while length < 4096 && core::ptr::read(pointer.add(length)) != 0 {
+        length += 1;
+    }
+    core::str::from_utf8(core::slice::from_raw_parts(pointer, length))
+        .ok()
+        .map(ToString::to_string)
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    unsafe { runtime::exit(127) }
+}

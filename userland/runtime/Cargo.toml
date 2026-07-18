@@ -7,3 +7,6 @@ publish = false
 [lib]
 name = "runtime"
 path = "src/lib.rs"
+
+[dependencies]
+linked_list_allocator = "0.10"

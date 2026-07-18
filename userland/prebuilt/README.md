@@ -9,10 +9,14 @@ and without an outbound network fetch.
 
 ## What lives here
 
-| File       | Source                    | Type | Size      | Notes                                          |
-|------------|---------------------------|------|-----------|------------------------------------------------|
-| `ZSH.ELF`  | `userland/apps/zsh/`      | EXEC | ~1.5 MiB  | static-musl zsh, vendors ncurses-widec         |
-| `BB.ELF`   | `userland/apps/busybox/`  | EXEC | ~700 KiB  | static-musl BusyBox, including ping/nc/HTTP wget |
+| File | Source | Ship kind | Notes |
+|---|---|---|---|
+| `ZSH.ELF` | `apps/zsh/` | prebuilt-managed | static-musl zsh + ncurses-widec |
+| `BB.ELF` | `apps/busybox/` | prebuilt-managed | BusyBox including ping/nc/HTTP wget |
+| `compiler-compat/CCCRT.ELF` | `apps/compiler-compat/` | test-fixture | CRT startup rung |
+| `compiler-compat/CCLIBC.ELF` | `apps/compiler-compat/` | test-fixture | libc/heap rung |
+| `compiler-compat/CCPROBE.ELF` | `apps/compiler-compat/` | test-fixture | fallback/filesystem rung |
+| `network/NETTEST.ELF` | `apps/network-test/` | test-fixture | static-musl socket smoke |
 
 (Add a row when a new prebuilt-managed app lands. Keep size approximate
 — the reviewer uses it to gut-check binary diffs, not for exactness.)
@@ -34,6 +38,7 @@ git add userland/prebuilt/<NAME>.ELF userland/apps/<app>/
 git commit -m "userland(<app>): <change>; refresh prebuilt"
 ```
 
+The artifact list comes from `userland/apps.manifest.sh`.
 `refresh-prebuilt.sh` hard-fails on any build problem and prints
 `git status userland/prebuilt/` when finished. It does NOT auto-commit
 — the developer stages and writes the commit message.

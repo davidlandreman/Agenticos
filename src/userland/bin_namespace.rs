@@ -1,11 +1,12 @@
-//! Virtual `/bin/<applet>` namespace backed by two multicall ELFs.
+//! Virtual `/bin/<applet>` namespace backed by multicall and direct ELFs.
 //!
 //! - **BusyBox** (`BB.ELF`) — one binary that dispatches on `argv[0]` to
 //!   ~240 coreutils applets (`ls`, `cat`, `grep`, …).
 //! - **GUILAUNCH** (`GLAUNCH.ELF`) — one ring-3 launcher binary that
 //!   takes an applet name in `argv[0]` and issues the
 //!   `gui_launch` syscall, spawning the matching kernel-side GUI app
-//!   (`painting`, `calc`, `notepad`, `tasks`, `explorer`).
+//!   (`painting`, `calc`, `tasks`, `explorer`).
+//! - **Direct apps** — standalone native ELFs such as `NOTEPAD.ELF`.
 //!
 //! The kernel exposes a single virtual `/bin` directory whose entries
 //! resolve into either binary based on which list the name belongs to.
@@ -40,14 +41,20 @@ pub const BB_HOST_PATH: &str = "/host/BB.ELF";
 /// `guilaunch` name since FAT never sees it).
 pub const GUILAUNCH_HOST_PATH: &str = "/host/GLAUNCH.ELF";
 
+pub const NOTEPAD_HOST_PATH: &str = "/host/NOTEPAD.ELF";
+
 /// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
 /// MUST stay in sync with the match arms in
 /// [`crate::commands::gui_launch_table::spawn_by_name`]; a test in
 /// `gui_launch_table` asserts coverage in both directions.
 ///
-/// Names MUST NOT collide with [`APPLETS`]. The disjoint-lists invariant
-/// is asserted at test time by `test_applets_and_gui_disjoint`.
-pub const GUI_APPLETS: &[&str] = &["calc", "explorer", "notepad", "painting", "tasks"];
+/// Names MUST NOT collide with [`APPLETS`] or [`DIRECT_APPLETS`]. The
+/// disjoint-list invariant is asserted at test time.
+pub const GUI_APPLETS: &[&str] = &["calc", "explorer", "painting", "tasks"];
+
+/// Sorted standalone executables synthesized into `/bin` without a multicall
+/// launcher. `apply_bin_rewrite` maps each name directly to its staged ELF.
+pub const DIRECT_APPLETS: &[&str] = &["notepad"];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
 /// `/bin/<name>`. Binary-searched on every lookup. MUST stay sorted —
@@ -303,7 +310,9 @@ pub const APPLETS: &[&str] = &[
 /// list via `binary_search`.
 #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn is_applet(name: &str) -> bool {
-    APPLETS.binary_search(&name).is_ok() || GUI_APPLETS.binary_search(&name).is_ok()
+    APPLETS.binary_search(&name).is_ok()
+        || GUI_APPLETS.binary_search(&name).is_ok()
+        || DIRECT_APPLETS.binary_search(&name).is_ok()
 }
 
 /// Look up an applet name in the BusyBox list and return the canonical
@@ -323,9 +332,19 @@ pub fn lookup_gui(name: &str) -> Option<&'static str> {
         .map(|i| GUI_APPLETS[i])
 }
 
+pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
+    let index = DIRECT_APPLETS.binary_search(&name).ok()?;
+    let canonical = DIRECT_APPLETS[index];
+    let path = match canonical {
+        "notepad" => NOTEPAD_HOST_PATH,
+        _ => return None,
+    };
+    Some((path, canonical))
+}
+
 /// If `normalized` is `/bin/<applet>` for a known applet, return
-/// `(host_binary_path, applet_name)` — either `(BB_HOST_PATH, name)`
-/// for BusyBox applets or `(GUILAUNCH_HOST_PATH, name)` for GUI apps.
+/// `(host_binary_path, applet_name)` for BusyBox, legacy GUI-launcher, or
+/// standalone direct applications.
 /// Returns `None` for anything else, including `/bin`, `/bin/`,
 /// `/bin/unknown`, `/bin/ls/extra`.
 ///
@@ -345,6 +364,9 @@ pub fn apply_bin_rewrite(normalized: &str) -> Option<(&'static str, &'static str
     if let Some(applet) = lookup_gui(after) {
         return Some((GUILAUNCH_HOST_PATH, applet));
     }
+    if let Some(direct) = lookup_direct(after) {
+        return Some(direct);
+    }
     None
 }
 
@@ -357,44 +379,40 @@ pub fn apply_bin_rewrite(normalized: &str) -> Option<(&'static str, &'static str
 /// by `getdents64_virtual_bin` and any directory-listing tool (`ls
 /// /bin`, BusyBox `find`).
 ///
-/// Total entry count: `APPLETS.len() + GUI_APPLETS.len()`.
+/// Total entry count includes BusyBox, kernel GUI launchers, and direct apps.
 pub fn merged_bin_entries() -> impl Iterator<Item = &'static str> {
-    // Both source lists are individually sorted and assumed disjoint
-    // (asserted in tests). Two-pointer merge yields a sorted stream
-    // without allocation.
-    MergedBinIter { i: 0, j: 0 }
+    MergedBinIter { i: 0, j: 0, k: 0 }
 }
 
 struct MergedBinIter {
     i: usize,
     j: usize,
+    k: usize,
 }
 
 impl Iterator for MergedBinIter {
     type Item = &'static str;
     fn next(&mut self) -> Option<&'static str> {
-        let a = APPLETS.get(self.i).copied();
-        let b = GUI_APPLETS.get(self.j).copied();
-        match (a, b) {
-            (Some(x), Some(y)) => {
-                if x <= y {
-                    self.i += 1;
-                    Some(x)
-                } else {
-                    self.j += 1;
-                    Some(y)
+        let candidates = [
+            APPLETS.get(self.i).copied(),
+            GUI_APPLETS.get(self.j).copied(),
+            DIRECT_APPLETS.get(self.k).copied(),
+        ];
+        let mut selected: Option<(usize, &'static str)> = None;
+        for (source, candidate) in candidates.into_iter().enumerate() {
+            if let Some(value) = candidate {
+                if selected.map(|(_, current)| value < current).unwrap_or(true) {
+                    selected = Some((source, value));
                 }
             }
-            (Some(x), None) => {
-                self.i += 1;
-                Some(x)
-            }
-            (None, Some(y)) => {
-                self.j += 1;
-                Some(y)
-            }
-            (None, None) => None,
         }
+        let (source, value) = selected?;
+        match source {
+            0 => self.i += 1,
+            1 => self.j += 1,
+            _ => self.k += 1,
+        }
+        Some(value)
     }
 }
 
@@ -402,7 +420,7 @@ impl Iterator for MergedBinIter {
 /// `stat_virtual_bin` for `st_nlink` and by `getdents64_virtual_bin`
 /// for the EOF cursor.
 pub fn merged_bin_entry_count() -> usize {
-    APPLETS.len() + GUI_APPLETS.len()
+    APPLETS.len() + GUI_APPLETS.len() + DIRECT_APPLETS.len()
 }
 
 /// True when `normalized` is exactly `/bin` (the synthesized directory
@@ -579,15 +597,32 @@ mod tests_internal {
         }
     }
 
-    /// GUI applet names must not collide with BusyBox applet names — the
-    /// dispatch order in `apply_bin_rewrite` checks BusyBox first, so a
-    /// collision would silently shadow the GUI app.
-    fn test_applets_and_gui_disjoint() {
+    fn test_direct_applets_sorted() {
+        for win in DIRECT_APPLETS.windows(2) {
+            assert!(win[0] < win[1]);
+        }
+    }
+
+    /// Every synthetic namespace class must be disjoint. The dispatch order
+    /// in `apply_bin_rewrite` would otherwise silently shadow a later class.
+    fn test_applet_classes_are_disjoint() {
         for &gui in GUI_APPLETS {
             assert!(
                 !APPLETS.binary_search(&gui).is_ok(),
                 "GUI applet {:?} collides with a BusyBox applet name",
                 gui,
+            );
+        }
+        for &direct in DIRECT_APPLETS {
+            assert!(
+                !APPLETS.binary_search(&direct).is_ok(),
+                "direct applet {:?} collides with a BusyBox applet name",
+                direct,
+            );
+            assert!(
+                !GUI_APPLETS.binary_search(&direct).is_ok(),
+                "direct applet {:?} collides with a GUI applet name",
+                direct,
             );
         }
     }
@@ -596,6 +631,12 @@ mod tests_internal {
         let (path, applet) = apply_bin_rewrite("/bin/painting").expect("must resolve");
         assert_eq!(path, "/host/GLAUNCH.ELF");
         assert_eq!(applet, "painting");
+    }
+
+    fn test_apply_bin_rewrite_dispatches_direct_app() {
+        let (path, applet) = apply_bin_rewrite("/bin/notepad").expect("must resolve");
+        assert_eq!(path, "/host/NOTEPAD.ELF");
+        assert_eq!(applet, "notepad");
     }
 
     fn test_apply_bin_rewrite_busybox_still_resolves() {
@@ -615,7 +656,10 @@ mod tests_internal {
     fn test_merged_bin_entries_sorted_and_complete() {
         let entries: alloc::vec::Vec<&str> = merged_bin_entries().collect();
         assert_eq!(entries.len(), merged_bin_entry_count());
-        assert_eq!(entries.len(), APPLETS.len() + GUI_APPLETS.len());
+        assert_eq!(
+            entries.len(),
+            APPLETS.len() + GUI_APPLETS.len() + DIRECT_APPLETS.len()
+        );
         for win in entries.windows(2) {
             assert!(
                 win[0] <= win[1],
@@ -633,6 +677,7 @@ mod tests_internal {
             entries.contains(&"painting"),
             "merged stream missing GUI 'painting'"
         );
+        assert!(entries.contains(&"notepad"));
     }
 
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
@@ -650,8 +695,10 @@ mod tests_internal {
             &test_dispatch_access_unknown_applet_returns_enoent,
             &test_dispatch_stat_bin_ls_returns_regular_file,
             &test_gui_applets_sorted,
-            &test_applets_and_gui_disjoint,
+            &test_direct_applets_sorted,
+            &test_applet_classes_are_disjoint,
             &test_apply_bin_rewrite_dispatches_gui_app,
+            &test_apply_bin_rewrite_dispatches_direct_app,
             &test_apply_bin_rewrite_busybox_still_resolves,
             &test_is_applet_covers_both_lists,
             &test_merged_bin_entries_sorted_and_complete,

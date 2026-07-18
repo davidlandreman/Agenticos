@@ -8,7 +8,7 @@ OUT_DIR := build
 BIN := $(OUT_DIR)/NETTEST.ELF
 PREBUILT := ../../prebuilt/network/NETTEST.ELF
 
-.PHONY: all validate refresh clean
+.PHONY: all validate clean
 .DELETE_ON_ERROR:
 
 all: $(BIN)
@@ -28,12 +28,6 @@ validate: all
 	@if $(READELF) -l $(BIN) | grep -q INTERP; then \
 	  echo "network fixture must not contain PT_INTERP: $(BIN)" >&2; exit 1; \
 	fi
-
-refresh: validate
-	$(STRIP) --strip-all $(BIN)
-	mkdir -p $(dir $(PREBUILT))
-	cp $(BIN) $(dir $(PREBUILT))/.NETTEST.ELF.tmp
-	mv -f $(dir $(PREBUILT))/.NETTEST.ELF.tmp $(PREBUILT)
 
 clean:
 	rm -rf $(OUT_DIR)

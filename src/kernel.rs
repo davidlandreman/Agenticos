@@ -664,12 +664,9 @@ fn restore_overlay_upper_from_data() {
 pub fn run() -> ! {
     debug_info!("Kernel initialization complete.");
 
-    // GUI app launchers (painting, calc, notepad, tasks, explorer) are
-    // now invoked via the `sys_gui_launch` syscall from `GLAUNCH.ELF`
-    // (see src/commands/gui_launch_table.rs and
-    // src/userland/bin_namespace.rs). File-utility commands have been
-    // replaced by BusyBox applets. The kernel-side command registry has
-    // been removed; zsh (the default terminal shell) drives everything.
+    // Legacy GUI app launchers (painting, calc, tasks, explorer) are invoked
+    // via `GLAUNCH.ELF`; notepad is a standalone ring-3 GUI ELF. File-utility
+    // commands are BusyBox applets. zsh drives the synthetic /bin namespace.
 
     // Force an initial render to display the desktop
     window::render_frame();

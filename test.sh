@@ -110,112 +110,16 @@ mkdir -p "$HOST_SHARE_STAGE/ETC"
 printf 'root:x:0:0::/root:/bin/zsh\n' > "$HOST_SHARE_STAGE/ETC/PASSWD"
 printf 'root:x:0:\n'                  > "$HOST_SHARE_STAGE/ETC/GROUP"
 
-# Mandatory static-musl compatibility fixtures. These are committed test
-# inputs, so stage them even with --skip-userland and fail loudly if a fresh
-# checkout is missing one. Ordinary test runs never invoke a musl compiler.
-COMPAT_PREBUILT="userland/prebuilt/compiler-compat"
-for name in CCCRT.ELF CCLIBC.ELF CCPROBE.ELF; do
-    SRC="$COMPAT_PREBUILT/$name"
-    if [ ! -f "$SRC" ]; then
-        echo "Missing mandatory compiler-compat fixture: $SRC" >&2
-        exit 1
-    fi
-    STAGED="$HOST_SHARE_STAGE/$name"
-    TMP="$HOST_SHARE_STAGE/.$name.tmp.$$"
-    cp "$SRC" "$TMP"
-    mv -f "$TMP" "$STAGED"
-    echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
-done
-
-# Mandatory static-musl networking fixture. Like compiler-compat, this is a
-# committed test input and is staged even with --skip-userland.
-NETWORK_FIXTURE="userland/prebuilt/network/NETTEST.ELF"
-if [ ! -f "$NETWORK_FIXTURE" ]; then
-    echo "Missing mandatory network fixture: $NETWORK_FIXTURE" >&2
+REPO_ROOT="$(pwd)"
+export REPO_ROOT HOST_SHARE_STAGE
+# shellcheck source=userland/stage-lib.sh
+. "$REPO_ROOT/userland/stage-lib.sh"
+# Test fixtures remain mandatory even with --skip-userland; optional apps and
+# prebuilt-managed interactive programs retain soft-fail staging semantics.
+stage_userland test "$SKIP_USERLAND" || {
+    echo "Userland fixture staging failed" >&2
     exit 1
-fi
-STAGED="$HOST_SHARE_STAGE/NETTEST.ELF"
-TMP="$HOST_SHARE_STAGE/.NETTEST.ELF.tmp.$$"
-cp "$NETWORK_FIXTURE" "$TMP"
-mv -f "$TMP" "$STAGED"
-echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
-
-# The committed BusyBox is also a mandatory input: network_userland boots its
-# ping/nc/wget applets directly, including in --skip-userland runs.
-BUSYBOX_FIXTURE="userland/prebuilt/BB.ELF"
-if [ ! -f "$BUSYBOX_FIXTURE" ]; then
-    echo "Missing mandatory BusyBox fixture: $BUSYBOX_FIXTURE" >&2
-    exit 1
-fi
-STAGED="$HOST_SHARE_STAGE/BB.ELF"
-TMP="$HOST_SHARE_STAGE/.BB.ELF.tmp.$$"
-cp "$BUSYBOX_FIXTURE" "$TMP"
-mv -f "$TMP" "$STAGED"
-echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
-
-# Stage userland apps into host_share/ so test boots see the same artifacts
-# as interactive boots. Failures here do not block tests (they use embedded
-# fixtures), but we want the staged file present whenever possible.
-if [ "$SKIP_USERLAND" -eq 0 ]; then
-    if cargo build --release --manifest-path userland/Cargo.toml; then
-        USER_HELLO="userland/target/x86_64-unknown-none/release/hello"
-        if [ -f "$USER_HELLO" ]; then
-            STAGED="$HOST_SHARE_STAGE/HELLO.ELF"
-            TMP="$HOST_SHARE_STAGE/.HELLO.ELF.tmp.$$"
-            cp "$USER_HELLO" "$TMP"
-            mv -f "$TMP" "$STAGED"
-            echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
-        fi
-        USER_GUILAUNCH="userland/target/x86_64-unknown-none/release/guilaunch"
-        if [ -f "$USER_GUILAUNCH" ]; then
-            STAGED="$HOST_SHARE_STAGE/GLAUNCH.ELF"
-            TMP="$HOST_SHARE_STAGE/.GLAUNCH.ELF.tmp.$$"
-            cp "$USER_GUILAUNCH" "$TMP"
-            mv -f "$TMP" "$STAGED"
-            echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
-        fi
-    else
-        echo "Warning: userland build failed; continuing without HELLO.ELF"
-    fi
-
-    # C++ userland — same probe + readelf check as build.sh. Soft-fail when
-    # the toolchain isn't installed so kernel tests can still run.
-    MUSL_GXX="${MUSL_GXX:-x86_64-linux-musl-g++}"
-    if command -v "$MUSL_GXX" >/dev/null 2>&1; then
-        if make -C userland/apps/hello-cpp MUSL_GXX="$MUSL_GXX"; then
-            CPP_BIN="userland/apps/hello-cpp/build/hello-cpp"
-            if [ -f "$CPP_BIN" ]; then
-                MUSL_READELF="${MUSL_GXX%g++}readelf"
-                command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
-                ET_TYPE=$("$MUSL_READELF" -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
-                if [ "$ET_TYPE" = "EXEC" ]; then
-                    STAGED="$HOST_SHARE_STAGE/HELLOCPP.ELF"
-                    TMP="$HOST_SHARE_STAGE/.HELLOCPP.ELF.tmp.$$"
-                    cp "$CPP_BIN" "$TMP"
-                    mv -f "$TMP" "$STAGED"
-                    echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
-                else
-                    echo "Warning: $CPP_BIN is $ET_TYPE, expected EXEC; skipping stage"
-                fi
-            fi
-        fi
-    else
-        echo "Note: $MUSL_GXX not found; skipping HELLOCPP.ELF (install: brew install x86_64-linux-musl-cross)"
-    fi
-
-    # zsh — prebuilt-managed. By default the committed
-    # userland/prebuilt/ZSH.ELF is copied into host_share/; pass
-    # --rebuild-userland or set REBUILD_USERLAND=1 to recompile from
-    # source. See userland/prebuilt-lib.sh.
-    REPO_ROOT="$(pwd)"
-    export REPO_ROOT HOST_SHARE_STAGE
-    # shellcheck source=userland/prebuilt-lib.sh
-    . "$REPO_ROOT/userland/prebuilt-lib.sh"
-    stage_zsh     || true  # soft-fail: kernel tests use embedded fixtures
-    stage_busybox || true  # soft-fail: kernel tests use embedded fixtures
-else
-    echo "Skipping userland prebuild (--skip-userland)"
-fi
+}
 
 # Cargo build must be ran twice to make sure the bootloader image is built
 # from the freshly-compiled kernel binary (the second pass invokes the
