@@ -179,6 +179,49 @@ _stage_one() {
     echo "Staged $staged ($(wc -c < "$staged" | tr -d ' ') bytes)"
 }
 
+# Stage the committed TCC sysroot tarball as an extracted tree under
+# host_share/sysroot (guest: /host/sysroot). Prebuilt-managed like the
+# ELF rows: normal builds extract the committed tarball; REBUILD_USERLAND=1
+# / REBUILD_TCC=1 / a missing tarball trigger a rebuild through the tcc
+# Makefile (which produces both the binary and the tarball). A content
+# stamp keeps repeat stagings cheap.
+stage_tcc_sysroot() {
+    local tarball="$REPO_ROOT/userland/prebuilt/tcc-sysroot.tar.gz"
+    local built="$REPO_ROOT/userland/apps/tcc/build/tcc-sysroot.tar.gz"
+    local dest="$HOST_SHARE_STAGE/sysroot"
+    local stamp="$dest/.staged.sha256" want have tmp
+
+    if [ "${REBUILD_USERLAND:-0}" = 1 ] || [ "${REBUILD_TCC:-0}" = 1 ] || [ ! -f "$tarball" ]; then
+        if _make_app apps/tcc musl-cc && [ -f "$built" ]; then
+            mkdir -p "${tarball%/*}"
+            cp "$built" "$tarball.tmp.$$" && mv -f "$tarball.tmp.$$" "$tarball"
+        else
+            echo "Could not rebuild tcc sysroot; trying committed tarball" >&2
+        fi
+    fi
+    if [ ! -f "$tarball" ]; then
+        echo "Warning: tcc sysroot tarball missing; /host/sysroot not staged" >&2
+        return 1
+    fi
+
+    want=$(shasum -a 256 "$tarball" | awk '{print $1}')
+    have=$(cat "$stamp" 2>/dev/null || true)
+    if [ "$want" = "$have" ] && [ -d "$dest" ]; then
+        return 0
+    fi
+    tmp="$HOST_SHARE_STAGE/.sysroot.tmp.$$"
+    rm -rf "$tmp" "$dest"
+    mkdir -p "$tmp"
+    if ! tar xzf "$tarball" -C "$tmp"; then
+        rm -rf "$tmp"
+        echo "Warning: could not extract tcc sysroot tarball" >&2
+        return 1
+    fi
+    printf '%s\n' "$want" > "$tmp/.staged.sha256"
+    mv "$tmp" "$dest"
+    echo "Staged $dest ($(find "$dest" -type f | wc -l | tr -d ' ') files)"
+}
+
 # stage_userland MODE SKIP_BUILT
 # MODE is `build` or `test`; SKIP_BUILT=1 preserves prebuilt + fixture staging.
 stage_userland() {
@@ -195,6 +238,10 @@ stage_userland() {
             echo "Warning: userland app $name was not staged" >&2
         fi
     done < <(_userland_rows)
+    # The TCC sysroot rides alongside the TCC.ELF row: extracted tree, not
+    # a single ELF, so it has its own staging helper. Soft-fail like other
+    # non-fixture apps.
+    stage_tcc_sysroot || echo "Warning: tcc sysroot was not staged" >&2
     return 0
 }
 
@@ -211,4 +258,12 @@ refresh_manifest_prebuilts() {
         validate_exec_elf "$prebuilt_path" || return 1
         echo "Refreshed $prebuilt_path"
     done < <(_userland_rows)
+    # The tcc row's _make_app above also produced the sysroot tarball;
+    # refresh the committed copy alongside TCC.ELF. Hard-fail like the
+    # ELF artifacts.
+    local sysroot_built="$REPO_ROOT/userland/apps/tcc/build/tcc-sysroot.tar.gz"
+    local sysroot_prebuilt="$REPO_ROOT/userland/prebuilt/tcc-sysroot.tar.gz"
+    [ -f "$sysroot_built" ] || { echo "tcc sysroot tarball was not built" >&2; return 1; }
+    cp "$sysroot_built" "$sysroot_prebuilt.tmp.$$" && mv -f "$sysroot_prebuilt.tmp.$$" "$sysroot_prebuilt" || return 1
+    echo "Refreshed $sysroot_prebuilt"
 }

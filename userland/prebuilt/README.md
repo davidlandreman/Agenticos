@@ -19,6 +19,8 @@ copies from the same pinned source tarball.
 |---|---|---|---|
 | `ZSH.ELF` | `apps/zsh/` | prebuilt-managed | static-musl zsh + ncurses-widec |
 | `BB.ELF` | `apps/busybox/` | prebuilt-managed | BusyBox including ping/nc/HTTP wget |
+| `TCC.ELF` | `apps/tcc/` | prebuilt-managed | static-musl TinyCC (compiler+assembler+linker, ~0.4 MiB) |
+| `tcc-sysroot.tar.gz` | `apps/tcc/` | prebuilt-managed (tree) | musl headers + crt/libc + libtcc1 + examples; extracted to `host_share/sysroot/` by `stage_tcc_sysroot` (~1.9 MiB) |
 | `compiler-compat/CCCRT.ELF` | `apps/compiler-compat/` | test-fixture | CRT startup rung |
 | `compiler-compat/CCLIBC.ELF` | `apps/compiler-compat/` | test-fixture | libc/heap rung |
 | `compiler-compat/CCPROBE.ELF` | `apps/compiler-compat/` | test-fixture | fallback/filesystem rung |
@@ -54,6 +56,7 @@ The artifact list comes from `userland/apps.manifest.sh`.
 ```sh
 ./build.sh --rebuild-userland       # rebuild every prebuilt-managed app
 REBUILD_ZSH=1 ./build.sh            # rebuild just zsh this run
+REBUILD_TCC=1 ./build.sh            # rebuild tcc + its sysroot tarball
 ```
 
 The same flag / env vars work on `test.sh`. With no flag and a prebuilt
