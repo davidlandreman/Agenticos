@@ -11,12 +11,13 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::process::{ProcessId, WakeEvents};
-use crate::window::windows::menu::MENU_ITEM_HEIGHT;
 use crate::window::windows::taskbar::{
     BUTTON_GAP, BUTTON_HEIGHT, BUTTON_Y_OFFSET, MAX_WINDOW_BUTTON_WIDTH, START_BUTTON_WIDTH,
 };
-use crate::window::windows::{Button, DesktopWindow, MenuWindow, TaskbarWindow};
-use crate::window::{self, Rect, Window, WindowId};
+use crate::window::windows::{
+    Button, DesktopWindow, StartMenuAction, StartMenuWindow, TaskbarWindow,
+};
+use crate::window::{self, Point, Rect, Window, WindowId};
 
 /// GUIShell state
 pub struct GUIShellState {
@@ -46,6 +47,8 @@ pub enum PendingAction {
     SpawnPainting,
     SpawnCalc,
     SpawnNotepad,
+    OpenRunDialog,
+    ShowShutdownNotice,
     FocusWindow(WindowId),
 }
 
@@ -222,33 +225,27 @@ fn show_start_menu() {
             .map(|w| w.bounds())
             .unwrap_or(Rect::new(0, 0, 0, 0));
 
-        // Calculate menu dimensions
-        let menu_items = 4; // Terminal, Notepad, Painting, Calc
-        let menu_width = 120u32;
-        let menu_height = (menu_items * MENU_ITEM_HEIGHT as usize + 4) as u32;
-        let menu_x = BUTTON_GAP as i32;
-        let menu_y = taskbar_bounds.y - menu_height as i32;
+        // Calculate menu dimensions from the typed Start-menu model.
+        let menu_height = StartMenuWindow::root_height();
+        let (screen_width, _) = wm.screen_dimensions();
+        let menu_x =
+            BUTTON_GAP.min(screen_width.saturating_sub(StartMenuWindow::maximum_width())) as i32;
+        let menu_y = (taskbar_bounds.y - menu_height as i32).max(0);
 
         // Create menu window as child of desktop (so it's in the render hierarchy)
         let menu_id = wm.create_window(Some(desktop_id));
-        let mut menu =
-            MenuWindow::new_with_id(menu_id, Rect::new(menu_x, menu_y, menu_width, menu_height));
+        let mut menu = StartMenuWindow::new_with_id(menu_id, Point::new(menu_x, menu_y));
         menu.set_parent(Some(desktop_id));
 
-        // Add menu items
-        menu.add_item("Terminal");
-        menu.add_item("Notepad");
-        menu.add_item("Painting");
-        menu.add_item("Calc");
-
-        // Set up callback for menu selection
-        // Use deferred actions to avoid deadlock
-        menu.on_select(|index| match index {
-            0 => queue_action(PendingAction::SpawnTerminal),
-            1 => queue_action(PendingAction::SpawnNotepad),
-            2 => queue_action(PendingAction::SpawnPainting),
-            3 => queue_action(PendingAction::SpawnCalc),
-            _ => {}
+        // Use deferred actions because this callback runs under the window
+        // manager lock. Disabled placeholders never emit an action.
+        menu.on_select(|action| match action {
+            StartMenuAction::Terminal => queue_action(PendingAction::SpawnTerminal),
+            StartMenuAction::Notepad => queue_action(PendingAction::SpawnNotepad),
+            StartMenuAction::Painting => queue_action(PendingAction::SpawnPainting),
+            StartMenuAction::Calc => queue_action(PendingAction::SpawnCalc),
+            StartMenuAction::Run => queue_action(PendingAction::OpenRunDialog),
+            StartMenuAction::ShutDown => queue_action(PendingAction::ShowShutdownNotice),
         });
 
         wm.set_window_impl(menu_id, Box::new(menu));
@@ -623,6 +620,14 @@ fn process_pending_actions() {
         }
     }
 
+    // Run dialogs are non-blocking so the GUIShell process can keep taskbar
+    // buttons synchronized while the modal is open.
+    if let Some(result) = crate::window::dialogs::poll_run_dialog() {
+        if let Some(command) = result {
+            crate::window::terminal_factory::spawn_run_command(command);
+        }
+    }
+
     // Take any pending action
     let pending_action = {
         let mut state = GUISHELL_STATE.lock();
@@ -650,6 +655,19 @@ fn process_pending_actions() {
             PendingAction::SpawnNotepad => {
                 close_start_menu();
                 spawn_notepad();
+            }
+            PendingAction::OpenRunDialog => {
+                close_start_menu();
+                if let Err(error) = crate::window::dialogs::open_run_dialog() {
+                    crate::debug_warn!("GUIShell: could not open Run dialog: {}", error);
+                }
+            }
+            PendingAction::ShowShutdownNotice => {
+                close_start_menu();
+                crate::window::dialogs::show_info(
+                    "Shut Down",
+                    "Shutdown is not available yet. Close the QEMU window to stop AgenticOS.",
+                );
             }
             PendingAction::FocusWindow(frame_id) => {
                 focus_window(frame_id);
