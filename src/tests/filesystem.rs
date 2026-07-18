@@ -1128,9 +1128,34 @@ fn test_work_directory_provisioned_and_writable() {
     crate::fs::vfs::vfs_unlink("/work/u3-probe.txt").expect("cleanup");
 }
 
+/// The default process environment advertises HOME=/root, so userland apps
+/// must be able to persist per-user state there on the writable overlay.
+fn test_root_home_provisioned_and_writable() {
+    let meta = crate::fs::metadata("/root").expect("/root must exist after boot");
+    assert_eq!(
+        meta.file_type,
+        crate::fs::filesystem::FileType::Directory,
+        "/root must be a directory"
+    );
+
+    let path = "/root/.links-write-probe";
+    let f = crate::fs::File::create(path).expect("create Links state probe in /root");
+    assert_eq!(f.write(b"writable").expect("write in /root"), 8);
+    drop(f);
+    assert_eq!(
+        crate::fs::File::open_read(path)
+            .expect("reopen Links state probe")
+            .read_to_string()
+            .expect("read Links state probe"),
+        "writable"
+    );
+    crate::fs::vfs::vfs_unlink(path).expect("cleanup Links state probe");
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_work_directory_provisioned_and_writable,
+        &test_root_home_provisioned_and_writable,
         &test_seek_past_eof_tmpfs_zero_fill,
         &test_seek_past_eof_data_zero_fill,
         &test_seek_past_eof_readonly_rejected,

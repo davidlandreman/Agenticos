@@ -24,7 +24,7 @@
 //! counterparts so EOF / EPIPE are observed promptly.
 
 use alloc::collections::VecDeque;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 use crate::lib::arc::Arc;
@@ -33,6 +33,20 @@ use crate::lib::arc::Arc;
 /// pick a smaller value because the buffer is per-pipe and our heap
 /// is bounded.
 pub const PIPE_CAPACITY: usize = 4096;
+
+/// Status flags belong to an open-file description: dup/fork share them,
+/// while each descriptor keeps its own FD_CLOEXEC bit in `FdSlot`.
+struct PipeEndpointStatus {
+    nonblocking: AtomicBool,
+}
+
+impl PipeEndpointStatus {
+    fn new(nonblocking: bool) -> Arc<Self> {
+        Arc::new(Self {
+            nonblocking: AtomicBool::new(nonblocking),
+        })
+    }
+}
 
 /// Underlying pipe shared between read and write handles.
 pub struct Pipe {
@@ -103,11 +117,12 @@ impl Pipe {
         n
     }
 
-    /// Bytes currently buffered (test-facing).
-    #[cfg(feature = "test")]
-    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn len(&self) -> usize {
         self.inner.lock().len()
+    }
+
+    pub fn has_capacity(&self) -> bool {
+        self.len() < PIPE_CAPACITY
     }
 }
 
@@ -116,19 +131,31 @@ impl Pipe {
 /// writers exist via these counts.
 pub struct PipeReadHandle {
     pipe: Arc<Pipe>,
+    status: Arc<PipeEndpointStatus>,
 }
 
 impl PipeReadHandle {
     /// Construct the first reader handle on a freshly-created pipe.
     /// Use this exactly once per pipe; subsequent fds clone via
     /// `Clone`.
-    pub fn new(pipe: Arc<Pipe>) -> Self {
+    pub fn new(pipe: Arc<Pipe>, nonblocking: bool) -> Self {
         pipe.reader_count.fetch_add(1, Ordering::Release);
-        Self { pipe }
+        Self {
+            pipe,
+            status: PipeEndpointStatus::new(nonblocking),
+        }
     }
 
     pub fn pipe(&self) -> &Arc<Pipe> {
         &self.pipe
+    }
+
+    pub fn nonblocking(&self) -> bool {
+        self.status.nonblocking.load(Ordering::Acquire)
+    }
+
+    pub fn set_nonblocking(&self, value: bool) {
+        self.status.nonblocking.store(value, Ordering::Release);
     }
 }
 
@@ -137,6 +164,7 @@ impl Clone for PipeReadHandle {
         self.pipe.reader_count.fetch_add(1, Ordering::Release);
         Self {
             pipe: self.pipe.clone(),
+            status: self.status.clone(),
         }
     }
 }
@@ -156,16 +184,28 @@ impl Drop for PipeReadHandle {
 /// Write end of a pipe. Mirror of `PipeReadHandle`.
 pub struct PipeWriteHandle {
     pipe: Arc<Pipe>,
+    status: Arc<PipeEndpointStatus>,
 }
 
 impl PipeWriteHandle {
-    pub fn new(pipe: Arc<Pipe>) -> Self {
+    pub fn new(pipe: Arc<Pipe>, nonblocking: bool) -> Self {
         pipe.writer_count.fetch_add(1, Ordering::Release);
-        Self { pipe }
+        Self {
+            pipe,
+            status: PipeEndpointStatus::new(nonblocking),
+        }
     }
 
     pub fn pipe(&self) -> &Arc<Pipe> {
         &self.pipe
+    }
+
+    pub fn nonblocking(&self) -> bool {
+        self.status.nonblocking.load(Ordering::Acquire)
+    }
+
+    pub fn set_nonblocking(&self, value: bool) {
+        self.status.nonblocking.store(value, Ordering::Release);
     }
 }
 
@@ -174,6 +214,7 @@ impl Clone for PipeWriteHandle {
         self.pipe.writer_count.fetch_add(1, Ordering::Release);
         Self {
             pipe: self.pipe.clone(),
+            status: self.status.clone(),
         }
     }
 }

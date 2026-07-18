@@ -218,6 +218,7 @@ pub mod nr {
     pub const RT_SIGPROCMASK: u64 = 14;
     pub const IOCTL: u64 = 16;
     pub const WRITEV: u64 = 20;
+    pub const SELECT: u64 = 23;
     pub const NANOSLEEP: u64 = 35;
     pub const SETITIMER: u64 = 38;
     pub const SOCKET: u64 = 41;
@@ -382,6 +383,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GETSOCKOPT => crate::userland::network_syscalls::getsockopt_handler(args),
         // U3: musl-init / zsh-startup surface
         nr::POLL => syscalls::poll_handler(args),
+        nr::SELECT => syscalls::select_handler(args),
         nr::PPOLL => syscalls::ppoll_handler(args),
         nr::PSELECT6 => syscalls::pselect6_handler(args),
         nr::READLINK => syscalls::readlink_handler(args),

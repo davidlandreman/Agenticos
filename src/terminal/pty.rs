@@ -328,7 +328,6 @@ impl PtySlave {
         self.with(|p| p.slave_read(dst))
     }
 
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn readable(&self) -> usize {
         self.with(|p| p.slave_readable())
     }

@@ -51,7 +51,7 @@ if [ "$HELP" = true ]; then
     echo "      --rebuild-userland  Force rebuild of prebuilt-managed userland apps"
     echo "                          (default: copy from userland/prebuilt/ when present)"
     echo "                          Equivalent: REBUILD_USERLAND=1 env. Per-app:"
-    echo "                          REBUILD_ZSH=1."
+    echo "                          REBUILD_ZSH=1, REBUILD_TCC=1, or REBUILD_LINKS2=1."
     echo "                          QEMU RAM defaults to 2G; override with"
     echo "                          AGENTICOS_QEMU_MEMORY (for example 4G)."
     echo "                          Rendering: AGENTICOS_COMPOSITOR=legacy|retained|gpu|auto"

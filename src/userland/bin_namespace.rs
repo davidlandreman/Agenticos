@@ -60,6 +60,9 @@ pub const CONTROL_HOST_PATH: &str = "/host/CONTROL.ELF";
 /// both rewrite here; argv[0] keeps the invoked name.
 pub const TCC_HOST_PATH: &str = "/host/TCC.ELF";
 
+/// Text-mode Links browser. Both command spellings resolve to one ELF.
+pub const LINKS_HOST_PATH: &str = "/host/LINKS.ELF";
+
 /// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
 /// MUST stay in sync with the match arms in
 /// [`crate::commands::gui_launch_table::spawn_by_name`]; a test in
@@ -74,10 +77,10 @@ pub const GUI_APPLETS: &[&str] = &[];
 /// `explorer` is the compatibility command for the ring-3 File Manager;
 /// `taskmgr` and `tasks` are aliases for the ring-3 Task Manager —
 /// `tasks` preserves the retired kernel app's name. `tcc` and `cc` are
-/// both TinyCC.
+/// both TinyCC; `links` and `links2` are the Links text browser.
 pub const DIRECT_APPLETS: &[&str] = &[
-    "calc", "cc", "control", "explorer", "glgame", "notepad", "painting", "settings", "taskmgr",
-    "tasks", "tcc",
+    "calc", "cc", "control", "explorer", "glgame", "links", "links2", "notepad", "painting",
+    "settings", "taskmgr", "tasks", "tcc",
 ];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
@@ -365,6 +368,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "cc" | "tcc" => TCC_HOST_PATH,
         "control" | "settings" => CONTROL_HOST_PATH,
         "glgame" => GLGAME_HOST_PATH,
+        "links" | "links2" => LINKS_HOST_PATH,
         "explorer" => FILEMAN_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,
         "painting" => PAINTING_HOST_PATH,
@@ -693,6 +697,13 @@ mod tests_internal {
         assert_eq!(path, "/host/FILEMAN.ELF");
         assert_eq!(applet, "explorer");
 
+        let (path, applet) = apply_bin_rewrite("/bin/links").expect("must resolve");
+        assert_eq!(path, "/host/LINKS.ELF");
+        assert_eq!(applet, "links");
+        let (path, applet) = apply_bin_rewrite("/bin/links2").expect("must resolve");
+        assert_eq!(path, "/host/LINKS.ELF");
+        assert_eq!(applet, "links2");
+
         // The Task Manager rewrites under both its own name and the
         // retired kernel app's `tasks` alias.
         let (path, applet) = apply_bin_rewrite("/bin/taskmgr").expect("must resolve");
@@ -754,6 +765,8 @@ mod tests_internal {
         );
         assert!(entries.contains(&"calc"));
         assert!(entries.contains(&"glgame"));
+        assert!(entries.contains(&"links"));
+        assert!(entries.contains(&"links2"));
         assert!(entries.contains(&"notepad"));
         assert!(entries.contains(&"painting"));
     }
