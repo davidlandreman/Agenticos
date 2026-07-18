@@ -195,6 +195,49 @@ pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
     Ok(instance)
 }
 
+/// Called by the window manager when a window is destroyed (e.g. the
+/// user clicked a terminal frame's close button). If `window_id` is a
+/// terminal frame or the terminal content window itself, tear down the
+/// terminal's entire ring-3 process tree (`zsh` and everything it
+/// forked — `ping`, `nc`, etc.) and drop the tracked `TerminalInstance`.
+///
+/// Without this, closing the window only removed the window from the
+/// registry; the ring-3 zsh and its children kept running as orphans,
+/// still time-sliced by the scheduler and still writing to a terminal
+/// whose window no longer exists.
+///
+/// Safe (and cheap) to call for any window: non-terminal windows have no
+/// matching `TerminalInstance`, so it is a no-op. Idempotent — the
+/// instance is removed on the first matching call, so the recursive
+/// `destroy_window` pass over the frame's children finds nothing to do.
+pub fn on_window_destroyed(window_id: WindowId) {
+    // Find and remove the matching instance (a terminal is destroyed via
+    // its frame, but match the content window too for robustness).
+    let instance = {
+        let mut instances = TERMINAL_INSTANCES.lock();
+        instances
+            .iter()
+            .position(|i| i.frame_id == window_id || i.terminal_id == window_id)
+            .map(|pos| instances.remove(pos))
+    };
+    let Some(instance) = instance else {
+        return;
+    };
+
+    crate::debug_info!(
+        "Terminal factory: closing terminal {} (frame={:?}, terminal={:?}) — killing its ring-3 processes",
+        instance.number,
+        instance.frame_id,
+        instance.terminal_id
+    );
+
+    // Kill zsh + every process it forked. They all share this
+    // terminal_id (inherited across fork), and this also wakes the
+    // blocked kernel launcher thread so it returns from
+    // `launch_user_binary` instead of hanging forever.
+    crate::userland::lifecycle::kill_ring3_processes_on_terminal(instance.terminal_id);
+}
+
 /// FAT path the kernel loads when launching the default shell. Staged
 /// from `userland/prebuilt/ZSH.ELF` by `build.sh` / `test.sh`.
 pub(crate) const ZSH_HOST_PATH: &str = "/host/ZSH.ELF";
