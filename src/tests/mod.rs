@@ -29,6 +29,10 @@ pub mod fat_write;
 pub mod filesystem;
 #[cfg(feature = "test")]
 pub mod fonts;
+// Kept but not yet registered in MODULES (cc1 runtime hang — see below).
+#[cfg(feature = "test")]
+#[allow(dead_code)]
+pub mod gcc;
 #[cfg(feature = "test")]
 pub mod graphics_device_image;
 #[cfg(feature = "test")]
@@ -154,6 +158,11 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("vm", vm::get_tests),
     ("compiler_compat", compiler_compat::get_tests),
     ("tcc", tcc::get_tests),
+    // GCC end-to-end compile is not yet registered: the driver → cc1 → as →
+    // ld pipeline is wired and cc1 loads, but cc1 hangs early in userspace
+    // when run as a fork+execve child (see the GCC port plan's "Known gap").
+    // The test module and staged fixtures are kept for when that is solved.
+    // ("gcc", gcc::get_tests),
     ("userland_switch", userland_switch::get_tests),
     ("path", crate::userland::path::path_tests),
     ("etc", crate::userland::etc::etc_tests),

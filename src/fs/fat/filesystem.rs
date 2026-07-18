@@ -46,6 +46,23 @@ struct MutableState {
     /// True when this mount has been gated through the dirty-bit
     /// read-before-set check (C-2) and is allowed to issue writes.
     writable: bool,
+    /// Single-entry resume hint for sequential `read_file_at` walks.
+    /// Demand-paging a large executable faults one 4 KiB page at a time
+    /// in ascending offset order; without this, each fault re-walks the
+    /// cluster chain from the start, making a full page-in O(n²) in the
+    /// cluster count (a 27 MiB cc1 stalled for minutes). The hint lets a
+    /// fault resume the walk from the last cluster reached. It is purely
+    /// an optimization: a miss (different file, or a lower offset) just
+    /// restarts from the first cluster. Any write invalidates it.
+    chain_hint: Option<ChainHint>,
+}
+
+/// Last cluster position reached while walking a chain in `read_file_at`.
+#[derive(Clone, Copy)]
+struct ChainHint {
+    first_cluster: u32,
+    cluster_index: u32,
+    cluster: u32,
 }
 
 pub struct FatFilesystem<'a> {
@@ -259,6 +276,7 @@ impl<'a> FatFilesystem<'a> {
                 alloc_hint: 2,
                 sn_cache: BTreeMap::new(),
                 writable: false,
+                chain_hint: None,
             }),
         })
     }
@@ -441,9 +459,25 @@ impl<'a> FatFilesystem<'a> {
         let mut cluster_offset = offset as usize % cluster_size;
 
         let fat_table = self.cached_fat_table()?;
-        let mut chain = fat_table.chain_cursor(file.first_cluster);
-        for _ in 0..cluster_index {
+        // Resume from the cached chain position when this is a
+        // higher-offset read of the same file (the demand-paging case).
+        // Otherwise walk from the first cluster.
+        let hint = self.state.lock().chain_hint;
+        let (mut chain, mut walked_index): (_, usize) = match hint {
+            Some(h)
+                if h.first_cluster == file.first_cluster.0
+                    && h.cluster_index as usize <= cluster_index =>
+            {
+                (
+                    fat_table.chain_cursor(ClusterId(h.cluster)),
+                    h.cluster_index as usize,
+                )
+            }
+            _ => (fat_table.chain_cursor(file.first_cluster), 0),
+        };
+        while walked_index < cluster_index {
             chain.advance()?;
+            walked_index += 1;
         }
 
         // One read may start part-way through a maximum-size logical sector,
@@ -476,7 +510,18 @@ impl<'a> FatFilesystem<'a> {
                 break;
             }
             chain.advance()?;
+            walked_index += 1;
             cluster_offset = 0;
+        }
+
+        // Record where the walk ended so the next (higher-offset) read of
+        // this file resumes here instead of re-walking from cluster 0.
+        if let Ok(cluster) = chain.current() {
+            self.state.lock().chain_hint = Some(ChainHint {
+                first_cluster: file.first_cluster.0,
+                cluster_index: walked_index as u32,
+                cluster: cluster.0,
+            });
         }
 
         Ok(bytes_read)
@@ -1120,6 +1165,9 @@ impl<'a> FatFilesystem<'a> {
         if !self.is_writable() {
             return Err(FatError::ReadOnly);
         }
+        // A write may relink clusters; drop the read resume hint so a
+        // later read never follows a stale cached cluster position.
+        self.state.lock().chain_hint = None;
         if data.is_empty() {
             *start_cluster_out = start_cluster;
             return Ok(0);
@@ -1260,6 +1308,8 @@ impl<'a> FatFilesystem<'a> {
         if start.0 < 2 {
             return Ok(());
         }
+        // Freeing rewrites FAT links; drop any stale read resume hint.
+        self.state.lock().chain_hint = None;
         let table = self.fresh_fat_table()?;
         let mut to_free: Vec<ClusterId> = Vec::new();
         table.follow_chain(start, |cl| {

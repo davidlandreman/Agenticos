@@ -126,6 +126,15 @@ pub fn init(boot_info: &'static mut BootInfo) {
         Err(e) => debug_info!("[boot] /root provisioning failed: {:?}", e),
     }
 
+    // POSIX temp-file directory. GCC's driver (and anything else relying
+    // on mkstemp/choose_tmpdir defaults) writes scratch files here with
+    // no TMPDIR convention. Overlay-backed like /work.
+    match crate::fs::vfs::vfs_mkdir("/tmp") {
+        Ok(()) => {}
+        Err(crate::fs::filesystem::FilesystemError::AlreadyExists) => {}
+        Err(e) => debug_info!("[boot] /tmp provisioning failed: {:?}", e),
+    }
+
     debug_info!("[boot] managed /etc");
     crate::userland::etc::init();
 

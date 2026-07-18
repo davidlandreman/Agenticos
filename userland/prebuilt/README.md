@@ -24,6 +24,7 @@ copies from the same pinned source tarball.
 | `CURL.ELF` | `apps/curl/` | prebuilt-managed | static-musl curl 8.21.0 + OpenSSL, IPv4 HTTP(S) only (~4 MiB) |
 | `binutils/*.ELF` | `apps/binutils/` | prebuilt-managed | GNU binutils 2.46.0, 14 stripped static native tools (~15.5 MiB total) |
 | `tcc-sysroot.tar.gz` | `apps/tcc/` | prebuilt-managed (tree) | musl headers + crt/libc + libtcc1 + examples; extracted to `host_share/sysroot/` by `stage_tcc_sysroot` (~1.9 MiB) |
+| `gcc-install.tar.gz` | `apps/gcc/` | prebuilt-managed (tree) | GCC 14.2.0 native C compiler: pruned `--prefix=/host/gcc` install (driver, cpp, cc1, collect2, libgcc/CRT/headers); extracted to `host_share/gcc/` by `stage_gcc_install` (~13.7 MiB) |
 | `compiler-compat/CCCRT.ELF` | `apps/compiler-compat/` | test-fixture | CRT startup rung |
 | `compiler-compat/CCLIBC.ELF` | `apps/compiler-compat/` | test-fixture | libc/heap rung |
 | `compiler-compat/CCPROBE.ELF` | `apps/compiler-compat/` | test-fixture | fallback/filesystem rung |
@@ -63,6 +64,7 @@ REBUILD_ZSH=1 ./build.sh            # rebuild just zsh this run
 REBUILD_TCC=1 ./build.sh            # rebuild tcc + its sysroot tarball
 REBUILD_LINKS2=1 ./build.sh         # rebuild the Links text + GUI browser
 REBUILD_BINUTILS=1 ./build.sh       # rebuild all fourteen GNU binutils tools
+REBUILD_GCC=1 ./build.sh            # rebuild the GCC install-prefix tarball
 ```
 
 The same flag / env vars work on `test.sh`. With no flag and a prebuilt
@@ -101,7 +103,8 @@ ports (bash, vim, coreutils, …) will land here.
 ## Repo-size note
 
 `userland/prebuilt/` is tracked plain in git — no LFS. The current
-total is about 21 MiB, below the ~50 MiB threshold where LFS pays for
+total is about 35 MiB (GCC's install tarball is the largest single
+artifact at ~13.7 MiB), below the ~50 MiB threshold where LFS pays for
 itself. If we cross that, revisit and switch.
 
 ## Reproducibility

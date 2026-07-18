@@ -61,6 +61,12 @@ pub const CONTROL_HOST_PATH: &str = "/host/CONTROL.ELF";
 /// both rewrite here; argv[0] keeps the invoked name.
 pub const TCC_HOST_PATH: &str = "/host/TCC.ELF";
 
+/// GCC: native C compiler driver inside the staged install prefix
+/// (`stage_gcc_install` extracts `gcc-install.tar.gz` to `host_share/gcc`).
+/// The driver locates cc1/collect2/libgcc through its configured
+/// `--prefix=/host/gcc`, so only the driver needs a `/bin` name.
+pub const GCC_HOST_PATH: &str = "/host/gcc/bin/gcc";
+
 /// Text-mode Links browser. Both command spellings resolve to one ELF.
 pub const LINKS_HOST_PATH: &str = "/host/LINKS.ELF";
 
@@ -116,6 +122,7 @@ pub const DIRECT_APPLETS: &[&str] = &[
     "curl",
     "elfedit",
     "explorer",
+    "gcc",
     "glgame",
     "ld",
     "links",
@@ -437,6 +444,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "cc" | "tcc" => TCC_HOST_PATH,
         "control" | "settings" => CONTROL_HOST_PATH,
         "curl" => CURL_HOST_PATH,
+        "gcc" => GCC_HOST_PATH,
         "glgame" => GLGAME_HOST_PATH,
         "links" | "links2" => LINKS_HOST_PATH,
         "explorer" => FILEMAN_HOST_PATH,
