@@ -152,6 +152,7 @@ QEMU_ARGS=(
     -serial stdio
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
     -no-reboot
+    -rtc "base=utc"
     -m "${AGENTICOS_TEST_MEMORY:-256M}"
 )
 if [ "${AGENTICOS_TEST_VIRGL:-0}" = "1" ]; then

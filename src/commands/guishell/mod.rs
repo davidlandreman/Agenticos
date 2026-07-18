@@ -12,10 +12,11 @@ use spin::Mutex;
 
 use crate::process::{ProcessId, WakeEvents};
 use crate::window::windows::taskbar::{
-    BUTTON_GAP, BUTTON_HEIGHT, BUTTON_Y_OFFSET, MAX_WINDOW_BUTTON_WIDTH, START_BUTTON_WIDTH,
+    tray_bounds, window_button_bounds, BUTTON_GAP, BUTTON_HEIGHT, BUTTON_Y_OFFSET,
+    START_BUTTON_WIDTH,
 };
 use crate::window::windows::{
-    Button, DesktopWindow, StartMenuAction, StartMenuWindow, TaskbarWindow,
+    Button, DesktopWindow, StartMenuAction, StartMenuWindow, TaskbarTrayWindow, TaskbarWindow,
 };
 use crate::window::{self, Point, Rect, Window, WindowId};
 
@@ -27,6 +28,8 @@ pub struct GUIShellState {
     pub taskbar_id: Option<WindowId>,
     /// Start button ID
     pub start_button_id: Option<WindowId>,
+    /// Right-side notification tray ID
+    pub tray_id: Option<WindowId>,
     /// Current menu ID (if open)
     pub menu_id: Option<WindowId>,
     /// Tracked window buttons: (button_id, frame_id)
@@ -48,6 +51,7 @@ pub enum PendingAction {
     SpawnCalc,
     SpawnGlGame,
     SpawnNotepad,
+    SpawnFileManager,
     OpenRunDialog,
     ShowShutdownNotice,
     FocusWindow(WindowId),
@@ -59,6 +63,7 @@ impl GUIShellState {
             desktop_id: None,
             taskbar_id: None,
             start_button_id: None,
+            tray_id: None,
             menu_id: None,
             window_buttons: Vec::new(),
             initialized: false,
@@ -73,7 +78,7 @@ pub fn queue_action(action: PendingAction) {
     // Use lock() instead of try_lock() to ensure the action is always queued
     // try_lock() was silently dropping actions when the lock was briefly held
     let mut state = GUISHELL_STATE.lock();
-    crate::debug_info!(
+    crate::debug_trace!(
         "GUIShell: Queuing action {:?}",
         core::mem::discriminant(&action)
     );
@@ -174,6 +179,14 @@ pub fn init_guishell() {
         // But since we can't downcast, we'll track it in state instead
         state.start_button_id = Some(start_button_id);
 
+        // Create the right-anchored notification tray as an independent child
+        // so its minute updates invalidate only the tray region.
+        let tray_id = wm.create_window(Some(taskbar_id));
+        let mut tray = TaskbarTrayWindow::new_with_id(tray_id, tray_bounds(width));
+        tray.set_parent(Some(taskbar_id));
+        wm.set_window_impl(tray_id, Box::new(tray));
+        state.tray_id = Some(tray_id);
+
         // Force repaint of all windows
         if let Some(window) = wm.window_registry.get_mut(&desktop_id) {
             window.invalidate();
@@ -184,15 +197,19 @@ pub fn init_guishell() {
         if let Some(window) = wm.window_registry.get_mut(&start_button_id) {
             window.invalidate();
         }
+        if let Some(window) = wm.window_registry.get_mut(&tray_id) {
+            window.invalidate();
+        }
 
         // Force a full screen repaint
         wm.force_full_repaint();
 
         crate::debug_info!(
-            "GUIShell: Desktop initialized (desktop={:?}, taskbar={:?}, start={:?})",
+            "GUIShell: Desktop initialized (desktop={:?}, taskbar={:?}, start={:?}, tray={:?})",
             desktop_id,
             taskbar_id,
-            start_button_id
+            start_button_id,
+            tray_id
         );
     });
 
@@ -241,6 +258,7 @@ fn show_start_menu() {
         // Use deferred actions because this callback runs under the window
         // manager lock. Disabled placeholders never emit an action.
         menu.on_select(|action| match action {
+            StartMenuAction::FileManager => queue_action(PendingAction::SpawnFileManager),
             StartMenuAction::Terminal => queue_action(PendingAction::SpawnTerminal),
             StartMenuAction::Notepad => queue_action(PendingAction::SpawnNotepad),
             StartMenuAction::Painting => queue_action(PendingAction::SpawnPainting),
@@ -349,10 +367,18 @@ fn spawn_notepad() {
     );
 }
 
+fn spawn_file_manager() {
+    crate::debug_info!("GUIShell: Spawning file manager...");
+    crate::window::terminal_factory::spawn_gui_user_app(
+        "/host/FILEMAN.ELF",
+        alloc::vec![alloc::string::String::from("explorer")],
+    );
+}
+
 /// Toggle the Start menu (show if hidden, hide if shown)
 fn toggle_start_menu() {
     let menu_open = GUISHELL_STATE.lock().menu_id.is_some();
-    crate::debug_info!(
+    crate::debug_trace!(
         "GUIShell: toggle_start_menu called, menu_open={}",
         menu_open
     );
@@ -423,16 +449,9 @@ fn add_window_button(frame_id: WindowId, title: &str) {
         let button_id = wm.create_window(Some(taskbar_id));
 
         // Calculate initial position (will be updated by layout)
-        let button_count = state.window_buttons.len() as u32;
-        let start_x = BUTTON_GAP + START_BUTTON_WIDTH + BUTTON_GAP;
-        let x = start_x + button_count * (MAX_WINDOW_BUTTON_WIDTH + BUTTON_GAP);
-
-        let bounds = Rect::new(
-            x as i32,
-            BUTTON_Y_OFFSET as i32,
-            MAX_WINDOW_BUTTON_WIDTH.min(100),
-            BUTTON_HEIGHT,
-        );
+        let (screen_width, _) = wm.screen_dimensions();
+        let button_count = state.window_buttons.len() + 1;
+        let bounds = window_button_bounds(screen_width, button_count, button_count - 1);
 
         // Truncate title if too long
         let display_title = if title.len() > 12 {
@@ -507,25 +526,10 @@ fn update_button_layout() {
     }
 
     window::with_window_manager(|wm| {
-        // Get screen width for layout calculation
         let (screen_width, _) = wm.screen_dimensions();
 
-        // Calculate button dimensions
-        let start_x = BUTTON_GAP + START_BUTTON_WIDTH + BUTTON_GAP;
-        let available_width = screen_width.saturating_sub(start_x + BUTTON_GAP);
-        let button_count = buttons.len() as u32;
-        let total_gaps = button_count.saturating_sub(1) * BUTTON_GAP;
-        let available_for_buttons = available_width.saturating_sub(total_gaps);
-        let button_width = (available_for_buttons / button_count).min(MAX_WINDOW_BUTTON_WIDTH);
-
         for (i, (button_id, _)) in buttons.iter().enumerate() {
-            let x = start_x + (i as u32 * (button_width + BUTTON_GAP));
-            let bounds = Rect::new(
-                x as i32,
-                BUTTON_Y_OFFSET as i32,
-                button_width,
-                BUTTON_HEIGHT,
-            );
+            let bounds = window_button_bounds(screen_width, buttons.len(), i);
 
             if let Some(button) = wm.window_registry.get_mut(button_id) {
                 button.set_bounds(bounds);
@@ -669,6 +673,10 @@ fn process_pending_actions() {
             PendingAction::SpawnNotepad => {
                 close_start_menu();
                 spawn_notepad();
+            }
+            PendingAction::SpawnFileManager => {
+                close_start_menu();
+                spawn_file_manager();
             }
             PendingAction::OpenRunDialog => {
                 close_start_menu();

@@ -398,7 +398,7 @@ assuming one layer per root. Tests must cover two GL windows, an ordinary
 window between them in z-order, partial offscreen placement, occlusion, and
 content-well clipping against both Classic and Aero frame metrics.
 
-### M4 — add kernel GL state and syscalls 5005-5008
+### M4 — add kernel GL state and syscalls 5006-5009
 
 Add a dedicated `src/userland/gui_gl.rs` rather than growing
 `gui_syscalls.rs` into a GPU implementation. Mirror the syscall constants and

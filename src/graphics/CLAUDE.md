@@ -20,13 +20,18 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
   persistent sampler view. The framebuffer surface, shaders, vertex elements,
   blend/depth/rasterizer/sampler state, and a geometrically growing vertex
   resource survive across frames and are torn down before their context.
+  Two fixed render-target/sampler scratch textures and bounded separable TGSI
+  shader variants implement the CPU reference's three-box backdrop blur for
+  effect-expanded damage. Engine construction qualifies the exact copy,
+  ping-pong, multi-sampler combine, transparent-discard, and readback path.
   Each clipped output-damage rectangle is cleared by a scissored transparent
   overwrite quad, then only intersecting textured layers are drawn with
   premultiplied source-over. The result is fenced and directly scanned out from
   the host texture. Layer opacity is draw state rather than cached pixel data,
   so movement/focus/opacity-only frames reuse textures without upload or GPU
-  object churn. Explicit Aero chrome is supported with sharp translucency; GPU
-  backdrop blur remains intentionally unsupported.
+  object churn. Qualified VirGL supports Aero's radius-4 blurred glass without
+  ordinary-frame readback; unsupported effect radii fail composition instead
+  of silently rendering sharp glass.
   The same physical VirGL context owns logical GL client targets: two color
   buffers, an optional capset-qualified depth attachment, bounded vertex
   storage, and a one-frame mailbox. `LayerSource::VirglClient` samples the

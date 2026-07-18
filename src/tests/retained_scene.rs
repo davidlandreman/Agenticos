@@ -43,11 +43,27 @@ fn test_backdrop_damage_reaches_adjacent_glass() {
         .any(|rect| rect.contains_point(crate::window::Point::new(10, 8))));
 }
 
+fn test_shared_backdrop_radius_contract() {
+    assert_eq!(crate::graphics::scene::backdrop_box_radii(0), [0, 0, 0]);
+    assert_eq!(crate::graphics::scene::backdrop_box_radii(4), [1, 1, 2]);
+
+    let mut layers = [
+        Layer::opaque(SurfaceId(1), Rect::new(0, 0, 2, 2)),
+        Layer::opaque(SurfaceId(2), Rect::new(0, 0, 2, 2)),
+    ];
+    layers[0].effect = LayerEffect::BackdropSample { radius: 4 };
+    layers[1].effect = LayerEffect::BackdropSample { radius: 2 };
+    assert_eq!(crate::graphics::scene::backdrop_halo(&layers), 6);
+    layers[1].visible = false;
+    assert_eq!(crate::graphics::scene::backdrop_halo(&layers), 4);
+}
+
 pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
     &[
         &test_stable_scene_order,
         &test_translation_and_effect_damage_bounds,
         &test_opaque_defaults,
         &test_backdrop_damage_reaches_adjacent_glass,
+        &test_shared_backdrop_radius_contract,
     ]
 }

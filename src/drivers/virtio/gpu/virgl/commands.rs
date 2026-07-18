@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use super::super::GpuError;
+use super::super::{protocol::GpuBox, GpuError};
 
 const VIRGL_CCMD_CREATE_OBJECT: u32 = 1;
 const VIRGL_CCMD_BIND_OBJECT: u32 = 2;
@@ -19,6 +19,7 @@ const VIRGL_CCMD_CLEAR: u32 = 7;
 const VIRGL_CCMD_DRAW_VBO: u32 = 8;
 const VIRGL_CCMD_RESOURCE_INLINE_WRITE: u32 = 9;
 const VIRGL_CCMD_SET_SAMPLER_VIEWS: u32 = 10;
+const VIRGL_CCMD_RESOURCE_COPY_REGION: u32 = 17;
 const VIRGL_CCMD_SET_SCISSOR_STATE: u32 = 15;
 const VIRGL_CCMD_BIND_SAMPLER_STATES: u32 = 18;
 const VIRGL_CCMD_BIND_SHADER: u32 = 31;
@@ -175,6 +176,53 @@ impl VirglCommandEncoder {
         self.emit_command(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, 11 + data_words as u32)?;
         self.emit_words(&[resource_id, 0, 0, 0, 0, 0, 0, 0, bytes.len() as u32, 1, 1])?;
         self.emit_padded_bytes(bytes)
+    }
+
+    /// Copy one bounded region between distinct VirGL resources.
+    ///
+    /// Layout follows virglrenderer's `VIRGL_CMD_RESOURCE_COPY_REGION_*`
+    /// definitions from the same pinned MIT-licensed protocol revision cited
+    /// at the top of this file.
+    pub fn resource_copy_region(
+        &mut self,
+        destination_resource_id: u32,
+        destination_x: u32,
+        destination_y: u32,
+        destination_z: u32,
+        source_resource_id: u32,
+        source: GpuBox,
+    ) -> Result<(), GpuError> {
+        if destination_resource_id == 0
+            || source_resource_id == 0
+            || destination_resource_id == source_resource_id
+            || source.width == 0
+            || source.height == 0
+            || source.depth == 0
+            || source.x.checked_add(source.width).is_none()
+            || source.y.checked_add(source.height).is_none()
+            || source.z.checked_add(source.depth).is_none()
+            || destination_x.checked_add(source.width).is_none()
+            || destination_y.checked_add(source.height).is_none()
+            || destination_z.checked_add(source.depth).is_none()
+        {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        self.emit_command(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, 13)?;
+        self.emit_words(&[
+            destination_resource_id,
+            0,
+            destination_x,
+            destination_y,
+            destination_z,
+            source_resource_id,
+            0,
+            source.x,
+            source.y,
+            source.z,
+            source.width,
+            source.height,
+            source.depth,
+        ])
     }
 
     pub fn create_shader(
@@ -433,27 +481,83 @@ impl VirglCommandEncoder {
     }
 
     pub fn set_fragment_sampler_view(&mut self, view_handle: u32) -> Result<(), GpuError> {
-        if view_handle == 0 {
+        self.set_fragment_sampler_views(0, &[view_handle])
+    }
+
+    pub fn set_fragment_sampler_views(
+        &mut self,
+        start_slot: u32,
+        view_handles: &[u32],
+    ) -> Result<(), GpuError> {
+        const MAX_FRAGMENT_SAMPLERS: usize = 16;
+        if view_handles.is_empty()
+            || view_handles.iter().any(|handle| *handle == 0)
+            || start_slot as usize >= MAX_FRAGMENT_SAMPLERS
+            || start_slot as usize + view_handles.len() > MAX_FRAGMENT_SAMPLERS
+        {
             return Err(GpuError::InvalidCommandStream);
         }
         const FRAGMENT_SHADER: u32 = 1;
-        self.emit_command(VIRGL_CCMD_SET_SAMPLER_VIEWS, 0, 3)?;
-        self.emit_words(&[FRAGMENT_SHADER, 0, view_handle])
+        self.emit_command(
+            VIRGL_CCMD_SET_SAMPLER_VIEWS,
+            0,
+            2 + view_handles.len() as u32,
+        )?;
+        self.emit_words(&[FRAGMENT_SHADER, start_slot])?;
+        self.emit_words(view_handles)
     }
 
     pub fn clear_fragment_sampler_view(&mut self) -> Result<(), GpuError> {
-        const FRAGMENT_SHADER: u32 = 1;
-        self.emit_command(VIRGL_CCMD_SET_SAMPLER_VIEWS, 0, 3)?;
-        self.emit_words(&[FRAGMENT_SHADER, 0, 0])
+        self.clear_fragment_sampler_views(0, 1)
     }
 
-    pub fn bind_fragment_sampler_state(&mut self, sampler_handle: u32) -> Result<(), GpuError> {
-        if sampler_handle == 0 {
+    pub fn clear_fragment_sampler_views(
+        &mut self,
+        start_slot: u32,
+        count: u32,
+    ) -> Result<(), GpuError> {
+        const MAX_FRAGMENT_SAMPLERS: u32 = 16;
+        if count == 0
+            || start_slot >= MAX_FRAGMENT_SAMPLERS
+            || start_slot.checked_add(count).is_none()
+            || start_slot + count > MAX_FRAGMENT_SAMPLERS
+        {
             return Err(GpuError::InvalidCommandStream);
         }
         const FRAGMENT_SHADER: u32 = 1;
-        self.emit_command(VIRGL_CCMD_BIND_SAMPLER_STATES, 0, 3)?;
-        self.emit_words(&[FRAGMENT_SHADER, 0, sampler_handle])
+        self.emit_command(VIRGL_CCMD_SET_SAMPLER_VIEWS, 0, 2 + count)?;
+        self.emit_words(&[FRAGMENT_SHADER, start_slot])?;
+        for _ in 0..count {
+            self.emit_word(0)?;
+        }
+        Ok(())
+    }
+
+    pub fn bind_fragment_sampler_state(&mut self, sampler_handle: u32) -> Result<(), GpuError> {
+        self.bind_fragment_sampler_states(0, &[sampler_handle])
+    }
+
+    pub fn bind_fragment_sampler_states(
+        &mut self,
+        start_slot: u32,
+        sampler_handles: &[u32],
+    ) -> Result<(), GpuError> {
+        const MAX_FRAGMENT_SAMPLERS: usize = 16;
+        if sampler_handles.is_empty()
+            || sampler_handles.iter().any(|handle| *handle == 0)
+            || start_slot as usize >= MAX_FRAGMENT_SAMPLERS
+            || start_slot as usize + sampler_handles.len() > MAX_FRAGMENT_SAMPLERS
+        {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        const FRAGMENT_SHADER: u32 = 1;
+        self.emit_command(
+            VIRGL_CCMD_BIND_SAMPLER_STATES,
+            0,
+            2 + sampler_handles.len() as u32,
+        )?;
+        self.emit_words(&[FRAGMENT_SHADER, start_slot])?;
+        self.emit_words(sampler_handles)
     }
 
     pub fn destroy_object(&mut self, object: u32, handle: u32) -> Result<(), GpuError> {

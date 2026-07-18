@@ -99,6 +99,14 @@ pub struct RenderStats {
     pub gpu_readback_bytes: u64,
     /// Direct-scanout flush commands issued for this frame.
     pub scanout_flushes: u64,
+    /// Output-to-scratch copies issued for backdrop effects.
+    pub backdrop_copies: u64,
+    pub backdrop_copy_pixels: u64,
+    /// Separable render passes issued into blur ping-pong targets.
+    pub backdrop_blur_passes: u64,
+    pub backdrop_blur_pixels: u64,
+    /// Fixed guest backing held by the two blur scratch targets.
+    pub backdrop_scratch_bytes: u64,
     /// Hardware cursor define/move commands issued for this frame.
     pub cursor_updates: u64,
     /// Guest CPU cycles spent rasterizing widgets/chrome into retained surfaces.
@@ -199,6 +207,7 @@ pub enum CompositionError {
     InvalidOutput,
     MissingSurface(SurfaceId),
     UnsupportedTransform,
+    UnsupportedEffect,
     SurfaceAllocation,
     GpuFailure,
     UnsupportedClientSurface,

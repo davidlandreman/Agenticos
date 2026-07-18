@@ -45,17 +45,17 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
 - `fdtable.rs` — per-process file-descriptor table.
 - `gui.rs` — per-PID window ownership plus the bounded, coalescing GUI event
   queue and process-death teardown.
-- `gui_syscalls.rs` — syscalls 5001-5004: create, copy-present, next-event,
-  and destroy.
-- `gui_gl.rs` — validated GL syscalls 5005-5008, per-PID logical-context
+- `gui_syscalls.rs` — syscalls 5001-5005: create, copy-present, next-event,
+  destroy, and update a window title.
+- `gui_gl.rs` — validated GL syscalls 5006-5009, per-PID logical-context
   ownership, bounded packet parsing, mailbox publication, and teardown.
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility
   pointer bounds for synthetic tests, and errno constants. Real processes
   use VMA-aware user-copy validation. Unknown syscall numbers always return
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
-  to BusyBox, the remaining kernel-side GUI apps through `GLAUNCH.ELF`, or
-  standalone ELFs such as `/host/CALC.ELF`, `/host/GLGAME.ELF`, and
+  to BusyBox, the remaining kernel-side GUI app through `GLAUNCH.ELF`, or
+  standalone ELFs such as `/host/FILEMAN.ELF`, `/host/GLGAME.ELF`, and
   `/host/NOTEPAD.ELF`.
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
@@ -113,6 +113,11 @@ FD-table mutation or hold process/network locks or user pointers across a
 yield. Final handle drop uses the deferred-close queue documented in
 `src/net/CLAUDE.md`.
 
+`CLOCK_MONOTONIC`, scheduler sleeps, polling deadlines, interval timers, and
+watchdogs remain based on the 100 Hz PIT. `CLOCK_REALTIME` and `gettimeofday`
+use the boot CMOS RTC snapshot advanced by PIT ticks through `crate::time`;
+when RTC validation fails they retain the prior uptime-from-zero fallback.
+
 Processes live in `lifecycle::PROCESS_TABLE`, indexed by PID. The
 single field `current_user_pid: Option<u32>` names which process's
 CR3 / FS_BASE / FPU / kernel-stack are loaded right now. Today only
@@ -125,23 +130,27 @@ must mask timer preemption until its guard releases the spinlock.
 
 ## Ring-3 GUI ABI
 
-The AgenticOS-private range extends syscall 5000 with eight GUI calls:
+The AgenticOS-private range extends syscall 5000 with nine GUI calls:
 
 - 5001 `gui_win_create(width, height, title, title_len, flags)`
 - 5002 `gui_win_present(handle, pixels, width, height, stride)`
 - 5003 `gui_next_event(event, len, flags)`
 - 5004 `gui_win_destroy(handle)`
-- 5005 `gui_gl_context_create(window, flags)`
-- 5006 `gui_gl_submit_frame(context, packet, len, flags)`
-- 5007 `gui_gl_get_info(context, info, len)`
-- 5008 `gui_gl_context_destroy(context)`
+- 5005 `gui_win_set_title(handle, title, title_len)`
+- 5006 `gui_gl_context_create(window, flags)`
+- 5007 `gui_gl_submit_frame(context, packet, len, flags)`
+- 5008 `gui_gl_get_info(context, info, len)`
+- 5009 `gui_gl_context_destroy(context)`
 
 Pixels are little-endian XRGB8888 (`u32` value `0x00RRGGBB`). Presents copy a
 full client surface into kernel memory. Events use a fixed 32-byte
 `GuiEvent { kind, window, payload[6] }`; an empty blocking read parks on
 `WaitingForGuiEvent`, while `GUI_NONBLOCK` returns `-EAGAIN`. Each PID has a
 128-entry queue: consecutive motion events coalesce and other overflow drops
-the oldest entry. Removing a process destroys every frame it owns.
+the oldest entry. Mouse button events carry a 64-bit PIT tick in payload slots
+4 and 5; mouse modifier bits occupy payload slot 2 above the button-state byte.
+Title updates and destruction are ownership-checked. Removing a process
+destroys every frame it owns.
 
 GL packets are versioned, self-contained colored-triangle frames capped at
 192 KiB, 1,024 draws, and 4,096 vertices. The kernel validates every offset,

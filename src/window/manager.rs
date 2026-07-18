@@ -479,11 +479,11 @@ impl WindowManager {
                     if !menu_bounds.contains_point(global_pos) {
                         // Click outside menu - close it and don't route the click
                         // (user's intent was to close the menu, not click what's underneath)
-                        crate::debug_info!("Click outside menu - closing");
+                        crate::debug_trace!("Click outside menu - closing");
                         self.close_active_menu();
                         return;
                     } else {
-                        crate::debug_info!("Click INSIDE menu {:?} at {:?}", menu_id, global_pos);
+                        crate::debug_trace!("Click inside menu {:?} at {:?}", menu_id, global_pos);
                     }
                 }
             }
@@ -908,6 +908,7 @@ impl WindowManager {
                                     "VirGL compositor and retained CPU fallback failed: {:?}; fallback=legacy",
                                     error
                                 );
+                                super::theme::activate(super::theme::ThemeKind::Classic);
                             }
                         }
                     } else {
@@ -915,6 +916,7 @@ impl WindowManager {
                             "retained compositor failed: {:?}; fallback=legacy",
                             error
                         );
+                        super::theme::activate(super::theme::ThemeKind::Classic);
                     }
                     self.compositor.end_frame();
                     self.compositor.dirty.mark_full_repaint();
@@ -1274,7 +1276,7 @@ impl WindowManager {
                 crate::graphics::composition::CompositionEngineKind::Virgl => "virgl",
             };
             crate::debug_info!(
-            "render_stats renderer={} engine={} presenter={} frames={} windows={} surface_pixels={} layers={} upload_bytes={} upload_regions={} texture_hits={} texture_misses={} texture_replacements={} texture_evictions={} texture_creates={} texture_destroys={} pipeline_creates={} sampler_view_creates={} sampler_view_destroys={} vertex_creates={} vertex_destroys={} vertex_capacity={} texture_cache_bytes={} texture_cache_peak={} command_dwords={} gpu_submissions={} readback_bytes={} output_regions={} output_pixels={} scanout_flushes={} cursor_updates={} presents={} cycles_raster={} cycles_upload={} cycles_compose={} cycles_blur={} cycles_fence={} cycles_readback={} cycles_present={} surface_bytes={} surface_peak={}",
+            "render_stats renderer={} engine={} presenter={} frames={} windows={} surface_pixels={} layers={} upload_bytes={} upload_regions={} texture_hits={} texture_misses={} texture_replacements={} texture_evictions={} texture_creates={} texture_destroys={} pipeline_creates={} sampler_view_creates={} sampler_view_destroys={} vertex_creates={} vertex_destroys={} vertex_capacity={} texture_cache_bytes={} texture_cache_peak={} command_dwords={} gpu_submissions={} readback_bytes={} output_regions={} output_pixels={} scanout_flushes={} backdrop_copies={} backdrop_copy_pixels={} blur_passes={} blur_pixels={} blur_scratch_bytes={} cursor_updates={} presents={} cycles_raster={} cycles_upload={} cycles_compose={} cycles_blur={} cycles_fence={} cycles_readback={} cycles_present={} surface_bytes={} surface_peak={}",
             if engine == "virgl" { "gpu" } else { "retained" },
             engine,
             if direct_scanout { "virgl-direct" } else if presented_by_virtio { "virtio-gpu-2d" } else { "boot-framebuffer" },
@@ -1304,6 +1306,11 @@ impl WindowManager {
             stats.output_damage_regions,
             stats.output_pixels_damaged,
             stats.scanout_flushes,
+            stats.backdrop_copies,
+            stats.backdrop_copy_pixels,
+            stats.backdrop_blur_passes,
+            stats.backdrop_blur_pixels,
+            stats.backdrop_scratch_bytes,
             stats.cursor_updates,
             stats.presents,
             stats.surface_raster_cycles,
@@ -1722,6 +1729,13 @@ impl WindowManager {
         self.last_mouse_buttons = 0x01;
     }
 
+    /// Test-only: run the production frame hit-test used on a fresh left
+    /// button press.
+    #[cfg(feature = "test")]
+    pub fn test_start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
+        self.start_drag_if_on_title_bar(mouse_x, mouse_y);
+    }
+
     /// Test-only: invoke `handle_dragging` directly so a test can drive
     /// drag/resize ticks without simulating mouse input through the full
     /// interrupt pipeline.
@@ -1923,7 +1937,7 @@ impl WindowManager {
                     }
                 } else {
                     // Button released - end drag
-                    crate::debug_info!("Window drag ended");
+                    crate::debug_trace!("Window drag ended");
                     self.interaction_state = InteractionState::Idle;
                 }
             }
@@ -1971,7 +1985,7 @@ impl WindowManager {
                     self.update_children_for_resized_window(window);
                 } else {
                     // Button released - end resize
-                    crate::debug_info!("Window resize ended");
+                    crate::debug_trace!("Window resize ended");
                     self.interaction_state = InteractionState::Idle;
                 }
             }
@@ -1982,7 +1996,7 @@ impl WindowManager {
     fn start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
         // If there's an active menu, don't process drag - let the click go to the menu
         if self.active_menu.is_some() {
-            crate::debug_info!(
+            crate::debug_trace!(
                 "start_drag_if_on_title_bar: active_menu present, skipping drag check"
             );
             return;
@@ -2004,7 +2018,11 @@ impl WindowManager {
         // Walk last-to-first so topmost siblings are tested first.
         for &window_id in top_level.iter().rev() {
             if let Some(window) = self.window_registry.get(&window_id) {
-                if !window.visible() {
+                // Only decorated frame windows own the theme's title-bar and
+                // border geometry. Other top-level desktop elements (notably
+                // the taskbar) must still receive clicks, but are never
+                // draggable or resizable.
+                if !window.visible() || window.window_title().is_none() {
                     continue;
                 }
                 let bounds = window.bounds();
@@ -2084,7 +2102,7 @@ impl WindowManager {
 
                 match target_hit {
                     HitTestResult::TitleBar => {
-                        crate::debug_info!(
+                        crate::debug_trace!(
                             "Starting window drag for {:?} at ({}, {})",
                             window_id,
                             bounds.x,
@@ -2098,7 +2116,7 @@ impl WindowManager {
                         self.focus_frame_and_content(window_id);
                     }
                     HitTestResult::Border(edge) => {
-                        crate::debug_info!(
+                        crate::debug_trace!(
                             "Starting window resize for {:?} edge {:?}",
                             window_id,
                             edge
@@ -2406,9 +2424,9 @@ impl WindowManager {
 ///
 /// SAFETY: only set/read inside `WindowManager::with_window_mut`. The
 /// pointer is valid for the duration of that call because the closure
-/// runs synchronously on the same thread; interrupts that touch the
-/// manager are blocked by the surrounding `with_window_manager`'s
-/// `InterruptGuard`.
+/// runs synchronously on the same thread. The surrounding
+/// `with_window_manager` prevents kernel-thread preemption, and interrupt
+/// handlers never access the manager directly.
 static ACTIVE_MANAGER: AtomicPtr<WindowManager> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Run `f` against the currently-active `WindowManager`. Returns

@@ -49,19 +49,23 @@ pub use menu::MenuWindow;
 pub use menu_bar::{MenuBar, MenuItemDef, PendingPopup, MENU_BAR_HEIGHT};
 pub use menu_bar_popup::MenuBarPopup;
 pub use multi_column_list::{Column, MultiColumnList};
+#[allow(unused_imports)]
 pub use path_bar::PathBar;
 pub use remote_surface::RemoteSurface;
+#[allow(unused_imports)]
 pub use scroll_view::ScrollView;
 #[allow(unused_imports)]
 pub use splitter::{Splitter, SplitterOrientation};
 #[allow(unused_imports)]
 pub use start_menu::{StartMenuAction, StartMenuItem, StartMenuWindow};
+#[allow(unused_imports)]
 pub use status_bar::StatusBar;
-pub use taskbar::TaskbarWindow;
+pub use taskbar::{TaskbarTrayWindow, TaskbarWindow};
 pub use terminal::TerminalWindow;
 #[allow(unused_imports)]
 pub use text_editor::TextEditor;
 pub use text_input::TextInput;
+#[allow(unused_imports)]
 pub use toolbar::Toolbar;
 #[allow(unused_imports)]
 pub use tree_view::{NodeId, TreeNode, TreeView};

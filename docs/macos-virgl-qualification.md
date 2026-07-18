@@ -62,11 +62,11 @@ AGENTICOS_QEMU_BIN="$QEMU_VIRGL_PREFIX/bin/qemu-system-x86_64" \
 ```
 
 Each rendered frame reports frame count, rasterized windows/pixels, upload
-bytes, composed layers, output damage, presentations, and guest cycle buckets
+bytes, composed layers, output damage, presentations, backdrop copy/pass
+counts and pixels, the fixed blur scratch working set, and guest cycle buckets
 for surface rasterization, texture staging, composition, backdrop blur, fence
-wait, and presentation. No line is emitted for idle iterations. Cursor-only
-or unchanged movement must report zero retained-surface raster and upload
-work.
+wait, and presentation. No line is emitted for idle iterations. Cursor-only or
+unchanged movement must report zero retained-surface raster and upload work.
 
 Use the same QEMU binary, 1280x720 resolution, and Aero scene for retained CPU
 and future GPU measurements. Capture idle, cursor-only, unchanged-window drag,
@@ -78,14 +78,14 @@ would contaminate the result.
 
 The repository now exposes a production `VirglCompositionEngine` after the
 pinned host passes preflight and the guest passes deterministic clear,
-premultiplied-alpha/readback, and lifecycle gates. The dedicated integration
-runner repeats lifecycle creation and teardown 100 times. The production
-fixture compares ordered, clipped, translucent layers with the CPU reference
-within one channel value. It also renders an asymmetric logical GL client into
-a content-well layer, pins its top-left orientation and clipping, and verifies
-depth ordering when a hardware depth format exists (or painter ordering when
-the capset has none). A listed GL device or advertised feature bit alone still
-cannot enable GPU mode.
+premultiplied-alpha/readback, lifecycle, and production backdrop-blur gates.
+The dedicated integration runner repeats lifecycle creation and teardown 100
+times. The production fixtures compare ordered, clipped, translucent layers
+and masked/stacked/partial-damage blur with the CPU reference. They also render
+an asymmetric logical GL client into a content-well layer, pin its top-left
+orientation and clipping, and verify depth ordering when a hardware depth
+format exists (or painter ordering when the capset has none). A listed GL device
+or advertised feature bit alone still cannot enable GPU mode.
 
 Run the complete hardware-backed gate with:
 
@@ -96,7 +96,11 @@ AGENTICOS_QEMU_GL=es \
 ```
 
 The qualified production path accelerates ordered textured-quad composition,
-translation, clipping/scissor, layer opacity, and premultiplied source-over.
+translation, clipping/scissor, layer opacity, premultiplied source-over, and
+radius-4 Aero backdrop blur. Blur uses persistent render-target/sampler scratch
+textures, an output-to-scratch copy, separable ping-pong passes, and a
+two-sampler masked combine. Transparent frame pixels are discarded so rounded
+corners preserve the unblurred output; opaque client pixels replace the blur.
 The completed render target remains on the host GPU and is presented as a
 scanout-bound VirGL texture; ordinary frames do not transfer it back to guest
 RAM and do not touch the boot framebuffer. A 64x64 VirtIO hardware cursor makes
@@ -107,11 +111,9 @@ The hardware runner validates the actual Cocoa GL presenter rather than QMP
 `screendump`: QMP sees only QEMU's legacy CPU display surface and is black
 during native texture scanout. Qualification requires Cocoa to enter scanout
 mode, borrow a nonzero VirGL texture, and complete its texture blit with no GL
-error. Damage-only persistent input textures, performance rollout
-measurements, and GPU Aero backdrop blur remain follow-up work.
+error. Broader performance rollout measurements remain follow-up work.
 
-Strict VirGL can use Aero chrome and translucency while GPU backdrop blur
-remains a follow-up:
+Strict VirGL can use GPU-blurred Aero chrome:
 
 ```sh
 AGENTICOS_QEMU_BIN="$QEMU_VIRGL_PREFIX/bin/qemu-system-x86_64" \
@@ -123,8 +125,8 @@ AGENTICOS_NETWORK=off \
 ./build.sh
 ```
 
-An explicit Aero request stays on VirGL and renders sharp translucent glass;
-`auto` continues to choose Classic for VirGL until GPU blur is implemented.
+An explicit Aero request stays on qualified VirGL and renders blurred glass;
+`auto` also selects Aero after the full production blur gate succeeds.
 The custom bottle has no QEMU `user` network backend, so the workspace launch
 disables networking; this is independent of VirGL.
 

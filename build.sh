@@ -200,6 +200,7 @@ if [ "$RUN_QEMU" = true ]; then
         -chardev "socket,id=rpc,path=$RPC_SOCK,server=on,wait=off"
         -serial chardev:rpc
         -no-reboot -no-shutdown
+        -rtc "base=utc"
         -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
         -device virtio-tablet-pci
         -m "$QEMU_MEMORY"

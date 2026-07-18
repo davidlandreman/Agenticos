@@ -20,9 +20,7 @@ pub mod desktop_window;
 #[cfg(feature = "test")]
 pub mod display;
 #[cfg(feature = "test")]
-pub mod explorer_dir_model_tests;
 #[cfg(feature = "test")]
-pub mod explorer_dispatch_tests;
 #[cfg(feature = "test")]
 pub mod fat_write;
 #[cfg(feature = "test")]
@@ -68,7 +66,11 @@ pub mod start_menu_tests;
 #[cfg(feature = "test")]
 pub mod surface_alpha;
 #[cfg(feature = "test")]
+pub mod taskbar_tests;
+#[cfg(feature = "test")]
 pub mod text_editor_migration_tests;
+#[cfg(feature = "test")]
+pub mod time;
 #[cfg(feature = "test")]
 pub mod toolbar_status_tests;
 #[cfg(feature = "test")]
@@ -153,6 +155,8 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("tree_view", tree_view_tests::get_tests),
     ("splitter", splitter_tests::get_tests),
     ("start_menu", start_menu_tests::get_tests),
+    ("taskbar", taskbar_tests::get_tests),
+    ("time", time::get_tests),
     ("toolbar_status", toolbar_status_tests::get_tests),
     ("path_bar", path_bar_tests::get_tests),
     ("icon_view", icon_view_tests::get_tests),
@@ -161,8 +165,6 @@ static MODULES: &[(&str, GetTestsFn)] = &[
         "text_editor_migration",
         text_editor_migration_tests::get_tests,
     ),
-    ("explorer_dir_model", explorer_dir_model_tests::get_tests),
-    ("explorer_dispatch", explorer_dispatch_tests::get_tests),
     ("compositor", compositor::get_tests),
     ("window_manager_render", window_manager_render::get_tests),
     ("window_buffer", window_buffer::get_tests),

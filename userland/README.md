@@ -38,6 +38,7 @@ userland/
     ├── hello/          # rust app — prints "hello\n", exits 0
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
     ├── guidemo/        # minimal ring-3 GUI reference client
+    ├── fileman/        # standalone Finder/Explorer-style file manager
     ├── notepad/        # standalone editor with userland dialogs + working Save
     ├── calc/           # standalone four-operation calculator
     ├── painting/       # standalone bouncing-shapes GUI demo (self-driven frame loop)
@@ -74,28 +75,34 @@ resolve into multicall or direct binaries staged under `host_share/`:
 
 - **`BB.ELF` — BusyBox** (core utilities plus IPv4 `ping`, `nc`, `nslookup`,
   and HTTP-only `wget`; IPv6 and TLS are not available).
-- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`tasks`, `explorer`).
-- **Direct standalone ring-3 applications**: `CALC.ELF`, `GLGAME.ELF`,
-  `NOTEPAD.ELF`, and `PAINTING.ELF` (`calc`, `glgame`, `notepad`, `painting`).
+- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`tasks`).
+- **Direct standalone ring-3 applications** — `CALC.ELF`, `FILEMAN.ELF`,
+  `GLGAME.ELF`, `NOTEPAD.ELF`, and `PAINTING.ELF` (`calc`, compatibility
+  command `explorer`, `glgame`, `notepad`, and `painting`).
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
 to `BB.ELF` with `argv[0]` overwritten to `"ls"`; BusyBox's own
-dispatcher picks the right applet. Direct apps resolve to their `/host/*.ELF`
-artifact with a canonical `argv[0]`; there are no symlinks or per-applet ELF
-copies.
+dispatcher picks the right applet. `execve("/bin/tasks", argv, envp)` resolves
+to `GLAUNCH.ELF` with `argv[0]` overwritten to `"tasks"`; GUILAUNCH's `_start`
+issues the AgenticOS-internal `sys_gui_launch("tasks")` syscall. No symlinks or
+per-applet ELF copies are needed; the namespace is pure kernel synthesis.
 
-`execve("/bin/glgame", ...)` rewrites directly to `/host/GLGAME.ELF`.
+`execve("/bin/explorer", ...)`, `execve("/bin/notepad", ...)`,
+`execve("/bin/calc", ...)`, `execve("/bin/glgame", ...)`, and
+`execve("/bin/painting", ...)` instead rewrite directly to their staged ELFs.
+There is no `GLAUNCH` round trip or kernel-side application process for them.
 
 `stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
 directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
 (`access("/bin/ls", X_OK)` followed by `execve`) finds applets without
 any zsh-side hooks. The terminal's default envp seeds
-`PATH=/bin:/host` so bare `ls`, `cat`, `painting`, etc. all Just Work
+`PATH=/bin:/host` so bare `ls`, `cat`, `explorer`, etc. all Just Work
 in an interactive shell.
 
-The overlay root and `/data` are writable; `/host` remains read-only. Native
-notepad surfaces `-EROFS` in a userland dialog when asked to save under
+The overlay root and `/data` are writable; `/host` remains read-only. File
+Manager exposes these mount capabilities in its actions and status bar; native
+Notepad surfaces `-EROFS` in a userland dialog when asked to save under
 `/host`.
 
 ### `GLAUNCH.ELF` (in-tree, built every run)

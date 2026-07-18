@@ -1,4 +1,4 @@
-//! Validated ring-3 fixed-function GL frame ABI (syscalls 5005-5008).
+//! Validated ring-3 fixed-function GL frame ABI (syscalls 5006-5009).
 
 use alloc::collections::BTreeMap;
 use alloc::vec;

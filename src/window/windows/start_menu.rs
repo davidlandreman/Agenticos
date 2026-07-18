@@ -33,6 +33,7 @@ const BANNER: Color = Color::new(0, 0, 128);
 /// Typed actions emitted by enabled Start-menu leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartMenuAction {
+    FileManager,
     Terminal,
     Notepad,
     Painting,
@@ -75,6 +76,10 @@ pub const START_MENU_ROOT_ITEMS: &[StartMenuItem] = &[
 ];
 
 pub const START_MENU_PROGRAM_ITEMS: &[StartMenuItem] = &[
+    StartMenuItem::Action {
+        label: "File Manager",
+        action: StartMenuAction::FileManager,
+    },
     StartMenuItem::Action {
         label: "Terminal",
         action: StartMenuAction::Terminal,
