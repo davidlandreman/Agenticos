@@ -61,6 +61,7 @@ pub struct ScrollView {
 
 impl ScrollView {
     /// Create a new `ScrollView` with the given outer bounds.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect) -> Self {
         Self::new_with_id(WindowId::new(), bounds)
     }
@@ -117,17 +118,15 @@ impl ScrollView {
     }
 
     /// Set the background color drawn behind the viewport.
-    pub fn set_background_color(&mut self, color: Color) {
-        self.bg_color = color;
-        self.base.invalidate();
-    }
 
     /// Current horizontal scroll offset (in content-coordinate pixels).
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn scroll_x(&self) -> i32 {
         self.scroll_x
     }
 
     /// Current vertical scroll offset (in content-coordinate pixels).
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn scroll_y(&self) -> i32 {
         self.scroll_y
     }
@@ -135,6 +134,7 @@ impl ScrollView {
     /// Programmatically scroll to `(x, y)`. Values are clamped to
     /// `[0, content - viewport]` on each axis (and to 0 when content
     /// fits entirely inside the viewport).
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn scroll_to(&mut self, x: i32, y: i32) {
         self.scroll_x = x;
         self.scroll_y = y;

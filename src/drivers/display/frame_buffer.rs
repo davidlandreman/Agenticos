@@ -15,27 +15,12 @@ const CHAR_HEIGHT: usize = 16;
 const LINE_SPACING: usize = 2;
 
 impl FrameBufferWriter {
-    pub fn get_dimensions(&self) -> (usize, usize) {
-        let info = self.framebuffer.info();
-        (info.width, info.height)
-    }
 
     /// Owned snapshot of the framebuffer's current bytes plus metadata.
     /// In direct mode this is uncached MMIO; expect it to be slower than
     /// reading from DRAM. The caller (typically `screenshot`) should drop
     /// any held WindowManager lock before transmitting the result.
-    pub fn snapshot_bytes(&self) -> (usize, usize, usize, usize, &'static str, alloc::vec::Vec<u8>) {
-        let info = self.framebuffer.info();
-        let pixel_format = match info.pixel_format {
-            PixelFormat::Rgb => "rgb",
-            PixelFormat::Bgr => "bgr",
-            PixelFormat::U8 => "u8",
-            _ => "unknown",
-        };
-        let bytes = self.framebuffer.buffer().to_vec();
-        (info.width, info.height, info.stride, info.bytes_per_pixel, pixel_format, bytes)
-    }
-    
+
     pub fn new(framebuffer: &'static mut FrameBuffer) -> Self {
         use crate::debug_debug;
         
@@ -102,9 +87,6 @@ impl FrameBufferWriter {
         self.framebuffer.info().height
     }
 
-    pub fn set_color(&mut self, color: Color) {
-        self.color = color;
-    }
 
     pub fn draw_pixel(&mut self, x: usize, y: usize, color: Color) {
         if x >= self.width() || y >= self.height() {
@@ -227,17 +209,3 @@ impl fmt::Write for FrameBufferWriter {
 }
 
 const FONT_8X16: &[u8] = &[0; 128 * 16]; // Temporary placeholder for 8x16 font data
-
-pub fn init(framebuffer: &'static mut FrameBuffer) -> FrameBufferWriter {
-    use crate::debug_info;
-    
-    let info = framebuffer.info();
-    debug_info!("Framebuffer Information:");
-    debug_info!("  Resolution: {}x{} pixels", info.width, info.height);
-    debug_info!("  Pixel format: {:?}", info.pixel_format);
-    debug_info!("  Bytes per pixel: {}", info.bytes_per_pixel);
-    debug_info!("  Stride: {} pixels", info.stride);
-    debug_info!("  Buffer size: {} bytes", framebuffer.buffer().len());
-    
-    FrameBufferWriter::new(framebuffer)
-}

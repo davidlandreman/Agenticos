@@ -49,10 +49,6 @@ pub struct AbnormalExit {
     pub fault_rip: VirtAddr,
 }
 
-/// Sentinel vector for cooperative `exit` syscall teardown — distinguishes a
-/// clean app exit from a fault in the diagnostic path. Chosen to be outside
-/// the architectural exception range (0..32).
-pub const COOPERATIVE_EXIT_VECTOR: u8 = 0xFF;
 
 /// The single active per-CPU user-process slot.
 ///
@@ -187,23 +183,6 @@ pub struct Process {
     pub terminal_id: Option<crate::window::WindowId>,
 }
 
-/// Compatibility alias retained for the long tail of callsites using
-/// the old name. New code should refer to `Process` directly.
-pub type ActiveUser = Process;
-
-/// State of a user process. Phase 4 PR-C lays the type in place; the
-/// transitions to `Zombie` and back to `Reaped` are wired up by `_exit`
-/// and `waitpid` in a follow-up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum ProcessState {
-    /// Currently runnable / running.
-    Running,
-    /// Exited but not yet reaped by a `waitpid`. Holds the exit code.
-    Zombie { exit_code: i64 },
-    /// Reaped — slot is free.
-    Reaped,
-}
 
 /// What ended the user process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,16 +384,6 @@ pub fn with_active_user<R>(f: impl FnOnce(&mut Process) -> R) -> R {
     with_current_process(f)
 }
 
-/// Returns true while a user process is currently loaded. The run
-/// command uses this to enforce the single-user invariant (D5) —
-/// U8 will lift that restriction.
-pub fn user_active() -> bool {
-    let g = PROCESS_TABLE.lock();
-    match g.current_user_pid {
-        Some(pid) => g.by_pid.get(&pid).is_some_and(|p| p.image.is_some()),
-        None => false,
-    }
-}
 
 /// PID of the currently-loaded ring-3 process, or `None` if none.
 /// Distinct from [`current_pid`] which folds `None` into `KERNEL_PID`
@@ -920,17 +889,6 @@ pub fn alloc_pid() -> u32 {
     NEXT_PID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Initialize the process slot for a new ring-3 binary launched by the
-/// kernel (`run /HOST/...`). Assigns a fresh PID with `parent_pid =
-/// KERNEL_PID`. Called by `enter_user_mode_with` before iretq.
-pub fn install_new_process(
-    image: UserImage,
-    brk_base: u64,
-    mmap_base: u64,
-    address_space: AddressSpace,
-) -> u32 {
-    install_new_process_opt(image, brk_base, mmap_base, Some(address_space))
-}
 
 /// Variant that accepts an optional address space. The kernel-test
 /// path bypasses the run command and runs binaries on the kernel L4

@@ -9,6 +9,7 @@ pub mod desktop;
 pub mod label;
 pub mod button;
 pub mod text_input;
+#[cfg(feature = "test")]
 pub mod list;
 pub mod multi_column_list;
 pub mod menu;
@@ -24,7 +25,9 @@ pub mod splitter;
 pub mod toolbar;
 pub mod status_bar;
 pub mod path_bar;
+#[cfg(feature = "test")]
 pub mod icon_view;
+#[cfg(feature = "test")]
 pub mod progress_bar;
 
 pub use container::ContainerWindow;
@@ -49,7 +52,3 @@ pub use splitter::{Splitter, SplitterOrientation};
 pub use toolbar::Toolbar;
 pub use status_bar::StatusBar;
 pub use path_bar::PathBar;
-#[allow(unused_imports)]
-pub use icon_view::{IconView, Tile};
-#[allow(unused_imports)]
-pub use progress_bar::ProgressBar;

@@ -1,6 +1,5 @@
 //! Checked user-memory copying with explicit lazy-page and COW resolution.
 
-use alloc::string::String;
 use core::mem::MaybeUninit;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
@@ -152,17 +151,4 @@ pub fn write_unaligned<T>(destination: u64, value: &T) -> Result<(), i64> {
         core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
     };
     copy_to_user(destination, bytes)
-}
-
-pub fn copy_cstr(source: u64, maximum: usize) -> Result<String, i64> {
-    let mut bytes = alloc::vec::Vec::new();
-    for index in 0..maximum {
-        let address = source.checked_add(index as u64).ok_or(EFAULT)?;
-        let byte = read_unaligned::<u8>(address)?;
-        if byte == 0 {
-            return String::from_utf8(bytes).map_err(|_| EFAULT);
-        }
-        bytes.push(byte);
-    }
-    Err(EFAULT)
 }

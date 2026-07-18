@@ -53,7 +53,7 @@ BusyBox's multicall ELF covers them all from ring 3. See
 1. **Create the module** at `src/commands/myapp/mod.rs` implementing
    `RunnableProcess`:
    ```rust
-   pub struct MyAppProcess { pub base: BaseProcess, args: Vec<String> }
+  pub struct MyAppProcess { args: Vec<String> }
    pub fn create_myapp_process(args: Vec<String>) -> Box<dyn RunnableProcess> {
        Box::new(MyAppProcess::new_with_args(args))
    }

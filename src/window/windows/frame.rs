@@ -1,8 +1,5 @@
 use crate::graphics::color::Color;
-use crate::window::{
-    Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId,
-};
-use crate::window::types::HitTestResult;
+use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 use alloc::string::{String, ToString};
 use super::base::WindowBase;
 
@@ -39,9 +36,6 @@ impl FrameWindow {
     }
 
     /// Get the window title
-    pub fn title(&self) -> &str {
-        &self.title
-    }
 
     pub fn content_area(&self) -> Rect {
         // Return area relative to parent (0,0 based)
@@ -127,70 +121,6 @@ impl FrameWindow {
     /// Perform a hit test at the given local coordinates.
     ///
     /// Returns what part of the window was hit.
-    pub fn hit_test(&self, local_point: Point) -> HitTestResult {
-        let bounds = self.base.bounds();
-        let x = local_point.x;
-        let y = local_point.y;
-
-        // Check if point is within window bounds
-        if x < 0 || y < 0 || x >= bounds.width as i32 || y >= bounds.height as i32 {
-            return HitTestResult::None;
-        }
-
-        let border = self.border_width as i32;
-        let title_height = self.title_bar_height as i32;
-
-        // Check title bar area (excluding borders)
-        if y >= border && y < border + title_height && x >= border && x < bounds.width as i32 - border {
-            // Check if click is in close button area
-            let close_btn_size = self.close_button_size as i32;
-            let close_btn_padding = self.close_button_padding as i32;
-            let close_btn_x = bounds.width as i32 - border - close_btn_padding - close_btn_size;
-            let close_btn_y = border + (title_height - close_btn_size) / 2;
-
-            if x >= close_btn_x && x < close_btn_x + close_btn_size
-                && y >= close_btn_y && y < close_btn_y + close_btn_size
-            {
-                return HitTestResult::CloseButton;
-            }
-
-            return HitTestResult::TitleBar;
-        }
-
-        // Check borders for resize handles
-        let at_left = x < border;
-        let at_right = x >= bounds.width as i32 - border;
-        let at_top = y < border;
-        let at_bottom = y >= bounds.height as i32 - border;
-
-        if at_top && at_left {
-            return HitTestResult::Border(crate::window::types::ResizeEdge::TopLeft);
-        }
-        if at_top && at_right {
-            return HitTestResult::Border(crate::window::types::ResizeEdge::TopRight);
-        }
-        if at_bottom && at_left {
-            return HitTestResult::Border(crate::window::types::ResizeEdge::BottomLeft);
-        }
-        if at_bottom && at_right {
-            return HitTestResult::Border(crate::window::types::ResizeEdge::BottomRight);
-        }
-        if at_top {
-            return HitTestResult::Border(crate::window::types::ResizeEdge::Top);
-        }
-        if at_bottom {
-            return HitTestResult::Border(crate::window::types::ResizeEdge::Bottom);
-        }
-        if at_left {
-            return HitTestResult::Border(crate::window::types::ResizeEdge::Left);
-        }
-        if at_right {
-            return HitTestResult::Border(crate::window::types::ResizeEdge::Right);
-        }
-
-        // Otherwise, it's the client area
-        HitTestResult::Client
-    }
 
     fn draw_borders(&self, device: &mut dyn GraphicsDevice) {
         let border_color = if self.active {

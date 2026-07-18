@@ -214,9 +214,6 @@ impl Screen {
     }
 
     /// Default 80×24 screen.
-    pub fn default_size() -> Self {
-        Self::new(config::DEFAULT_ROWS as usize, config::DEFAULT_COLS as usize)
-    }
 
     // ---- accessors ----
 
@@ -226,18 +223,23 @@ impl Screen {
     pub fn cols(&self) -> usize {
         self.cols
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn cursor(&self) -> (usize, usize) {
         (self.cursor_row, self.cursor_col)
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn cell(&self, row: usize, col: usize) -> Cell {
         self.buffer[row][col]
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn cursor_shape(&self) -> CursorShape {
         self.cursor_shape
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn autowrap(&self) -> bool {
         self.autowrap
     }
@@ -264,27 +266,32 @@ impl Screen {
     /// this against `caret()` to know which cells need erase + redraw
     /// on the next paint, then calls
     /// [`Screen::acknowledge_cursor_paint`].
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn last_painted_cursor(&self) -> (usize, usize) {
         self.last_painted_cursor
     }
 
     /// Tell the screen the renderer has drawn the caret at `caret()`'s
     /// current position. Should be called at the end of each paint.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn acknowledge_cursor_paint(&mut self) {
         self.last_painted_cursor = (self.cursor_row, self.cursor_col);
     }
 
     /// True while the alt-screen buffer is active.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn is_alt_screen(&self) -> bool {
         self.using_alt
     }
 
     /// Current scrollback view offset, in lines. 0 = live.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn view_offset(&self) -> usize {
         self.view_offset
     }
 
     /// Total number of lines currently in scrollback.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
     }
@@ -308,9 +315,6 @@ impl Screen {
 
     /// Snap the view back to live (offset 0). Called automatically
     /// whenever the primary buffer scrolls.
-    pub fn snap_to_live(&mut self) {
-        self.view_offset = 0;
-    }
 
     /// Return the row of cells the renderer should draw at visible row
     /// `row`. When `view_offset > 0`, the top `view_offset` rows are
@@ -335,14 +339,6 @@ impl Screen {
 
     // ---- cursor primitives ----
 
-    fn clamp_cursor(&mut self) {
-        if self.cursor_row >= self.rows {
-            self.cursor_row = self.rows - 1;
-        }
-        if self.cursor_col >= self.cols {
-            self.cursor_col = self.cols - 1;
-        }
-    }
 
     fn move_to(&mut self, row: usize, col: usize) {
         self.cursor_row = row.min(self.rows - 1);

@@ -14,10 +14,12 @@ use crate::process::ProcessState;
 use crate::tools::{Tool, ToolError, ToolResult};
 
 #[derive(Deserialize)]
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 struct KernelStateArgs<'a> {
     what: &'a str,
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub struct KernelState;
 
 impl Tool for KernelState {
@@ -56,6 +58,7 @@ impl Tool for KernelState {
     }
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 fn snapshot_windows() -> Result<Value, ToolError> {
     let result = crate::window::with_window_manager(|wm| {
         let mut entries: Vec<Value> = Vec::with_capacity(wm.window_registry.len());
@@ -82,6 +85,7 @@ fn snapshot_windows() -> Result<Value, ToolError> {
     result.ok_or_else(|| ToolError::unsupported("window manager not initialized"))
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 fn snapshot_processes() -> Value {
     let processes = crate::process::get_process_list();
     let entries: Vec<Value> = processes
@@ -103,6 +107,7 @@ fn snapshot_processes() -> Value {
     })
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 fn snapshot_heap() -> Result<Value, ToolError> {
     let stats =
         crate::mm::heap::stats().ok_or_else(|| ToolError::unsupported("heap not initialized"))?;
@@ -115,6 +120,7 @@ fn snapshot_heap() -> Result<Value, ToolError> {
     }))
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 fn snapshot_memory() -> Result<Value, ToolError> {
     let stats = crate::mm::memory::with_memory_mapper(|mapper| mapper.frame_stats())
         .ok_or_else(|| ToolError::unsupported("frame allocator not initialized"))?;

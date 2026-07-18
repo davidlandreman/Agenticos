@@ -92,9 +92,6 @@ impl AddressSpace {
         &mut self.vmas
     }
 
-    pub fn clone_vmas_from(&mut self, parent: &Self) {
-        self.vmas = parent.vmas.clone();
-    }
 
     pub fn initialize_vmas_from_image(
         &mut self,

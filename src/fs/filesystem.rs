@@ -9,6 +9,7 @@ pub enum FilesystemError {
     InvalidPath,
     DiskFull,
     ReadOnly,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Corrupted,
     UnsupportedOperation,
     IoError,
@@ -46,17 +47,24 @@ impl fmt::Display for FilesystemError {
 pub enum FileType {
     File,
     Directory,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Symlink,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Device,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Other,
 }
 
 /// File attributes
 #[derive(Debug, Clone, Copy)]
 pub struct FileAttributes {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub read_only: bool,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub hidden: bool,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub system: bool,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub archive: bool,
 }
 
@@ -67,9 +75,13 @@ pub struct DirectoryEntry {
     pub name_len: usize,
     pub file_type: FileType,
     pub size: u64,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub attributes: FileAttributes,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub created: u64,      // Timestamp
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub modified: u64,     // Timestamp
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub accessed: u64,     // Timestamp
 }
 
@@ -90,6 +102,7 @@ pub struct FileHandle {
 /// File open modes
 #[derive(Debug, Clone, Copy)]
 pub struct FileMode {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub read: bool,
     pub write: bool,
     pub append: bool,
@@ -106,14 +119,7 @@ impl FileMode {
         truncate: false,
     };
     
-    pub const WRITE: Self = Self {
-        read: false,
-        write: true,
-        append: false,
-        create: true,
-        truncate: true,
-    };
-    
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const READ_WRITE: Self = Self {
         read: true,
         write: true,
@@ -125,6 +131,7 @@ impl FileMode {
 
 /// Filesystem statistics
 #[derive(Debug, Clone, Copy)]
+#[expect(dead_code, reason = "intentional kernel API surface")]
 pub struct FilesystemStats {
     pub total_blocks: u64,
     pub free_blocks: u64,
@@ -142,6 +149,7 @@ pub trait Filesystem {
     fn is_read_only(&self) -> bool;
     
     /// Get filesystem statistics
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn stats(&self) -> Result<FilesystemStats, FilesystemError>;
     
     /// List directory contents
@@ -197,8 +205,11 @@ pub trait Filesystem {
 
 /// Iterator over directory entries
 pub struct DirectoryIterator<'a> {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     filesystem: &'a dyn Filesystem,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     path: [u8; 256],
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     path_len: usize,
     index: usize,
     entries: alloc::vec::Vec<DirectoryEntry>,
@@ -223,10 +234,7 @@ impl<'a> DirectoryIterator<'a> {
     }
     
     /// Get the path as a string slice
-    pub fn path_str(&self) -> &str {
-        core::str::from_utf8(&self.path[..self.path_len]).unwrap_or("")
-    }
-    
+
     /// Load directory entries from the filesystem
     fn load_entries(&mut self) {
         if self.loaded {
@@ -277,7 +285,9 @@ pub enum FilesystemType {
     Fat16,
     Fat32,
     Ext2,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Ext3,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Ext4,
     Ntfs,
     Unknown,

@@ -51,17 +51,16 @@ pub fn set(t: Termios) {
     }
 }
 
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn is_canonical() -> bool {
     snapshot().is_canonical()
 }
 
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn is_echo() -> bool {
     snapshot().is_echo()
 }
 
-pub fn icrnl() -> bool {
-    (snapshot().c_iflag & ICRNL) != 0
-}
 
 /// Winsize for the current process's pty. Derived from the
 /// hosting TerminalWindow's grid when that window is bound; falls back

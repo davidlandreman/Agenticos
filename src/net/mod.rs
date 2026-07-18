@@ -52,14 +52,17 @@ pub fn drain_deferred_closes() {
     socket::drain_deferred_closes();
 }
 
+#[cfg(feature = "test")]
 pub fn is_available() -> bool {
     with_stack_mut(|_| ()).is_some()
 }
 
+#[cfg(feature = "test")]
 pub fn config() -> NetworkConfig {
     with_stack_mut(|stack| stack.config()).unwrap_or_default()
 }
 
+#[cfg(feature = "test")]
 pub fn counters() -> Option<crate::drivers::virtio::net::NetDriverCounters> {
     with_stack_mut(|stack| stack.counters())
 }
@@ -88,20 +91,4 @@ fn with_stack_mut<R>(f: impl FnOnce(&mut NetworkStack) -> R) -> Option<R> {
     // section and restore the caller's prior interrupt state on exit.
     let _interrupt_guard = crate::arch::x86_64::interrupt_guard::InterruptGuard::disable();
     NETWORK.lock().as_mut().map(f)
-}
-
-#[allow(dead_code)]
-fn smoltcp_api_smoke() {
-    use smoltcp::iface::{Interface, SocketSet};
-    use smoltcp::socket::{dhcpv4, icmp, raw, tcp, udp};
-
-    fn require_type<T>() {}
-
-    require_type::<Interface>();
-    require_type::<SocketSet<'static>>();
-    require_type::<dhcpv4::Socket<'static>>();
-    require_type::<icmp::Socket<'static>>();
-    require_type::<raw::Socket<'static>>();
-    require_type::<tcp::Socket<'static>>();
-    require_type::<udp::Socket<'static>>();
 }

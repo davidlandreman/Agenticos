@@ -21,12 +21,16 @@ pub const BUTTON_Y_OFFSET: u32 = 4;
 
 /// Tracks a window button on the taskbar
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub struct TaskbarButton {
     /// ID of the button widget
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub button_id: WindowId,
     /// ID of the frame window this button represents
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub frame_id: WindowId,
     /// Title of the window
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub title: String,
 }
 
@@ -37,12 +41,16 @@ pub struct TaskbarWindow {
     /// Background color
     bg_color: Color,
     /// ID of the Start button
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     start_button_id: Option<WindowId>,
     /// Window buttons for open frame windows
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     window_buttons: Vec<TaskbarButton>,
     /// Currently active window (for highlighting its button)
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     active_frame_id: Option<WindowId>,
     /// Screen width (for layout calculations)
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     screen_width: u32,
 }
 
@@ -66,124 +74,7 @@ impl TaskbarWindow {
         }
     }
 
-    /// Create a new taskbar (generates its own ID)
-    pub fn new(screen_width: u32, screen_height: u32) -> Self {
-        Self::new_with_id(WindowId::new(), screen_width, screen_height)
     }
-
-    /// Set the Start button ID
-    pub fn set_start_button(&mut self, button_id: WindowId) {
-        self.start_button_id = Some(button_id);
-    }
-
-    /// Get the Start button ID
-    pub fn start_button_id(&self) -> Option<WindowId> {
-        self.start_button_id
-    }
-
-    /// Add a window button for a frame window
-    pub fn add_window_button(&mut self, button_id: WindowId, frame_id: WindowId, title: &str) {
-        self.window_buttons.push(TaskbarButton {
-            button_id,
-            frame_id,
-            title: String::from(title),
-        });
-        self.base.invalidate();
-    }
-
-    /// Remove a window button by frame ID
-    pub fn remove_window_button(&mut self, frame_id: WindowId) -> Option<WindowId> {
-        if let Some(pos) = self.window_buttons.iter().position(|b| b.frame_id == frame_id) {
-            let removed = self.window_buttons.remove(pos);
-            self.base.invalidate();
-            Some(removed.button_id)
-        } else {
-            None
-        }
-    }
-
-    /// Get the button ID for a frame window
-    pub fn get_button_for_frame(&self, frame_id: WindowId) -> Option<WindowId> {
-        self.window_buttons
-            .iter()
-            .find(|b| b.frame_id == frame_id)
-            .map(|b| b.button_id)
-    }
-
-    /// Get the frame ID for a button
-    pub fn get_frame_for_button(&self, button_id: WindowId) -> Option<WindowId> {
-        self.window_buttons
-            .iter()
-            .find(|b| b.button_id == button_id)
-            .map(|b| b.frame_id)
-    }
-
-    /// Set the currently active window
-    pub fn set_active_window(&mut self, frame_id: Option<WindowId>) {
-        if self.active_frame_id != frame_id {
-            self.active_frame_id = frame_id;
-            self.base.invalidate();
-        }
-    }
-
-    /// Get the active window
-    pub fn active_window(&self) -> Option<WindowId> {
-        self.active_frame_id
-    }
-
-    /// Get the window buttons
-    pub fn window_buttons(&self) -> &[TaskbarButton] {
-        &self.window_buttons
-    }
-
-    /// Calculate button bounds for layout
-    /// Returns a vector of (button_id, bounds) for all window buttons
-    pub fn calculate_button_layout(&self) -> Vec<(WindowId, Rect)> {
-        let mut result = Vec::new();
-
-        if self.window_buttons.is_empty() {
-            return result;
-        }
-
-        // Start after the Start button
-        let start_x = BUTTON_GAP + START_BUTTON_WIDTH + BUTTON_GAP;
-        let available_width = self.screen_width.saturating_sub(start_x + BUTTON_GAP);
-        let button_count = self.window_buttons.len() as u32;
-
-        // Calculate width per button
-        let total_gaps = (button_count.saturating_sub(1)) * BUTTON_GAP;
-        let available_for_buttons = available_width.saturating_sub(total_gaps);
-        let button_width = (available_for_buttons / button_count).min(MAX_WINDOW_BUTTON_WIDTH);
-
-        for (i, btn) in self.window_buttons.iter().enumerate() {
-            let x = start_x + (i as u32 * (button_width + BUTTON_GAP));
-            let bounds = Rect::new(
-                x as i32,
-                BUTTON_Y_OFFSET as i32,
-                button_width,
-                BUTTON_HEIGHT,
-            );
-            result.push((btn.button_id, bounds));
-        }
-
-        result
-    }
-
-    /// Get the bounds for the Start button
-    pub fn start_button_bounds(&self) -> Rect {
-        Rect::new(
-            BUTTON_GAP as i32,
-            BUTTON_Y_OFFSET as i32,
-            START_BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-        )
-    }
-
-    /// Check if a frame is tracked by the taskbar
-    pub fn has_window_button(&self, frame_id: WindowId) -> bool {
-        self.window_buttons.iter().any(|b| b.frame_id == frame_id)
-    }
-}
 
 impl Window for TaskbarWindow {
     fn base(&self) -> &WindowBase {

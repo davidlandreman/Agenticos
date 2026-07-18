@@ -18,6 +18,7 @@ pub struct Screen {
     /// Root window for this screen
     pub root_window: Option<WindowId>,
     /// Operating mode of this screen
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub mode: ScreenMode,
 }
 

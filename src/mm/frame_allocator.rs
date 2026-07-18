@@ -255,9 +255,6 @@ impl BootInfoFrameAllocator {
         self.stats.free -= 1;
     }
 
-    fn is_allocated(&self, index: usize) -> bool {
-        self.bitmap[index / 64] & (1u64 << (index % 64)) != 0
-    }
 
     fn set_allocated(&mut self, index: usize, allocated: bool) {
         let mask = 1u64 << (index % 64);
@@ -442,14 +439,17 @@ pub mod test_support {
         }
     }
 
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn usable_frames(regions: &[MemoryRegion]) -> u64 {
         usable_frame_count(regions)
     }
 
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn index_of(regions: &[MemoryRegion], frame: PhysFrame<Size4KiB>) -> Option<usize> {
         compact_frame_index(regions, frame.start_address().as_u64())
     }
 
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn frame_at(regions: &[MemoryRegion], index: usize) -> Option<PhysFrame<Size4KiB>> {
         compact_index_frame(regions, index)
     }

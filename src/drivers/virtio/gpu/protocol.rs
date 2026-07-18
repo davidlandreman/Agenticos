@@ -12,20 +12,9 @@ pub const CMD_SET_SCANOUT: u32 = 0x0103;
 pub const CMD_RESOURCE_FLUSH: u32 = 0x0104;
 pub const CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 pub const CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
-pub const CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
-pub const CMD_GET_EDID: u32 = 0x010a;
-pub const CMD_UPDATE_CURSOR: u32 = 0x0300;
-pub const CMD_MOVE_CURSOR: u32 = 0x0301;
 
 pub const RESP_OK_NODATA: u32 = 0x1100;
 pub const RESP_OK_DISPLAY_INFO: u32 = 0x1101;
-pub const RESP_OK_EDID: u32 = 0x1104;
-pub const RESP_ERR_UNSPEC: u32 = 0x1200;
-pub const RESP_ERR_OUT_OF_MEMORY: u32 = 0x1201;
-pub const RESP_ERR_INVALID_SCANOUT_ID: u32 = 0x1202;
-pub const RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
-pub const RESP_ERR_INVALID_CONTEXT_ID: u32 = 0x1204;
-pub const RESP_ERR_INVALID_PARAMETER: u32 = 0x1205;
 
 pub const FORMAT_B8G8R8A8_UNORM: u32 = 1;
 pub const MAX_SCANOUTS: usize = 16;
@@ -158,6 +147,7 @@ pub struct CursorPosition {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
+#[expect(dead_code, reason = "intentional kernel API surface")]
 pub struct UpdateCursor {
     pub header: CtrlHeader,
     pub position: CursorPosition,

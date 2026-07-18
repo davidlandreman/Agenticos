@@ -13,6 +13,7 @@ use crate::drivers::block::BlockDevice;
 #[repr(u16)]
 pub enum IdeRegister {
     Data = 0x00,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     ErrorFeatures = 0x01,    // Error when reading, Features when writing
     SectorCount = 0x02,
     LbaLow = 0x03,
@@ -26,11 +27,16 @@ pub enum IdeRegister {
 #[repr(u8)]
 pub enum IdeStatus {
     Busy = 0x80,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Ready = 0x40,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     WriteFault = 0x20,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     SeekComplete = 0x10,
     DataRequest = 0x08,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     CorrectedData = 0x04,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Index = 0x02,
     Error = 0x01,
 }
@@ -43,6 +49,7 @@ pub enum IdeCommand {
     WritePio = 0x30,
     WritePioExt = 0x34,
     Identify = 0xEC,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     SetFeatures = 0xEF,
 }
 
@@ -70,14 +77,7 @@ impl IdeChannel {
         }
     }
 
-    /// Get the IRQ number for this channel
-    pub fn irq(&self) -> u8 {
-        match self {
-            IdeChannel::Primary => 14,
-            IdeChannel::Secondary => 15,
-        }
     }
-}
 
 /// IDE drive (Master or Slave)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,6 +102,7 @@ impl IdeDrive {
 
 /// Drive identification data (512 bytes)
 #[repr(C)]
+#[expect(dead_code, reason = "intentional kernel API surface")]
 pub struct IdentifyData {
     pub config: u16,
     pub cylinders: u16,
@@ -165,7 +166,9 @@ pub struct IdentifyData {
 
 /// IDE disk device
 pub struct IdeDisk {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     channel: IdeChannel,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     drive: IdeDrive,
     present: bool,
     supports_lba: bool,
@@ -177,18 +180,6 @@ pub struct IdeDisk {
 
 impl IdeDisk {
     /// Create a new IDE disk instance
-    pub fn new(channel: IdeChannel, drive: IdeDrive) -> Self {
-        Self {
-            channel,
-            drive,
-            present: false,
-            supports_lba: false,
-            supports_lba48: false,
-            total_sectors: 0,
-            model: [0; 40],
-            serial: [0; 20],
-        }
-    }
 
     /// Check if the disk is present
     pub fn is_present(&self) -> bool {
@@ -196,9 +187,6 @@ impl IdeDisk {
     }
 
     /// Get the disk capacity in sectors
-    pub fn capacity(&self) -> u64 {
-        self.total_sectors
-    }
 
     /// Get the model string
     pub fn model_string(&self) -> &str {
@@ -303,12 +291,6 @@ unsafe fn ide_write_register(channel: IdeChannel, register: IdeRegister, value: 
     port.write(value);
 }
 
-/// Helper function to read from the alternate status register
-unsafe fn ide_read_alt_status(channel: IdeChannel) -> u8 {
-    let port = channel.control_port();
-    let mut port: PortReadOnly<u8> = PortReadOnly::new(port);
-    port.read()
-}
 
 /// Helper function to write to the device control register
 unsafe fn ide_write_device_control(channel: IdeChannel, value: u8) {

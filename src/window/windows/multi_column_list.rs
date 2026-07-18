@@ -120,6 +120,7 @@ impl MultiColumnList {
     }
 
     /// Create a new multi-column list (generates its own ID)
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect, columns: Vec<Column>) -> Self {
         Self::new_with_id(WindowId::new(), bounds, columns)
     }
@@ -131,11 +132,6 @@ impl MultiColumnList {
     }
 
     /// Add a row from string slices
-    pub fn add_row_strs(&mut self, values: &[&str]) {
-        self.rows
-            .push(values.iter().map(|s| String::from(*s)).collect());
-        self.base.invalidate();
-    }
 
     /// Clear all rows (keep columns)
     pub fn clear_rows(&mut self) {
@@ -145,65 +141,23 @@ impl MultiColumnList {
     }
 
     /// Get the number of rows
-    pub fn row_count(&self) -> usize {
-        self.rows.len()
-    }
 
     /// Check if the list is empty
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
 
     /// Get the currently selected row index. For multi-select this returns
     /// the first selected index in ascending order.
-    pub fn selected(&self) -> Option<usize> {
-        self.selection.iter().next()
-    }
 
     /// Borrow the underlying selection state.
-    pub fn selection(&self) -> &Selection {
-        &self.selection
-    }
 
     /// Get the selected row data (first selected row in ascending order).
-    pub fn selected_row(&self) -> Option<&Vec<String>> {
-        self.selected().and_then(|i| self.rows.get(i))
-    }
 
     /// Set the selected row index. Passing `None` clears the selection.
-    pub fn set_selected(&mut self, index: Option<usize>) {
-        let new_sel = match index.filter(|&i| i < self.rows.len()) {
-            Some(i) => Selection::Single(i),
-            None => Selection::None,
-        };
-        if self.selection != new_sel {
-            self.selection = new_sel;
-            self.base.invalidate();
-        }
-    }
 
     /// Configure the selection mode. Switching from `Multi` back to `Single`
     /// collapses any existing multi-selection to its first index in
     /// ascending order.
-    pub fn set_selection_mode(&mut self, mode: SelectionMode) {
-        if self.selection_mode == mode {
-            return;
-        }
-        self.selection_mode = mode;
-        if matches!(mode, SelectionMode::Single) {
-            let first = self.selection.iter().next();
-            self.selection = match first {
-                Some(i) => Selection::Single(i),
-                None => Selection::None,
-            };
-            self.base.invalidate();
-        }
-    }
 
     /// Current selection mode.
-    pub fn selection_mode(&self) -> SelectionMode {
-        self.selection_mode
-    }
 
     /// Set the selection change callback
     pub fn on_select<F>(&mut self, callback: F)
@@ -236,14 +190,8 @@ impl MultiColumnList {
     }
 
     /// Header row height in pixels.
-    pub fn header_height(&self) -> usize {
-        self.header_height
-    }
 
     /// Data row height in pixels.
-    pub fn row_height(&self) -> usize {
-        self.row_height
-    }
 
     /// Natural content height in pixels (`header + row_count * row_height`).
     /// Use to feed `ScrollView::set_content_size` from the caller.

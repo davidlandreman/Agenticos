@@ -51,14 +51,8 @@ impl TextInput {
     }
 
     /// Create a new text input (generates its own ID)
-    pub fn new(bounds: Rect) -> Self {
-        Self::new_with_id(WindowId::new(), bounds)
-    }
 
     /// Get the current text
-    pub fn text(&self) -> &str {
-        &self.text
-    }
 
     /// Set the text content
     pub fn set_text(&mut self, text: &str) {
@@ -80,46 +74,14 @@ impl TextInput {
     }
 
     /// Clear the text
-    pub fn clear(&mut self) {
-        if !self.text.is_empty() {
-            self.text.clear();
-            self.base.invalidate();
-            self.notify_change();
-        }
-    }
 
     /// Set maximum text length
-    pub fn set_max_length(&mut self, max: Option<usize>) {
-        self.max_length = max;
-        // Truncate if current text exceeds new limit
-        if let Some(max) = max {
-            if self.text.len() > max {
-                self.text.truncate(max);
-                self.base.invalidate();
-                self.notify_change();
-            }
-        }
-    }
 
     /// Set the text change callback
-    pub fn on_change<F>(&mut self, callback: F)
-    where
-        F: FnMut(&str) + Send + 'static,
-    {
-        self.on_change = Some(Box::new(callback));
-    }
 
     /// Set background color
-    pub fn set_bg_color(&mut self, color: Color) {
-        self.bg_color = color;
-        self.base.invalidate();
-    }
 
     /// Set text color
-    pub fn set_text_color(&mut self, color: Color) {
-        self.text_color = color;
-        self.base.invalidate();
-    }
 
     /// Notify change callback
     fn notify_change(&mut self) {

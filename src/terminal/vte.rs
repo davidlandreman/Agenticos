@@ -83,9 +83,13 @@ enum State {
     CsiIgnore,
     OscString,
     DcsEntry,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     DcsParam,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     DcsIntermediate,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     DcsPassthrough,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     DcsIgnore,
     SosPmApcString,
 }
@@ -149,14 +153,6 @@ impl Vte {
     /// Reset to GROUND, clearing all in-flight state. Use after a
     /// parser-corrupting external event (we don't expect any today; the
     /// state machine self-recovers from any sequence of bytes).
-    pub fn reset(&mut self) {
-        self.state = State::Ground;
-        self.clear_sequence();
-        self.utf8_len = 0;
-        self.utf8_expected = 0;
-        self.osc_buf.clear();
-        self.osc_overflow = false;
-    }
 
     /// Feed a byte. Dispatches zero or one [`Perform`] callback before
     /// returning.

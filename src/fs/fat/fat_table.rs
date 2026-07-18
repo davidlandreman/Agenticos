@@ -29,18 +29,18 @@ impl<'a> FatTable<'a> {
         }
     }
 
-    pub fn fat_type(&self) -> FatType {
-        self.fat_type
-    }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn num_fats(&self) -> u8 {
         self.num_fats
     }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn sectors_per_fat(&self) -> u32 {
         self.sectors_per_fat
     }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn bytes_per_sector(&self) -> u16 {
         self.bytes_per_sector
     }

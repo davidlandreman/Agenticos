@@ -19,6 +19,7 @@ pub struct BiosParameterBlock {
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
+#[expect(dead_code, reason = "intentional kernel API surface")]
 pub struct Fat16ExtBootRecord {
     pub drive_number: u8,
     pub reserved: u8,
@@ -113,10 +114,7 @@ impl BootSector {
         }
     }
     
-    pub fn fat16_ext(&self) -> &Fat16ExtBootRecord {
-        unsafe { &*(self.fat_specific.as_ptr() as *const Fat16ExtBootRecord) }
-    }
-    
+
     pub fn fat32_ext(&self) -> &Fat32ExtBootRecord {
         unsafe { &*(self.fat_specific.as_ptr() as *const Fat32ExtBootRecord) }
     }
@@ -137,10 +135,7 @@ impl BootSector {
             + root_dir_sectors
     }
     
-    pub fn cluster_to_sector(&self, cluster: u32) -> u32 {
-        ((cluster - 2) * self.bpb.sectors_per_cluster as u32) + self.first_data_sector()
-    }
-    
+
     pub fn root_dir_sectors(&self) -> u32 {
         ((self.bpb.root_entries as u32 * 32) 
             + (self.bpb.bytes_per_sector as u32 - 1)) 

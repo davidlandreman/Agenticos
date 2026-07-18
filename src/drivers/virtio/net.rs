@@ -134,6 +134,7 @@ impl VirtioNet {
         self.mac
     }
 
+    #[cfg(feature = "test")]
     pub fn counters(&self) -> NetDriverCounters {
         self.counters
     }

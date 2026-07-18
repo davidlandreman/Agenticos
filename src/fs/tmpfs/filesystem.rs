@@ -41,10 +41,7 @@ impl TmpNode {
     pub fn is_dir(&self) -> bool {
         matches!(self, TmpNode::Dir(_))
     }
-    pub fn is_file(&self) -> bool {
-        matches!(self, TmpNode::File(_))
-    }
-    pub fn size(&self) -> u64 {
+        pub fn size(&self) -> u64 {
         match self {
             TmpNode::File(body) => body.lock().len() as u64,
             TmpNode::Dir(_) => 0,
@@ -457,6 +454,7 @@ impl Filesystem for Tmpfs {
 /// Truncate a file to `new_size`. Extending writes zeros (POSIX
 /// `ftruncate`). Lives outside the trait until `Filesystem::truncate`
 /// is added in U5.
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn ftruncate(fs: &Tmpfs, handle: &mut FileHandle, new_size: u64) -> Result<(), FilesystemError> {
     let entry = {
         let tbl = fs.open.lock();

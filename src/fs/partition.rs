@@ -34,6 +34,7 @@ impl PartitionType {
 #[derive(Debug, Clone, Copy)]
 pub struct Partition {
     pub partition_type: PartitionType,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub bootable: bool,
     pub start_lba: u64,
     pub size_sectors: u64,

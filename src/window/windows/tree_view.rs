@@ -95,6 +95,7 @@ pub struct TreeView {
 
 impl TreeView {
     /// Create a new `TreeView` with the given outer bounds.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect) -> Self {
         Self::new_with_id(WindowId::new(), bounds)
     }
@@ -221,6 +222,7 @@ impl TreeView {
 
     /// Borrow the underlying selection state. Indices are in
     /// `visible_rows` index space.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn selection(&self) -> &Selection {
         &self.selection
     }
@@ -237,33 +239,10 @@ impl TreeView {
 
     /// Configure the selection mode. Switching `Multi` -> `Single`
     /// collapses the existing selection to its first element.
-    pub fn set_selection_mode(&mut self, mode: SelectionMode) {
-        if self.selection_mode == mode {
-            return;
-        }
-        self.selection_mode = mode;
-        if matches!(mode, SelectionMode::Single) {
-            let first = self.selection.iter().next();
-            self.selection = match first {
-                Some(i) => Selection::Single(i),
-                None => Selection::None,
-            };
-            self.base.invalidate();
-        }
-    }
 
     /// Current selection mode.
-    pub fn selection_mode(&self) -> SelectionMode {
-        self.selection_mode
-    }
 
     /// Register the activate callback (fired on Enter).
-    pub fn on_activate<F>(&mut self, callback: F)
-    where
-        F: FnMut(NodeId) + Send + 'static,
-    {
-        self.on_activate = Some(Box::new(callback));
-    }
 
     /// Register the select callback (fired when the user clicks a node
     /// label, changing the selection). Not fired by arrow-key navigation
@@ -277,28 +256,29 @@ impl TreeView {
     }
 
     /// Number of currently visible rows (non-collapsed nodes).
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn visible_row_count(&self) -> usize {
         self.visible_rows.len()
     }
 
     /// `NodeId` at the given visible row, if any.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn node_at_row(&self, row: usize) -> Option<NodeId> {
         self.visible_rows.get(row).copied()
     }
 
     /// Row height in pixels.
-    pub fn row_height(&self) -> usize {
-        self.row_height
-    }
 
     /// Natural content height in pixels — feed this to a wrapping
     /// `ScrollView::set_content_size`.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn content_height(&self) -> u32 {
         (self.visible_rows.len() * self.row_height) as u32
     }
 
     /// Programmatically set the selection to a particular row,
     /// or clear it with `None`.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn set_selected_row(&mut self, row: Option<usize>) {
         let new_sel = match row.filter(|&r| r < self.visible_rows.len()) {
             Some(r) => Selection::Single(r),

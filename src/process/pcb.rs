@@ -27,26 +27,16 @@ impl WakeEvents {
     /// Window event occurred (mouse click, focus change, etc.)
     pub const WINDOW_EVENT: Self = Self(1 << 2);
     /// Child process exited
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const CHILD_EXIT: Self = Self(1 << 3);
     /// Explicit signal from another process
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const SIGNAL: Self = Self(1 << 4);
 
     /// Check if this contains the specified event type
     #[inline]
     pub fn contains(&self, other: Self) -> bool {
         (self.0 & other.0) != 0
-    }
-
-    /// Add an event type
-    #[inline]
-    pub fn set(&mut self, other: Self) {
-        self.0 |= other.0;
-    }
-
-    /// Check if any events are set
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.0 == 0
     }
 
     /// Get raw value
@@ -72,36 +62,13 @@ impl SignalFlags {
     /// No signals pending
     pub const NONE: Self = Self(0);
 
-    /// Check if any signals are pending
-    #[inline]
-    pub fn has_any(&self) -> bool {
-        self.0 != 0
-    }
-
     /// Set a signal flag
     #[inline]
     pub fn set(&mut self, flag: u32) {
         self.0 |= flag;
     }
 
-    /// Clear a specific flag
-    #[inline]
-    pub fn clear(&mut self, flag: u32) {
-        self.0 &= !flag;
     }
-
-    /// Clear all flags
-    #[inline]
-    pub fn clear_all(&mut self) {
-        self.0 = 0;
-    }
-
-    /// Get raw value
-    #[inline]
-    pub fn bits(&self) -> u32 {
-        self.0
-    }
-}
 
 /// Process execution state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,14 +86,11 @@ pub enum ProcessState {
 /// Reason why a process is blocked
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockReason {
-    /// Waiting for input from stdin
-    WaitingForInput,
     /// Waiting for a child process
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     WaitingForChild(ProcessId),
     /// Sleeping until a specific timer tick
     SleepingUntilTick(u64),
-    /// Waiting for a signal/event to occur
-    WaitingForSignal,
     /// U8: kernel-thread is the launcher of a ring-3 process
     /// (`enter_user_mode_with_aspace`) and is parked until that
     /// process exits. Woken by `wake_kernel_threads_waiting_for_ring3_exit`
@@ -159,6 +123,7 @@ pub struct ProcessControlBlock {
     pub terminal_id: Option<WindowId>,
 
     /// Input buffer for stdin (lines from terminal)
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub stdin_buffer: Arc<Mutex<VecDeque<String>>>,
 
     /// Remaining time slice in timer ticks
@@ -218,21 +183,7 @@ impl ProcessControlBlock {
         }
     }
 
-    /// Check if the process has pending input
-    pub fn has_input(&self) -> bool {
-        !self.stdin_buffer.lock().is_empty()
     }
-
-    /// Push a line of input to this process
-    pub fn push_input(&self, line: String) {
-        self.stdin_buffer.lock().push_back(line);
-    }
-
-    /// Pop a line of input from this process (if available)
-    pub fn pop_input(&self) -> Option<String> {
-        self.stdin_buffer.lock().pop_front()
-    }
-}
 
 impl core::fmt::Debug for ProcessControlBlock {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

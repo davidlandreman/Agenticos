@@ -53,7 +53,7 @@ pub use keyboard_driver::KeyboardDriver;
 pub use mouse_driver::MouseDriver;
 pub use queue::{InputQueue, RawInputEvent};
 
-use crate::window::event::{Event, KeyModifiers, MouseButtons, MouseEvent, MouseEventType};
+use crate::window::event::{Event, MouseButtons, MouseEvent, MouseEventType};
 use crate::window::types::Point;
 
 /// Global input event queue.
@@ -216,23 +216,7 @@ impl InputProcessor {
         }))
     }
 
-    /// Get current mouse position.
-    #[inline]
-    pub fn mouse_position(&self) -> (i32, i32) {
-        self.mouse.position()
     }
-
-    /// Get current keyboard modifier state.
-    #[inline]
-    pub fn current_modifiers(&self) -> KeyModifiers {
-        self.keyboard.current_modifiers()
-    }
-
-    /// Update screen dimensions for mouse clamping.
-    pub fn set_screen_bounds(&mut self, width: i32, height: i32) {
-        self.mouse.set_screen_bounds(width, height);
-    }
-}
 
 impl Default for InputProcessor {
     fn default() -> Self {
@@ -260,22 +244,4 @@ impl<'a> Iterator for ProcessIterator<'a> {
             // Continue to next raw event if this one didn't produce a typed event
         }
     }
-}
-
-/// Check if there are any pending input events.
-#[inline]
-pub fn has_pending_input() -> bool {
-    !INPUT_QUEUE.is_empty()
-}
-
-/// Get the number of dropped events since last reset.
-#[inline]
-pub fn dropped_event_count() -> usize {
-    INPUT_QUEUE.dropped_count()
-}
-
-/// Reset the dropped event counter.
-#[inline]
-pub fn reset_dropped_count() {
-    INPUT_QUEUE.reset_dropped_count();
 }

@@ -68,9 +68,6 @@ impl MenuWindow {
     }
 
     /// Create a new menu window (generates its own ID)
-    pub fn new(bounds: Rect) -> Self {
-        Self::new_with_id(WindowId::new(), bounds)
-    }
 
     /// Add an item to the menu
     pub fn add_item(&mut self, label: &str) {
@@ -79,16 +76,8 @@ impl MenuWindow {
     }
 
     /// Clear all items
-    pub fn clear_items(&mut self) {
-        self.items.clear();
-        self.hover_index = None;
-        self.base.invalidate();
-    }
 
     /// Get the number of items
-    pub fn item_count(&self) -> usize {
-        self.items.len()
-    }
 
     /// Set the selection callback
     pub fn on_select<F>(&mut self, callback: F)
@@ -99,10 +88,6 @@ impl MenuWindow {
     }
 
     /// Calculate the required height for all items
-    pub fn calculate_height(&self) -> u32 {
-        let item_count = self.items.len() as u32;
-        item_count * MENU_ITEM_HEIGHT + 4 // 2px border top and bottom
-    }
 
     /// Get the item index at a given y position (local coordinates)
     fn item_at_position(&self, y: i32) -> Option<usize> {

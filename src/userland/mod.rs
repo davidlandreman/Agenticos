@@ -27,7 +27,6 @@ pub mod vm;
 
 use core::arch::naked_asm;
 
-use x86_64::VirtAddr;
 
 use crate::userland::image::UserImage;
 use crate::userland::lifecycle::ExitKind;
@@ -62,6 +61,7 @@ const DEFAULT_ARGV0: &str = "agenticos-app";
 #[derive(Debug, Clone, Copy)]
 pub enum EnterError {
     /// A user app is already active. Single-app-synchronous (D5).
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     AlreadyActive,
     /// The loader-produced mappings could not be represented as VMAs.
     InvalidVmLayout,
@@ -91,6 +91,7 @@ pub enum EnterError {
 /// `enter_user_mode_asm`, which `ret`s to this function. We then read the
 /// active-user slot to extract the exit kind/code and return them to the
 /// caller.
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn enter_user_mode(image: UserImage) -> Result<(ExitKind, i64), EnterError> {
     enter_user_mode_with(image, &[DEFAULT_ARGV0], &[])
 }
@@ -566,10 +567,6 @@ pub fn force_clear_active_for_test() {
     crate::userland::abi::clear_user_va_bounds();
     crate::userland::stdin::clear();
 }
-
-// Suppress unused-import warning when only some entries are needed.
-#[allow(dead_code)]
-fn _va_addr_silencer(_v: VirtAddr) {}
 
 /// Test-only hooks that bridge the kernel-driven `enter_user_mode_with`
 /// path with state tests want to inject just before iretq.

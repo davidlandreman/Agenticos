@@ -21,6 +21,7 @@ pub struct Padding {
 
 impl Padding {
     /// Create a new `Padding` with the given outer bounds and insets.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect, top: u32, right: u32, bottom: u32, left: u32) -> Self {
         Padding {
             base: WindowBase::new(bounds),

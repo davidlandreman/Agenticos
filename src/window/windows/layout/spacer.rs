@@ -29,6 +29,7 @@ pub enum SizeHint {
     Fill(u32),
     /// Use the child's minimum size; defaults to `0` if the child has
     /// no minimum-size API.
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     MinContent,
 }
 

@@ -16,8 +16,6 @@ use crate::window::{with_window_manager, Rect, Window, WindowId};
 pub enum MessageBoxType {
     /// Informational message
     Info,
-    /// Warning message
-    Warning,
     /// Error message
     Error,
 }
@@ -62,7 +60,6 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
         // Choose icon color based on type
         let _icon_color = match msg_type {
             MessageBoxType::Info => Color::new(0, 120, 215),    // Blue
-            MessageBoxType::Warning => Color::new(255, 165, 0), // Orange
             MessageBoxType::Error => Color::new(220, 20, 60),   // Crimson
         };
 
@@ -192,10 +189,6 @@ pub fn show_info(title: &str, message: &str) {
     show_message(title, message, MessageBoxType::Info);
 }
 
-/// Show a warning message
-pub fn show_warning(title: &str, message: &str) {
-    show_message(title, message, MessageBoxType::Warning);
-}
 
 /// Show an error message
 pub fn show_error(title: &str, message: &str) {

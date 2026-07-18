@@ -28,6 +28,7 @@ pub struct Caret {
 }
 
 impl Caret {
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const fn hidden() -> Self {
         Caret {
             row: 0,
@@ -42,6 +43,7 @@ impl Caret {
 /// Returns `true` when the caret should be drawn. Toggles every
 /// [`BLINK_INTERVAL_MS`]; the on/off cycle is therefore
 /// `2 * BLINK_INTERVAL_MS` end-to-end.
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn blink_on_at(ms: u64) -> bool {
     (ms / BLINK_INTERVAL_MS) % 2 == 0
 }

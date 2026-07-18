@@ -49,12 +49,6 @@ impl MouseDriver {
     }
 
     /// Update screen dimensions (for when display mode changes).
-    pub fn set_screen_bounds(&mut self, width: i32, height: i32) {
-        self.screen_bounds = (width - 1, height - 1);
-        // Clamp current position to new bounds
-        self.position.0 = self.position.0.clamp(0, self.screen_bounds.0);
-        self.position.1 = self.position.1.clamp(0, self.screen_bounds.1);
-    }
 
     /// Process a raw mouse packet byte.
     ///
@@ -170,49 +164,7 @@ impl MouseDriver {
         }
     }
 
-    /// Get current mouse position.
-    #[inline]
-    pub fn position(&self) -> (i32, i32) {
-        self.position
     }
-
-    /// Get current button state.
-    #[inline]
-    pub fn buttons(&self) -> MouseButtons {
-        self.buttons
-    }
-
-    /// Check if left button is pressed.
-    #[inline]
-    pub fn is_left_pressed(&self) -> bool {
-        self.buttons.left
-    }
-
-    /// Check if right button is pressed.
-    #[inline]
-    pub fn is_right_pressed(&self) -> bool {
-        self.buttons.right
-    }
-
-    /// Check if middle button is pressed.
-    #[inline]
-    pub fn is_middle_pressed(&self) -> bool {
-        self.buttons.middle
-    }
-
-    /// Reset packet accumulation state.
-    ///
-    /// Call this if packet stream gets out of sync.
-    pub fn reset_packet_state(&mut self) {
-        self.packet_index = 0;
-    }
-
-    /// Set mouse position directly (for testing or initialization).
-    pub fn set_position(&mut self, x: i32, y: i32) {
-        self.position.0 = x.clamp(0, self.screen_bounds.0);
-        self.position.1 = y.clamp(0, self.screen_bounds.1);
-    }
-}
 
 impl Default for MouseDriver {
     fn default() -> Self {

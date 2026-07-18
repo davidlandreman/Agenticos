@@ -240,6 +240,7 @@ impl Rect {
 
 /// Color depth supported by the graphics device
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(dead_code, reason = "intentional kernel API surface")]
 pub enum ColorDepth {
     Bit8,
     Bit16,
@@ -280,6 +281,7 @@ pub struct CompositorCapabilities {
 /// This stores the computed global bounds so we don't need to recalculate
 /// parent offsets on every operation.
 #[derive(Debug, Clone, Copy)]
+#[expect(dead_code, reason = "intentional kernel API surface")]
 pub struct WindowLayout {
     /// The window's local bounds (relative to parent)
     pub local_bounds: Rect,
@@ -290,31 +292,7 @@ pub struct WindowLayout {
 }
 
 impl WindowLayout {
-    /// Create a new layout with the given local bounds.
-    pub fn new(local_bounds: Rect) -> Self {
-        WindowLayout {
-            local_bounds,
-            global_bounds: local_bounds, // Initially same as local
-            dirty: true,
-        }
     }
-
-    /// Update the global bounds based on parent offset.
-    pub fn update_global(&mut self, parent_x: i32, parent_y: i32) {
-        self.global_bounds = Rect::new(
-            self.local_bounds.x + parent_x,
-            self.local_bounds.y + parent_y,
-            self.local_bounds.width,
-            self.local_bounds.height,
-        );
-        self.dirty = false;
-    }
-
-    /// Mark the layout as needing recalculation.
-    pub fn invalidate(&mut self) {
-        self.dirty = true;
-    }
-}
 
 /// Which edge of a window is being resized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,7 +354,9 @@ pub enum HitTestResult {
     /// On the close button
     CloseButton,
     /// On the minimize button
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     MinimizeButton,
     /// On the maximize button
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     MaximizeButton,
 }
