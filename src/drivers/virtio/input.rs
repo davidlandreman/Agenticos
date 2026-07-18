@@ -206,7 +206,7 @@ impl VirtioTablet {
                         } else {
                             self.buttons &= !0x01;
                         }
-                        debug_info!(
+                        debug_trace!(
                             "Tablet left button: {}",
                             if pressed { "pressed" } else { "released" }
                         );
@@ -217,7 +217,7 @@ impl VirtioTablet {
                         } else {
                             self.buttons &= !0x02;
                         }
-                        debug_info!(
+                        debug_trace!(
                             "Tablet right button: {}",
                             if pressed { "pressed" } else { "released" }
                         );
@@ -228,7 +228,7 @@ impl VirtioTablet {
                         } else {
                             self.buttons &= !0x04;
                         }
-                        debug_info!(
+                        debug_trace!(
                             "Tablet middle button: {}",
                             if pressed { "pressed" } else { "released" }
                         );

@@ -663,7 +663,7 @@ impl MemoryMapper {
             frames.push(frame);
         }
 
-        debug_info!(
+        debug_trace!(
             "map_user_region: {} pages at {:?} ({:?})",
             num_pages,
             virt_start,

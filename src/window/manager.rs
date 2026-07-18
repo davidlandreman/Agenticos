@@ -423,11 +423,11 @@ impl WindowManager {
                     if !menu_bounds.contains_point(global_pos) {
                         // Click outside menu - close it and don't route the click
                         // (user's intent was to close the menu, not click what's underneath)
-                        crate::debug_info!("Click outside menu - closing");
+                        crate::debug_trace!("Click outside menu - closing");
                         self.close_active_menu();
                         return;
                     } else {
-                        crate::debug_info!("Click INSIDE menu {:?} at {:?}", menu_id, global_pos);
+                        crate::debug_trace!("Click inside menu {:?} at {:?}", menu_id, global_pos);
                     }
                 }
             }
@@ -1597,6 +1597,13 @@ impl WindowManager {
         self.last_mouse_buttons = 0x01;
     }
 
+    /// Test-only: run the production frame hit-test used on a fresh left
+    /// button press.
+    #[cfg(feature = "test")]
+    pub fn test_start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
+        self.start_drag_if_on_title_bar(mouse_x, mouse_y);
+    }
+
     /// Test-only: invoke `handle_dragging` directly so a test can drive
     /// drag/resize ticks without simulating mouse input through the full
     /// interrupt pipeline.
@@ -1798,7 +1805,7 @@ impl WindowManager {
                     }
                 } else {
                     // Button released - end drag
-                    crate::debug_info!("Window drag ended");
+                    crate::debug_trace!("Window drag ended");
                     self.interaction_state = InteractionState::Idle;
                 }
             }
@@ -1846,7 +1853,7 @@ impl WindowManager {
                     self.update_children_for_resized_window(window);
                 } else {
                     // Button released - end resize
-                    crate::debug_info!("Window resize ended");
+                    crate::debug_trace!("Window resize ended");
                     self.interaction_state = InteractionState::Idle;
                 }
             }
@@ -1857,7 +1864,7 @@ impl WindowManager {
     fn start_drag_if_on_title_bar(&mut self, mouse_x: i32, mouse_y: i32) {
         // If there's an active menu, don't process drag - let the click go to the menu
         if self.active_menu.is_some() {
-            crate::debug_info!(
+            crate::debug_trace!(
                 "start_drag_if_on_title_bar: active_menu present, skipping drag check"
             );
             return;
@@ -1879,7 +1886,11 @@ impl WindowManager {
         // Walk last-to-first so topmost siblings are tested first.
         for &window_id in top_level.iter().rev() {
             if let Some(window) = self.window_registry.get(&window_id) {
-                if !window.visible() {
+                // Only decorated frame windows own the theme's title-bar and
+                // border geometry. Other top-level desktop elements (notably
+                // the taskbar) must still receive clicks, but are never
+                // draggable or resizable.
+                if !window.visible() || window.window_title().is_none() {
                     continue;
                 }
                 let bounds = window.bounds();
@@ -1959,7 +1970,7 @@ impl WindowManager {
 
                 match target_hit {
                     HitTestResult::TitleBar => {
-                        crate::debug_info!(
+                        crate::debug_trace!(
                             "Starting window drag for {:?} at ({}, {})",
                             window_id,
                             bounds.x,
@@ -1973,7 +1984,7 @@ impl WindowManager {
                         self.focus_frame_and_content(window_id);
                     }
                     HitTestResult::Border(edge) => {
-                        crate::debug_info!(
+                        crate::debug_trace!(
                             "Starting window resize for {:?} edge {:?}",
                             window_id,
                             edge

@@ -85,7 +85,7 @@ The page-fault path runs ~1500 times during a multi-MiB binary load. Per-fault l
 - Routine fault address/error details are **trace** only. Default boots perform no UART I/O for successfully handled demand, COW, or stack-growth faults.
 - `Page fault in heap region at …`, `Handling page fault for address: …`, `Successfully mapped page … to frame …`, and `Page X was already mapped` are also **trace** (silent at the default `Debug` boot level).
 - Fatal user and kernel faults remain at **error** and include the fault address, error bits, RIP, and process/page-table context needed for diagnosis.
-- `Allocated frame at PhysAddr(…)` is at **trace** inside `BootInfoFrameAllocator::allocate_frame`. The cursor emits a periodic info-level summary every 256 frames (`frame allocator: N frames issued, region M, next 0x…`) so progress is still visible under load.
+- `Allocated frame at PhysAddr(…)` is at **trace** inside `BootInfoFrameAllocator::allocate_frame`. The periodic 256-allocation counter snapshot is also trace-only; ordinary allocation progress must not dominate the normal boot log.
 
 If you re-promote routine fault messages to info/debug, the multi-MiB binary load slows back down dramatically. Use a temporary Trace session when individual handled faults are needed; do not make them part of normal boot output. Code comments at `src/mm/paging.rs::handle_page_fault` and `src/arch/x86_64/interrupts.rs::page_fault_handler` reference plan U2 for the original rationale.
 

@@ -77,7 +77,7 @@ pub fn queue_action(action: PendingAction) {
     // Use lock() instead of try_lock() to ensure the action is always queued
     // try_lock() was silently dropping actions when the lock was briefly held
     let mut state = GUISHELL_STATE.lock();
-    crate::debug_info!(
+    crate::debug_trace!(
         "GUIShell: Queuing action {:?}",
         core::mem::discriminant(&action)
     );
@@ -368,7 +368,7 @@ fn spawn_file_manager() {
 /// Toggle the Start menu (show if hidden, hide if shown)
 fn toggle_start_menu() {
     let menu_open = GUISHELL_STATE.lock().menu_id.is_some();
-    crate::debug_info!(
+    crate::debug_trace!(
         "GUIShell: toggle_start_menu called, menu_open={}",
         menu_open
     );
