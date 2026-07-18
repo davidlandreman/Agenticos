@@ -4,6 +4,8 @@ mod cpu;
 mod virgl;
 
 pub use cpu::CpuCompositionEngine;
+#[cfg(feature = "test")]
+pub(crate) use virgl::stage_surface_rect_for_test;
 pub use virgl::VirglCompositionEngine;
 
 use alloc::collections::BTreeMap;
@@ -25,6 +27,25 @@ pub struct RenderStats {
     pub surface_pixels_updated: u64,
     pub layers_composed: u64,
     pub texture_bytes_uploaded: u64,
+    pub texture_upload_regions: u64,
+    pub texture_cache_hits: u64,
+    pub texture_cache_misses: u64,
+    pub texture_cache_replacements: u64,
+    pub texture_cache_evictions: u64,
+    pub texture_resources_created: u64,
+    pub texture_resources_destroyed: u64,
+    /// Fixed framebuffer/shader/state objects created for this frame.
+    pub pipeline_objects_created: u64,
+    pub sampler_views_created: u64,
+    pub sampler_views_destroyed: u64,
+    pub vertex_resources_created: u64,
+    pub vertex_resources_destroyed: u64,
+    pub vertex_buffer_capacity: u64,
+    pub texture_cache_bytes: u64,
+    pub texture_cache_peak_bytes: u64,
+    pub command_stream_dwords: u64,
+    pub gpu_submissions: u64,
+    pub output_damage_regions: u64,
     pub output_pixels_damaged: u64,
     pub presents: u64,
     /// Bytes copied from a host GPU resource back into guest memory.

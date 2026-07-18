@@ -207,6 +207,16 @@ impl VirglCommandEncoder {
         self.emit_words(&[0; 7])
     }
 
+    pub fn create_replace_blend(&mut self, handle: u32) -> Result<(), GpuError> {
+        const RGBA_MASK: u32 = 0xf;
+        if handle == 0 {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        self.emit_command(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_BLEND, 11)?;
+        self.emit_words(&[handle, 0, 0, RGBA_MASK << 27])?;
+        self.emit_words(&[0; 7])
+    }
+
     pub fn create_disabled_dsa(&mut self, handle: u32) -> Result<(), GpuError> {
         if handle == 0 {
             return Err(GpuError::InvalidCommandStream);
@@ -331,9 +341,30 @@ impl VirglCommandEncoder {
         if sampler_handle == 0 || view_handle == 0 {
             return Err(GpuError::InvalidCommandStream);
         }
+        self.set_fragment_sampler_view(view_handle)?;
+        self.bind_fragment_sampler_state(sampler_handle)
+    }
+
+    pub fn set_fragment_sampler_view(&mut self, view_handle: u32) -> Result<(), GpuError> {
+        if view_handle == 0 {
+            return Err(GpuError::InvalidCommandStream);
+        }
         const FRAGMENT_SHADER: u32 = 1;
         self.emit_command(VIRGL_CCMD_SET_SAMPLER_VIEWS, 0, 3)?;
-        self.emit_words(&[FRAGMENT_SHADER, 0, view_handle])?;
+        self.emit_words(&[FRAGMENT_SHADER, 0, view_handle])
+    }
+
+    pub fn clear_fragment_sampler_view(&mut self) -> Result<(), GpuError> {
+        const FRAGMENT_SHADER: u32 = 1;
+        self.emit_command(VIRGL_CCMD_SET_SAMPLER_VIEWS, 0, 3)?;
+        self.emit_words(&[FRAGMENT_SHADER, 0, 0])
+    }
+
+    pub fn bind_fragment_sampler_state(&mut self, sampler_handle: u32) -> Result<(), GpuError> {
+        if sampler_handle == 0 {
+            return Err(GpuError::InvalidCommandStream);
+        }
+        const FRAGMENT_SHADER: u32 = 1;
         self.emit_command(VIRGL_CCMD_BIND_SAMPLER_STATES, 0, 3)?;
         self.emit_words(&[FRAGMENT_SHADER, 0, sampler_handle])
     }

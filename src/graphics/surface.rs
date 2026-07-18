@@ -5,6 +5,11 @@ use alloc::vec::Vec;
 
 use crate::window::Rect;
 
+/// Bound the number of transfer rectangles a surface can accumulate between
+/// successful composition frames. Beyond this point one full upload is less
+/// risky than an unbounded stream of tiny VirtIO commands.
+const MAX_DAMAGE_REGIONS: usize = 16;
+
 /// Stable identity shared by scene layers and composition engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SurfaceId(pub u64);
@@ -160,6 +165,7 @@ impl Surface {
     pub fn byte_len(&self) -> usize {
         self.pixels.len() * 4
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn pixels(&self) -> &[PremulArgb] {
         &self.pixels
     }
@@ -167,9 +173,22 @@ impl Surface {
     pub(crate) fn pixels_mut(&mut self) -> &mut [PremulArgb] {
         &mut self.pixels
     }
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn damage(&self) -> &[Rect] {
         &self.damage
+    }
+    pub fn damage_snapshot(&self) -> Vec<Rect> {
+        self.damage.clone()
+    }
+
+    /// Clear a previously observed damage set only if no drawing changed it
+    /// while the consumer was working. Returning false is conservative: the
+    /// next frame may upload pixels twice, but it cannot lose an update.
+    pub fn acknowledge_damage(&mut self, snapshot: &[Rect]) -> bool {
+        if self.damage != snapshot {
+            return false;
+        }
+        self.damage.clear();
+        true
     }
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn clear_damage(&mut self) {
@@ -230,6 +249,11 @@ impl Surface {
             }
         }
         self.damage.push(merged);
+        if self.damage.len() > MAX_DAMAGE_REGIONS {
+            self.damage.clear();
+            self.damage
+                .push(Rect::new(0, 0, self.desc.width, self.desc.height));
+        }
     }
 
     fn index(&self, x: u32, y: u32) -> Option<usize> {
