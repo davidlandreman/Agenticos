@@ -253,7 +253,7 @@ pub(crate) const TERMINAL_SHELL_ENV: [&str; 8] = [
     "SHELL=/bin/zsh",
     "TERM=xterm-256color",
     "COLORTERM=truecolor",
-    "LANG=C",
+    "LANG=C.UTF-8",
 ];
 
 /// Spawn a kernel-side process whose entry function loads
@@ -274,9 +274,11 @@ fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
             // agnoster pick the right terminfo behavior — the matching
             // parser support lives in `src/terminal/` (see the plan
             // `docs/plans/2026-05-24-001-feat-terminal-ansi-vt-pty-and-caret-plan.md`).
-            // HOME/USER/LOGNAME/SHELL match the staged /etc/passwd
-            // entry. COLORTERM=truecolor unlocks 24-bit-color code
-            // paths in modern programs.
+            // HOME/USER/LOGNAME/SHELL match the kernel-managed /etc/passwd
+            // entry. LANG=C.UTF-8 keeps zsh's multibyte prompt-width
+            // accounting aligned with the terminal's Unicode cell grid.
+            // COLORTERM=truecolor unlocks 24-bit-color code paths in modern
+            // programs.
             let argv = [ZSH_HOST_PATH];
             match crate::userland::launcher::launch_user_binary(
                 ZSH_HOST_PATH,

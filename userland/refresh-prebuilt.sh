@@ -1,7 +1,8 @@
 #!/bin/bash
 #
 # refresh-prebuilt.sh - Force-rebuild every prebuilt-managed userland app
-# and refresh the committed binaries under userland/prebuilt/.
+# and refresh the committed binaries under userland/prebuilt/. Zsh's build
+# also refreshes the committed function subset under userland/zsh-config/.
 #
 # Run this AFTER changing the source, Makefile, or build flags of a
 # prebuilt-managed app (currently: zsh, and any future Linux ports that
@@ -50,10 +51,10 @@ stage_busybox || { echo "❌ stage_busybox failed."; exit 1; }
 # stage_bash || { echo "❌ stage_bash failed."; exit 1; }
 
 echo ""
-echo "✅ Refresh complete. Changes under userland/prebuilt/:"
+echo "✅ Refresh complete. Changes under userland/prebuilt/ and zsh-config/functions/:"
 echo ""
-git -C "$REPO_ROOT" status --short userland/prebuilt/
+git -C "$REPO_ROOT" status --short userland/prebuilt/ userland/zsh-config/functions/
 echo ""
 echo "Commit the updated binaries alongside any source/Makefile changes:"
-echo "  git add userland/prebuilt/ userland/apps/<app>/"
+echo "  git add userland/prebuilt/ userland/apps/<app>/ userland/zsh-config/"
 echo "  git commit -m \"userland(<app>): <change>; refresh prebuilt\""

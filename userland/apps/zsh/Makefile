@@ -10,6 +10,8 @@
 #   2. fetch + verify zsh-5.9 tarball, extract, configure with CPPFLAGS
 #      pointing at the installed ncurses, LDFLAGS=-static -no-pie, build.
 #   3. strip the resulting binary and copy to build/zsh.
+#   4. copy the pruned upstream function set used by AgenticOS into
+#      userland/zsh-config/functions/.
 #
 # Versions and SHA256s are pinned in this file so the recipe is
 # reproducible across hosts. Bumping a version bumps the SHA in lockstep.
@@ -24,7 +26,7 @@ MUSL_STRIP   ?= $(patsubst %-gcc,%-strip,$(MUSL_CC))
 
 ZSH_VERSION     := 5.9
 ZSH_SHA256      := 9b8d1ecedd5b5e81fbf1918e876752a7dd948e05c1a0dba10ab863842d45acd5
-ZSH_URL         := https://www.zsh.org/pub/zsh-$(ZSH_VERSION).tar.xz
+ZSH_URL         := https://www.zsh.org/pub/old/zsh-$(ZSH_VERSION).tar.xz
 
 NCURSES_VERSION := 6.5
 NCURSES_SHA256  := 136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6
@@ -33,11 +35,48 @@ NCURSES_URL     := https://ftp.gnu.org/pub/gnu/ncurses/ncurses-$(NCURSES_VERSION
 OUT_DIR         := build
 TARBALLS_DIR    := $(OUT_DIR)/tarballs
 NCURSES_SRC     := $(OUT_DIR)/ncurses-$(NCURSES_VERSION)
+NCURSES_EXTRACTED := $(NCURSES_SRC)/.agenticos-extracted
 NCURSES_PREFIX  := $(abspath $(OUT_DIR)/ncurses-install)
 NCURSES_LIB     := $(NCURSES_PREFIX)/lib/libncursesw.a
 ZSH_SRC         := $(OUT_DIR)/zsh-$(ZSH_VERSION)
+ZSH_EXTRACTED   := $(ZSH_SRC)/.agenticos-extracted
 ZSH_BUILT       := $(ZSH_SRC)/Src/zsh
 BIN             := $(OUT_DIR)/zsh
+ZSH_CONFIG_DIR  := $(abspath ../../zsh-config)
+FUNCTIONS_DIR   := $(ZSH_CONFIG_DIR)/functions
+
+# Keep this list flat because /etc/zsh/functions is one fpath entry in the
+# guest. vcs_info's complete core plus its git backend are included so the
+# agnoster autoload is self-contained if a git binary is added later.
+FUNCTION_SOURCES := \
+	Misc/add-zle-hook-widget \
+	Misc/add-zsh-hook \
+	Misc/colors \
+	Misc/is-at-least \
+	Prompts/promptinit \
+	VCS_Info/VCS_INFO_adjust \
+	VCS_Info/VCS_INFO_bydir_detect \
+	VCS_Info/VCS_INFO_check_com \
+	VCS_Info/VCS_INFO_formats \
+	VCS_Info/VCS_INFO_get_cmd \
+	VCS_Info/VCS_INFO_hexdump \
+	VCS_Info/VCS_INFO_hook \
+	VCS_Info/VCS_INFO_maxexports \
+	VCS_Info/VCS_INFO_nvcsformats \
+	VCS_Info/VCS_INFO_patch2subject \
+	VCS_Info/VCS_INFO_quilt \
+	VCS_Info/VCS_INFO_reposub \
+	VCS_Info/VCS_INFO_set \
+	VCS_Info/VCS_INFO_set-branch-format \
+	VCS_Info/VCS_INFO_set-patch-format \
+	VCS_Info/vcs_info \
+	VCS_Info/vcs_info_hookadd \
+	VCS_Info/vcs_info_hookdel \
+	VCS_Info/vcs_info_lastmsg \
+	VCS_Info/vcs_info_printsys \
+	VCS_Info/vcs_info_setsys \
+	VCS_Info/Backends/VCS_INFO_detect_git \
+	VCS_Info/Backends/VCS_INFO_get_data_git
 
 # Compile flags. GCC 15 promoted three latent autoconf-test mismatches
 # from warnings to errors:
@@ -53,10 +92,10 @@ ZSH_CFLAGS  := -O2 -fno-pie \
                -Wno-error=int-conversion
 ZSH_LDFLAGS := -static -no-pie
 
-.PHONY: all clean distclean fetch
+.PHONY: all clean distclean fetch functions
 .DELETE_ON_ERROR:
 
-all: $(BIN)
+all: $(BIN) functions
 
 # ---------------- fetch + extract ----------------
 
@@ -86,12 +125,12 @@ $(TARBALLS_DIR)/zsh-$(ZSH_VERSION).tar.xz: | $(TARBALLS_DIR)
 	  fi
 	mv $@.tmp $@
 
-$(NCURSES_SRC)/configure: $(TARBALLS_DIR)/ncurses-$(NCURSES_VERSION).tar.gz
+$(NCURSES_EXTRACTED): $(TARBALLS_DIR)/ncurses-$(NCURSES_VERSION).tar.gz
 	rm -rf $(NCURSES_SRC)
 	tar xzf $< -C $(OUT_DIR)
 	@touch $@
 
-$(ZSH_SRC)/configure: $(TARBALLS_DIR)/zsh-$(ZSH_VERSION).tar.xz
+$(ZSH_EXTRACTED): $(TARBALLS_DIR)/zsh-$(ZSH_VERSION).tar.xz
 	rm -rf $(ZSH_SRC)
 	tar xJf $< -C $(OUT_DIR)
 	@touch $@
@@ -99,9 +138,8 @@ $(ZSH_SRC)/configure: $(TARBALLS_DIR)/zsh-$(ZSH_VERSION).tar.xz
 # ---------------- ncurses ----------------
 
 # Minimal static ncurses-widec: no shared libs, no progs, no manpages,
-# no C++ binding, no Ada, no tests. We only need libncursesw.a + headers
-# + the terminfo database for zsh's terminal-handling code.
-$(NCURSES_LIB): $(NCURSES_SRC)/configure
+# no C++ binding, no Ada, no tests. We only need libncursesw.a + headers.
+$(NCURSES_LIB): $(NCURSES_EXTRACTED)
 	@echo "🔨 Configuring ncurses-$(NCURSES_VERSION)..."
 	cd $(NCURSES_SRC) && \
 	  CC=$(MUSL_CC) AR=$(MUSL_AR) RANLIB=$(MUSL_RANLIB) \
@@ -113,11 +151,13 @@ $(NCURSES_LIB): $(NCURSES_SRC)/configure
 	    --enable-pc-files=no >/dev/null
 	@echo "🔨 Building ncurses-$(NCURSES_VERSION)..."
 	$(MAKE) -C $(NCURSES_SRC) -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4) >/dev/null
-	$(MAKE) -C $(NCURSES_SRC) install >/dev/null
+	# zsh needs only the static library and headers. Skipping install.data
+	# also avoids generating an unused terminfo database in the worktree.
+	$(MAKE) -C $(NCURSES_SRC) install.libs install.includes >/dev/null
 
 # ---------------- zsh ----------------
 
-$(ZSH_BUILT): $(ZSH_SRC)/configure $(NCURSES_LIB)
+$(ZSH_BUILT): $(ZSH_EXTRACTED) $(NCURSES_LIB)
 	@echo "🔨 Configuring zsh-$(ZSH_VERSION)..."
 	cd $(ZSH_SRC) && \
 	  CC=$(MUSL_CC) \
@@ -127,8 +167,7 @@ $(ZSH_BUILT): $(ZSH_SRC)/configure $(NCURSES_LIB)
 	  LIBS="-lncursesw" \
 	  ./configure --host=x86_64-linux-musl \
 	    --disable-dynamic --disable-cap --disable-pcre --disable-restricted-r \
-	    --disable-etcdir --disable-zshenv --disable-zshrc \
-	    --disable-zlogin --disable-zprofile --disable-zlogout \
+	    --disable-zshenv --disable-zlogin --disable-zprofile --disable-zlogout \
 	    --without-tcsetpgrp --enable-multibyte >/dev/null
 	@echo "🔨 Building zsh-$(ZSH_VERSION)..."
 	$(MAKE) -C $(ZSH_SRC) -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4) >/dev/null
@@ -138,6 +177,22 @@ $(BIN): $(ZSH_BUILT)
 	$(MUSL_STRIP) --strip-all $@.tmp
 	mv -f $@.tmp $@
 	@size=$$(wc -c < $@ | tr -d ' '); echo "✅ Built $@ ($$size bytes, stripped)"
+
+# Refresh the committed, pruned function library from the same pinned zsh
+# tarball as the binary. These files are generated artifacts; edit the source
+# list above and rerun this target instead of hand-editing them.
+functions: $(ZSH_EXTRACTED)
+	rm -rf $(FUNCTIONS_DIR)
+	mkdir -p $(FUNCTIONS_DIR)
+	@for source in $(FUNCTION_SOURCES); do \
+	  destination="$(FUNCTIONS_DIR)/$${source##*/}"; \
+	  awk '{ gsub(/ +\t/, "\t"); sub(/[[:space:]]+$$/, ""); lines[NR]=$$0 } \
+	       END { last=NR; while (last > 0 && lines[last] == "") last--; \
+	             for (i=1; i<=last; i++) print lines[i] }' \
+	    "$(ZSH_SRC)/Functions/$$source" > "$$destination"; \
+	done
+	@count=$$(find $(FUNCTIONS_DIR) -type f | wc -l | tr -d ' '); \
+	  echo "✅ Refreshed $(FUNCTIONS_DIR) ($$count functions)"
 
 # ---------------- maintenance ----------------
 

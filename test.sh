@@ -104,6 +104,14 @@ echo "Building and running kernel tests..."
 HOST_SHARE_STAGE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
 mkdir -p "$HOST_SHARE_STAGE"
 
+# Stage the read-only zsh configuration source tree. The kernel imports it
+# into its managed runtime /etc after mounting the host share.
+REPO_ROOT="$(pwd)"
+export REPO_ROOT HOST_SHARE_STAGE
+# shellcheck source=userland/prebuilt-lib.sh
+. "$REPO_ROOT/userland/prebuilt-lib.sh"
+stage_zsh_config || exit 1
+
 # Mandatory static-musl compatibility fixtures. These are committed test
 # inputs, so stage them even with --skip-userland and fail loudly if a fresh
 # checkout is missing one. Ordinary test runs never invoke a musl compiler.
@@ -201,10 +209,6 @@ if [ "$SKIP_USERLAND" -eq 0 ]; then
     # userland/prebuilt/ZSH.ELF is copied into host_share/; pass
     # --rebuild-userland or set REBUILD_USERLAND=1 to recompile from
     # source. See userland/prebuilt-lib.sh.
-    REPO_ROOT="$(pwd)"
-    export REPO_ROOT HOST_SHARE_STAGE
-    # shellcheck source=userland/prebuilt-lib.sh
-    . "$REPO_ROOT/userland/prebuilt-lib.sh"
     stage_zsh     || true  # soft-fail: kernel tests use embedded fixtures
     stage_busybox || true  # soft-fail: kernel tests use embedded fixtures
 else

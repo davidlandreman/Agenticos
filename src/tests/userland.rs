@@ -1360,40 +1360,22 @@ fn test_run_fault_pf() {
 
 // ---------- U8: ZSH.ELF end-to-end ----------
 //
-// These test bodies are written and ready to run, but currently
-// gated off the live test slice because they trip a pre-existing
-// `linked_list_allocator` 0.10.6 behavior: `allocate_first_fit`
-// returns `Err` for a 4 KiB align-1 layout even when the allocator's
-// own stats report ~99 MiB free. Reproducible deterministically:
-// boot, launch ZSH.ELF via RunProcess, get past 3 user-mmap calls
-// during musl init, and the next kernel-side alloc returns null →
-// `alloc_error_handler` → test panic. HELLOCPP.ELF (5.79 MiB,
-// similar musl init) does NOT reproduce — it's something specific
-// about the zsh allocation pattern (more numerous small alloc/free
-// cycles between mmaps).
-//
-// Re-register these in `get_tests()` once the allocator is swapped
-// (talc is the leading candidate) or the linked_list_allocator
-// pattern is otherwise unblocked. The launch-verb extensions in
-// `src/commands/run/mod.rs` (--trace flag, zsh-shaped envp) are
-// independent and shipping in U8 — only the e2e tests are gated.
-//
-// See docs/plans/2026-05-09-003-feat-zsh-on-agenticos-plan.md
-// "Deferred to Follow-Up Work" for the allocator-replacement
-// follow-up captured during U8.
+// These tests exercise the committed static zsh through the same launcher and
+// environment as a desktop terminal. Keep `-f` on parser/syscall smoke tests;
+// the startup-config test intentionally enables interactive rc sourcing.
 
 /// Drive `RunProcess::run` against `/host/ZSH.ELF` with the given argv.
 /// Trace mode is enabled for detailed discovery logging; unsupported syscalls
-/// return ENOSYS in normal operation too. Returns `true` if the binary was
-/// staged and the run completed; `false` (skip) if not staged.
+/// return ENOSYS in normal operation too. Returns `Some(exit)` if the binary
+/// was staged and the run completed; `None` (skip) if not staged.
 #[cfg(feature = "test")]
-fn drive_zsh(argv_after_path: &[&str]) -> bool {
+fn drive_zsh(argv_after_path: &[&str]) -> Option<(crate::userland::lifecycle::ExitKind, i64)> {
     use crate::userland::lifecycle::with_active_user;
     use alloc::string::String;
     let path = crate::window::terminal_factory::ZSH_HOST_PATH;
     if !crate::fs::exists(path) {
         crate::debug_info!("[u8] {} not staged; skipping", path);
-        return false;
+        return None;
     }
     // Enable trace mode for detailed once-per-number argument logs. It does
     // not alter the ENOSYS behavior observed by the binary.
@@ -1407,11 +1389,12 @@ fn drive_zsh(argv_after_path: &[&str]) -> bool {
         argv_owned.push(String::from(*a));
     }
     let argv_borrows: alloc::vec::Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
-    let _ = crate::userland::launcher::launch_user_binary(
+    let result = crate::userland::launcher::launch_user_binary(
         path,
         &argv_borrows,
         &crate::window::terminal_factory::TERMINAL_SHELL_ENV,
-    );
+    )
+    .expect("launch staged zsh");
 
     crate::userland::abi::set_trace_mode(prior_trace);
     let still_active = with_active_user(|au| au.image.is_some());
@@ -1419,26 +1402,61 @@ fn drive_zsh(argv_after_path: &[&str]) -> bool {
         !still_active,
         "active-user slot should be empty after zsh run() returns"
     );
-    true
+    Some(result)
 }
 
 /// `zsh -f +m -c 'exit 0'` with the exact desktop-terminal environment —
 /// proves the normal terminal launch profile loads, musl init runs, the
 /// parser handles -c, and cooperative exit returns cleanly.
 fn test_run_zsh_minimal_exit() {
-    let _ran = drive_zsh(&["-f", "+m", "-c", "exit 0"]);
+    let Some((kind, code)) = drive_zsh(&["-f", "+m", "-c", "exit 0"]) else {
+        return;
+    };
+    assert!(matches!(
+        kind,
+        crate::userland::lifecycle::ExitKind::Cooperative
+    ));
+    assert_eq!(code, 0);
 }
 
 /// `zsh -f +m -c 'echo hi'` — exercises the print/write path and
 /// cooperative exit.
 fn test_run_zsh_echo_command() {
-    let _ran = drive_zsh(&["-f", "+m", "-c", "echo hi"]);
+    let Some((kind, code)) = drive_zsh(&["-f", "+m", "-c", "echo hi"]) else {
+        return;
+    };
+    assert!(matches!(
+        kind,
+        crate::userland::lifecycle::ExitKind::Cooperative
+    ));
+    assert_eq!(code, 0);
 }
 
 /// `zsh -f +m -c 'pwd'` — proves getcwd, the pwd builtin, and the
 /// envp-driven path resolution work.
 fn test_run_zsh_pwd() {
-    let _ran = drive_zsh(&["-f", "+m", "-c", "pwd"]);
+    let Some((kind, code)) = drive_zsh(&["-f", "+m", "-c", "pwd"]) else {
+        return;
+    };
+    assert!(matches!(
+        kind,
+        crate::userland::lifecycle::ExitKind::Cooperative
+    ));
+    assert_eq!(code, 0);
+}
+
+/// Interactive zsh must source the staged global config and build an Agnoster
+/// prompt in-process, without leaving upstream's per-redraw `$()` fork in PS1.
+fn test_run_zsh_global_rc_agnoster_prompt() {
+    let command = r#"build_prompt; [[ "$PROMPT" == *$'\ue0b0'* ]] || exit 42; [[ "$PROMPT" != *'$('* ]] || exit 43; exit 0"#;
+    let Some((kind, code)) = drive_zsh(&["+m", "-ic", command]) else {
+        return;
+    };
+    assert!(matches!(
+        kind,
+        crate::userland::lifecycle::ExitKind::Cooperative
+    ));
+    assert_eq!(code, 0, "agnoster startup/prompt command failed");
 }
 
 fn test_run_fault_gp() {
@@ -1847,6 +1865,44 @@ fn test_dispatch_open_runtime_etc_passwd() {
     close.rax = nr::CLOSE;
     close.rdi = fd as u64;
     assert_eq!(syscall_dispatch(&mut close), 0);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// The shipped zsh startup chain is imported into the managed runtime `/etc`.
+fn test_dispatch_stat_runtime_zsh_config() {
+    assert!(
+        crate::fs::exists("/etc/zshrc"),
+        "managed /etc must import the staged zshrc"
+    );
+    assert!(
+        crate::fs::exists("/etc/zsh/functions/promptinit"),
+        "managed /etc must import the staged zsh function library"
+    );
+
+    setup_phase2_active_user();
+    for path in [
+        b"/etc/zshrc\0".as_slice(),
+        b"/etc/zsh/functions/promptinit\0".as_slice(),
+    ] {
+        let path_ptr = path.as_ptr() as u64;
+        let mut statbuf = [0u8; 144];
+        let buf_ptr = statbuf.as_mut_ptr() as u64;
+        let start = core::cmp::min(path_ptr, buf_ptr);
+        let end = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + statbuf.len() as u64);
+        abi::set_user_va_bounds(UserVaBounds { start, end });
+
+        let mut args = SyscallArgs::default();
+        args.rax = nr::STAT;
+        args.rdi = path_ptr;
+        args.rsi = buf_ptr;
+        let result = syscall_dispatch(&mut args);
+        assert_eq!(result, 0, "stat({:?}) failed", path);
+
+        let mode = u32::from_ne_bytes([statbuf[24], statbuf[25], statbuf[26], statbuf[27]]);
+        assert_eq!(mode & 0o170000, 0o100000, "expected regular file");
+    }
 
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
@@ -2746,6 +2802,82 @@ fn test_dispatch_pipe2_round_trip() {
     args.rsi = dst_ptr;
     args.rdx = 64;
     assert_eq!(syscall_dispatch(&mut args), 0);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// Zsh's `echo` builtin flushes prompt command-substitution output with
+/// `writev`. The pipe target must accept those vectors instead of returning
+/// ENOSYS and printing "write error: function not implemented" into the TTY.
+fn test_dispatch_writev_pipe_round_trip() {
+    #[repr(C)]
+    struct TestIovec {
+        base: u64,
+        len: u64,
+    }
+
+    setup_phase2_active_user();
+
+    let fds_buf = [0u8; 8];
+    let fds_ptr = fds_buf.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: fds_ptr,
+        end: fds_ptr + fds_buf.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::PIPE2;
+    args.rdi = fds_ptr;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let read_fd = i32::from_ne_bytes(fds_buf[0..4].try_into().unwrap());
+    let write_fd = i32::from_ne_bytes(fds_buf[4..8].try_into().unwrap());
+
+    let first = b"prompt_";
+    let second = b"segment";
+    let iovecs = [
+        TestIovec {
+            base: first.as_ptr() as u64,
+            len: first.len() as u64,
+        },
+        TestIovec {
+            base: second.as_ptr() as u64,
+            len: second.len() as u64,
+        },
+    ];
+    let iov_ptr = iovecs.as_ptr() as u64;
+    let start = core::cmp::min(
+        iov_ptr,
+        core::cmp::min(first.as_ptr() as u64, second.as_ptr() as u64),
+    );
+    let end = core::cmp::max(
+        iov_ptr + core::mem::size_of_val(&iovecs) as u64,
+        core::cmp::max(
+            first.as_ptr() as u64 + first.len() as u64,
+            second.as_ptr() as u64 + second.len() as u64,
+        ),
+    );
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::WRITEV;
+    args.rdi = write_fd as u64;
+    args.rsi = iov_ptr;
+    args.rdx = iovecs.len() as u64;
+    assert_eq!(syscall_dispatch(&mut args), 14);
+
+    let dst = [0u8; 32];
+    let dst_ptr = dst.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: dst_ptr,
+        end: dst_ptr + dst.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::READ;
+    args.rdi = read_fd as u64;
+    args.rsi = dst_ptr;
+    args.rdx = dst.len() as u64;
+    assert_eq!(syscall_dispatch(&mut args), 14);
+    assert_eq!(&dst[..14], b"prompt_segment");
 
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
@@ -4556,6 +4688,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_run_zsh_minimal_exit,
         &test_run_zsh_echo_command,
         &test_run_zsh_pwd,
+        &test_run_zsh_global_rc_agnoster_prompt,
         &test_run_fault_pf,
         &test_run_fault_gp,
         &test_run_bad_pointer_syscall,
@@ -4585,6 +4718,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_open_nonexistent_returns_enoent,
         &test_dispatch_open_writable_flag_returns_erofs,
         &test_dispatch_open_runtime_etc_passwd,
+        &test_dispatch_stat_runtime_zsh_config,
         &test_dispatch_open_etc_unmanaged_file_returns_enoent,
         &test_dispatch_open_etc_traversal_collapses,
         &test_dispatch_open_runtime_etc_for_write_returns_erofs,
@@ -4630,6 +4764,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_pipe_handle_clone_drop_tracks_counts,
         &test_pipe_short_write_at_capacity,
         &test_dispatch_pipe2_round_trip,
+        &test_dispatch_writev_pipe_round_trip,
         // Phase 5 PR-B: signal foundation
         &test_dispatch_rt_sigaction_round_trip,
         &test_dispatch_rt_sigaction_sigrtmax_does_not_panic,

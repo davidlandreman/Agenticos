@@ -3,11 +3,13 @@
 Statically-linked `zsh` (Z shell) for AgenticOS, built against musl
 + ncurses-widec via the host's `x86_64-linux-musl` cross-compiler.
 
-The Makefile fetches both source tarballs from upstream on first build,
-verifies SHA256, builds ncurses (libraries only, no progs) into a local
-prefix, then builds zsh against that prefix and ships a stripped static
-ET_EXEC at `build/zsh`. `build.sh` and `test.sh` stage that binary as
-`host_share/ZSH.ELF` so the guest can `run /HOST/ZSH.ELF`.
+The Makefile fetches both source tarballs from upstream on first build
+(zsh 5.9 comes from upstream's pinned `pub/old/` archive), verifies SHA256,
+builds ncurses (static library and headers only; no unused terminfo database)
+into a local prefix, then builds zsh against that prefix and ships a stripped
+static ET_EXEC at `build/zsh`. It also refreshes the pruned upstream function library under
+`userland/zsh-config/functions/`. `build.sh` and `test.sh` stage the binary as
+`host_share/ZSH.ELF` and the configuration under `host_share/ETC/`.
 
 See `docs/plans/2026-05-09-003-feat-zsh-on-agenticos-plan.md` for the
 overall plan; this directory implements U1.
@@ -56,6 +58,15 @@ zsh source plus ~3.5 MiB of ncurses source into `build/tarballs/`,
 extracts both, builds ncurses (~1 min) and then zsh (~30 s) on a recent
 laptop.
 
+Refresh only the committed function subset (no musl compiler required):
+
+```sh
+make -C userland/apps/zsh functions
+```
+
+The subset contains `promptinit`, `colors`, hook/version helpers, and the
+`vcs_info` core plus git backend required by the vendored agnoster theme.
+
 Override the toolchain:
 
 ```sh
@@ -70,7 +81,8 @@ make -C userland/apps/zsh MUSL_CC=/opt/musl-cross/bin/x86_64-linux-musl-gcc
 | `--disable-cap` | No libcap on AgenticOS. |
 | `--disable-pcre` | No libpcre on AgenticOS. |
 | `--disable-restricted-r` | Skip the `rzsh` restricted-shell symlink. |
-| `--disable-etcdir` and `--disable-z{shenv,shrc,login,profile,logout}` | Skip all `/etc/zsh*` lookups at startup. Equivalent to forced `--no-rcs --no-globalrcs` at build time — fewer `openat` calls during startup. |
+| default `etcdir` + global zshrc enabled | Interactive shells source the shipped `/etc/zshrc` before `$HOME/.zshrc`. The function path remains relocatable because `/etc/zshrc` sets `fpath`. |
+| `--disable-zshenv`, `--disable-zlogin`, `--disable-zprofile`, `--disable-zlogout` | Skip the unused non-interactive and login-shell global rc files while keeping `/etc/zshrc`. |
 | `--without-tcsetpgrp` | Belt-and-suspenders with the kernel's `ioctl(TIOCGPGRP) → -ENOTTY` trick (U5). Either alone should disable MONITOR; combining both removes a foot-gun. |
 | `--enable-multibyte` | Leave UTF-8 on. Disabling has been broken for years and we want UTF-8 in any case. |
 

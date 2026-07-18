@@ -73,17 +73,12 @@ window_clipping / compositor / window_manager_render / desktop_window
    4-byte packets; VirtIO tablet wheel events are also unplumbed.
    Shift+PgUp / Shift+PgDn scroll the view unconditionally.
 
-4. **Powerline-patched font.** `assets/system.ttf` is JetBrains Mono;
-   no glyphs at U+E0A0–E0B3. agnoster's separators render as `.notdef`
-   boxes. Swap the TTF (DejaVu Sans Mono for Powerline is permissively
-   licensed) and update `assets/system.ttf.LICENSE`.
-
-5. **Full line discipline in the master.** TerminalWindow still does
+4. **Full line discipline in the master.** TerminalWindow still does
    its own canonical-mode echo/backspace before pushing the line into
    the slave queue. The proper home for ICANON + ECHO + ISIG is the
    master input pipeline; future-work.
 
-6. **Screen resize on TerminalWindow resize.** When the window grows
+5. **Screen resize on TerminalWindow resize.** When the window grows
    or shrinks, the `Screen` inside `TerminalWindow` keeps its initial
    dimensions until the next `Screen::new`. TextWindow renders
    `min(screen_rows, textwindow_rows)`, so the worst case is blank
