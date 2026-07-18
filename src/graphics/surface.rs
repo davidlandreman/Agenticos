@@ -160,9 +160,12 @@ impl Surface {
     pub fn byte_len(&self) -> usize {
         self.pixels.len() * 4
     }
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn pixels(&self) -> &[PremulArgb] {
         &self.pixels
+    }
+    #[cfg(feature = "test")]
+    pub(crate) fn pixels_mut(&mut self) -> &mut [PremulArgb] {
+        &mut self.pixels
     }
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn damage(&self) -> &[Rect] {

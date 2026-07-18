@@ -35,6 +35,11 @@ CPU, and strict GPU mode fails. No stub is logged or presented as acceleration.
 The pinned startergo/Linux render-readback proof remains required before that
 gate can be opened.
 
+The concrete follow-up for that unfinished gate, including qualification of a
+side-by-side custom macOS QEMU, the narrow VirGL spike, production composition,
+and GPU Aero blur, is
+[`2026-07-17-004-feat-macos-virgl-gpu-compositor-plan.md`](2026-07-17-004-feat-macos-virgl-gpu-compositor-plan.md).
+
 ## Summary
 
 Add a second compositor implementation alongside the current immediate,

@@ -1,7 +1,11 @@
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 
 use crate::drivers::virtio::gpu::{ScanoutResource, VirtioGpu};
-use crate::graphics::composition::{CompositionEngine, CpuCompositionEngine, RenderStats};
+use crate::graphics::composition::{
+    CompositionEngine, CompositionEngineKind, CpuCompositionEngine, RenderStats,
+    VirglCompositionEngine,
+};
 use crate::graphics::scene::{Layer, SceneFrame};
 use crate::graphics::surface::{
     Surface, SurfaceBudget, SurfaceClass, SurfaceDesc, SurfaceError, SurfaceId,
@@ -26,7 +30,7 @@ pub struct RetainedRenderer {
     surfaces: BTreeMap<SurfaceId, Surface>,
     root_surfaces: BTreeMap<WindowId, SurfaceId>,
     bounds: BTreeMap<WindowId, Rect>,
-    engine: CpuCompositionEngine,
+    engine: Box<dyn CompositionEngine>,
     budget: SurfaceBudget,
     last_stats: RenderStats,
     virtio_presenter: Option<(VirtioGpu, ScanoutResource)>,
@@ -34,10 +38,31 @@ pub struct RetainedRenderer {
 
 impl RetainedRenderer {
     pub fn new(width: u32, height: u32) -> Result<Self, RetainedRendererError> {
+        let engine = Box::new(
+            CpuCompositionEngine::new(width, height)
+                .map_err(|_| RetainedRendererError::Composition)?,
+        );
+        Self::with_engine(width, height, engine, true)
+    }
+
+    pub fn new_gpu(width: u32, height: u32) -> Result<Self, RetainedRendererError> {
+        let engine = Box::new(
+            VirglCompositionEngine::new(width, height)
+                .map_err(|_| RetainedRendererError::Composition)?,
+        );
+        Self::with_engine(width, height, engine, false)
+    }
+
+    fn with_engine(
+        width: u32,
+        height: u32,
+        engine: Box<dyn CompositionEngine>,
+        allow_virtio_presenter: bool,
+    ) -> Result<Self, RetainedRendererError> {
         let output_bytes = SurfaceDesc::new(width, height).byte_len()?;
         let mut budget = SurfaceBudget::new(DEFAULT_SURFACE_BUDGET);
         budget.reserve(SurfaceClass::Output, output_bytes)?;
-        let virtio_presenter = VirtioGpu::discover().ok().and_then(|mut gpu| {
+        let virtio_presenter = allow_virtio_presenter.then(|| VirtioGpu::discover().ok()).flatten().and_then(|mut gpu| {
             match gpu.create_scanout(width, height) {
                 Ok(resource) => {
                     crate::debug_info!("retained presenter candidate=virtio-gpu-2d scanout={} size={}x{}", resource.scanout_id, width, height);
@@ -53,12 +78,15 @@ impl RetainedRenderer {
             surfaces: BTreeMap::new(),
             root_surfaces: BTreeMap::new(),
             bounds: BTreeMap::new(),
-            engine: CpuCompositionEngine::new(width, height)
-                .map_err(|_| RetainedRendererError::Composition)?,
+            engine,
             budget,
             last_stats: RenderStats::default(),
             virtio_presenter,
         })
+    }
+
+    pub fn engine_kind(&self) -> CompositionEngineKind {
+        self.engine.kind()
     }
 
     pub fn ensure_surface(
@@ -162,6 +190,31 @@ impl RetainedRenderer {
     }
     pub fn output_mut(&mut self) -> &mut Surface {
         self.engine.output_mut()
+    }
+
+    pub fn uses_direct_scanout(&self) -> bool {
+        self.engine.uses_direct_scanout()
+    }
+
+    pub fn present_direct(&mut self, damage: &[Rect]) -> Result<u64, RetainedRendererError> {
+        self.engine
+            .present_direct(damage)
+            .map_err(|_| RetainedRendererError::Composition)
+    }
+
+    pub fn hardware_cursor_needs_image(&self) -> bool {
+        self.engine.hardware_cursor_needs_image()
+    }
+
+    pub fn update_hardware_cursor(
+        &mut self,
+        x: u32,
+        y: u32,
+        pixels: Option<&[u32]>,
+    ) -> Result<bool, RetainedRendererError> {
+        self.engine
+            .update_hardware_cursor(x, y, pixels)
+            .map_err(|_| RetainedRendererError::Composition)
     }
 
     /// Capture the canonical composed output rather than the boot framebuffer.

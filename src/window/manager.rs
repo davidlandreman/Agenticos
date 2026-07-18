@@ -16,7 +16,7 @@ use super::{
     Screen, ScreenId, ScreenMode, Window, WindowId,
 };
 use crate::drivers::mouse;
-use crate::graphics::composition::RenderStats;
+use crate::graphics::composition::{timestamp_cycles, RenderStats};
 use crate::graphics::compositor::Compositor;
 use crate::graphics::present::{BootFramebufferPresenter, Presenter};
 use alloc::boxed::Box;
@@ -76,15 +76,33 @@ impl WindowManager {
             crate::debug_warn!("compositor_request=invalid fallback=legacy");
         }
 
-        // No accelerated engine is exposed until the required negotiated
-        // capset and deterministic alpha/readback smoke test exist.
-        let mut retained_candidate = if request == super::renderer::CompositorRequest::Legacy {
-            None
+        let mut gpu_candidate = if matches!(
+            request,
+            super::renderer::CompositorRequest::Gpu | super::renderer::CompositorRequest::Auto
+        ) {
+            match RetainedRenderer::new_gpu(width, height) {
+                Ok(renderer) => Some(renderer),
+                Err(error) => {
+                    crate::debug_warn!("VirGL compositor initialization failed: {:?}", error);
+                    None
+                }
+            }
         } else {
-            RetainedRenderer::new(width, height).ok()
+            None
         };
-        let selection = select_renderer(request, strict, retained_candidate.is_some(), false)
-            .unwrap_or_else(|error| panic!("strict compositor initialization failed: {:?}", error));
+        let mut retained_candidate =
+            if request == super::renderer::CompositorRequest::Legacy || gpu_candidate.is_some() {
+                None
+            } else {
+                RetainedRenderer::new(width, height).ok()
+            };
+        let selection = select_renderer(
+            request,
+            strict,
+            retained_candidate.is_some(),
+            gpu_candidate.is_some(),
+        )
+        .unwrap_or_else(|error| panic!("strict compositor initialization failed: {:?}", error));
         crate::window::theme::init_boot_policy(selection.selected);
         let renderer = match selection.selected {
             RendererKind::RetainedCpu => RendererState::Retained(
@@ -93,9 +111,14 @@ impl WindowManager {
                     .expect("retained candidate selected without initialization"),
             ),
             RendererKind::Legacy => RendererState::Legacy,
-            RendererKind::Virgl => panic!("VirGL selected without a passing capability smoke test"),
+            RendererKind::Virgl => RendererState::Retained(
+                gpu_candidate
+                    .take()
+                    .expect("VirGL candidate selected without initialization"),
+            ),
         };
         let presenter = match &renderer {
+            RendererState::Retained(renderer) if renderer.uses_direct_scanout() => "virgl-direct",
             RendererState::Retained(renderer) if renderer.has_virtio_presenter() => "virtio-gpu-2d",
             _ => "boot-framebuffer",
         };
@@ -149,7 +172,7 @@ impl WindowManager {
     }
 
     #[expect(dead_code, reason = "intentional kernel API surface")]
-    pub const fn compositor_capabilities(&self) -> super::CompositorCapabilities {
+    pub fn compositor_capabilities(&self) -> super::CompositorCapabilities {
         match self.renderer.kind() {
             RendererKind::Legacy => super::CompositorCapabilities {
                 opacity: false,
@@ -784,6 +807,9 @@ impl WindowManager {
 
         // Early exit if nothing needs rendering
         if !self.compositor.needs_render() && !mouse_moved {
+            // An idle sample is explicitly zero-work. Do not leave the prior
+            // active frame's counters visible to diagnostics.
+            self.last_render_stats = RenderStats::default();
             return; // Nothing to update - this is the key optimization!
         }
 
@@ -798,8 +824,42 @@ impl WindowManager {
                     self.compositor.end_frame();
                 }
                 Err(error) => {
-                    crate::debug_warn!("retained compositor failed: {:?}; fallback=legacy", error);
-                    // `renderer` already contains a fully valid legacy state.
+                    if self.renderer_selection.selected == RendererKind::Virgl
+                        && self.renderer_selection.strict
+                    {
+                        panic!("strict VirGL compositor failed at runtime: {:?}", error);
+                    }
+                    if self.renderer_selection.selected == RendererKind::Virgl {
+                        // Release the sole VirtIO-GPU owner before the CPU
+                        // renderer probes an optional 2D presenter.
+                        drop(retained);
+                        match RetainedRenderer::new(
+                            self.graphics_device.width() as u32,
+                            self.graphics_device.height() as u32,
+                        ) {
+                            Ok(cpu) => {
+                                crate::debug_warn!(
+                                    "VirGL compositor failed: {:?}; fallback=retained CPU",
+                                    error
+                                );
+                                self.renderer = RendererState::Retained(cpu);
+                                self.renderer_selection.selected = RendererKind::RetainedCpu;
+                                self.renderer_selection.fallback_reason =
+                                    Some("VirGL runtime failure");
+                            }
+                            Err(_) => {
+                                crate::debug_warn!(
+                                    "VirGL compositor and retained CPU fallback failed: {:?}; fallback=legacy",
+                                    error
+                                );
+                            }
+                        }
+                    } else {
+                        crate::debug_warn!(
+                            "retained compositor failed: {:?}; fallback=legacy",
+                            error
+                        );
+                    }
                     self.compositor.end_frame();
                     self.compositor.dirty.mark_full_repaint();
                     self.render();
@@ -885,6 +945,7 @@ impl WindowManager {
             window.clear_composition_dirty();
         }
         self.last_render_stats = RenderStats {
+            frames: 1,
             output_pixels_damaged: present_regions.iter().map(Rect::area).sum(),
             presents: 1,
             ..RenderStats::default()
@@ -906,6 +967,33 @@ impl WindowManager {
         }
 
         let regions: Vec<Rect> = self.compositor.dirty.dirty_regions().collect();
+        let direct_scanout = retained.uses_direct_scanout();
+        if direct_scanout
+            && !full_repaint
+            && regions.is_empty()
+            && previous_cursor_position.is_some()
+        {
+            let presentation_started = timestamp_cycles();
+            let cursor_pixels = retained
+                .hardware_cursor_needs_image()
+                .then(CursorRenderer::hardware_argb_64);
+            retained.update_hardware_cursor(
+                mouse_x.max(0) as u32,
+                mouse_y.max(0) as u32,
+                cursor_pixels.as_deref(),
+            )?;
+            self.last_render_stats = RenderStats {
+                frames: 1,
+                presents: 1,
+                cursor_updates: 1,
+                presentation_cycles: timestamp_cycles().saturating_sub(presentation_started),
+                ..RenderStats::default()
+            };
+            for window in self.window_registry.values_mut() {
+                window.clear_composition_dirty();
+            }
+            return Ok(());
+        }
         let roots = self.collect_layer_roots();
         let decorated_roots: Vec<(WindowId, Rect)> = roots
             .iter()
@@ -933,21 +1021,24 @@ impl WindowManager {
         // overlay, then present both it and the newly drawn footprint. Keep
         // these rectangles out of `regions` so cursor-only movement never
         // asks widgets to repaint or rerasterizes their retained surfaces.
-        if let Some(previous) = previous_cursor_position {
-            Self::add_present_region(
-                &mut compose_regions,
-                CursorRenderer::bounds_at(previous.x, previous.y),
-                screen_bounds,
-            );
-            Self::add_present_region(
-                &mut compose_regions,
-                CursorRenderer::bounds_at(mouse_x, mouse_y),
-                screen_bounds,
-            );
+        if !direct_scanout {
+            if let Some(previous) = previous_cursor_position {
+                Self::add_present_region(
+                    &mut compose_regions,
+                    CursorRenderer::bounds_at(previous.x, previous.y),
+                    screen_bounds,
+                );
+                Self::add_present_region(
+                    &mut compose_regions,
+                    CursorRenderer::bounds_at(mouse_x, mouse_y),
+                    screen_bounds,
+                );
+            }
         }
 
         let mut windows_rasterized = 0u64;
         let mut surface_pixels_updated = 0u64;
+        let mut surface_raster_cycles = 0u64;
         for ((root, _), (_, bounds)) in roots.iter().zip(decorated_roots.iter()) {
             let previous = retained.previous_bounds(*root);
             let (surface_id, created) = retained.ensure_surface(*root, *bounds)?;
@@ -992,6 +1083,7 @@ impl WindowManager {
                     .collect()
             };
             for repaint in repaint_regions {
+                let raster_started = timestamp_cycles();
                 let local = Rect::new(
                     repaint.x - bounds.x,
                     repaint.y - bounds.y,
@@ -1019,6 +1111,8 @@ impl WindowManager {
                         &mut canvas,
                     ) as u64);
                 surface_pixels_updated = surface_pixels_updated.saturating_add(local.area());
+                surface_raster_cycles = surface_raster_cycles
+                    .saturating_add(timestamp_cycles().saturating_sub(raster_started));
             }
         }
 
@@ -1034,10 +1128,9 @@ impl WindowManager {
         compose_regions = Self::expand_backdrop_damage(&scene, &compose_regions);
         let mut stats = retained.compose(&scene, &compose_regions)?;
 
-        // Retained cursor overlay: recomposition restores the old location;
-        // drawing into the canonical output makes the cursor topmost without
-        // framebuffer background save/restore.
-        {
+        // CPU composition uses an output-surface overlay. Direct VirGL
+        // scanout keeps the pointer on the dedicated hardware cursor plane.
+        if !direct_scanout {
             let output = retained.output_mut();
             let mut canvas = SurfaceCanvas::new(
                 output,
@@ -1047,32 +1140,71 @@ impl WindowManager {
             self.cursor.draw(mouse_x, mouse_y, &mut canvas);
         }
 
-        let presented_by_virtio = retained.present_virtio(&compose_regions)?;
+        let presentation_started = timestamp_cycles();
+        let presented_by_virtio = if direct_scanout {
+            stats.scanout_flushes = retained.present_direct(&compose_regions)?;
+            let cursor_pixels = retained
+                .hardware_cursor_needs_image()
+                .then(CursorRenderer::hardware_argb_64);
+            if retained.update_hardware_cursor(
+                mouse_x.max(0) as u32,
+                mouse_y.max(0) as u32,
+                cursor_pixels.as_deref(),
+            )? {
+                stats.cursor_updates = 1;
+            }
+            true
+        } else {
+            retained.present_virtio(&compose_regions)?
+        };
         if !presented_by_virtio {
             let mut presenter = BootFramebufferPresenter::new(&mut *self.graphics_device);
             presenter
                 .present(retained.output(), &compose_regions)
                 .map_err(|_| super::renderer::RetainedRendererError::Composition)?;
         }
+        let presentation_cycles = timestamp_cycles().saturating_sub(presentation_started);
+        stats.frames = 1;
         stats.windows_rasterized = windows_rasterized;
         stats.surface_pixels_updated = surface_pixels_updated;
         stats.presents = 1;
+        stats.surface_raster_cycles = surface_raster_cycles;
+        stats.presentation_cycles = presentation_cycles;
         self.last_render_stats = stats;
         for window in self.window_registry.values_mut() {
             window.clear_composition_dirty();
         }
-        crate::debug_trace!(
-            "render_stats renderer=retained engine=cpu presenter={} windows={} surface_pixels={} layers={} upload_bytes={} output_pixels={} presents={} surface_bytes={} surface_peak={}",
-            if presented_by_virtio { "virtio-gpu-2d" } else { "boot-framebuffer" },
+        if super::renderer::render_stats_enabled() {
+            let engine = match retained.engine_kind() {
+                crate::graphics::composition::CompositionEngineKind::Cpu => "cpu",
+                crate::graphics::composition::CompositionEngineKind::Virgl => "virgl",
+            };
+            crate::debug_info!(
+            "render_stats renderer={} engine={} presenter={} frames={} windows={} surface_pixels={} layers={} upload_bytes={} readback_bytes={} output_pixels={} scanout_flushes={} cursor_updates={} presents={} cycles_raster={} cycles_upload={} cycles_compose={} cycles_blur={} cycles_fence={} cycles_readback={} cycles_present={} surface_bytes={} surface_peak={}",
+            if engine == "virgl" { "gpu" } else { "retained" },
+            engine,
+            if direct_scanout { "virgl-direct" } else if presented_by_virtio { "virtio-gpu-2d" } else { "boot-framebuffer" },
+            stats.frames,
             stats.windows_rasterized,
             stats.surface_pixels_updated,
             stats.layers_composed,
             stats.texture_bytes_uploaded,
+            stats.gpu_readback_bytes,
             stats.output_pixels_damaged,
+            stats.scanout_flushes,
+            stats.cursor_updates,
             stats.presents,
+            stats.surface_raster_cycles,
+            stats.texture_upload_cycles,
+            stats.composition_cycles,
+            stats.backdrop_blur_cycles,
+            stats.fence_wait_cycles,
+            stats.gpu_readback_cycles,
+            stats.presentation_cycles,
             retained.budget().total(),
             retained.budget().peak_bytes(),
-        );
+            );
+        }
         Ok(())
     }
 

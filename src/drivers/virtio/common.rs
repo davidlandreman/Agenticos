@@ -586,6 +586,7 @@ pub struct VirtioDevice {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtioInitError {
+    ResetTimeout { status: u8 },
     MissingRequiredFeatures { required: u64, offered: u64 },
     FeaturesRejected,
 }
@@ -770,12 +771,19 @@ impl VirtioDevice {
     }
 
     /// Reset the device
-    pub fn reset(&self) {
+    pub fn reset(&self) -> bool {
+        const RESET_SPINS: usize = 20_000_000;
         self.write_status(0);
         // Wait for reset to complete
-        while self.read_status() != 0 {
+        for _ in 0..RESET_SPINS {
+            if self.read_status() == 0 {
+                return true;
+            }
             core::hint::spin_loop();
         }
+        let status = self.read_status();
+        crate::debug_error!("VirtIO reset timed out with status=0x{:02x}", status);
+        false
     }
 
     /// Read device features (32 bits at a time)
@@ -867,7 +875,11 @@ impl VirtioDevice {
     /// negotiated subset. The device is left at FEATURES_OK so callers can
     /// configure every queue before setting DRIVER_OK.
     pub fn begin_init(&self, required: u64, accepted: u64) -> Result<u64, VirtioInitError> {
-        self.reset();
+        if !self.reset() {
+            return Err(VirtioInitError::ResetTimeout {
+                status: self.read_status(),
+            });
+        }
         self.write_status(status::ACKNOWLEDGE);
         self.write_status(status::ACKNOWLEDGE | status::DRIVER);
 
@@ -902,7 +914,9 @@ impl VirtioDevice {
         supported_low: u32,
         supported_high: u32,
     ) -> Option<(u32, u32)> {
-        self.reset();
+        if !self.reset() {
+            return None;
+        }
         self.write_status(status::ACKNOWLEDGE);
         self.write_status(status::ACKNOWLEDGE | status::DRIVER);
         let device_low = self.read_device_features(0);

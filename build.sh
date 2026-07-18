@@ -56,6 +56,7 @@ if [ "$HELP" = true ]; then
     echo "                          AGENTICOS_QEMU_MEMORY (for example 4G)."
     echo "                          Rendering: AGENTICOS_COMPOSITOR=legacy|retained|gpu|auto"
     echo "                          AGENTICOS_GPU_STRICT=1 refuses GPU fallback."
+    echo "                          AGENTICOS_RENDER_STATS=1 logs per-stage frame cycles."
     echo "                          AGENTICOS_THEME=classic|aero|auto (default auto)."
     echo "                          AGENTICOS_QEMU_2D=on forces plain VirtIO 2D scanout;"
     echo "                          auto (default) avoids its black Cocoa window on macOS."
@@ -148,6 +149,11 @@ if [ "$RUN_QEMU" = true ]; then
     if [ -z "$QEMU_BIN" ] || [ ! -x "$QEMU_BIN" ]; then
         echo "❌ QEMU binary is missing or not executable: ${QEMU_BIN:-<unset>}" >&2
         exit 1
+    fi
+    # Freeze Homebrew's `opt` symlink (or any PATH result) to one executable
+    # before capability probing. The exact same resolved file is launched.
+    if command -v realpath >/dev/null 2>&1; then
+        QEMU_BIN=$(realpath "$QEMU_BIN")
     fi
     # shellcheck source=scripts/qemu-compositor.sh
     . "$(pwd)/scripts/qemu-compositor.sh"
