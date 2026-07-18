@@ -96,6 +96,10 @@ pub struct Process {
     /// Phase 2: file-descriptor table. Slots 0/1/2 are pinned to the
     /// standard streams; slots 3..N hold `Arc<File>` opened via `openat`.
     pub fd_table: FdTable,
+    /// Process file-creation mask. Inherited across fork and retained across
+    /// execve, matching POSIX process state even though filesystem permission
+    /// enforcement remains intentionally minimal.
+    pub umask: u32,
     /// Restart-stable deadline state for a blocking network syscall.
     pub network_wait: Option<NetworkWaitState>,
     /// Linux ITIMER_REAL state, represented against the monotonic 100 Hz PIT.
@@ -401,6 +405,7 @@ impl Process {
             brk_base: 0,
             mmap_next: 0,
             fd_table: FdTable::new(),
+            umask: 0o022,
             network_wait: None,
             real_timer: RealTimerState::disarmed(),
             sleep_deadline: None,
@@ -789,7 +794,10 @@ pub fn wake_ring3_blocked_on_input(terminal_id: Option<crate::window::WindowId>)
         .ring3_blocked
         .iter()
         .filter_map(|(pid, reason)| {
-            if matches!(reason, Ring3BlockReason::WaitingForInput) {
+            if matches!(
+                reason,
+                Ring3BlockReason::WaitingForInput | Ring3BlockReason::WaitingForNetwork { .. }
+            ) {
                 Some(*pid)
             } else {
                 None
@@ -920,7 +928,12 @@ pub fn kill_ring3_processes_on_terminal(terminal_id: crate::window::WindowId) {
 /// follow-up wake after the lock is released (see
 /// `close_handler` / `dup2_handler`). Spin-deadlock-safe.
 pub fn wake_ring3_blocked_on_pipe_readable() {
-    wake_ring3_blocked_by(|r| matches!(r, Ring3BlockReason::WaitingForPipeRead));
+    wake_ring3_blocked_by(|r| {
+        matches!(
+            r,
+            Ring3BlockReason::WaitingForPipeRead | Ring3BlockReason::WaitingForNetwork { .. }
+        )
+    });
 }
 
 /// Wake every ring-3 process blocked on a pipe write. Called when a
@@ -929,7 +942,35 @@ pub fn wake_ring3_blocked_on_pipe_readable() {
 /// `try_lock` discipline matches
 /// [`wake_ring3_blocked_on_pipe_readable`].
 pub fn wake_ring3_blocked_on_pipe_writable() {
-    wake_ring3_blocked_by(|r| matches!(r, Ring3BlockReason::WaitingForPipeWrite));
+    wake_ring3_blocked_by(|r| {
+        matches!(
+            r,
+            Ring3BlockReason::WaitingForPipeWrite | Ring3BlockReason::WaitingForNetwork { .. }
+        )
+    });
+}
+
+/// Wake the owner of a GUI queue when a new event becomes readable. This
+/// covers both the legacy blocking `gui_next_event` syscall and processes
+/// parked in poll/select on a GUI event descriptor.
+pub fn wake_ring3_blocked_on_gui_event(pid: u32) {
+    if pid == KERNEL_PID {
+        return;
+    }
+    let Some(mut table) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let should_wake = matches!(
+        table.ring3_blocked.get(&pid),
+        Some(Ring3BlockReason::WaitingForGuiEvent | Ring3BlockReason::WaitingForNetwork { .. })
+    );
+    if should_wake {
+        table.ring3_blocked.remove(&pid);
+    }
+    drop(table);
+    if should_wake {
+        mark_ring3_ready(pid);
+    }
 }
 
 /// Wake network waiters after a socket state change. Deadline expiration is
@@ -1484,6 +1525,7 @@ pub fn install_new_process_opt(
         brk_base,
         mmap_next: mmap_base,
         fd_table,
+        umask: 0o022,
         network_wait: None,
         real_timer: RealTimerState::disarmed(),
         sleep_deadline: None,

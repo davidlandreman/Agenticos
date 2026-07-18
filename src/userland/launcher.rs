@@ -120,6 +120,9 @@ pub(crate) fn prepare_user_binary_unstarted(
     let (file, bytes) = read_file_bytes(path)?;
     #[cfg(feature = "test")]
     TEST_SETUP_READS.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    let mut at_random = [0u8; 16];
+    crate::random::fill_bytes(&mut at_random)
+        .map_err(|e| format!("entropy unavailable: {:?}", e))?;
     let _setup_guard = BINARY_SETUP_MUTEX.lock();
 
     let aspace = crate::userland::address_space::AddressSpace::new()
@@ -157,6 +160,7 @@ pub(crate) fn prepare_user_binary_unstarted(
                 envp,
                 Some(aspace),
                 terminal_id,
+                &at_random,
             )
             .map_err(|e| format!("setup_user_process: {:?}", e))
         });

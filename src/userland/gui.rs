@@ -4,7 +4,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
 use crate::arch::x86_64::interrupt_guard::InterruptMutex;
-use crate::userland::lifecycle::{Ring3BlockReason, KERNEL_PID, PROCESS_TABLE};
+use crate::userland::lifecycle::KERNEL_PID;
 use crate::window::event::{Event, KeyCode, MouseEventType};
 use crate::window::WindowId;
 
@@ -138,7 +138,7 @@ pub fn enqueue_event(pid: u32, event: GuiEvent) {
             push_bounded(state, event);
         }
     }
-    wake_ring3_blocked_on_gui_event(pid);
+    crate::userland::lifecycle::wake_ring3_blocked_on_gui_event(pid);
 }
 
 /// Notify every GUI-owning process of a process-global theme transition.
@@ -204,7 +204,7 @@ fn broadcast_global_event(event: GuiEvent) {
             .collect()
     };
     for pid in wake {
-        wake_ring3_blocked_on_gui_event(pid);
+        crate::userland::lifecycle::wake_ring3_blocked_on_gui_event(pid);
     }
 }
 
@@ -223,25 +223,11 @@ pub fn pop_event(pid: u32) -> Option<GuiEvent> {
         .and_then(|state| state.events.pop_front())
 }
 
-fn wake_ring3_blocked_on_gui_event(pid: u32) {
-    if pid == KERNEL_PID {
-        return;
-    }
-    let should_wake = {
-        let mut table = PROCESS_TABLE.lock();
-        if matches!(
-            table.ring3_blocked.get(&pid),
-            Some(Ring3BlockReason::WaitingForGuiEvent)
-        ) {
-            table.ring3_blocked.remove(&pid);
-            true
-        } else {
-            false
-        }
-    };
-    if should_wake {
-        crate::userland::lifecycle::mark_ring3_ready(pid);
-    }
+pub fn has_events(pid: u32) -> bool {
+    GUI_STATES
+        .lock()
+        .get(&pid)
+        .is_some_and(|state| !state.events.is_empty())
 }
 
 /// Drain GUI state before taking the window-manager lock, keeping lock order

@@ -40,9 +40,9 @@ at the start and/or end:
 Flags:
   --skip-userland     Skip building optional userland apps and hello-cpp
                       (mandatory committed compiler-compat, network, and
-                      BusyBox fixtures are still staged). Wins over
+                      prebuilt-managed fixtures are still staged). Wins over
                       --rebuild-userland if both are passed.
-  --rebuild-userland  Force rebuild of prebuilt-managed userland apps (zsh).
+  --rebuild-userland  Force rebuild of prebuilt-managed userland apps.
                       Default copies the committed userland/prebuilt/ELF into
                       host_share/. Equivalent: REBUILD_USERLAND=1 env.
   -l, --list          Print available modules and exit (no build/QEMU).
@@ -150,6 +150,10 @@ case "$TEST_DATA_SNAPSHOT" in on) DATA_DRIVE="format=raw,file=$DATA_IMAGE,if=non
 echo "Data disk: $DATA_IMAGE -> /data (writable, snapshot=$TEST_DATA_SNAPSHOT)"
 FORCE_DIRTY_MOUNT="${AGENTICOS_FORCE_DIRTY_MOUNT:-0}"
 case "$FORCE_DIRTY_MOUNT" in 0|1) ;; *) echo "AGENTICOS_FORCE_DIRTY_MOUNT must be 0 or 1" >&2; exit 2 ;; esac
+if [ ! -r /dev/urandom ]; then
+    echo "Host entropy source /dev/urandom is missing or unreadable" >&2
+    exit 1
+fi
 QEMU_ARGS=(
     -drive "format=raw,file=$BIOS_IMAGE,if=none,id=agenticos-root,readonly=on"
     -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-root,serial=agenticos-root,bootindex=1"
@@ -157,6 +161,8 @@ QEMU_ARGS=(
     -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-host,serial=agenticos-host"
     -drive "$DATA_DRIVE"
     -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-data,serial=agenticos-data"
+    -object "rng-random,id=agenticos-rng,filename=/dev/urandom"
+    -device "virtio-rng-pci,disable-legacy=on,rng=agenticos-rng"
     -fw_cfg "name=opt/agenticos/force_dirty_mount,string=$FORCE_DIRTY_MOUNT"
     -serial stdio
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04"

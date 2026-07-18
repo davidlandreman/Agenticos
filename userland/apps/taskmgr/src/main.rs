@@ -19,10 +19,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use dialogs::{DialogStatus, MessageBox, MessageChoice};
 use gui::{
-    Button, Column, ColumnListEvent, ColumnListView, ColumnRow, TabBar, TimeSeriesGraph, Window,
-    COLOR_ACCENT2, COLOR_BORDER, COLOR_HIGHLIGHT, COLOR_PANEL, COLOR_TEXT, COLOR_TEXT_DIM,
-    COLOR_WHITE, GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE, GUI_MOUSE_DOWN,
-    GUI_MOUSE_SCROLL,
+    decode_control_input, Button, Column, ColumnListEvent, ColumnListView, ColumnRow, ControlInput,
+    PointerKind, TabBar, TimeSeriesGraph, Window, COLOR_ACCENT2, COLOR_BORDER, COLOR_HIGHLIGHT,
+    COLOR_PANEL, COLOR_TEXT, COLOR_TEXT_DIM, COLOR_WHITE, GUI_EVENT_CLOSE, GUI_EVENT_KEY,
+    GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
 };
 use runtime::GuiEvent;
 use sampler::{CpuTimes, Snapshot};
@@ -491,52 +491,48 @@ impl TaskMgr {
         }
     }
 
-    fn handle_mouse(&mut self, payload: [u32; 6]) {
-        let x = payload[0] as i32;
-        let y = payload[1] as i32;
-        let action = payload[3];
-        if action == GUI_MOUSE_SCROLL {
-            let delta = payload[5] as i32;
-            let list = match self.tabs.active {
-                TAB_PROCESSES => &mut self.proc_list,
-                TAB_NETWORK => &mut self.socket_list,
-                _ => return,
-            };
-            list.scroll(delta);
-            self.dirty = true;
+    fn handle_mouse(&mut self, event: &GuiEvent) {
+        let Some(ControlInput::Pointer(input)) = decode_control_input(event) else {
             return;
-        }
-        if action != GUI_MOUSE_DOWN || payload[2] & 1 == 0 {
-            return;
-        }
-        if let Some(tab) = self.tabs.hit(x, y) {
-            if tab != self.tabs.active {
-                self.tabs.active = tab;
-                self.dirty = true;
-            }
-            return;
-        }
-        match self.tabs.active {
-            TAB_PROCESSES => {
-                if self.end_task.hit(x, y) {
-                    self.request_end_task();
-                    return;
-                }
-                match self.proc_list.click(x, y) {
-                    ColumnListEvent::None => {}
-                    ColumnListEvent::Activated(_) => {
-                        self.dirty = true;
-                        self.request_end_task();
-                    }
-                    _ => self.dirty = true,
-                }
-            }
-            TAB_NETWORK => {
-                if self.socket_list.click(x, y) != ColumnListEvent::None {
+        };
+        if matches!(input.kind, PointerKind::Down) {
+            if let Some(tab) = self.tabs.hit(input.x, input.y) {
+                if tab != self.tabs.active {
+                    self.tabs.active = tab;
                     self.dirty = true;
                 }
+                return;
             }
-            _ => {}
+        }
+        if self.tabs.active == TAB_PROCESSES {
+            let enabled = self
+                .proc_list
+                .selected_row()
+                .map(|row| !row.dim)
+                .unwrap_or(false);
+            self.end_task.set_enabled(enabled);
+            let response = self.end_task.handle_pointer(input);
+            if response.action == Some(gui::ButtonAction::Activated) {
+                self.request_end_task();
+                return;
+            }
+            if response.consumed {
+                self.dirty |= response.repaint;
+                return;
+            }
+        }
+        let response = match self.tabs.active {
+            TAB_PROCESSES => self.proc_list.handle_pointer(input),
+            TAB_NETWORK => self.socket_list.handle_pointer(input),
+            _ => return,
+        };
+        if response.repaint || response.consumed {
+            self.dirty = true;
+        }
+        if let Some(ColumnListEvent::Activated(_)) = response.action {
+            if self.tabs.active == TAB_PROCESSES {
+                self.request_end_task();
+            }
         }
     }
 
@@ -571,7 +567,7 @@ impl TaskMgr {
                 self.handle_key(event.payload);
             }
             GUI_EVENT_MOUSE if self.modal.is_none() => {
-                self.handle_mouse(event.payload);
+                self.handle_mouse(&event);
             }
             _ => {}
         }
@@ -608,7 +604,8 @@ impl TaskMgr {
                     .selected_row()
                     .map(|r| !r.dim)
                     .unwrap_or(false);
-                self.end_task.draw(canvas, enabled);
+                self.end_task.set_enabled(enabled);
+                self.end_task.draw_control(canvas, false);
                 if !enabled {
                     canvas.draw_text(
                         self.proc_list.x,

@@ -13,209 +13,13 @@ use dialogs::{
     ModalOutcome,
 };
 use gui::{
-    next_boundary, previous_boundary, theme, Canvas, MenuBar, Window, FONT_CELL_WIDTH,
-    FONT_LINE_HEIGHT, GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
-    GUI_MOUSE_DOWN, GUI_MOUSE_MOVE, GUI_MOUSE_SCROLL,
+    decode_control_input, theme, ControlInput, MenuBar, Rect, TextArea, TextAreaAction,
+    TextAreaOptions, Window, GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
+    GUI_MOUSE_DOWN, GUI_MOUSE_MOVE,
 };
 
 const FILE_ITEMS: &[&str] = &["New", "Open...", "Save", "Save As...", "Exit"];
 const STATUS_HEIGHT: u32 = 18;
-const LINE_HEIGHT: u32 = FONT_LINE_HEIGHT as u32 + 2;
-
-struct Editor {
-    text: String,
-    cursor: usize,
-    anchor: Option<usize>,
-    first_line: usize,
-}
-
-impl Editor {
-    fn new() -> Self {
-        Self {
-            text: String::new(),
-            cursor: 0,
-            anchor: None,
-            first_line: 0,
-        }
-    }
-
-    fn set_text(&mut self, text: String) {
-        self.text = text;
-        self.cursor = 0;
-        self.anchor = None;
-        self.first_line = 0;
-    }
-
-    fn selection(&self) -> Option<(usize, usize)> {
-        let anchor = self.anchor?;
-        if anchor == self.cursor {
-            None
-        } else {
-            Some((anchor.min(self.cursor), anchor.max(self.cursor)))
-        }
-    }
-
-    fn delete_selection(&mut self) -> bool {
-        let Some((start, end)) = self.selection() else {
-            return false;
-        };
-        self.text.replace_range(start..end, "");
-        self.cursor = start;
-        self.anchor = None;
-        true
-    }
-
-    fn begin_move(&mut self, shift: bool) {
-        if shift {
-            if self.anchor.is_none() {
-                self.anchor = Some(self.cursor);
-            }
-        } else {
-            self.anchor = None;
-        }
-    }
-
-    fn insert(&mut self, character: char) {
-        self.delete_selection();
-        self.text.insert(self.cursor, character);
-        self.cursor += character.len_utf8();
-    }
-
-    fn backspace(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
-        if self.cursor == 0 {
-            return false;
-        }
-        let previous = previous_boundary(&self.text, self.cursor);
-        self.text.replace_range(previous..self.cursor, "");
-        self.cursor = previous;
-        true
-    }
-
-    fn delete(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
-        if self.cursor == self.text.len() {
-            return false;
-        }
-        let next = next_boundary(&self.text, self.cursor);
-        self.text.replace_range(self.cursor..next, "");
-        true
-    }
-
-    fn move_horizontal(&mut self, right: bool, shift: bool) {
-        self.begin_move(shift);
-        self.cursor = if right {
-            if self.cursor < self.text.len() {
-                next_boundary(&self.text, self.cursor)
-            } else {
-                self.cursor
-            }
-        } else if self.cursor > 0 {
-            previous_boundary(&self.text, self.cursor)
-        } else {
-            0
-        };
-    }
-
-    fn line_col(&self) -> (usize, usize) {
-        line_col_at(&self.text, self.cursor)
-    }
-
-    fn move_vertical(&mut self, delta: isize, shift: bool) {
-        let (line, column) = self.line_col();
-        let target = if delta < 0 {
-            line.saturating_sub(delta.unsigned_abs())
-        } else {
-            line.saturating_add(delta as usize)
-        };
-        self.begin_move(shift);
-        self.cursor = index_for_line_col(&self.text, target, column);
-    }
-
-    fn home_end(&mut self, end: bool, shift: bool) {
-        let (line, _) = self.line_col();
-        self.begin_move(shift);
-        self.cursor = index_for_line_col(&self.text, line, if end { usize::MAX } else { 0 });
-    }
-
-    fn ensure_visible(&mut self, visible_lines: usize) {
-        let (line, _) = self.line_col();
-        if line < self.first_line {
-            self.first_line = line;
-        }
-        if line >= self.first_line.saturating_add(visible_lines.max(1)) {
-            self.first_line = line + 1 - visible_lines.max(1);
-        }
-    }
-
-    fn click(&mut self, row: usize, column: usize) {
-        self.cursor = index_for_line_col(&self.text, self.first_line + row, column);
-        self.anchor = None;
-    }
-
-    fn draw(&self, canvas: &mut Canvas, top: u32, bottom: u32, focused: bool) {
-        let palette = theme::palette();
-        canvas.fill_rect(
-            0,
-            top as i32,
-            canvas.width(),
-            bottom.saturating_sub(top),
-            palette.field_bg,
-        );
-        let selected = self.selection();
-        let mut line = 0usize;
-        let mut column = 0usize;
-        for (index, character) in self.text.char_indices() {
-            if character == '\n' {
-                line += 1;
-                column = 0;
-                continue;
-            }
-            if line >= self.first_line {
-                let visible_line = line - self.first_line;
-                let y = top as i32 + visible_line as i32 * LINE_HEIGHT as i32 + 1;
-                if y + FONT_LINE_HEIGHT >= bottom as i32 {
-                    break;
-                }
-                let x = 4 + column as i32 * FONT_CELL_WIDTH;
-                if selected
-                    .map(|(start, end)| index >= start && index < end)
-                    .unwrap_or(false)
-                {
-                    canvas.fill_rect(
-                        x,
-                        y - 1,
-                        FONT_CELL_WIDTH as u32,
-                        LINE_HEIGHT,
-                        palette.selection_bg,
-                    );
-                    canvas.draw_char(x, y, character, palette.selection_text);
-                } else {
-                    canvas.draw_char(x, y, character, palette.field_text);
-                }
-            }
-            column += 1;
-        }
-        if focused {
-            let (cursor_line, cursor_column) = self.line_col();
-            if cursor_line >= self.first_line {
-                let y = top as i32 + (cursor_line - self.first_line) as i32 * LINE_HEIGHT as i32;
-                if y + LINE_HEIGHT as i32 <= bottom as i32 {
-                    canvas.vertical_line(
-                        4 + cursor_column as i32 * FONT_CELL_WIDTH,
-                        y + 1,
-                        FONT_LINE_HEIGHT as u32,
-                        palette.field_text,
-                    );
-                }
-            }
-        }
-    }
-}
 
 /// Why the current modal is open, so `on_modal_done` knows how to act on its
 /// outcome. The library dialog itself is purpose-agnostic.
@@ -229,7 +33,7 @@ enum ModalPurpose {
 
 struct Notepad {
     window: Window,
-    editor: Editor,
+    editor: TextArea,
     menu: MenuBar<'static>,
     path: Option<String>,
     dirty: bool,
@@ -243,7 +47,15 @@ impl Notepad {
     fn new(initial_path: Option<String>) -> Result<Self, i64> {
         let mut app = Self {
             window: Window::new(720, 480, "Notepad")?,
-            editor: Editor::new(),
+            editor: TextArea::new(
+                Rect::new(
+                    0,
+                    MenuBar::HEIGHT as i32,
+                    720,
+                    480 - MenuBar::HEIGHT - STATUS_HEIGHT,
+                ),
+                TextAreaOptions::default(),
+            ),
             menu: MenuBar::new("File", FILE_ITEMS),
             path: None,
             dirty: false,
@@ -286,16 +98,24 @@ impl Notepad {
     }
 
     fn render(&mut self) {
+        let width = self.window.canvas().width();
         let height = self.window.canvas().height();
         let editor_bottom = height.saturating_sub(STATUS_HEIGHT);
         let path = self.path.as_deref().unwrap_or("Untitled");
         let dirty = self.dirty;
         let focused = self.focused && self.modal.is_none();
+        let (line, column) = self.editor.line_col();
+        let position = format!("Ln {}, Col {}", line + 1, column + 1);
+        self.editor.set_bounds(Rect::new(
+            0,
+            MenuBar::HEIGHT as i32,
+            width,
+            editor_bottom.saturating_sub(MenuBar::HEIGHT),
+        ));
         let palette = theme::palette();
         let canvas = self.window.canvas_mut();
         canvas.clear(palette.content_bg);
-        self.editor
-            .draw(canvas, MenuBar::HEIGHT, editor_bottom, focused);
+        self.editor.draw(canvas, focused);
         canvas.fill_rect(
             0,
             editor_bottom as i32,
@@ -305,6 +125,15 @@ impl Notepad {
         );
         canvas.horizontal_line(0, editor_bottom as i32, canvas.width(), palette.border);
         canvas.draw_text(6, editor_bottom as i32 + 5, path, palette.text);
+        let position_x = canvas.width() as i32
+            - position.len() as i32 * gui::FONT_CELL_WIDTH
+            - if dirty { 92 } else { 8 };
+        canvas.draw_text(
+            position_x.max(160),
+            editor_bottom as i32 + 5,
+            &position,
+            palette.text,
+        );
         if dirty {
             canvas.draw_text(
                 canvas.width() as i32 - 80,
@@ -320,44 +149,35 @@ impl Notepad {
     fn handle_main(&mut self, event: runtime::GuiEvent) -> bool {
         match event.kind {
             GUI_EVENT_CLOSE => return self.request_exit(),
-            gui::GUI_EVENT_FOCUS_CHANGE => self.focused = event.payload[0] != 0,
+            gui::GUI_EVENT_FOCUS_CHANGE => {
+                self.focused = event.payload[0] != 0;
+                if !self.focused {
+                    self.editor.cancel_interaction();
+                }
+            }
             GUI_EVENT_RESIZE => {
                 self.window.resize(event.payload[0], event.payload[1]);
-                let lines = self.visible_lines();
-                self.editor.ensure_visible(lines);
             }
             GUI_EVENT_KEY if event.payload[3] != 0 && self.modal.is_none() => {
-                if self.handle_key(event.payload) {
+                if self.handle_key(&event) {
                     return true;
                 }
             }
-            GUI_EVENT_MOUSE if self.modal.is_none() => match event.payload[3] {
-                GUI_MOUSE_MOVE => {
-                    if !self
-                        .menu
-                        .pointer_move(event.payload[0] as i32, event.payload[1] as i32)
-                    {
-                        return false;
-                    }
+            GUI_EVENT_MOUSE if self.modal.is_none() => {
+                if self.handle_mouse(&event) {
+                    return true;
                 }
-                GUI_MOUSE_DOWN | GUI_MOUSE_SCROLL => {
-                    if self.handle_mouse(event.payload) {
-                        return true;
-                    }
-                }
-                _ => return false,
-            },
+            }
             _ => return false,
         }
         self.render();
         false
     }
 
-    fn handle_key(&mut self, payload: [u32; 6]) -> bool {
-        let key = payload[0];
-        let character = char::from_u32(payload[1]).unwrap_or('\0');
-        let shift = payload[2] & 1 != 0;
-        let ctrl = payload[2] & 2 != 0;
+    fn handle_key(&mut self, event: &runtime::GuiEvent) -> bool {
+        let character = char::from_u32(event.payload[1]).unwrap_or('\0');
+        let shift = event.payload[2] & 1 != 0;
+        let ctrl = event.payload[2] & 2 != 0;
         if ctrl {
             match character.to_ascii_lowercase() {
                 'n' => self.new_file(),
@@ -366,100 +186,63 @@ impl Notepad {
                 's' => self.save(),
                 _ => {}
             }
-            return false;
+            if matches!(character.to_ascii_lowercase(), 'n' | 'o' | 's') {
+                return false;
+            }
         }
-        let changed = match key {
-            runtime::KEY_BACKSPACE => self.editor.backspace(),
-            runtime::KEY_DELETE => self.editor.delete(),
-            runtime::KEY_LEFT => {
-                self.editor.move_horizontal(false, shift);
-                false
-            }
-            runtime::KEY_RIGHT => {
-                self.editor.move_horizontal(true, shift);
-                false
-            }
-            runtime::KEY_UP => {
-                self.editor.move_vertical(-1, shift);
-                false
-            }
-            runtime::KEY_DOWN => {
-                self.editor.move_vertical(1, shift);
-                false
-            }
-            runtime::KEY_HOME => {
-                self.editor.home_end(false, shift);
-                false
-            }
-            runtime::KEY_END => {
-                self.editor.home_end(true, shift);
-                false
-            }
-            runtime::KEY_ENTER => {
-                self.editor.insert('\n');
-                true
-            }
-            runtime::KEY_TAB => {
-                for _ in 0..4 {
-                    self.editor.insert(' ');
-                }
-                true
-            }
-            _ if character >= ' ' && character != '\u{7f}' => {
-                self.editor.insert(character);
-                true
-            }
-            _ => false,
+        let Some(ControlInput::Key(input)) = decode_control_input(event) else {
+            return false;
         };
-        if changed {
+        let response = self.editor.handle_input(ControlInput::Key(input), true);
+        if response.action == Some(TextAreaAction::Changed) {
             self.dirty = true;
         }
-        self.editor.ensure_visible(self.visible_lines());
         false
     }
 
-    fn handle_mouse(&mut self, payload: [u32; 6]) -> bool {
-        let x = payload[0] as i32;
-        let y = payload[1] as i32;
-        if payload[3] == GUI_MOUSE_SCROLL {
-            let delta = payload[5] as i32;
-            if delta < 0 {
-                self.editor.first_line = self.editor.first_line.saturating_sub((-delta) as usize);
-            } else {
-                self.editor.first_line = self.editor.first_line.saturating_add(delta as usize);
+    fn handle_mouse(&mut self, event: &runtime::GuiEvent) -> bool {
+        let x = event.payload[0] as i32;
+        let y = event.payload[1] as i32;
+        if event.payload[3] == GUI_MOUSE_MOVE {
+            self.menu.pointer_move(x, y);
+        }
+        if event.payload[3] == GUI_MOUSE_DOWN && y < MenuBar::HEIGHT as i32 {
+            if let Some(index) = self.menu.click(x, y) {
+                match index {
+                    0 => self.new_file(),
+                    1 => self.open_dialog(),
+                    2 => self.save(),
+                    3 => self.save_as_dialog(),
+                    4 => return self.request_exit(),
+                    _ => {}
+                }
             }
             return false;
         }
-        if payload[3] != GUI_MOUSE_DOWN {
+        if event.payload[3] == GUI_MOUSE_DOWN && self.menu.open {
+            if let Some(index) = self.menu.click(x, y) {
+                match index {
+                    0 => self.new_file(),
+                    1 => self.open_dialog(),
+                    2 => self.save(),
+                    3 => self.save_as_dialog(),
+                    4 => return self.request_exit(),
+                    _ => {}
+                }
+            }
             return false;
         }
-        if let Some(index) = self.menu.click(x, y) {
-            match index {
-                0 => self.new_file(),
-                1 => self.open_dialog(),
-                2 => self.save(),
-                3 => self.save_as_dialog(),
-                4 => return self.request_exit(),
-                _ => {}
+        if let Some(input) = decode_control_input(event) {
+            let response = self.editor.handle_input(input, self.focused);
+            if response.action == Some(TextAreaAction::Changed) {
+                self.dirty = true;
             }
-        } else if y >= MenuBar::HEIGHT as i32 {
-            let row = ((y - MenuBar::HEIGHT as i32) / LINE_HEIGHT as i32).max(0) as usize;
-            let column = ((x - 4) / FONT_CELL_WIDTH).max(0) as usize;
-            self.editor.click(row, column);
         }
         false
-    }
-
-    fn visible_lines(&self) -> usize {
-        self.window
-            .canvas()
-            .height()
-            .saturating_sub(MenuBar::HEIGHT + STATUS_HEIGHT) as usize
-            / LINE_HEIGHT as usize
     }
 
     fn new_file(&mut self) {
-        self.editor.set_text(String::new());
+        self.editor.set_text("");
         self.path = None;
         self.dirty = false;
     }
@@ -485,7 +268,7 @@ impl Notepad {
             return;
         }
         let fd = fd as i32;
-        let bytes = self.editor.text.as_bytes();
+        let bytes = self.editor.text().as_bytes();
         let mut offset = 0usize;
         while offset < bytes.len() {
             let written = runtime::write(fd, &bytes[offset..]);
@@ -499,6 +282,7 @@ impl Notepad {
         let _ = runtime::close(fd);
         self.path = Some(path.to_string());
         self.dirty = false;
+        self.editor.set_modified(false);
     }
 
     fn load_from(&mut self, path: &str) {
@@ -526,10 +310,11 @@ impl Notepad {
         let _ = runtime::close(fd);
         match String::from_utf8(bytes) {
             Ok(text) => {
-                self.editor.set_text(text);
+                self.editor.set_text(&text);
                 self.path = Some(path.to_string());
                 self.last_dialog_dir = dialogs::path::parent_directory(path).to_string();
                 self.dirty = false;
+                self.editor.set_modified(false);
             }
             Err(_) => self.show_error("File is not UTF-8 text"),
         }
@@ -634,40 +419,6 @@ fn text_file_filter() -> FileFilter {
             "txt", "md", "rs", "toml", "json", "log", "conf", "sh", "c", "h", "cpp",
         ],
     )
-}
-
-fn line_col_at(text: &str, index: usize) -> (usize, usize) {
-    let mut line = 0usize;
-    let mut column = 0usize;
-    for character in text[..index].chars() {
-        if character == '\n' {
-            line += 1;
-            column = 0;
-        } else {
-            column += 1;
-        }
-    }
-    (line, column)
-}
-
-fn index_for_line_col(text: &str, target_line: usize, target_column: usize) -> usize {
-    let mut line = 0usize;
-    let mut column = 0usize;
-    for (index, character) in text.char_indices() {
-        if line == target_line && (column == target_column || character == '\n') {
-            return index;
-        }
-        if character == '\n' {
-            line += 1;
-            column = 0;
-        } else if line == target_line {
-            column += 1;
-        }
-        if line > target_line {
-            return index;
-        }
-    }
-    text.len()
 }
 
 #[unsafe(naked)]

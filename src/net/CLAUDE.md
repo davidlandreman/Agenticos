@@ -49,6 +49,9 @@ not implemented.
   kernel-owned runtime namespace and userland mutation attempts fail.
 - Production boot never waits for DHCP. Bounded synchronous wait helpers are
   test-only.
+- Entropy initialization precedes network initialization. Both smoltcp's
+  random seed and the first ephemeral port come from the trusted random broker;
+  network startup fails closed if it cannot obtain them.
 
 ## Polling and QEMU contract
 

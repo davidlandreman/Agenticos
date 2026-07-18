@@ -9,7 +9,88 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::{Canvas, FONT_CELL_WIDTH};
+use crate::{
+    Axis, Canvas, ControlResponse, PointerInput, Rect, Scrollbar, ScrollbarAction, FONT_CELL_WIDTH,
+    SCROLLBAR_THICKNESS,
+};
+
+/// Shared interactive scrollbar adapter for custom details/grid browser views.
+pub struct BrowserScrollbar {
+    bar: Scrollbar,
+    visible: bool,
+    items_per_row: usize,
+}
+
+impl BrowserScrollbar {
+    pub fn new() -> Self {
+        Self {
+            bar: Scrollbar::new(Axis::Vertical, Rect::default()),
+            visible: false,
+            items_per_row: 1,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn configure(
+        &mut self,
+        right: i32,
+        top: i32,
+        height: u32,
+        total_items: usize,
+        page_items: usize,
+        first: usize,
+        items_per_row: usize,
+    ) {
+        self.items_per_row = items_per_row.max(1);
+        let total_rows = total_items.div_ceil(self.items_per_row);
+        let page_rows = page_items.max(1).div_ceil(self.items_per_row);
+        self.visible = total_rows > page_rows;
+        self.bar.set_bounds(Rect::new(
+            right - SCROLLBAR_THICKNESS as i32,
+            top,
+            SCROLLBAR_THICKNESS,
+            height,
+        ));
+        self.bar.set_line_step(1);
+        self.bar
+            .set_extents(total_rows as u32, page_rows.max(1) as u32);
+        self.bar.set_offset((first / self.items_per_row) as u32);
+        self.bar.set_enabled(self.visible);
+    }
+
+    pub fn visible(&self) -> bool {
+        self.visible
+    }
+
+    pub fn bounds(&self) -> Rect {
+        self.bar.bounds()
+    }
+
+    pub fn first(&self) -> usize {
+        self.bar.offset() as usize * self.items_per_row
+    }
+
+    pub fn handle_pointer(&mut self, input: PointerInput) -> ControlResponse<ScrollbarAction> {
+        if self.visible && (self.bar.is_captured() || self.bar.bounds().contains(input.x, input.y))
+        {
+            self.bar.handle_pointer(input)
+        } else {
+            ControlResponse::ignored()
+        }
+    }
+
+    pub fn draw(&self, canvas: &mut Canvas) {
+        if self.visible {
+            self.bar.draw(canvas);
+        }
+    }
+}
+
+impl Default for BrowserScrollbar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UiRect {

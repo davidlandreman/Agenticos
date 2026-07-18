@@ -47,6 +47,9 @@ pub struct WindowManager {
     compositor: Compositor,
     /// Current window interaction state (dragging, resizing)
     interaction_state: InteractionState,
+    /// Window that received the current left-button press. Motion and release
+    /// stay routed here until the button is released, even outside its bounds.
+    pointer_capture: Option<WindowId>,
     /// Last known mouse button state for detecting clicks
     last_mouse_buttons: u8,
     /// Cursor renderer for save/restore and drawing
@@ -146,6 +149,7 @@ impl WindowManager {
             graphics_device,
             compositor: Compositor::new(width, height),
             interaction_state: InteractionState::Idle,
+            pointer_capture: None,
             last_mouse_buttons: 0,
             cursor: CursorRenderer::new(),
             active_menu: None,
@@ -403,6 +407,9 @@ impl WindowManager {
 
         self.window_registry.remove(&id);
         self.focus_stack.retain(|&wid| wid != id);
+        if self.pointer_capture == Some(id) {
+            self.pointer_capture = None;
+        }
     }
 
     // Focus management
@@ -549,6 +556,7 @@ impl WindowManager {
                         // Click outside menu - close it and don't route the click
                         // (user's intent was to close the menu, not click what's underneath)
                         crate::debug_trace!("Click outside menu - closing");
+                        self.pointer_capture = None;
                         self.close_active_menu();
                         return;
                     } else {
@@ -558,9 +566,44 @@ impl WindowManager {
             }
         }
 
+        // A fresh press replaces any stale capture. Once a window receives
+        // that press, keep routing motion and the matching release to it. This
+        // is required for narrow draggable controls such as scrollbar thumbs:
+        // ordinary per-event hit-testing would otherwise redirect motion as
+        // soon as the pointer slipped outside the original target.
+        if matches!(event.event_type, MouseEventType::ButtonDown) && event.buttons.left {
+            self.pointer_capture = None;
+        }
+        if matches!(
+            event.event_type,
+            MouseEventType::Move | MouseEventType::ButtonUp
+        ) {
+            if let Some(captured) = self.pointer_capture {
+                if matches!(event.event_type, MouseEventType::Move) && !event.buttons.left {
+                    // Recover if a release was lost before it reached the
+                    // queue; do not leave routing permanently captured.
+                    self.pointer_capture = None;
+                } else if let Some(bounds) = self.get_global_bounds(captured) {
+                    let mut local_event = event;
+                    local_event.position =
+                        Point::new(global_pos.x - bounds.x, global_pos.y - bounds.y);
+                    self.route_event_to_window(captured, Event::Mouse(local_event));
+                    if matches!(event.event_type, MouseEventType::ButtonUp) && !event.buttons.left {
+                        self.pointer_capture = None;
+                    }
+                    return;
+                } else {
+                    self.pointer_capture = None;
+                }
+            }
+        }
+
         // If modal dialog is active, only route within the modal subtree.
         if let Some(modal_id) = self.modal_dialog {
             if let Some((hit_id, hit_bounds)) = self.topmost_at(modal_id, global_pos, 0, 0) {
+                if matches!(event.event_type, MouseEventType::ButtonDown) && event.buttons.left {
+                    self.pointer_capture = Some(hit_id);
+                }
                 let mut local_event = event;
                 local_event.position =
                     Point::new(global_pos.x - hit_bounds.x, global_pos.y - hit_bounds.y);
@@ -590,6 +633,9 @@ impl WindowManager {
                     }
                 }
 
+                if matches!(event.event_type, MouseEventType::ButtonDown) && event.buttons.left {
+                    self.pointer_capture = Some(hit_id);
+                }
                 let mut local_event = event;
                 local_event.position =
                     Point::new(global_pos.x - hit_bounds.x, global_pos.y - hit_bounds.y);

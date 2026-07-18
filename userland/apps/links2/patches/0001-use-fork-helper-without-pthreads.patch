@@ -1,0 +1,5 @@
+--- a/os_dep.c
++++ b/os_dep.c
+@@ -2564 +2564 @@ void done_draw(void)
+-#elif defined(HAVE_PTHREADS)
++#elif defined(HAVE_PTHREADS) && !defined(AGENTICOS_NO_PTHREADS)

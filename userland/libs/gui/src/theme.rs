@@ -49,6 +49,10 @@ pub struct Palette {
     pub selection_bg: u32,
     /// Text on `selection_bg`.
     pub selection_text: u32,
+    pub scrollbar_track: u32,
+    pub scrollbar_thumb: u32,
+    pub scrollbar_hot: u32,
+    pub scrollbar_pressed: u32,
 }
 
 const CLASSIC_PALETTE: Palette = Palette {
@@ -60,6 +64,10 @@ const CLASSIC_PALETTE: Palette = Palette {
     field_text: 0x000000,
     selection_bg: 0x000080,
     selection_text: 0xFFFFFF,
+    scrollbar_track: 0xDFDFDF,
+    scrollbar_thumb: 0xC0C0C0,
+    scrollbar_hot: 0xD4D0C8,
+    scrollbar_pressed: 0xA0A0A0,
 };
 
 const AERO_PALETTE: Palette = Palette {
@@ -71,6 +79,10 @@ const AERO_PALETTE: Palette = Palette {
     field_text: 0x000000,
     selection_bg: 0xCBE8F6,
     selection_text: 0x000000,
+    scrollbar_track: 0xF0F0F0,
+    scrollbar_thumb: 0xCDCDCD,
+    scrollbar_hot: 0xA9D4F0,
+    scrollbar_pressed: 0x7FB6D8,
 };
 
 // Classic (Win98) bevel constants, shared with the kernel classic theme.
@@ -419,5 +431,39 @@ pub fn draw_menu_surface(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32) {
         Theme::Aero => {
             canvas.rect(x, y, w, h, AERO_MENU_BORDER);
         }
+    }
+}
+
+pub fn draw_scrollbar_track(canvas: &mut Canvas, rect: gui_core::Rect) {
+    canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, palette().scrollbar_track);
+}
+
+pub fn draw_scrollbar_part(
+    canvas: &mut Canvas,
+    rect: gui_core::Rect,
+    enabled: bool,
+    hot: bool,
+    pressed: bool,
+) {
+    let fill = if !enabled {
+        palette().content_bg
+    } else if pressed {
+        palette().scrollbar_pressed
+    } else if hot {
+        palette().scrollbar_hot
+    } else {
+        palette().scrollbar_thumb
+    };
+    canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, fill);
+    match current() {
+        Theme::Classic => {
+            let rings = if pressed {
+                [(BEVEL_SHADOW, BEVEL_HIGHLIGHT), (BEVEL_DARK, BEVEL_LIGHT)]
+            } else {
+                [(BEVEL_HIGHLIGHT, BEVEL_DARK), (BEVEL_LIGHT, BEVEL_SHADOW)]
+            };
+            draw_bevel_rings(canvas, rect.x, rect.y, rect.w, rect.h, &rings);
+        }
+        Theme::Aero => canvas.rect(rect.x, rect.y, rect.w, rect.h, palette().border),
     }
 }

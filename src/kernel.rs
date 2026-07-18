@@ -82,6 +82,9 @@ pub fn init(boot_info: &'static mut BootInfo) {
     crate::process::timer::start_service();
     crate::arch::x86_64::smp::init();
 
+    debug_info!("[boot] entropy");
+    crate::random::init();
+
     // Linux ABI syscall surface (write/exit_group, plus the broader set in
     // U9) is dispatched directly from `userland::abi::syscall_dispatch` —
     // no per-syscall registration needed.
@@ -112,6 +115,15 @@ pub fn init(boot_info: &'static mut BootInfo) {
         Ok(()) => {}
         Err(crate::fs::filesystem::FilesystemError::AlreadyExists) => {}
         Err(e) => debug_info!("[boot] /work provisioning failed: {:?}", e),
+    }
+
+    // DEFAULT_USER_ENV advertises HOME=/root. Keep it writable on the
+    // overlay so normal userland applications (including Links) can create
+    // their own dot-directories without baking mutable state into /etc.
+    match crate::fs::vfs::vfs_mkdir("/root") {
+        Ok(()) => {}
+        Err(crate::fs::filesystem::FilesystemError::AlreadyExists) => {}
+        Err(e) => debug_info!("[boot] /root provisioning failed: {:?}", e),
     }
 
     debug_info!("[boot] managed /etc");

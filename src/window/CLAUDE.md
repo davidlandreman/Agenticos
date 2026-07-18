@@ -10,6 +10,8 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `event.rs` — keyboard, mouse, and window events.
 - `graphics.rs` — `GraphicsDevice` trait that abstracts rendering targets.
 - `manager.rs` — `WindowManager`. Coordinates windows and screens. Owns `render_window_tree_with_offset`, which performs parent-child coordinate transformation.
+  Left-button routing captures the pressed window through motion and release,
+  so draggable controls continue receiving events outside their hit bounds.
 - `renderer/` — boot policy and two real renderer siblings. `legacy` preserves
   the dirty framebuffer/cursor path; `retained` rasterizes the desktop and each
   visible top-level subtree into separate premultiplied surfaces, builds a flat
@@ -44,7 +46,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.
 - `keyboard.rs` — PS/2 scancode-set-2 → `KeyCode` conversion *for window events* (distinct from the lower-level driver in `src/input/`).
 - `terminal.rs`, `terminal_factory.rs` — terminal-window support; the factory wires terminal windows up to the shell.
-- `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background), `start_menu.rs` (classic root menu plus Programs fly-out in one active popup), and `taskbar.rs` (task-button geometry plus the minute-updated UTC tray).
+- `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background), `start_menu.rs` (classic root menu plus Programs fly-out in one active popup, with ordinary SVG assets under `assets/icons/start/`), and `taskbar.rs` (task-button geometry plus the minute-updated UTC tray).
 - `windows/remote_surface.rs` — server-decorated client surface for ring-3
   apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
   events to the owning PID's GUI queue. Its enclosing frame title can be
@@ -63,7 +65,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | `TextWindow` | Grid-based text rendering | Cell size derived from the system TTF (`get_default_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
-| `StartMenuWindow` | GUIShell Start popup | Theme-aware popup panels, selection-colored rotated `AgenticOS` banner, typed disabled/separator/action rows, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
+| `StartMenuWindow` | GUIShell Start popup | Theme-aware popup panels, selection-colored rotated `AgenticOS` banner, typed disabled/separator/action rows, SVG-backed root/program icons, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
 | `TaskbarTrayWindow` | Right-side notification tray | Theme-aware recessed panel with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
 | `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer or one attached VirGL client texture; close requests are delivered to the client. |
 

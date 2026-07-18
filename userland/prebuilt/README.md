@@ -20,6 +20,8 @@ copies from the same pinned source tarball.
 | `ZSH.ELF` | `apps/zsh/` | prebuilt-managed | static-musl zsh + ncurses-widec |
 | `BB.ELF` | `apps/busybox/` | prebuilt-managed | BusyBox including ping/nc/HTTP wget |
 | `TCC.ELF` | `apps/tcc/` | prebuilt-managed | static-musl TinyCC (compiler+assembler+linker, ~0.4 MiB) |
+| `LINKS.ELF` | `apps/links2/` | prebuilt-managed | static-musl Links 2.30, text/IPv4/HTTP-only (~1.5 MiB) |
+| `binutils/*.ELF` | `apps/binutils/` | prebuilt-managed | GNU binutils 2.46.0, 14 stripped static native tools (~15.5 MiB total) |
 | `tcc-sysroot.tar.gz` | `apps/tcc/` | prebuilt-managed (tree) | musl headers + crt/libc + libtcc1 + examples; extracted to `host_share/sysroot/` by `stage_tcc_sysroot` (~1.9 MiB) |
 | `compiler-compat/CCCRT.ELF` | `apps/compiler-compat/` | test-fixture | CRT startup rung |
 | `compiler-compat/CCLIBC.ELF` | `apps/compiler-compat/` | test-fixture | libc/heap rung |
@@ -57,6 +59,8 @@ The artifact list comes from `userland/apps.manifest.sh`.
 ./build.sh --rebuild-userland       # rebuild every prebuilt-managed app
 REBUILD_ZSH=1 ./build.sh            # rebuild just zsh this run
 REBUILD_TCC=1 ./build.sh            # rebuild tcc + its sysroot tarball
+REBUILD_LINKS2=1 ./build.sh         # rebuild the Links text browser
+REBUILD_BINUTILS=1 ./build.sh       # rebuild all fourteen GNU binutils tools
 ```
 
 The same flag / env vars work on `test.sh`. With no flag and a prebuilt
@@ -91,7 +95,7 @@ ports (bash, vim, coreutils, …) will land here.
 ## Repo-size note
 
 `userland/prebuilt/` is tracked plain in git — no LFS. The current
-total (~1.5 MiB) is below the ~50 MiB threshold where LFS pays for
+total is about 21 MiB, below the ~50 MiB threshold where LFS pays for
 itself. If we cross that, revisit and switch.
 
 ## Reproducibility

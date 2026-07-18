@@ -31,9 +31,9 @@
 
 use crate::arch::x86_64::syscall::SyscallArgs;
 use crate::userland::abi::{
-    validate_user_slice, EACCES, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINTR, EINVAL, EIO, EISDIR,
-    EMFILE, ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EOPNOTSUPP, EPERM, ERANGE,
-    EROFS, ESPIPE, ESRCH, EXDEV, LAST_EXIT_CODE,
+    validate_user_slice, EACCES, EAGAIN, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINTR, EINVAL, EIO,
+    EISDIR, EMFILE, ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EOPNOTSUPP, EPERM,
+    ERANGE, EROFS, ESPIPE, ESRCH, EXDEV, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
 use crate::userland::path::{copy_user_cstr, normalize_path};
@@ -55,6 +55,9 @@ const WRITEV_MAX_IOV: usize = 16;
 /// Maximum total bytes per `writev` (sum of iov_len). Matches Linux's
 /// MAX_RW_COUNT; per-iov chunking keeps kernel memory bounded below this.
 const WRITEV_MAX_TOTAL: u64 = 0x7fff_f000;
+/// `readv` uses the same bounded vector count and Linux MAX_RW_COUNT ceiling.
+const READV_MAX_IOV: usize = WRITEV_MAX_IOV;
+const READV_MAX_TOTAL: u64 = WRITEV_MAX_TOTAL;
 /// Maximum mmap allocation in bytes.
 const MMAP_MAX_LEN: u64 = 512 * 1024 * 1024;
 /// Maximum brk growth from the initial anchor in bytes. Bumped from
@@ -83,6 +86,9 @@ const TCSETSF: u64 = 0x5404;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
 const TIOCGWINSZ: u64 = 0x5413;
+
+const UTIME_NOW: i64 = 0x3fff_ffff;
+const UTIME_OMIT: i64 = 0x3fff_fffe;
 
 // ---------- write / writev / read ----------
 
@@ -209,12 +215,15 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::File { handle, .. }) => Target::File(handle),
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
-        | Some(FdSlot::VirtualDir { .. }) => return EISDIR,
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
         // /proc snapshots are read-only.
-        Some(FdSlot::VirtualFile { .. }) => return EBADF,
+        Some(FdSlot::VirtualFile { .. })
+        | Some(FdSlot::Urandom { .. })
+        | Some(FdSlot::GuiEvents { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
 
@@ -253,6 +262,9 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
             // write (reader process exited while we were preparing).
             if handle.pipe().readers() == 0 {
                 return crate::userland::abi::EPIPE;
+            }
+            if handle.nonblocking() {
+                return EAGAIN;
             }
             unsafe {
                 crate::userland::switch::block_current_ring3_and_yield(
@@ -309,12 +321,15 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::File { handle, .. }) => Target::File(handle),
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
-        | Some(FdSlot::VirtualDir { .. }) => return EISDIR,
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
         // /proc snapshots are read-only.
-        Some(FdSlot::VirtualFile { .. }) => return EBADF,
+        Some(FdSlot::VirtualFile { .. })
+        | Some(FdSlot::Urandom { .. })
+        | Some(FdSlot::GuiEvents { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
     if iovcnt < 0 || iovcnt as usize > WRITEV_MAX_IOV {
@@ -411,6 +426,9 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                 if written > 0 {
                     return written as i64;
                 }
+                if handle.nonblocking() {
+                    return EAGAIN;
+                }
                 unsafe {
                     crate::userland::switch::block_current_ring3_and_yield(
                         args,
@@ -471,6 +489,67 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
     if len == 0 {
         return 0;
     }
+    read_fd_once(args, fd, ptr, len)
+}
+
+/// `readv(fd: i32, iov: *const iovec, iovcnt: i32) -> isize`.
+///
+/// Validate the complete vector before advancing the open-file description,
+/// then read entries in order. A short read ends the operation, matching the
+/// Linux/POSIX scatter-read contract. Blocking on the first entry is safe:
+/// the scheduler restarts the original `readv` syscall with untouched user
+/// registers. Once bytes have been consumed, an error is reported as a short
+/// read instead of losing the progress already made.
+pub fn readv_handler(args: &mut SyscallArgs) -> i64 {
+    let fd = args.rdi as i32;
+    let iov_ptr = args.rsi;
+    let iovcnt = args.rdx as i64;
+
+    if iovcnt < 0 || iovcnt as usize > READV_MAX_IOV {
+        return EINVAL;
+    }
+    let mut total_len = 0u64;
+    let mut iovecs = alloc::vec::Vec::with_capacity(iovcnt as usize);
+    for index in 0..iovcnt as u64 {
+        let Some(entry) = iov_ptr.checked_add(index * 16) else {
+            return EFAULT;
+        };
+        let base = match crate::userland::usercopy::read_unaligned::<u64>(entry) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let len = match crate::userland::usercopy::read_unaligned::<u64>(entry + 8) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        if let Err(error) = crate::userland::usercopy::ensure_user_range(base, len, true) {
+            return error;
+        }
+        total_len = match total_len.checked_add(len) {
+            Some(total) if total <= READV_MAX_TOTAL => total,
+            _ => return EINVAL,
+        };
+        iovecs.push((base, len));
+    }
+
+    let mut read = 0u64;
+    for (base, len) in iovecs {
+        if len == 0 {
+            continue;
+        }
+        let result = read_fd_once(args, fd, base, len);
+        if result < 0 {
+            return if read > 0 { read as i64 } else { result };
+        }
+        read += result as u64;
+        if result as u64 != len {
+            break;
+        }
+    }
+    read as i64
+}
+
+fn read_fd_once(args: &SyscallArgs, fd: i32, ptr: u64, len: u64) -> i64 {
     let cap = core::cmp::min(len, READ_MAX_LEN as u64);
     let slot = with_fd_slot(fd);
     match slot {
@@ -478,7 +557,19 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => EBADF,
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
-        | Some(FdSlot::VirtualDir { .. }) => EISDIR,
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => EISDIR,
+        Some(FdSlot::Urandom { .. }) => {
+            if let Err(e) = validate_user_slice(ptr, cap) {
+                return e;
+            }
+            let mut staging = vec![0u8; cap as usize];
+            if crate::random::fill_bytes(&mut staging).is_err() {
+                return EIO;
+            }
+            crate::userland::usercopy::copy_to_user(ptr, &staging)
+                .map_or_else(|e| e, |_| staging.len() as i64)
+        }
         Some(FdSlot::VirtualFile { data, cursor, .. }) => {
             // Serve from the open-time snapshot; advance the per-fd
             // cursor. Returns 0 at EOF like a regular file.
@@ -497,6 +588,42 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
                 });
             }
             n as i64
+        }
+        Some(FdSlot::GuiEvents { handle, .. }) => {
+            let event_size = core::mem::size_of::<crate::userland::gui::GuiEvent>();
+            if cap < event_size as u64 {
+                return EINVAL;
+            }
+            if crate::userland::lifecycle::current_user_pid() != Some(handle.owner_pid()) {
+                return EBADF;
+            }
+            let max_events = cap as usize / event_size;
+            if let Err(error) = validate_user_slice(ptr, (max_events * event_size) as u64) {
+                return error;
+            }
+            let mut events = alloc::vec::Vec::with_capacity(max_events);
+            while events.len() < max_events {
+                match crate::userland::gui::pop_event(handle.owner_pid()) {
+                    Some(event) => events.push(event),
+                    None => break,
+                }
+            }
+            if events.is_empty() {
+                if handle.nonblocking() {
+                    return EAGAIN;
+                }
+                unsafe {
+                    crate::userland::switch::block_current_ring3_and_yield(
+                        args,
+                        crate::userland::lifecycle::Ring3BlockReason::WaitingForGuiEvent,
+                    );
+                }
+            }
+            let byte_len = events.len() * event_size;
+            let bytes =
+                unsafe { core::slice::from_raw_parts(events.as_ptr().cast::<u8>(), byte_len) };
+            crate::userland::usercopy::copy_to_user(ptr, bytes)
+                .map_or_else(|error| error, |_| byte_len as i64)
         }
         Some(FdSlot::PipeRead(handle, _)) => {
             // Drain bytes from the pipe. EOF when empty *and* no
@@ -517,6 +644,9 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
             }
             if handle.pipe().writers() == 0 {
                 return 0; // EOF
+            }
+            if handle.nonblocking() {
+                return EAGAIN;
             }
             unsafe {
                 crate::userland::switch::block_current_ring3_and_yield(
@@ -1303,7 +1433,8 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         brk_current: parent.brk_current,
         brk_base: parent.brk_base,
         mmap_next: parent.mmap_next,
-        fd_table: parent.fd_table.clone(),
+        fd_table: parent.fd_table.fork_clone(),
+        umask: parent.umask,
         network_wait: None,
         // POSIX timers are not inherited across fork.
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
@@ -1450,6 +1581,10 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         },
         Err(ref e) => return map_file_err(e),
     };
+    let mut at_random = [0u8; 16];
+    if crate::random::fill_bytes(&mut at_random).is_err() {
+        return EIO;
+    }
 
     // 3. Build a fresh AddressSpace for the new image. If this fails,
     //    we haven't touched the old state yet — return cleanly.
@@ -1537,8 +1672,14 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         argv_refs[0] = applet;
     }
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
-    let user_rsp =
-        super::build_initial_stack(stack_top, &phdr_bytes, e_phnum, &argv_refs, &envp_refs);
+    let user_rsp = super::build_initial_stack(
+        stack_top,
+        &phdr_bytes,
+        e_phnum,
+        &argv_refs,
+        &envp_refs,
+        &at_random,
+    );
 
     // From commit onward the targeted AddressSpace walker is the sole page
     // owner; UserImage remains only executable metadata.
@@ -1991,8 +2132,7 @@ pub fn pipe_handler(args: &mut SyscallArgs) -> i64 {
 ///
 /// Allocates a kernel pipe object and two fds — `pipefd[0]` for
 /// reading, `pipefd[1]` for writing. Both honor the `O_CLOEXEC` flag.
-/// `O_NONBLOCK` is ignored (the synchronous-fork model doesn't need
-/// blocking I/O semantics on pipes for short pipelines).
+/// `O_NONBLOCK` is stored on each endpoint's shared open-file description.
 pub fn pipe2_handler(args: &mut SyscallArgs) -> i64 {
     pipe2_common(args.rdi, args.rsi as u32)
 }
@@ -2004,11 +2144,15 @@ fn pipe2_common(fds_ptr: u64, flags: u32) -> i64 {
     if fds_ptr == 0 {
         return EFAULT;
     }
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return EINVAL;
+    }
     let cloexec = (flags & O_CLOEXEC) != 0;
+    let nonblocking = (flags & O_NONBLOCK) != 0;
 
     let pipe = Pipe::new();
-    let read_handle = PipeReadHandle::new(pipe.clone());
-    let write_handle = PipeWriteHandle::new(pipe);
+    let read_handle = PipeReadHandle::new(pipe.clone(), nonblocking);
+    let write_handle = PipeWriteHandle::new(pipe, nonblocking);
 
     // Allocate both fds atomically — if the second alloc fails, undo
     // the first by removing it before returning EMFILE. Without this,
@@ -2187,6 +2331,7 @@ const O_CLOEXEC: u32 = 0o2000000;
 /// access bit (`O_WRONLY=1`, `O_RDWR=2`) returns `-EROFS`.
 const O_ACCMODE: u32 = 0o3;
 const O_RDONLY: u32 = 0;
+const O_WRONLY: u32 = 0o1;
 const O_RDWR: u32 = 0o2;
 const O_NONBLOCK: u32 = 0o4000;
 const O_CREAT: u32 = 0o100;
@@ -2247,6 +2392,7 @@ const _STAT_SIZE_CHECK: () = assert!(core::mem::size_of::<LinuxStat>() == 144);
 
 const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
+const S_IFCHR: u32 = 0o020000;
 const PERM_READ_ALL: u32 = 0o444;
 const PERM_RX_ALL: u32 = 0o555;
 
@@ -2360,6 +2506,24 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
     };
     let cloexec = (flags & O_CLOEXEC) != 0;
     let want_write = (flags & O_WRITE_BITS) != 0 || (flags & O_ACCMODE) != O_RDONLY;
+
+    // Resolve the two synthetic nodes before mounted filesystems so no disk
+    // entry can shadow the random device. Other existing `/dev/*` paths (most
+    // importantly the boot image's `/dev/null`) retain their VFS behavior.
+    if let Some(node) = crate::userland::devfs::classify(&path) {
+        if want_write {
+            return EACCES;
+        }
+        let slot = match node {
+            crate::userland::devfs::DeviceNode::Directory => {
+                FdSlot::VirtualDevDir { cursor: 0, cloexec }
+            }
+            crate::userland::devfs::DeviceNode::Urandom => FdSlot::Urandom { cloexec },
+        };
+        return with_fd_table_mut(|t| t.alloc(slot))
+            .map(|fd| fd as i64)
+            .unwrap_or(EMFILE);
+    }
     // /bin namespace is always read-only — userland can't mutate the
     // synthesized applet entries.
     if want_write {
@@ -2424,9 +2588,15 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
             Ok(h) => h,
             Err(ref e) => return map_file_err(e),
         };
-        return with_fd_table_mut(|t| t.alloc(FdSlot::File { handle, cloexec }))
-            .map(|fd| fd as i64)
-            .unwrap_or(EMFILE);
+        return with_fd_table_mut(|t| {
+            t.alloc(FdSlot::File {
+                handle,
+                status_flags: O_RDONLY,
+                cloexec,
+            })
+        })
+        .map(|fd| fd as i64)
+        .unwrap_or(EMFILE);
     }
 
     // Check whether the path exists and is a directory. Directories
@@ -2484,9 +2654,16 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
         Ok(h) => h,
         Err(ref e) => return map_file_err(e),
     };
-    with_fd_table_mut(|t| t.alloc(FdSlot::File { handle, cloexec }))
-        .map(|fd| fd as i64)
-        .unwrap_or(EMFILE)
+    let status_flags = access | (flags & (O_APPEND | O_NONBLOCK));
+    with_fd_table_mut(|t| {
+        t.alloc(FdSlot::File {
+            handle,
+            status_flags,
+            cloexec,
+        })
+    })
+    .map(|fd| fd as i64)
+    .unwrap_or(EMFILE)
 }
 
 /// `close(fd) -> int`. Drops the `Arc<File>` (which closes the underlying
@@ -2534,6 +2711,11 @@ fn proc_namespace_mutation_check(path: &str) -> Option<i64> {
     crate::userland::procfs::is_proc_path(path).then_some(EPERM)
 }
 
+/// The synthesized `/dev` namespace is entirely kernel-owned.
+fn dev_namespace_mutation_check(path: &str) -> Option<i64> {
+    crate::userland::devfs::is_dev_path(path).then_some(EPERM)
+}
+
 pub fn mkdir_handler(args: &mut SyscallArgs) -> i64 {
     let path = match resolve_user_path(args.rdi) {
         Ok(p) => p,
@@ -2546,6 +2728,9 @@ pub fn mkdir_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = proc_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
         return e;
     }
     match crate::fs::vfs::vfs_mkdir(&path) {
@@ -2585,6 +2770,9 @@ pub fn rmdir_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(e) = proc_namespace_mutation_check(&path) {
         return e;
     }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
+        return e;
+    }
     if path == "/" {
         return EBUSY;
     }
@@ -2606,6 +2794,9 @@ pub fn unlink_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = proc_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
         return e;
     }
     match crate::fs::vfs::vfs_unlink(&path) {
@@ -2631,6 +2822,9 @@ pub fn unlinkat_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = proc_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
         return e;
     }
     // AT_REMOVEDIR = 0x200
@@ -2669,6 +2863,12 @@ pub fn rename_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = proc_namespace_mutation_check(&new) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&old) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&new) {
         return e;
     }
     if let Some(e) = managed_etc_mutation_check(&old) {
@@ -2716,6 +2916,10 @@ pub fn link_handler(args: &mut SyscallArgs) -> i64 {
         .or_else(|| bin_namespace_mutation_check(&new))
         .or_else(|| managed_etc_mutation_check(&old))
         .or_else(|| managed_etc_mutation_check(&new))
+        .or_else(|| proc_namespace_mutation_check(&old))
+        .or_else(|| proc_namespace_mutation_check(&new))
+        .or_else(|| dev_namespace_mutation_check(&old))
+        .or_else(|| dev_namespace_mutation_check(&new))
     {
         return error;
     }
@@ -2751,8 +2955,10 @@ pub fn symlink_handler(args: &mut SyscallArgs) -> i64 {
         Ok(path) => path,
         Err(error) => return error,
     };
-    if let Some(error) =
-        bin_namespace_mutation_check(&link_path).or_else(|| managed_etc_mutation_check(&link_path))
+    if let Some(error) = bin_namespace_mutation_check(&link_path)
+        .or_else(|| managed_etc_mutation_check(&link_path))
+        .or_else(|| proc_namespace_mutation_check(&link_path))
+        .or_else(|| dev_namespace_mutation_check(&link_path))
     {
         return error;
     }
@@ -2791,7 +2997,10 @@ pub fn ftruncate_handler(args: &mut SyscallArgs) -> i64 {
     let new_size = args.rsi;
     let handle = match with_fd_slot(fd) {
         Some(FdSlot::File { handle, .. }) => handle,
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(_) | None => return EBADF,
     };
     if crate::userland::etc::is_managed_path(&handle.path()) {
@@ -2809,6 +3018,12 @@ pub fn truncate_handler(args: &mut SyscallArgs) -> i64 {
     };
     let new_size = args.rsi;
     if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = proc_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
         return e;
     }
     if crate::userland::etc::is_managed_path(&path) {
@@ -2881,7 +3096,9 @@ pub fn pread64_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::File { handle, .. }) => handle,
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
-        | Some(FdSlot::VirtualDir { .. }) => return EISDIR,
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
+        Some(FdSlot::Urandom { .. }) => return ESPIPE,
         Some(FdSlot::VirtualFile { data, .. }) => {
             // Positional read from the open-time snapshot; per-fd
             // cursor untouched, mirroring pread semantics.
@@ -2935,7 +3152,10 @@ pub fn pwrite64_handler(args: &mut SyscallArgs) -> i64 {
     let offset = args.r10;
     let handle = match with_fd_slot(fd) {
         Some(FdSlot::File { handle, .. }) => handle,
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(_) | None => return EBADF,
     };
     if len == 0 {
@@ -2979,7 +3199,10 @@ pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
 
     let in_handle = match with_fd_slot(in_fd) {
         Some(FdSlot::File { handle, .. }) => handle,
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(_) => return EINVAL,
         None => return EBADF,
     };
@@ -2993,7 +3216,10 @@ pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Out::StdoutErr,
         Some(FdSlot::File { handle, .. }) => Out::File(handle),
         Some(FdSlot::PipeWrite(h, _)) => Out::Pipe(h),
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(_) | None => return EBADF,
     };
 
@@ -3126,6 +3352,17 @@ pub fn lseek_handler(args: &mut SyscallArgs) -> i64 {
             }
             return ESPIPE;
         }
+        Some(FdSlot::VirtualDevDir { .. }) => {
+            if whence == SEEK_SET && offset == 0 {
+                with_fd_table_mut(|t| {
+                    if let Some(FdSlot::VirtualDevDir { cursor, .. }) = t.get_mut(fd) {
+                        *cursor = 0;
+                    }
+                });
+                return 0;
+            }
+            return ESPIPE;
+        }
         Some(_) => return ESPIPE,
         None => return EBADF,
     };
@@ -3167,7 +3404,8 @@ pub fn dup2_handler(args: &mut SyscallArgs) -> i64 {
 
 /// `fcntl(fd, cmd, arg) -> int`. Implements just enough of the cmd
 /// surface for libc startup: F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD,
-/// F_SETFD, F_GETFL, F_SETFL (no-op).
+/// F_SETFD, F_GETFL, and F_SETFL. Socket and pipe nonblocking state lives
+/// on the shared open-file description so duplicated fds observe changes.
 pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
     let fd = args.rdi as i32;
     let cmd = args.rsi as i32;
@@ -3204,21 +3442,48 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
                 Err(e) => e,
             }
         }
-        F_GETFL => {
-            // Always-RDONLY for files; stdin treats it as readable too.
-            match with_fd_slot(fd) {
-                Some(FdSlot::Socket { handle, .. }) => {
-                    let nonblocking = crate::net::socket::nonblocking(handle.id()).unwrap_or(false);
-                    (O_RDWR | if nonblocking { O_NONBLOCK } else { 0 }) as i64
-                }
-                Some(_) => O_RDONLY as i64,
-                None => EBADF,
+        F_GETFL => match with_fd_slot(fd) {
+            Some(FdSlot::File { status_flags, .. }) => status_flags as i64,
+            Some(FdSlot::Socket { handle, .. }) => {
+                let nonblocking = crate::net::socket::nonblocking(handle.id()).unwrap_or(false);
+                (O_RDWR | if nonblocking { O_NONBLOCK } else { 0 }) as i64
             }
-        }
+            Some(FdSlot::PipeRead(handle, _)) => {
+                (O_RDONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+            }
+            Some(FdSlot::PipeWrite(handle, _)) => {
+                (O_WRONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+            }
+            Some(FdSlot::GuiEvents { handle, .. }) => {
+                (O_RDONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+            }
+            Some(_) => O_RDONLY as i64,
+            None => EBADF,
+        },
         F_SETFL => match with_fd_slot(fd) {
             Some(FdSlot::Socket { handle, .. }) => {
                 crate::net::socket::set_nonblocking(handle.id(), arg & O_NONBLOCK as u64 != 0)
                     .map_or_else(crate::userland::network_syscalls::map_socket_error, |_| 0)
+            }
+            Some(FdSlot::PipeRead(handle, _)) => {
+                handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
+                0
+            }
+            Some(FdSlot::PipeWrite(handle, _)) => {
+                handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
+                0
+            }
+            Some(FdSlot::File { .. }) => with_fd_table_mut(|table| {
+                let Some(FdSlot::File { status_flags, .. }) = table.get_mut(fd) else {
+                    return EBADF;
+                };
+                *status_flags =
+                    (*status_flags & O_ACCMODE) | (arg as u32 & (O_APPEND | O_NONBLOCK));
+                0
+            }),
+            Some(FdSlot::GuiEvents { handle, .. }) => {
+                handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
+                0
             }
             Some(_) => 0,
             None => EBADF,
@@ -3280,6 +3545,9 @@ pub fn stat_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(st) = stat_virtual_bin(&path) {
         return write_stat(out_ptr, &st);
     }
+    if let Some(st) = stat_virtual_dev(&path) {
+        return write_stat(out_ptr, &st);
+    }
     if crate::userland::procfs::is_proc_path(&path) {
         return match stat_virtual_proc(&path) {
             Some(st) => write_stat(out_ptr, &st),
@@ -3300,6 +3568,9 @@ pub fn lstat_handler(args: &mut SyscallArgs) -> i64 {
         Err(error) => return error,
     };
     if let Some(stat) = stat_virtual_bin(&path) {
+        return write_stat(args.rsi, &stat);
+    }
+    if let Some(stat) = stat_virtual_dev(&path) {
         return write_stat(args.rsi, &stat);
     }
     if crate::userland::procfs::is_proc_path(&path) {
@@ -3329,6 +3600,25 @@ fn stat_virtual_proc(path: &str) -> Option<LinuxStat> {
         crate::userland::procfs::ProcNodeKind::File => {
             st.st_mode = S_IFREG | PERM_READ_ALL;
             st.st_nlink = 1;
+        }
+    }
+    st.st_blksize = 4096;
+    Some(st)
+}
+
+/// Synthesize metadata for the kernel-owned `/dev` namespace.
+fn stat_virtual_dev(path: &str) -> Option<LinuxStat> {
+    let mut st = LinuxStat::default();
+    match crate::userland::devfs::classify(path)? {
+        crate::userland::devfs::DeviceNode::Directory => {
+            st.st_mode = S_IFDIR | PERM_RX_ALL;
+            st.st_nlink = 2;
+        }
+        crate::userland::devfs::DeviceNode::Urandom => {
+            st.st_mode = S_IFCHR | PERM_READ_ALL;
+            st.st_nlink = 1;
+            // Linux's /dev/urandom is character device major 1, minor 9.
+            st.st_rdev = (1 << 8) | 9;
         }
     }
     st.st_blksize = 4096;
@@ -3454,6 +3744,22 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
             st.st_blksize = 4096;
             write_stat(out_ptr, &st)
         }
+        Some(FdSlot::VirtualDevDir { .. }) => {
+            let st = stat_virtual_dev("/dev").expect("/dev is always virtual");
+            write_stat(out_ptr, &st)
+        }
+        Some(FdSlot::Urandom { .. }) => {
+            let st = stat_virtual_dev("/dev/urandom").expect("urandom is always virtual");
+            write_stat(out_ptr, &st)
+        }
+        Some(FdSlot::GuiEvents { .. }) => {
+            let st = LinuxStat {
+                st_mode: S_IFCHR | 0o600,
+                st_blksize: core::mem::size_of::<crate::userland::gui::GuiEvent>() as i64,
+                ..LinuxStat::default()
+            };
+            write_stat(out_ptr, &st)
+        }
         None => EBADF,
     }
 }
@@ -3479,6 +3785,9 @@ pub fn newfstatat_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(st) = stat_virtual_bin(&path) {
         return write_stat(out_ptr, &st);
     }
+    if let Some(st) = stat_virtual_dev(&path) {
+        return write_stat(out_ptr, &st);
+    }
     if crate::userland::procfs::is_proc_path(&path) {
         return match stat_virtual_proc(&path) {
             Some(st) => write_stat(out_ptr, &st),
@@ -3499,8 +3808,8 @@ pub fn newfstatat_handler(args: &mut SyscallArgs) -> i64 {
 
 pub fn access_handler(args: &mut SyscallArgs) -> i64 {
     let path_ptr = args.rdi;
-    let _mode = args.rsi as u32;
-    access_common(path_ptr)
+    let mode = args.rsi as u32;
+    access_common(path_ptr, mode)
 }
 
 pub fn faccessat_handler(args: &mut SyscallArgs) -> i64 {
@@ -3509,11 +3818,11 @@ pub fn faccessat_handler(args: &mut SyscallArgs) -> i64 {
         return ENOSYS;
     }
     let path_ptr = args.rsi;
-    let _mode = args.rdx as u32;
-    access_common(path_ptr)
+    let mode = args.rdx as u32;
+    access_common(path_ptr, mode)
 }
 
-fn access_common(path_ptr: u64) -> i64 {
+fn access_common(path_ptr: u64, mode: u32) -> i64 {
     let path = match resolve_user_path(path_ptr) {
         Ok(p) => p,
         Err(e) => return e,
@@ -3532,6 +3841,9 @@ fn access_common(path_ptr: u64) -> i64 {
         } else {
             ENOENT
         };
+    }
+    if crate::userland::devfs::classify(&path).is_some() {
+        return if mode & _W_OK != 0 { EACCES } else { 0 };
     }
     if crate::fs::exists(&path) {
         0
@@ -3609,8 +3921,12 @@ pub fn fchdir_handler(args: &mut SyscallArgs) -> i64 {
     let fd = args.rdi as i32;
     let slot = with_fd_slot(fd);
     let path = match slot {
-        Some(FdSlot::File { handle, .. }) => handle.path(),
-        _ => return EBADF,
+        Some(FdSlot::Directory { handle, .. }) => handle.path(),
+        Some(FdSlot::VirtualDir { path, .. }) => (*path).clone(),
+        Some(FdSlot::VirtualBinDir { .. }) => String::from("/bin"),
+        Some(FdSlot::VirtualDevDir { .. }) => String::from("/dev"),
+        Some(_) => return ENOTDIR,
+        None => return EBADF,
     };
     chdir_to(path)
 }
@@ -3623,6 +3939,38 @@ fn chdir_to(path: alloc::string::String) -> i64 {
         set_cwd(path);
         return 0;
     }
+
+    // Kernel-synthesized namespaces participate in path resolution just like
+    // mounted directories. BusyBox top relies on `chdir("/proc")` before it
+    // opens stat/meminfo/loadavg by relative name.
+    if crate::userland::bin_namespace::is_bin_dir(&path) {
+        set_cwd(path);
+        return 0;
+    }
+    if crate::userland::bin_namespace::apply_bin_rewrite(&path).is_some() {
+        return ENOTDIR;
+    }
+    if crate::userland::procfs::is_proc_path(&path) {
+        return match crate::userland::procfs::classify(&path) {
+            Some(crate::userland::procfs::ProcNodeKind::Dir) => {
+                set_cwd(path);
+                0
+            }
+            Some(crate::userland::procfs::ProcNodeKind::File) => ENOTDIR,
+            None => ENOENT,
+        };
+    }
+    if crate::userland::devfs::is_dev_path(&path) {
+        return match crate::userland::devfs::classify(&path) {
+            Some(crate::userland::devfs::DeviceNode::Directory) => {
+                set_cwd(path);
+                0
+            }
+            Some(crate::userland::devfs::DeviceNode::Urandom) => ENOTDIR,
+            None => ENOENT,
+        };
+    }
+
     let meta = match crate::fs::metadata(&path) {
         Ok(m) => m,
         Err(ref e) => return map_fs_err(e),
@@ -3683,31 +4031,112 @@ pub fn gettimeofday_handler(args: &mut SyscallArgs) -> i64 {
     crate::userland::usercopy::write_unaligned(tv_ptr, &tv).map_or_else(|e| e, |_| 0)
 }
 
-/// `getrandom(buf, len, flags) -> ssize_t`. Tiny xorshift64 seeded from
-/// the timer; not cryptographically secure but gives libc a non-zero
-/// answer. AT_RANDOM in auxv plays the same role for stack-canary
-/// init — both paths converge here for any extra entropy zsh asks for.
+/// `umask(mask) -> previous_mask`. Permission enforcement remains minimal,
+/// but the state is process-local, inherited across fork, and retained across
+/// exec so BFD and future toolchains observe normal POSIX behavior.
+pub fn umask_handler(args: &mut SyscallArgs) -> i64 {
+    crate::userland::lifecycle::with_current_process(|process| {
+        let old = process.umask;
+        process.umask = args.rdi as u32 & 0o777;
+        old as i64
+    })
+}
+
+fn decode_utimens_value(value: LinuxTimespec, now: u64) -> Result<Option<u64>, i64> {
+    match value.tv_nsec {
+        UTIME_NOW => Ok(Some(now)),
+        UTIME_OMIT => Ok(None),
+        0..=999_999_999 if value.tv_sec >= 0 => Ok(Some(value.tv_sec as u64)),
+        _ => Err(EINVAL),
+    }
+}
+
+/// `utimensat(AT_FDCWD, path, times, 0)` with Linux `UTIME_NOW` and
+/// `UTIME_OMIT` support. Directory-fd-relative and no-follow variants stay
+/// outside the current path ABI and fail explicitly.
+pub fn utimensat_handler(args: &mut SyscallArgs) -> i64 {
+    let dirfd = args.rdi as i32;
+    let path_ptr = args.rsi;
+    let times_ptr = args.rdx;
+    let flags = args.r10;
+    if dirfd != AT_FDCWD {
+        return ENOSYS;
+    }
+    if flags != 0 {
+        return EINVAL;
+    }
+    let path = match resolve_user_path(path_ptr) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    if let Some(error) = bin_namespace_mutation_check(&path) {
+        return error;
+    }
+    if let Some(error) = managed_etc_mutation_check(&path) {
+        return error;
+    }
+    if let Some(error) = proc_namespace_mutation_check(&path) {
+        return error;
+    }
+    if let Some(error) = dev_namespace_mutation_check(&path) {
+        return error;
+    }
+
+    let now = crate::time::realtime_ns() / 1_000_000_000;
+    let (accessed, modified) = if times_ptr == 0 {
+        (Some(now), Some(now))
+    } else {
+        let atime: LinuxTimespec = match crate::userland::usercopy::read_unaligned(times_ptr) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let mtime: LinuxTimespec = match crate::userland::usercopy::read_unaligned(times_ptr + 16) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let accessed = match decode_utimens_value(atime, now) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let modified = match decode_utimens_value(mtime, now) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        (accessed, modified)
+    };
+
+    crate::fs::vfs::vfs_set_times(&path, accessed, modified)
+        .map_or_else(|ref error| map_filesystem_err(error), |_| 0)
+}
+
+/// `getrandom(buf, len, flags) -> ssize_t` backed by the kernel's trusted
+/// platform random broker. Unknown flags are rejected; GRND_RANDOM uses the
+/// Linux 512-byte single-call bound while the ordinary source uses 4 KiB.
 pub fn getrandom_handler(args: &mut SyscallArgs) -> i64 {
     let buf = args.rdi;
     let len = args.rsi;
-    let _flags = args.rdx;
+    let flags = args.rdx;
+    const GRND_NONBLOCK: u64 = 0x1;
+    const GRND_RANDOM: u64 = 0x2;
 
+    if flags & !(GRND_NONBLOCK | GRND_RANDOM) != 0 {
+        return EINVAL;
+    }
     if len == 0 {
         return 0;
     }
-    let cap = core::cmp::min(len, 4096);
-    let mut bytes = alloc::vec![0u8; cap as usize];
-    // xorshift64* — small, fast, deterministic enough for libc seed needs.
-    let mut state: u64 = crate::time::monotonic_ns() ^ 0x9E37_79B9_7F4A_7C15;
-    if state == 0 {
-        state = 0xDEAD_BEEF_CAFE_BABE;
+    let max = if flags & GRND_RANDOM != 0 { 512 } else { 4096 };
+    let cap = core::cmp::min(len, max);
+    if let Err(error) = validate_user_slice(buf, cap) {
+        return error;
     }
-    for i in 0..cap {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let byte = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8;
-        bytes[i as usize] = byte;
+    let mut bytes = alloc::vec![0u8; cap as usize];
+    if crate::random::fill_bytes(&mut bytes).is_err() {
+        return if flags & GRND_NONBLOCK != 0 {
+            EAGAIN
+        } else {
+            EIO
+        };
     }
     crate::userland::usercopy::copy_to_user(buf, &bytes).map_or_else(|e| e, |_| cap as i64)
 }
@@ -3746,6 +4175,7 @@ fn pack_utsname_field(field: &mut [u8; 65], s: &str) {
 const DIRENT_HEADER_SIZE: usize = 19;
 
 const DT_UNKNOWN: u8 = 0;
+const DT_CHR: u8 = 2;
 const DT_REG: u8 = 8;
 const DT_DIR: u8 = 4;
 
@@ -3908,6 +4338,53 @@ fn getdents64_virtual_dir(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
     )
 }
 
+/// `getdents64` dispatch for the synthetic `/dev` directory.
+fn getdents64_virtual_dev(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
+    let start = with_fd_table_mut(|t| match t.get(fd) {
+        Some(FdSlot::VirtualDevDir { cursor, .. }) => Some(*cursor),
+        _ => None,
+    })?;
+    const RECORDS: [(&[u8], u8); 3] = [(b".", DT_DIR), (b"..", DT_DIR), (b"urandom", DT_CHR)];
+    if start >= RECORDS.len() {
+        return Some(0);
+    }
+
+    let parent_seed = fnv1a_64(0xcbf2_9ce4_8422_2325, b"/dev");
+    let mut staging = alloc::vec::Vec::with_capacity(cap);
+    let mut cursor = start;
+    while cursor < RECORDS.len() {
+        let (name, d_type) = RECORDS[cursor];
+        let reclen = align_up_8(DIRENT_HEADER_SIZE + name.len() + 1);
+        if staging.len() + reclen > cap {
+            break;
+        }
+        let d_ino = fnv1a_64(parent_seed, name);
+        let next_cursor = (cursor + 1) as u64;
+        staging.extend_from_slice(&d_ino.to_ne_bytes());
+        staging.extend_from_slice(&next_cursor.to_ne_bytes());
+        staging.extend_from_slice(&(reclen as u16).to_ne_bytes());
+        staging.push(d_type);
+        staging.extend_from_slice(name);
+        staging.push(0);
+        while staging.len() % 8 != 0 {
+            staging.push(0);
+        }
+        cursor += 1;
+    }
+    if staging.is_empty() {
+        return Some(EINVAL);
+    }
+    with_fd_table_mut(|t| {
+        if let Some(FdSlot::VirtualDevDir { cursor: c, .. }) = t.get_mut(fd) {
+            *c = cursor;
+        }
+    });
+    Some(
+        crate::userland::usercopy::copy_to_user(dirp, &staging)
+            .map_or_else(|e| e, |_| staging.len() as i64),
+    )
+}
+
 pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
     use crate::fs::filesystem::FileType;
     let fd = args.rdi as i32;
@@ -3930,6 +4407,9 @@ pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
     // Synthetic /proc directories carry their listing snapshot in the
     // fd slot itself.
     if let Some(written) = getdents64_virtual_dir(fd, dirp, cap as usize) {
+        return written;
+    }
+    if let Some(written) = getdents64_virtual_dev(fd, dirp, cap as usize) {
         return written;
     }
 
@@ -4051,9 +4531,7 @@ pub fn uname_handler(args: &mut SyscallArgs) -> i64 {
 
 // ---------- U3: musl-init / zsh-startup syscalls ----------
 
-// poll/ppoll constants. POLLNVAL is the only one we generate when an
-// fd isn't valid; the others are just bit copies from `events` to
-// `revents` for valid stream fds.
+// poll/ppoll constants used by the shared descriptor-readiness snapshot.
 const POLLIN: i16 = 0x0001;
 const POLLOUT: i16 = 0x0004;
 const POLLERR: i16 = 0x0008;
@@ -4076,21 +4554,82 @@ struct PollFd {
 /// without restricting any realistic caller.
 const POLL_MAX_NFDS: u64 = 64;
 
+#[derive(Clone, Copy, Default)]
+struct FdReady {
+    readable: bool,
+    writable: bool,
+    error: bool,
+    hangup: bool,
+}
+
+/// Snapshot readiness without consuming data. `with_fd_slot` clones the
+/// handle while holding the process table and releases that lock before a
+/// socket readiness query takes the network lock.
+fn fd_readiness(fd: i32) -> Result<FdReady, i64> {
+    match with_fd_slot(fd).ok_or(EBADF)? {
+        FdSlot::Stdin => Ok(FdReady {
+            readable: crate::userland::stdin::queued_len_for_current_process() != 0,
+            ..FdReady::default()
+        }),
+        FdSlot::Stdout | FdSlot::Stderr => Ok(FdReady {
+            writable: true,
+            ..FdReady::default()
+        }),
+        FdSlot::Urandom { .. } => Ok(FdReady {
+            readable: true,
+            ..FdReady::default()
+        }),
+        FdSlot::GuiEvents { handle, .. } => {
+            if crate::userland::lifecycle::current_user_pid() != Some(handle.owner_pid()) {
+                return Err(EBADF);
+            }
+            Ok(FdReady {
+                readable: crate::userland::gui::has_events(handle.owner_pid()),
+                ..FdReady::default()
+            })
+        }
+        FdSlot::File { .. }
+        | FdSlot::VirtualFile { .. }
+        | FdSlot::Directory { .. }
+        | FdSlot::VirtualBinDir { .. }
+        | FdSlot::VirtualDevDir { .. }
+        | FdSlot::VirtualDir { .. } => Ok(FdReady {
+            readable: true,
+            writable: true,
+            ..FdReady::default()
+        }),
+        FdSlot::PipeRead(handle, _) => {
+            let eof = handle.pipe().writers() == 0;
+            Ok(FdReady {
+                readable: handle.pipe().len() != 0 || eof,
+                hangup: eof,
+                ..FdReady::default()
+            })
+        }
+        FdSlot::PipeWrite(handle, _) => {
+            let no_readers = handle.pipe().readers() == 0;
+            Ok(FdReady {
+                writable: !no_readers && handle.pipe().has_capacity(),
+                error: no_readers,
+                ..FdReady::default()
+            })
+        }
+        FdSlot::Socket { handle, .. } => crate::net::socket::readiness(handle.id())
+            .map(|state| FdReady {
+                readable: state.readable,
+                writable: state.writable,
+                error: state.error,
+                hangup: state.hangup,
+            })
+            .map_err(crate::userland::network_syscalls::map_socket_error),
+    }
+}
+
 /// `poll(fds: *mut pollfd, nfds: nfds_t, timeout: int) -> int`
 ///
-/// Real-shaped: validate the user pollfd array (with checked
-/// multiplication of `nfds * size_of::<PollFd>()` to defeat overflow),
-/// then for each entry mark `revents` according to the fd's class:
-/// stdin/stdout/stderr report whatever events the caller asked for as
-/// "ready" (we have no real I/O wait — the subsequent read/write call
-/// is what blocks); valid open files and pipes report POLLIN/POLLOUT
-/// likewise; unknown fds get POLLNVAL set. Returns the count of pollfd
-/// entries with non-zero `revents`.
-///
-/// Timeout is ignored — every poll call returns immediately. zsh's ZLE
-/// uses poll for keytimeout disambiguation; without a real timer the
-/// best we can do is "always ready," which makes ZLE call read() and
-/// block there.
+/// Validates the user pollfd array, samples shared readiness for streams,
+/// files, pipes, and sockets, and parks the process until an input, pipe,
+/// socket, close, or timeout wakeup makes it worth sampling again.
 pub fn poll_handler(args: &mut SyscallArgs) -> i64 {
     let timeout_ms = args.rdx as i32;
     let timeout_ticks = if timeout_ms < 0 {
@@ -4103,8 +4642,8 @@ pub fn poll_handler(args: &mut SyscallArgs) -> i64 {
 
 /// `ppoll(fds, nfds, *timeout, *sigmask, sigsetsize) -> int`
 ///
-/// Linux-x86-64 ppoll. We ignore the timespec, sigmask, and sigsetsize;
-/// shape is identical to `poll` for our purposes.
+/// Linux-x86-64 ppoll. The timeout is honored; temporary signal masks are
+/// not implemented yet.
 pub fn ppoll_handler(args: &mut SyscallArgs) -> i64 {
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -4131,9 +4670,6 @@ pub fn ppoll_handler(args: &mut SyscallArgs) -> i64 {
 }
 
 fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Option<u64>) -> i64 {
-    if nfds == 0 {
-        return 0;
-    }
     if nfds > POLL_MAX_NFDS {
         return EINVAL;
     }
@@ -4150,7 +4686,6 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
         return e;
     }
     let mut ready = 0i64;
-    let mut has_socket = false;
     crate::net::poll_once();
     for index in 0..nfds {
         let address = fds_ptr + index * core::mem::size_of::<PollFd>() as u64;
@@ -4164,31 +4699,25 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
         let revents = if entry.fd < 0 {
             0
         } else {
-            match with_fd_slot(entry.fd) {
-                Some(FdSlot::Socket { handle, .. }) => {
-                    has_socket = true;
-                    match crate::net::socket::readiness(handle.id()) {
-                        Ok(state) => {
-                            let mut events = 0;
-                            if state.readable {
-                                events |= want & POLLIN;
-                            }
-                            if state.writable {
-                                events |= want & POLLOUT;
-                            }
-                            if state.error {
-                                events |= POLLERR;
-                            }
-                            if state.hangup {
-                                events |= POLLHUP;
-                            }
-                            events
-                        }
-                        Err(_) => POLLERR,
+            match fd_readiness(entry.fd) {
+                Ok(state) => {
+                    let mut events = 0;
+                    if state.readable {
+                        events |= want & POLLIN;
                     }
+                    if state.writable {
+                        events |= want & POLLOUT;
+                    }
+                    if state.error {
+                        events |= POLLERR;
+                    }
+                    if state.hangup {
+                        events |= POLLHUP;
+                    }
+                    events
                 }
-                Some(_) => want & (POLLIN | POLLOUT), // preserve existing behavior
-                None => POLLNVAL,
+                Err(EBADF) => POLLNVAL,
+                Err(_) => POLLERR,
             }
         };
         entry.revents = revents;
@@ -4199,14 +4728,126 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
             return e;
         }
     }
-    if ready != 0 || timeout_ticks == Some(0) || !has_socket {
-        if ready != 0 {
-            crate::userland::lifecycle::clear_network_wait();
-        }
+    if ready != 0 || timeout_ticks == Some(0) {
+        crate::userland::lifecycle::clear_network_wait();
         return ready;
     }
     let identity = fds_ptr ^ nfds.rotate_left(17);
     crate::userland::network_syscalls::block_poll(args, identity, timeout_ticks)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SelectTimeval {
+    seconds: i64,
+    microseconds: i64,
+}
+
+fn select_read_mask(pointer: u64, nfds: usize) -> Result<u64, i64> {
+    if pointer == 0 || nfds == 0 {
+        return Ok(0);
+    }
+    let value = crate::userland::usercopy::read_unaligned::<u64>(pointer)?;
+    let valid = if nfds == 64 {
+        u64::MAX
+    } else {
+        (1u64 << nfds) - 1
+    };
+    Ok(value & valid)
+}
+
+fn select_write_mask(pointer: u64, value: u64, nfds: usize) -> Result<(), i64> {
+    if pointer == 0 || nfds == 0 {
+        return Ok(());
+    }
+    crate::userland::usercopy::write_unaligned(pointer, &value)
+}
+
+/// Linux x86-64 `select(2)`. Links uses this as its central terminal, pipe,
+/// timer, and socket event loop.
+pub fn select_handler(args: &mut SyscallArgs) -> i64 {
+    let nfds_signed = args.rdi as i64;
+    if nfds_signed < 0 || nfds_signed as usize > crate::userland::fdtable::FD_TABLE_SIZE {
+        return EINVAL;
+    }
+    let nfds = nfds_signed as usize;
+    let read_in = match select_read_mask(args.rsi, nfds) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let write_in = match select_read_mask(args.rdx, nfds) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let except_in = match select_read_mask(args.r10, nfds) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+
+    let timeout_ticks = if args.r8 == 0 {
+        None
+    } else {
+        let timeout = match crate::userland::usercopy::read_unaligned::<SelectTimeval>(args.r8) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        if timeout.seconds < 0 || !(0..1_000_000).contains(&timeout.microseconds) {
+            return EINVAL;
+        }
+        let milliseconds = (timeout.seconds as u64)
+            .saturating_mul(1000)
+            .saturating_add((timeout.microseconds as u64 + 999) / 1000);
+        Some((milliseconds + 9) / 10)
+    };
+
+    crate::net::poll_once();
+    let requested = read_in | write_in | except_in;
+    let mut read_out = 0u64;
+    let mut write_out = 0u64;
+    let except_out = 0u64;
+    let mut ready = 0i64;
+    for fd in 0..nfds {
+        let bit = 1u64 << fd;
+        if requested & bit == 0 {
+            continue;
+        }
+        let state = match fd_readiness(fd as i32) {
+            Ok(state) => state,
+            Err(EBADF) => return EBADF,
+            Err(error) => return error,
+        };
+        if read_in & bit != 0 && (state.readable || state.error || state.hangup) {
+            read_out |= bit;
+            ready += 1;
+        }
+        if write_in & bit != 0 && (state.writable || state.error) {
+            write_out |= bit;
+            ready += 1;
+        }
+    }
+
+    if ready == 0 && timeout_ticks != Some(0) {
+        let identity = args.rsi
+            ^ args.rdx.rotate_left(11)
+            ^ args.r10.rotate_left(23)
+            ^ (nfds as u64).rotate_left(37);
+        // Diverges while blocked; returns only when the restart-stable
+        // absolute deadline has expired.
+        let _ = crate::userland::network_syscalls::block_poll(args, identity, timeout_ticks);
+    } else {
+        crate::userland::lifecycle::clear_network_wait();
+    }
+
+    if let Err(error) = select_write_mask(args.rsi, read_out, nfds) {
+        return error;
+    }
+    if let Err(error) = select_write_mask(args.rdx, write_out, nfds) {
+        return error;
+    }
+    if let Err(error) = select_write_mask(args.r10, except_out, nfds) {
+        return error;
+    }
+    ready
 }
 
 /// `pselect6(nfds, *readfds, *writefds, *exceptfds, *timeout, *sigmask) -> int`
@@ -4312,7 +4953,10 @@ fn resolve_proc_self_fd(fd: i32) -> Option<String> {
         FdSlot::Directory { handle, .. } => handle.path(),
         FdSlot::PipeRead(_, _) | FdSlot::PipeWrite(_, _) => String::from("pipe:[0]"),
         FdSlot::VirtualBinDir { .. } => String::from("/bin"),
+        FdSlot::VirtualDevDir { .. } => String::from("/dev"),
+        FdSlot::Urandom { .. } => String::from("/dev/urandom"),
         FdSlot::Socket { handle, .. } => alloc::format!("socket:[{}]", handle.id()),
+        FdSlot::GuiEvents { .. } => String::from("anon_inode:[agenticos-gui]"),
         FdSlot::VirtualFile { path, .. } | FdSlot::VirtualDir { path, .. } => String::clone(&path),
     })
 }

@@ -95,6 +95,56 @@ fn test_busybox_wget_hostname() {
     run_busybox_applet(&["wget", "-q", "-O", "-", "http://agenticos-http.test:8081/"]);
 }
 
+fn run_links_dump(url: &str) {
+    let path = crate::userland::bin_namespace::LINKS_HOST_PATH;
+    assert!(
+        crate::fs::exists(path),
+        "mandatory fixture missing: {}",
+        path
+    );
+    let argv = [path, "-dump", url];
+    let result = crate::userland::launcher::launch_user_binary(
+        path,
+        &argv,
+        &crate::userland::process_service::DEFAULT_USER_ENV,
+    );
+    crate::userland::abi::reset_unknown_syscall_trace();
+    crate::userland::abi::clear_user_va_bounds();
+
+    let (kind, code) = result.unwrap_or_else(|error| panic!("Links {:?} failed: {}", url, error));
+    assert!(
+        matches!(kind, ExitKind::Cooperative),
+        "Links {:?} exited via {:?}",
+        url,
+        kind
+    );
+    assert_eq!(code, 0, "Links {:?} exited with code {}", url, code);
+}
+
+fn test_links_dump_numeric_http() {
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    run_links_dump("http://10.0.2.101:8081/");
+}
+
+fn test_links_dump_hostname_http() {
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    run_zsh_network_command(
+        "links -dump http://agenticos-http.test:8081/ > /work/links-http.txt && \
+         grep -q 'AgenticOS HTTP OK' /work/links-http.txt",
+    );
+}
+
+fn test_links_follows_relative_http_redirect() {
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    run_zsh_network_command(
+        "links -dump http://10.0.2.101:8081/redirect > /work/links-redirect.txt && \
+         grep -q 'AgenticOS second page' /work/links-redirect.txt",
+    );
+}
+
 fn run_zsh_network_command(command: &str) {
     let path = crate::userland::process_service::ZSH_HOST_PATH;
     assert!(
@@ -155,6 +205,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_busybox_nc_hostname,
         &test_busybox_wget_numeric_http,
         &test_busybox_wget_hostname,
+        &test_links_dump_numeric_http,
+        &test_links_dump_hostname_http,
+        &test_links_follows_relative_http_redirect,
         &test_zsh_ping_numeric_ipv4,
         &test_zsh_wget_numeric_http,
         &test_zsh_wget_hostname,

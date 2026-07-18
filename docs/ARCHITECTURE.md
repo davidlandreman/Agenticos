@@ -22,6 +22,7 @@ AgenticOS is a modular monolithic kernel targeting x86-64. Kernel subsystems run
 - **Input Devices**: Full keyboard and mouse support
 - **Userland**: Preemptively scheduled ring-3 zsh/BusyBox processes
 - **Networking**: DHCP-configured IPv4 with ICMP, UDP, TCP, and socket FDs
+- **Randomness**: Trusted platform entropy with Linux-compatible random interfaces
 - **Build System**: Simple and effective
 
 ### What Needs Work
@@ -92,9 +93,26 @@ The initialization sequence is centralized in `kernel.rs`:
 2. **Interrupts** - Set up interrupt descriptor table
 3. **Memory manager** - Initialize physical memory management
 4. **Scheduler** - Initialize kernel/ring-3 scheduling
-5. **Storage** - Mount filesystems and initialize the managed runtime `/etc`
-6. **Network/display/desktop** - Discover modern VirtIO-net after VFS setup,
+5. **Entropy** - Select modern VirtIO RNG or x86-64 RDRAND before any consumer
+6. **Storage** - Mount filesystems and initialize the managed runtime `/etc`
+7. **Network/display/desktop** - Discover modern VirtIO-net after VFS setup,
    start its poll worker when present, and start the GUI
+
+## Cryptographic Randomness (`random.rs`, `drivers/virtio/rng.rs`)
+
+QEMU exposes a modern VirtIO entropy device backed explicitly by the host's
+`/dev/urandom`; physical x86-64 systems may fall back to carry-checked RDRAND.
+The kernel broker serves trusted bytes directly without a home-grown PRNG or
+timer/input fallback. VirtIO requests use page-owned DMA, exact-length checked
+completions, finite waits, and permanent queue quarantine after timeout or
+malformed completion.
+
+The same fail-closed broker supplies process `AT_RANDOM`, `getrandom(2)`, the
+synthetic read-only `/dev/urandom` character device, smoltcp's random seed, and
+the initial ephemeral-port offset. Entropy availability does not imply TLS:
+HTTPS, certificate validation, and protocol integration remain deferred.
+A hostile VMM controls both the presented entropy device and virtual CPU and
+is outside the guest threat model.
 
 ## IPv4 Networking (`drivers/virtio/net.rs`, `net/`, `userland/`)
 

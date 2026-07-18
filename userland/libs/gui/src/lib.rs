@@ -4,17 +4,29 @@ extern crate alloc;
 
 pub mod file_ui;
 mod font;
+mod input;
+mod scrollbar;
+mod slider;
+mod text_area;
 pub mod theme;
 
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+pub use gui_core::{
+    Axis, ControlInput, ControlResponse, KeyInput, Modifiers, MouseButtons, PointerInput,
+    PointerKind, Rect, ScrollState, ScrollbarPolicy, TextEdit,
+};
+pub use input::decode_control_input;
 pub use runtime::{
     GuiEvent, GUI_EVENT_CLOSE, GUI_EVENT_FOCUS_CHANGE, GUI_EVENT_KEY, GUI_EVENT_MOUSE,
     GUI_EVENT_RESIZE, GUI_EVENT_SETTINGS_CHANGED, GUI_EVENT_THEME_CHANGED, GUI_MOUSE_DOWN,
     GUI_MOUSE_MOVE, GUI_MOUSE_SCROLL, GUI_MOUSE_UP,
 };
+pub use scrollbar::{Scrollbar, ScrollbarAction, SCROLLBAR_THICKNESS};
+pub use slider::{Slider, SliderAction};
+pub use text_area::{TextArea, TextAreaAction, TextAreaOptions, WrapMode};
 pub use theme::{ButtonState, Theme};
 
 pub const FONT_CELL_WIDTH: i32 = font::CELL_WIDTH;
@@ -41,6 +53,7 @@ pub struct Canvas {
     width: u32,
     height: u32,
     pixels: Vec<u32>,
+    clip: Option<Rect>,
 }
 
 impl Canvas {
@@ -49,6 +62,7 @@ impl Canvas {
             width,
             height,
             pixels: vec![0; width as usize * height as usize],
+            clip: None,
         }
     }
 
@@ -66,6 +80,15 @@ impl Canvas {
         self.width = width;
         self.height = height;
         self.pixels.resize(width as usize * height as usize, 0);
+        self.clip = None;
+    }
+
+    pub fn clip(&self) -> Option<Rect> {
+        self.clip
+    }
+
+    pub fn set_clip(&mut self, clip: Option<Rect>) {
+        self.clip = clip;
     }
 
     pub fn clear(&mut self, color: u32) {
@@ -76,11 +99,17 @@ impl Canvas {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
         }
+        if self.clip.map(|clip| !clip.contains(x, y)).unwrap_or(false) {
+            return;
+        }
         self.pixels[y as usize * self.width as usize + x as usize] = color;
     }
 
     fn blend_pixel(&mut self, x: i32, y: i32, color: u32, alpha: u8) {
         if alpha == 0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        if self.clip.map(|clip| !clip.contains(x, y)).unwrap_or(false) {
             return;
         }
         if alpha == u8::MAX {
@@ -102,14 +131,27 @@ impl Canvas {
     }
 
     pub fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: u32) {
-        let left = x.max(0) as u32;
-        let top = y.max(0) as u32;
-        let right = (x.saturating_add(width as i32))
+        let mut left = x.max(0);
+        let mut top = y.max(0);
+        let mut right = (x.saturating_add(width as i32))
             .max(0)
-            .min(self.width as i32) as u32;
-        let bottom = (y.saturating_add(height as i32))
+            .min(self.width as i32);
+        let mut bottom = (y.saturating_add(height as i32))
             .max(0)
-            .min(self.height as i32) as u32;
+            .min(self.height as i32);
+        if let Some(clip) = self.clip {
+            left = left.max(clip.x);
+            top = top.max(clip.y);
+            right = right.min(clip.right());
+            bottom = bottom.min(clip.bottom());
+        }
+        let left = left.max(0) as u32;
+        let top = top.max(0) as u32;
+        let right = right.max(0) as u32;
+        let bottom = bottom.max(0) as u32;
+        if right <= left || bottom <= top {
+            return;
+        }
         for row in top..bottom {
             let start = row as usize * self.width as usize + left as usize;
             let end = row as usize * self.width as usize + right as usize;
@@ -402,15 +444,23 @@ pub fn next_boundary(text: &str, index: usize) -> usize {
 /// A clickable push button with a centered system-font label.
 ///
 /// Positioned manually by the caller (no layout engine), matching the
-/// `MenuBar` idiom. `draw(canvas, hot)` renders the default/hot variant;
-/// `hit(x, y)` hit-tests a click. Mouse + accelerator keys only — no focus
-/// traversal.
+/// `MenuBar` idiom. The typed handlers provide hover, press, disabled, and
+/// release-to-activate behavior; the older drawing and hit-test methods remain
+/// available for compatibility.
 pub struct Button {
     pub label: String,
     pub x: i32,
     pub y: i32,
     pub w: u32,
     pub h: u32,
+    enabled: bool,
+    hot: bool,
+    pressed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonAction {
+    Activated,
 }
 
 impl Button {
@@ -421,7 +471,85 @@ impl Button {
             y,
             w,
             h,
+            enabled: true,
+            hot: false,
+            pressed: false,
         }
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.hot = false;
+            self.pressed = false;
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn cancel_interaction(&mut self) {
+        self.hot = false;
+        self.pressed = false;
+    }
+
+    pub fn handle_pointer(&mut self, input: PointerInput) -> ControlResponse<ButtonAction> {
+        match input.kind {
+            PointerKind::Cancel => {
+                let repaint = self.hot || self.pressed;
+                self.cancel_interaction();
+                ControlResponse::consumed(repaint, None)
+            }
+            PointerKind::Move => {
+                let hot = self.enabled && self.hit(input.x, input.y);
+                let repaint = hot != self.hot;
+                self.hot = hot;
+                ControlResponse {
+                    consumed: hot || self.pressed,
+                    repaint,
+                    action: None,
+                }
+            }
+            PointerKind::Down if self.enabled && self.hit(input.x, input.y) => {
+                self.hot = true;
+                self.pressed = true;
+                ControlResponse::consumed(true, None)
+            }
+            PointerKind::Up if self.pressed => {
+                let activate = self.enabled && self.hit(input.x, input.y);
+                self.pressed = false;
+                self.hot = activate;
+                ControlResponse::consumed(true, activate.then_some(ButtonAction::Activated))
+            }
+            _ => ControlResponse::ignored(),
+        }
+    }
+
+    pub fn handle_key(&mut self, input: KeyInput, focused: bool) -> ControlResponse<ButtonAction> {
+        if !self.enabled || !focused || !input.pressed {
+            return ControlResponse::ignored();
+        }
+        if input.key == runtime::KEY_ENTER || input.character == ' ' {
+            ControlResponse::consumed(true, Some(ButtonAction::Activated))
+        } else {
+            ControlResponse::ignored()
+        }
+    }
+
+    pub fn draw_control(&self, canvas: &mut Canvas, default: bool) {
+        self.draw_state(
+            canvas,
+            if !self.enabled {
+                ButtonState::Disabled
+            } else if self.pressed {
+                ButtonState::Pressed
+            } else if self.hot || default {
+                ButtonState::Hot
+            } else {
+                ButtonState::Normal
+            },
+        );
     }
 
     pub fn hit(&self, x: i32, y: i32) -> bool {
@@ -461,8 +589,9 @@ impl Button {
 /// A single-line editable text field with a byte-index caret.
 ///
 /// Owns its `text` and renders a box, clipped/scrolled text (so the caret is
-/// always visible), and a caret line. No selection in v1. Feed keyboard with
-/// [`TextField::key`] and clicks with [`TextField::click`].
+/// always visible), selection, and a caret line. Prefer [`TextField::handle_input`]
+/// for typed key and pointer routing; the direct key/click methods remain for
+/// compatibility.
 pub struct TextField {
     pub text: String,
     pub caret: usize,
@@ -471,6 +600,14 @@ pub struct TextField {
     pub w: u32,
     pub h: u32,
     scroll: usize,
+    anchor: Option<usize>,
+    selecting: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextFieldAction {
+    Changed,
+    SelectionChanged,
 }
 
 impl TextField {
@@ -487,6 +624,8 @@ impl TextField {
             w,
             h,
             scroll: 0,
+            anchor: None,
+            selecting: false,
         }
     }
 
@@ -494,6 +633,33 @@ impl TextField {
         self.text = String::from(text);
         self.caret = self.text.len();
         self.scroll = 0;
+        self.anchor = None;
+        self.selecting = false;
+    }
+
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        (anchor != self.caret).then_some((anchor.min(self.caret), anchor.max(self.caret)))
+    }
+
+    fn begin_move(&mut self, extend: bool) {
+        if extend {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.caret);
+            }
+        } else {
+            self.anchor = None;
+        }
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection() else {
+            return false;
+        };
+        self.text.replace_range(start..end, "");
+        self.caret = start;
+        self.anchor = None;
+        true
     }
 
     /// Number of `char`s in `text[..self.caret]` — the caret's column.
@@ -518,33 +684,58 @@ impl TextField {
             .nth(column)
             .map(|(index, _)| index)
             .unwrap_or(self.text.len());
+        self.anchor = None;
     }
 
     /// Handle a key press. Returns `true` if the text content changed.
     pub fn key(&mut self, key: u32, character: char) -> bool {
-        match key {
+        self.key_input(KeyInput {
+            key,
+            character,
+            modifiers: Modifiers::default(),
+            pressed: true,
+        }) == Some(TextFieldAction::Changed)
+    }
+
+    fn key_input(&mut self, input: KeyInput) -> Option<TextFieldAction> {
+        if !input.pressed {
+            return None;
+        }
+        let before = (self.caret, self.selection());
+        let changed = match input.key {
+            _ if input.modifiers.ctrl && input.character.eq_ignore_ascii_case(&'a') => {
+                self.anchor = Some(0);
+                self.caret = self.text.len();
+                false
+            }
             runtime::KEY_LEFT => {
+                self.begin_move(input.modifiers.shift);
                 if self.caret > 0 {
                     self.caret = previous_boundary(&self.text, self.caret);
                 }
                 false
             }
             runtime::KEY_RIGHT => {
+                self.begin_move(input.modifiers.shift);
                 if self.caret < self.text.len() {
                     self.caret = next_boundary(&self.text, self.caret);
                 }
                 false
             }
             runtime::KEY_HOME => {
+                self.begin_move(input.modifiers.shift);
                 self.caret = 0;
                 false
             }
             runtime::KEY_END => {
+                self.begin_move(input.modifiers.shift);
                 self.caret = self.text.len();
                 false
             }
             runtime::KEY_BACKSPACE => {
-                if self.caret > 0 {
+                if self.delete_selection() {
+                    true
+                } else if self.caret > 0 {
                     let previous = previous_boundary(&self.text, self.caret);
                     self.text.replace_range(previous..self.caret, "");
                     self.caret = previous;
@@ -554,7 +745,9 @@ impl TextField {
                 }
             }
             runtime::KEY_DELETE => {
-                if self.caret < self.text.len() {
+                if self.delete_selection() {
+                    true
+                } else if self.caret < self.text.len() {
                     let next = next_boundary(&self.text, self.caret);
                     self.text.replace_range(self.caret..next, "");
                     true
@@ -562,12 +755,74 @@ impl TextField {
                     false
                 }
             }
-            _ if character >= ' ' && character != '\u{7f}' => {
-                self.text.insert(self.caret, character);
-                self.caret += character.len_utf8();
+            _ if input.character >= ' ' && input.character != '\u{7f}' => {
+                self.delete_selection();
+                self.text.insert(self.caret, input.character);
+                self.caret += input.character.len_utf8();
+                self.anchor = None;
                 true
             }
             _ => false,
+        };
+        if changed {
+            Some(TextFieldAction::Changed)
+        } else if before != (self.caret, self.selection()) {
+            Some(TextFieldAction::SelectionChanged)
+        } else {
+            None
+        }
+    }
+
+    pub fn handle_input(
+        &mut self,
+        input: ControlInput,
+        focused: bool,
+    ) -> ControlResponse<TextFieldAction> {
+        match input {
+            ControlInput::Key(key) if focused => {
+                let action = self.key_input(key);
+                ControlResponse {
+                    consumed: action.is_some(),
+                    repaint: action.is_some(),
+                    action,
+                }
+            }
+            ControlInput::Pointer(pointer) => match pointer.kind {
+                PointerKind::Down if self.hit(pointer.x, pointer.y) => {
+                    let old = self.caret;
+                    if pointer.modifiers.shift {
+                        if self.anchor.is_none() {
+                            self.anchor = Some(self.caret);
+                        }
+                        let anchor = self.anchor;
+                        self.click(pointer.x);
+                        self.anchor = anchor;
+                    } else {
+                        self.click(pointer.x);
+                    }
+                    self.selecting = true;
+                    ControlResponse::consumed(
+                        true,
+                        (old != self.caret).then_some(TextFieldAction::SelectionChanged),
+                    )
+                }
+                PointerKind::Move if self.selecting => {
+                    let anchor = self.anchor.or(Some(self.caret));
+                    self.click(pointer.x);
+                    self.anchor = anchor;
+                    ControlResponse::consumed(true, Some(TextFieldAction::SelectionChanged))
+                }
+                PointerKind::Up if self.selecting => {
+                    self.selecting = false;
+                    ControlResponse::consumed(true, None)
+                }
+                PointerKind::Cancel => {
+                    self.selecting = false;
+                    ControlResponse::consumed(true, None)
+                }
+                _ => ControlResponse::ignored(),
+            },
+            _ => ControlResponse::ignored(),
         }
     }
 
@@ -581,10 +836,39 @@ impl TextField {
         }
         theme::draw_field(canvas, self.x, self.y, self.w, self.h, focused);
         let text_color = theme::palette().field_text;
+        let palette = theme::palette();
         let text_y = self.y + (self.h as i32 - FONT_LINE_HEIGHT) / 2;
         let mut pixel_x = self.x + Self::PAD;
-        for character in self.text.chars().skip(self.scroll).take(visible) {
-            canvas.draw_char(pixel_x, text_y, character, text_color);
+        let selection = self.selection();
+        for (column, (index, character)) in self.text.char_indices().enumerate() {
+            if column < self.scroll {
+                continue;
+            }
+            if column >= self.scroll + visible {
+                break;
+            }
+            let selected = selection
+                .map(|(start, end)| index >= start && index < end)
+                .unwrap_or(false);
+            if selected {
+                canvas.fill_rect(
+                    pixel_x,
+                    text_y - 1,
+                    FONT_CELL_WIDTH as u32,
+                    FONT_LINE_HEIGHT as u32 + 2,
+                    palette.selection_bg,
+                );
+            }
+            canvas.draw_char(
+                pixel_x,
+                text_y,
+                character,
+                if selected {
+                    palette.selection_text
+                } else {
+                    text_color
+                },
+            );
             pixel_x += FONT_CELL_WIDTH;
         }
         if focused {
@@ -619,6 +903,7 @@ pub struct ListView {
     pub y: i32,
     pub w: u32,
     pub h: u32,
+    scrollbar: Scrollbar,
 }
 
 impl ListView {
@@ -633,6 +918,7 @@ impl ListView {
             y,
             w,
             h,
+            scrollbar: Scrollbar::new(Axis::Vertical, Rect::default()),
         }
     }
 
@@ -664,6 +950,63 @@ impl ListView {
         } else {
             let max_first = self.rows.len().saturating_sub(self.visible_rows());
             self.first_row = (self.first_row + delta as usize).min(max_first);
+        }
+        self.sync_scrollbar();
+    }
+
+    fn overflow(&self) -> bool {
+        self.rows.len() > self.visible_rows()
+    }
+
+    fn scrollbar_bounds(&self) -> Rect {
+        Rect::new(
+            self.x + self.w as i32 - SCROLLBAR_THICKNESS as i32 - 2,
+            self.y + 2,
+            SCROLLBAR_THICKNESS,
+            self.h.saturating_sub(4),
+        )
+    }
+
+    fn sync_scrollbar(&mut self) {
+        self.scrollbar.set_bounds(self.scrollbar_bounds());
+        self.scrollbar.set_line_step(Self::ROW_HEIGHT);
+        self.scrollbar.set_extents(
+            self.rows.len() as u32 * Self::ROW_HEIGHT,
+            self.visible_rows() as u32 * Self::ROW_HEIGHT,
+        );
+        self.scrollbar
+            .set_offset(self.first_row as u32 * Self::ROW_HEIGHT);
+        self.scrollbar.set_enabled(self.overflow());
+    }
+
+    pub fn handle_pointer(&mut self, input: PointerInput) -> ControlResponse<ListEvent> {
+        self.sync_scrollbar();
+        if self.overflow()
+            && (self.scrollbar.is_captured() || self.scrollbar.bounds().contains(input.x, input.y))
+        {
+            let response = self.scrollbar.handle_pointer(input);
+            self.first_row = (self.scrollbar.offset() / Self::ROW_HEIGHT) as usize;
+            return ControlResponse {
+                consumed: response.consumed,
+                repaint: response.repaint || response.action.is_some(),
+                action: None,
+            };
+        }
+        match input.kind {
+            PointerKind::Scroll { delta_y, .. } if self.hit(input.x, input.y) => {
+                let before = self.first_row;
+                self.scroll(delta_y);
+                ControlResponse::consumed(before != self.first_row, None)
+            }
+            PointerKind::Down if self.hit(input.x, input.y) => {
+                let event = self.click(input.x, input.y);
+                ControlResponse {
+                    consumed: event != ListEvent::None,
+                    repaint: event != ListEvent::None,
+                    action: (event != ListEvent::None).then_some(event),
+                }
+            }
+            _ => ControlResponse::ignored(),
         }
     }
 
@@ -726,6 +1069,9 @@ impl ListView {
         if !self.hit(x, y) {
             return ListEvent::None;
         }
+        if self.overflow() && self.scrollbar_bounds().contains(x, y) {
+            return ListEvent::None;
+        }
         let row = self.first_row + ((y - self.y) / Self::ROW_HEIGHT as i32) as usize;
         if row >= self.rows.len() {
             return ListEvent::None;
@@ -738,12 +1084,17 @@ impl ListView {
         }
     }
 
-    pub fn draw(&self, canvas: &mut Canvas) {
+    pub fn draw(&mut self, canvas: &mut Canvas) {
+        self.sync_scrollbar();
         let palette = theme::palette();
         canvas.fill_rect(self.x, self.y, self.w, self.h, palette.field_bg);
         let visible = self.visible_rows();
         let overflow = self.rows.len() > visible;
-        let gutter = if overflow { 6 } else { 0 };
+        let gutter = if overflow {
+            SCROLLBAR_THICKNESS as i32 + 2
+        } else {
+            0
+        };
         let text_width = self.w as i32 - gutter - 4;
         let max_chars = (text_width / FONT_CELL_WIDTH).max(1) as usize;
         for slot in 0..visible {
@@ -758,7 +1109,7 @@ impl ListView {
                     canvas,
                     self.x,
                     row_y,
-                    self.w - gutter as u32,
+                    self.w.saturating_sub(gutter as u32),
                     Self::ROW_HEIGHT,
                 );
             }
@@ -777,21 +1128,7 @@ impl ListView {
         }
         theme::draw_field_border(canvas, self.x, self.y, self.w, self.h, false);
         if overflow {
-            let gutter_x = self.x + self.w as i32 - gutter;
-            canvas.vertical_line(gutter_x, self.y, self.h, palette.border);
-            let total = self.rows.len();
-            let track = self.h as i32 - 2;
-            let thumb_h = ((visible * track as usize) / total).max(8) as i32;
-            let max_first = total.saturating_sub(visible).max(1);
-            let thumb_y =
-                self.y + 1 + (self.first_row as i32 * (track - thumb_h)) / max_first as i32;
-            canvas.fill_rect(
-                gutter_x + 1,
-                thumb_y,
-                gutter as u32 - 2,
-                thumb_h as u32,
-                palette.border,
-            );
+            self.scrollbar.draw(canvas);
         }
     }
 }
@@ -804,6 +1141,11 @@ pub struct TabBar {
     pub x: i32,
     pub y: i32,
     pub w: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabBarAction {
+    Changed(usize),
 }
 
 impl TabBar {
@@ -847,13 +1189,39 @@ impl TabBar {
         }
     }
 
+    pub fn handle_input(&mut self, input: ControlInput) -> ControlResponse<TabBarAction> {
+        let before = self.active;
+        match input {
+            ControlInput::Pointer(pointer) if matches!(pointer.kind, PointerKind::Down) => {
+                let Some(tab) = self.hit(pointer.x, pointer.y) else {
+                    return ControlResponse::ignored();
+                };
+                self.active = tab;
+            }
+            ControlInput::Key(key) if key.pressed && !self.tabs.is_empty() => match key.key {
+                runtime::KEY_LEFT => self.active = self.active.saturating_sub(1),
+                runtime::KEY_RIGHT => self.active = (self.active + 1).min(self.tabs.len() - 1),
+                runtime::KEY_HOME => self.active = 0,
+                runtime::KEY_END => self.active = self.tabs.len() - 1,
+                _ => return ControlResponse::ignored(),
+            },
+            _ => return ControlResponse::ignored(),
+        }
+        let changed = before != self.active;
+        ControlResponse::consumed(
+            changed,
+            changed.then_some(TabBarAction::Changed(self.active)),
+        )
+    }
+
     pub fn draw(&self, canvas: &mut Canvas) {
-        canvas.fill_rect(self.x, self.y, self.w, Self::HEIGHT, COLOR_PANEL);
+        let palette = theme::palette();
+        canvas.fill_rect(self.x, self.y, self.w, Self::HEIGHT, palette.content_bg);
         canvas.horizontal_line(
             self.x,
             self.y + Self::HEIGHT as i32 - 1,
             self.w,
-            COLOR_BORDER,
+            palette.border,
         );
         let mut tab_x = self.x;
         for (i, label) in self.tabs.iter().enumerate() {
@@ -862,12 +1230,16 @@ impl TabBar {
             if active {
                 // Active tab: raised white panel that merges into the
                 // content area, with an accent line across its top.
-                canvas.fill_rect(tab_x, self.y, tw as u32, Self::HEIGHT, COLOR_WHITE);
-                canvas.fill_rect(tab_x, self.y, tw as u32, 2, COLOR_HIGHLIGHT);
-                canvas.vertical_line(tab_x, self.y, Self::HEIGHT, COLOR_BORDER);
-                canvas.vertical_line(tab_x + tw - 1, self.y, Self::HEIGHT, COLOR_BORDER);
+                canvas.fill_rect(tab_x, self.y, tw as u32, Self::HEIGHT, palette.field_bg);
+                canvas.fill_rect(tab_x, self.y, tw as u32, 2, palette.selection_bg);
+                canvas.vertical_line(tab_x, self.y, Self::HEIGHT, palette.border);
+                canvas.vertical_line(tab_x + tw - 1, self.y, Self::HEIGHT, palette.border);
             }
-            let fg = if active { COLOR_TEXT } else { COLOR_TEXT_DIM };
+            let fg = if active {
+                palette.text
+            } else {
+                palette.disabled_text
+            };
             canvas.draw_text(
                 tab_x + Self::PAD,
                 self.y + (Self::HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
@@ -994,6 +1366,7 @@ pub struct ColumnListView {
     pub y: i32,
     pub w: u32,
     pub h: u32,
+    scrollbar: Scrollbar,
 }
 
 impl ColumnListView {
@@ -1012,6 +1385,7 @@ impl ColumnListView {
             y,
             w,
             h,
+            scrollbar: Scrollbar::new(Axis::Vertical, Rect::default()),
         }
     }
 
@@ -1104,6 +1478,63 @@ impl ColumnListView {
             let max_first = self.rows.len().saturating_sub(self.visible_rows());
             self.first_row = (self.first_row + delta as usize).min(max_first);
         }
+        self.sync_scrollbar();
+    }
+
+    fn overflow(&self) -> bool {
+        self.rows.len() > self.visible_rows()
+    }
+
+    fn scrollbar_bounds(&self) -> Rect {
+        Rect::new(
+            self.x + self.w as i32 - SCROLLBAR_THICKNESS as i32 - 2,
+            self.y + Self::HEADER_HEIGHT as i32,
+            SCROLLBAR_THICKNESS,
+            self.h.saturating_sub(Self::HEADER_HEIGHT).saturating_sub(2),
+        )
+    }
+
+    fn sync_scrollbar(&mut self) {
+        self.scrollbar.set_bounds(self.scrollbar_bounds());
+        self.scrollbar.set_line_step(Self::ROW_HEIGHT);
+        self.scrollbar.set_extents(
+            self.rows.len() as u32 * Self::ROW_HEIGHT,
+            self.visible_rows() as u32 * Self::ROW_HEIGHT,
+        );
+        self.scrollbar
+            .set_offset(self.first_row as u32 * Self::ROW_HEIGHT);
+        self.scrollbar.set_enabled(self.overflow());
+    }
+
+    pub fn handle_pointer(&mut self, input: PointerInput) -> ControlResponse<ColumnListEvent> {
+        self.sync_scrollbar();
+        if self.overflow()
+            && (self.scrollbar.is_captured() || self.scrollbar.bounds().contains(input.x, input.y))
+        {
+            let response = self.scrollbar.handle_pointer(input);
+            self.first_row = (self.scrollbar.offset() / Self::ROW_HEIGHT) as usize;
+            return ControlResponse {
+                consumed: response.consumed,
+                repaint: response.repaint || response.action.is_some(),
+                action: None,
+            };
+        }
+        match input.kind {
+            PointerKind::Scroll { delta_y, .. } if self.hit(input.x, input.y) => {
+                let before = self.first_row;
+                self.scroll(delta_y);
+                ControlResponse::consumed(before != self.first_row, None)
+            }
+            PointerKind::Down if self.hit(input.x, input.y) => {
+                let event = self.click(input.x, input.y);
+                ControlResponse {
+                    consumed: event != ColumnListEvent::None,
+                    repaint: event != ColumnListEvent::None,
+                    action: (event != ColumnListEvent::None).then_some(event),
+                }
+            }
+            _ => ControlResponse::ignored(),
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -1165,6 +1596,9 @@ impl ColumnListView {
         if !self.hit(x, y) {
             return ColumnListEvent::None;
         }
+        if self.overflow() && self.scrollbar_bounds().contains(x, y) {
+            return ColumnListEvent::None;
+        }
         if y < self.y + Self::HEADER_HEIGHT as i32 {
             let mut col_x = self.x;
             for (i, column) in self.columns.iter().enumerate() {
@@ -1195,13 +1629,25 @@ impl ColumnListView {
         }
     }
 
-    pub fn draw(&self, canvas: &mut Canvas) {
-        canvas.fill_rect(self.x, self.y, self.w, self.h, COLOR_WHITE);
+    pub fn draw(&mut self, canvas: &mut Canvas) {
+        self.sync_scrollbar();
+        let palette = theme::palette();
+        canvas.fill_rect(self.x, self.y, self.w, self.h, palette.field_bg);
         // Header.
-        canvas.fill_rect(self.x, self.y, self.w, Self::HEADER_HEIGHT, COLOR_PANEL);
+        canvas.fill_rect(
+            self.x,
+            self.y,
+            self.w,
+            Self::HEADER_HEIGHT,
+            palette.content_bg,
+        );
         let visible = self.visible_rows();
         let overflow = self.rows.len() > visible;
-        let gutter: i32 = if overflow { 6 } else { 0 };
+        let gutter: i32 = if overflow {
+            SCROLLBAR_THICKNESS as i32 + 2
+        } else {
+            0
+        };
         let mut col_x = self.x;
         for (i, column) in self.columns.iter().enumerate() {
             let max_chars = ((column.width as i32 - 8) / FONT_CELL_WIDTH).max(1) as usize;
@@ -1218,19 +1664,19 @@ impl ColumnListView {
                 col_x + 4,
                 self.y + (Self::HEADER_HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
                 &title,
-                COLOR_TEXT,
+                palette.text,
             );
             col_x += column.width as i32;
             if col_x >= self.x + self.w as i32 {
                 break;
             }
-            canvas.vertical_line(col_x - 1, self.y, self.h, 0xE0E0E0);
+            canvas.vertical_line(col_x - 1, self.y, self.h, palette.border);
         }
         canvas.horizontal_line(
             self.x,
             self.y + Self::HEADER_HEIGHT as i32 - 1,
             self.w,
-            COLOR_BORDER,
+            palette.border,
         );
         // Body.
         for slot in 0..visible {
@@ -1241,13 +1687,13 @@ impl ColumnListView {
             let row_y = self.y + Self::HEADER_HEIGHT as i32 + slot as i32 * Self::ROW_HEIGHT as i32;
             let selected = self.selected_key == Some(row.key);
             let (bg, fg) = if selected {
-                (COLOR_HIGHLIGHT, COLOR_WHITE)
+                (palette.selection_bg, palette.selection_text)
             } else if row.dim {
-                (COLOR_WHITE, COLOR_TEXT_DIM)
+                (palette.field_bg, palette.disabled_text)
             } else {
-                (COLOR_WHITE, COLOR_TEXT)
+                (palette.field_bg, palette.field_text)
             };
-            if bg != COLOR_WHITE {
+            if bg != palette.field_bg {
                 canvas.fill_rect(self.x, row_y, self.w - gutter as u32, Self::ROW_HEIGHT, bg);
             }
             let mut cell_x = self.x;
@@ -1269,26 +1715,10 @@ impl ColumnListView {
                 }
             }
         }
-        canvas.rect(self.x, self.y, self.w, self.h, COLOR_BORDER);
+        theme::draw_field_border(canvas, self.x, self.y, self.w, self.h, false);
         // Scrollbar gutter.
         if overflow {
-            let gutter_x = self.x + self.w as i32 - gutter;
-            let track_y = self.y + Self::HEADER_HEIGHT as i32;
-            let track_h = self.h - Self::HEADER_HEIGHT;
-            canvas.vertical_line(gutter_x, track_y, track_h, COLOR_BORDER);
-            let total = self.rows.len();
-            let track = track_h as i32 - 2;
-            let thumb_h = ((visible * track as usize) / total).max(8) as i32;
-            let max_first = total.saturating_sub(visible).max(1);
-            let thumb_y =
-                track_y + 1 + (self.first_row as i32 * (track - thumb_h)) / max_first as i32;
-            canvas.fill_rect(
-                gutter_x + 1,
-                thumb_y,
-                gutter as u32 - 2,
-                thumb_h as u32,
-                COLOR_BORDER,
-            );
+            self.scrollbar.draw(canvas);
         }
     }
 }

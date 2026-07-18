@@ -51,7 +51,7 @@ if [ "$HELP" = true ]; then
     echo "      --rebuild-userland  Force rebuild of prebuilt-managed userland apps"
     echo "                          (default: copy from userland/prebuilt/ when present)"
     echo "                          Equivalent: REBUILD_USERLAND=1 env. Per-app:"
-    echo "                          REBUILD_ZSH=1."
+    echo "                          REBUILD_ZSH=1, REBUILD_TCC=1, or REBUILD_LINKS2=1."
     echo "                          QEMU RAM defaults to 2G; override with"
     echo "                          AGENTICOS_QEMU_MEMORY (for example 4G)."
     echo "                          AGENTICOS_QEMU_SMP selects 1-8 CPUs (default 4)."
@@ -156,6 +156,10 @@ if [ "$RUN_QEMU" = true ]; then
         echo "❌ QEMU binary is missing or not executable: ${QEMU_BIN:-<unset>}" >&2
         exit 1
     fi
+    if [ ! -r /dev/urandom ]; then
+        echo "❌ Host entropy source /dev/urandom is missing or unreadable" >&2
+        exit 1
+    fi
     # Freeze Homebrew's `opt` symlink (or any PATH result) to one executable
     # before capability probing. The exact same resolved file is launched.
     if command -v realpath >/dev/null 2>&1; then
@@ -238,6 +242,8 @@ if [ "$RUN_QEMU" = true ]; then
         -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-host,serial=agenticos-host"
         -drive "format=raw,file=$DATA_IMAGE,if=none,id=agenticos-data"
         -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-data,serial=agenticos-data"
+        -object "rng-random,id=agenticos-rng,filename=/dev/urandom"
+        -device "virtio-rng-pci,disable-legacy=on,rng=agenticos-rng"
         -fw_cfg "name=opt/agenticos/force_dirty_mount,string=$FORCE_DIRTY_MOUNT"
         -serial stdio
         -chardev "socket,id=rpc,path=$RPC_SOCK,server=on,wait=off"

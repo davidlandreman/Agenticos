@@ -6,6 +6,8 @@ pub mod arc;
 #[cfg(feature = "test")]
 pub mod basic;
 #[cfg(feature = "test")]
+pub mod binutils;
+#[cfg(feature = "test")]
 pub mod compiler_compat;
 #[cfg(feature = "test")]
 pub mod composition_cpu;
@@ -20,7 +22,7 @@ pub mod desktop_window;
 #[cfg(feature = "test")]
 pub mod display;
 #[cfg(feature = "test")]
-#[cfg(feature = "test")]
+pub mod entropy;
 #[cfg(feature = "test")]
 pub mod fat_write;
 #[cfg(feature = "test")]
@@ -72,6 +74,8 @@ pub mod start_menu_tests;
 #[cfg(feature = "test")]
 pub mod surface_alpha;
 #[cfg(feature = "test")]
+pub mod svg_image;
+#[cfg(feature = "test")]
 pub mod taskbar_tests;
 #[cfg(feature = "test")]
 pub mod tcc;
@@ -118,10 +122,12 @@ type GetTestsFn = fn() -> &'static [&'static dyn crate::lib::test_utils::Testabl
 #[cfg(feature = "test")]
 static MODULES: &[(&str, GetTestsFn)] = &[
     ("basic", basic::get_tests),
+    ("binutils", binutils::get_tests),
     ("memory", memory::get_tests),
     ("network", network::get_tests),
     ("resolver", crate::net::resolver_tests),
     ("network_userland", network_userland::get_tests),
+    ("entropy", entropy::get_tests),
     ("display", display::get_tests),
     ("interrupts", interrupts::get_tests),
     ("heap", heap::get_tests),
@@ -188,6 +194,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("window_buffer", window_buffer::get_tests),
     ("desktop_backing_store", desktop_backing_store::get_tests),
     ("surface_alpha", surface_alpha::get_tests),
+    ("svg_image", svg_image::get_tests),
     ("retained_scene", retained_scene::get_tests),
     ("scheduler", scheduler::get_tests),
     ("smp", smp::get_tests),

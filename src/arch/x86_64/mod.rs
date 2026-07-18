@@ -10,6 +10,7 @@ pub mod msr;
 pub mod percpu;
 pub mod preemption;
 pub mod preemption_guard;
+pub mod random;
 pub mod rtc;
 pub mod smp;
 pub mod syscall;
