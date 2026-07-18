@@ -1,7 +1,6 @@
 //! Taskbar, task-button geometry, and right-side notification tray.
 
 use super::base::WindowBase;
-use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_caption_font;
 use crate::time::DateTime;
 use crate::window::theme::controls;
@@ -251,32 +250,7 @@ impl Window for TaskbarTrayWindow {
             return;
         }
 
-        // Windows 98-style sunken panel: dark top/left, bright bottom/right.
-        device.fill_rect(
-            bounds.x,
-            bounds.y,
-            bounds.width,
-            bounds.height,
-            Color::new(192, 192, 192),
-        );
-        let right = bounds.x + bounds.width as i32 - 1;
-        let bottom = bounds.y + bounds.height as i32 - 1;
-        device.draw_line(
-            bounds.x,
-            bounds.y,
-            right,
-            bounds.y,
-            Color::new(128, 128, 128),
-        );
-        device.draw_line(
-            bounds.x,
-            bounds.y,
-            bounds.x,
-            bottom,
-            Color::new(128, 128, 128),
-        );
-        device.draw_line(bounds.x, bottom, right, bottom, Color::WHITE);
-        device.draw_line(right, bounds.y, right, bottom, Color::WHITE);
+        controls::draw_recessed_panel(device, bounds);
 
         let font = get_caption_font();
         let line_height = font.line_height();
@@ -321,5 +295,5 @@ fn draw_centered_text(
             .saturating_sub(text_width)
             .checked_div(2)
             .unwrap_or(0) as i32;
-    device.draw_text(x, y, text, font.as_font(), Color::BLACK);
+    device.draw_text(x, y, text, font.as_font(), controls::palette().text);
 }

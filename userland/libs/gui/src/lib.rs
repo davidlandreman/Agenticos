@@ -262,24 +262,37 @@ pub struct MenuBar<'a> {
     pub label: &'a str,
     pub items: &'a [&'a str],
     pub open: bool,
+    title_hovered: bool,
+    hover_index: Option<usize>,
 }
 
 impl<'a> MenuBar<'a> {
     pub const HEIGHT: u32 = 24;
     pub const ITEM_HEIGHT: u32 = 22;
 
+    pub const fn new(label: &'a str, items: &'a [&'a str]) -> Self {
+        Self {
+            label,
+            items,
+            open: false,
+            title_hovered: false,
+            hover_index: None,
+        }
+    }
+
     pub fn draw(&self, canvas: &mut Canvas) {
         let palette = theme::palette();
         canvas.fill_rect(0, 0, canvas.width(), Self::HEIGHT, palette.content_bg);
         canvas.horizontal_line(0, Self::HEIGHT as i32 - 1, canvas.width(), palette.border);
-        if self.open {
+        let title_highlighted = self.open || self.title_hovered;
+        if title_highlighted {
             theme::draw_selection(canvas, 4, 3, 48, 18);
         }
         canvas.draw_text(
             10,
             (Self::HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
             self.label,
-            if self.open {
+            if title_highlighted {
                 palette.selection_text
             } else {
                 palette.text
@@ -290,32 +303,72 @@ impl<'a> MenuBar<'a> {
             let height = Self::ITEM_HEIGHT * self.items.len() as u32 + 4;
             theme::draw_menu_surface(canvas, 4, Self::HEIGHT as i32, width, height);
             for (index, item) in self.items.iter().enumerate() {
+                let highlighted = self.hover_index == Some(index);
+                if highlighted {
+                    theme::draw_selection(
+                        canvas,
+                        6,
+                        Self::HEIGHT as i32 + 2 + index as i32 * Self::ITEM_HEIGHT as i32,
+                        width - 4,
+                        Self::ITEM_HEIGHT,
+                    );
+                }
                 canvas.draw_text(
                     12,
                     Self::HEIGHT as i32
                         + index as i32 * Self::ITEM_HEIGHT as i32
                         + (Self::ITEM_HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
                     item,
-                    palette.text,
+                    if highlighted {
+                        palette.selection_text
+                    } else {
+                        palette.text
+                    },
                 );
             }
         }
     }
 
+    /// Update menu hover state. Returns whether a repaint is needed.
+    pub fn pointer_move(&mut self, x: i32, y: i32) -> bool {
+        let title_hovered = Self::title_hit(x, y);
+        let hover_index = self.item_at(x, y);
+        if self.title_hovered == title_hovered && self.hover_index == hover_index {
+            return false;
+        }
+        self.title_hovered = title_hovered;
+        self.hover_index = hover_index;
+        true
+    }
+
     pub fn click(&mut self, x: i32, y: i32) -> Option<usize> {
-        if y >= 0 && y < Self::HEIGHT as i32 && x >= 4 && x < 60 {
+        if Self::title_hit(x, y) {
             self.open = !self.open;
+            if !self.open {
+                self.hover_index = None;
+            }
             return None;
         }
-        if self.open && x >= 4 && x < 132 && y >= Self::HEIGHT as i32 {
-            let index = ((y - Self::HEIGHT as i32) / Self::ITEM_HEIGHT as i32) as usize;
-            if index < self.items.len() {
-                self.open = false;
-                return Some(index);
-            }
+        if let Some(index) = self.item_at(x, y) {
+            self.open = false;
+            self.hover_index = None;
+            return Some(index);
         }
         self.open = false;
+        self.hover_index = None;
         None
+    }
+
+    fn title_hit(x: i32, y: i32) -> bool {
+        y >= 0 && y < Self::HEIGHT as i32 && x >= 4 && x < 60
+    }
+
+    fn item_at(&self, x: i32, y: i32) -> Option<usize> {
+        if !self.open || !(4..132).contains(&x) || y < Self::HEIGHT as i32 {
+            return None;
+        }
+        let index = ((y - Self::HEIGHT as i32) / Self::ITEM_HEIGHT as i32) as usize;
+        (index < self.items.len()).then_some(index)
     }
 }
 

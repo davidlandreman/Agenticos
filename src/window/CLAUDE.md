@@ -60,8 +60,8 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | `TextWindow` | Grid-based text rendering | Cell size derived from the system TTF (`get_default_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
-| `StartMenuWindow` | GUIShell Start popup | Windows 95/98 ButtonFace panels, blue rotated `AgenticOS` banner, typed disabled/separator/action rows, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
-| `TaskbarTrayWindow` | Right-side notification tray | Recessed classic panel with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
+| `StartMenuWindow` | GUIShell Start popup | Theme-aware popup panels, selection-colored rotated `AgenticOS` banner, typed disabled/separator/action rows, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
+| `TaskbarTrayWindow` | Right-side notification tray | Theme-aware recessed panel with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
 | `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer or one attached VirGL client texture; close requests are delivered to the client. |
 
 All windows derive from `WindowBase` for consistent parent-child tracking.

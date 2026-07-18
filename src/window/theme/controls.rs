@@ -403,6 +403,24 @@ pub fn draw_raised_panel(device: &mut dyn GraphicsDevice, rect: Rect) {
     }
 }
 
+/// Paint a recessed panel such as the taskbar notification area. Classic
+/// keeps the Win98 sunken edge, while Aero uses its control background and
+/// flat border colors.
+pub fn draw_recessed_panel(device: &mut dyn GraphicsDevice, rect: Rect) {
+    let palette = palette();
+    device.fill_rect(rect.x, rect.y, rect.width, rect.height, palette.content_bg);
+    match theme::active() {
+        ThemeKind::Classic => {
+            draw_bevel_rings(
+                device,
+                rect,
+                &[(classic::BEVEL_SHADOW, classic::BEVEL_HIGHLIGHT)],
+            );
+        }
+        ThemeKind::Aero => outline(device, rect, palette.border),
+    }
+}
+
 /// Paint a popup-menu surface: themed background plus popup border (Classic:
 /// raised two-ring bevel; Aero: flat 1px border).
 pub fn draw_menu_surface(device: &mut dyn GraphicsDevice, rect: Rect) {
@@ -422,6 +440,15 @@ pub fn draw_menu_surface(device: &mut dyn GraphicsDevice, rect: Rect) {
         ThemeKind::Aero => {
             outline(device, rect, Color::new(151, 151, 151)); // #979797
         }
+    }
+}
+
+/// Paint a menu separator using the active theme's divider treatment.
+pub fn draw_menu_separator(device: &mut dyn GraphicsDevice, x: i32, y: i32, width: u32) {
+    let palette = palette();
+    device.fill_rect(x, y, width, 1, palette.border);
+    if theme::active() == ThemeKind::Classic {
+        device.fill_rect(x, y + 1, width, 1, classic::BEVEL_HIGHLIGHT);
     }
 }
 

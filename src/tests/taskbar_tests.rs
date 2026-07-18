@@ -2,6 +2,7 @@ use crate::graphics::surface::{Surface, SurfaceDesc};
 use crate::lib::test_utils::Testable;
 use crate::time::DateTime;
 use crate::window::renderer::SurfaceCanvas;
+use crate::window::theme::{self, ThemeKind};
 use crate::window::windows::taskbar::{
     format_clock, tray_bounds, window_button_bounds, TaskbarTrayWindow, BUTTON_GAP, BUTTON_HEIGHT,
     BUTTON_Y_OFFSET, MAX_WINDOW_BUTTON_WIDTH, START_BUTTON_WIDTH, TRAY_WIDTH,
@@ -130,12 +131,15 @@ fn test_unknown_clock_uses_placeholders() {
 }
 
 fn test_tray_paints_recessed_bevel() {
+    let previous_theme = theme::active();
+    theme::activate(ThemeKind::Classic);
     let mut tray = TaskbarTrayWindow::new_with_id(WindowId(9003), Rect::new(0, 0, 96, 28));
     let mut surface = Surface::new(SurfaceDesc::new(96, 28)).unwrap();
     {
         let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (96, 28));
         tray.paint(&mut canvas);
     }
+    theme::activate(previous_theme);
 
     assert_eq!(surface.pixel(0, 0).unwrap().to_rgba(), (128, 128, 128, 255));
     assert_eq!(
@@ -145,6 +149,28 @@ fn test_tray_paints_recessed_bevel() {
     assert_eq!(
         surface.pixel(2, 13).unwrap().to_rgba(),
         (192, 192, 192, 255)
+    );
+}
+
+fn test_aero_tray_uses_control_palette() {
+    let previous_theme = theme::active();
+    theme::activate(ThemeKind::Aero);
+    let mut tray = TaskbarTrayWindow::new_with_id(WindowId(9004), Rect::new(0, 0, 96, 28));
+    let mut surface = Surface::new(SurfaceDesc::new(96, 28)).unwrap();
+    {
+        let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (96, 28));
+        tray.paint(&mut canvas);
+    }
+    theme::activate(previous_theme);
+
+    assert_eq!(surface.pixel(0, 0).unwrap().to_rgba(), (112, 112, 112, 255));
+    assert_eq!(
+        surface.pixel(95, 27).unwrap().to_rgba(),
+        (112, 112, 112, 255)
+    );
+    assert_eq!(
+        surface.pixel(2, 13).unwrap().to_rgba(),
+        (240, 240, 240, 255)
     );
 }
 
@@ -158,5 +184,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_tray_invalidates_only_when_displayed_minute_changes,
         &test_unknown_clock_uses_placeholders,
         &test_tray_paints_recessed_bevel,
+        &test_aero_tray_uses_control_palette,
     ]
 }
