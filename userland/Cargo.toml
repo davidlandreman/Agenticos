@@ -9,7 +9,15 @@
 
 [workspace]
 resolver = "2"
-members = ["runtime", "apps/hello", "apps/guilaunch"]
+exclude = ["build-support"]
+members = [
+    "runtime",
+    "libs/gui",
+    "apps/hello",
+    "apps/guilaunch",
+    "apps/guidemo",
+    "apps/notepad",
+]
 
 # Release profile: small, panic-abort, LTO, strip. The output ELF must fit
 # inside the FAT16/vvfat-friendly 64 KiB ceiling and be acceptable to the U6

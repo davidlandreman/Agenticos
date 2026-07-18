@@ -24,6 +24,9 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `keyboard.rs` — PS/2 scancode-set-2 → `KeyCode` conversion *for window events* (distinct from the lower-level driver in `src/input/`).
 - `terminal.rs`, `terminal_factory.rs` — terminal-window support; the factory wires terminal windows up to the shell.
 - `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background).
+- `windows/remote_surface.rs` — server-decorated client surface for ring-3
+  apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
+  events to the owning PID's GUI queue.
 - `adapters/` — `GraphicsDevice` implementations: `direct_framebuffer.rs` (fast, used for cursor) and `double_buffered.rs` (smooth).
 - `dialogs/` — dialog-window scaffolding.
 
@@ -36,6 +39,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | `TextWindow` | Grid-based text rendering | Cell size derived from the system TTF (`get_default_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
+| `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer; close requests are delivered to the client. |
 
 All windows derive from `WindowBase` for consistent parent-child tracking.
 

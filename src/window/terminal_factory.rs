@@ -256,6 +256,28 @@ pub(crate) const TERMINAL_SHELL_ENV: [&str; 8] = [
     "LANG=C.UTF-8",
 ];
 
+/// Spawn a kernel wrapper thread that owns the blocking lifetime of a
+/// standalone ring-3 GUI binary. This is the same scheduler pattern as the
+/// terminal's zsh launcher, without attaching a terminal window.
+pub fn spawn_gui_user_app(path: &'static str, argv: Vec<String>) -> ProcessId {
+    let process_name = argv
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("gui-app"));
+    crate::process::spawn_process(process_name, None, move || {
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        match crate::userland::launcher::launch_user_binary(path, &argv_refs, &TERMINAL_SHELL_ENV) {
+            Ok((kind, code)) => crate::debug_info!(
+                "GUI user app {} exited: kind={:?}, code={}",
+                path,
+                kind,
+                code
+            ),
+            Err(error) => crate::debug_error!("GUI user app {} failed: {}", path, error),
+        }
+    })
+}
+
 /// Spawn a kernel-side process whose entry function loads
 /// `/host/ZSH.ELF` and enters ring 3 with stdio bound to `terminal_id`.
 /// The kernel process blocks for the entire zsh session; on exit the terminal

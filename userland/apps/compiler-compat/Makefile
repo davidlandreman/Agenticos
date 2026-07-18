@@ -9,7 +9,7 @@ PREBUILT_DIR := ../../prebuilt/compiler-compat
 FIXTURES := CCCRT CCLIBC CCPROBE
 BINS := $(addprefix $(OUT_DIR)/,$(addsuffix .ELF,$(FIXTURES)))
 
-.PHONY: all validate refresh clean
+.PHONY: all validate clean
 .DELETE_ON_ERROR:
 
 all: $(BINS)
@@ -36,15 +36,6 @@ validate: all
 		if $(READELF) -l $$bin | grep -q INTERP; then \
 			echo "fixture must not contain PT_INTERP: $$bin" >&2; exit 1; \
 		fi; \
-	done
-
-refresh: validate
-	mkdir -p $(PREBUILT_DIR)
-	@for bin in $(BINS); do \
-		$(STRIP) --strip-all $$bin; \
-		name=$$(basename $$bin); \
-		cp $$bin $(PREBUILT_DIR)/.$$name.tmp; \
-		mv -f $(PREBUILT_DIR)/.$$name.tmp $(PREBUILT_DIR)/$$name; \
 	done
 
 clean:

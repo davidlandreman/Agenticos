@@ -23,14 +23,23 @@ for the Linux-ABI cutover and the C++ pipeline.
 
 ```
 userland/
-├── Cargo.toml          # workspace manifest (members = runtime, apps/hello, apps/guilaunch)
+├── Cargo.toml          # no_std Rust workspace
+├── apps.manifest.sh    # single source of truth for build/stage/ship policy
+├── stage-lib.sh        # shared build.sh/test.sh staging implementation
 ├── .cargo/config.toml  # target = x86_64-unknown-none, build-std
 ├── linker.ld           # ENTRY(_start), base 0x40_0000, no PT_INTERP
-├── runtime/            # tiny library: print, exit, gui_launch, argv0_from_stack
+├── build-support/      # shared per-binary linker-argument helper
+├── runtime/            # syscall ABI, startup parsing, brk allocator, GUI events
+├── libs/gui/           # Window, Canvas, bitmap text, menus, directory listing
 └── apps/
     ├── hello/          # rust app — prints "hello\n", exits 0
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
+    ├── guidemo/        # minimal ring-3 GUI reference client
+    ├── notepad/        # standalone editor with userland dialogs + working Save
+    ├── zsh/            # prebuilt-managed interactive shell
+    ├── busybox/        # prebuilt-managed multicall utilities
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
+    ├── network-test/   # static-musl socket test fixture
     └── hello-cpp/      # C++ app — std::cout, exits 0
         ├── Makefile    # invokes x86_64-linux-musl-g++ -static -no-pie
         └── src/main.cpp
@@ -52,15 +61,16 @@ The committed binary is what `build.sh` / `test.sh` copy into
 without the `x86_64-linux-musl-cross` toolchain installed and without
 an outbound network fetch.
 
-### `/bin` virtual namespace (BusyBox + GUILAUNCH)
+### `/bin` virtual namespace
 
 The kernel exposes a single virtual `/bin` directory whose entries
-resolve into one of two multicall binaries staged under `host_share/`:
+resolve into multicall or direct binaries staged under `host_share/`:
 
 - **`BB.ELF` — BusyBox** (core utilities plus IPv4 `ping`, `nc`, `nslookup`,
   and HTTP-only `wget`; IPv6 and TLS are not available).
-- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (5 entries:
-  `painting`, `calc`, `notepad`, `tasks`, `explorer`).
+- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`painting`, `calc`,
+  `tasks`, `explorer`).
+- **`NOTEPAD.ELF` — direct standalone ring-3 application** (`notepad`).
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
@@ -72,6 +82,9 @@ envp)` resolves to `GLAUNCH.ELF` with `argv[0]` overwritten to
 `PaintingProcess`. No symlinks, no per-applet ELF copies — the
 namespace is pure kernel synthesis.
 
+`execve("/bin/notepad", ...)` instead rewrites directly to
+`/host/NOTEPAD.ELF`; there is no `GLAUNCH` round trip or kernel notepad.
+
 `stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
 directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
 (`access("/bin/ls", X_OK)` followed by `execve`) finds applets without
@@ -79,12 +92,9 @@ any zsh-side hooks. The terminal's default envp seeds
 `PATH=/bin:/host` so bare `ls`, `cat`, `painting`, etc. all Just Work
 in an interactive shell.
 
-**Read-only FS caveat**: write-side BusyBox applets (`cp`, `mv`, `rm`,
-`mkdir`, `touch`, `chmod`, `chown`, `ln`, `dd`) ship in `BB.ELF` and
-the namespace resolves them normally, but every `write()` to a
-file-backed FD returns `EROFS`. The applets print a clean error and
-exit non-zero — they do not panic the kernel. These will start working
-when the FS gains write support.
+The overlay root and `/data` are writable; `/host` remains read-only. Native
+notepad surfaces `-EROFS` in a userland dialog when asked to save under
+`/host`.
 
 ### `GLAUNCH.ELF` (in-tree, built every run)
 
@@ -199,14 +209,17 @@ Both scripts run `readelf -h` on the produced binary and assert
 passed at link time; the readelf check fails the build loud rather than
 deferring the surprise to a confusing kernel-side rejection at run time.
 
-## Adding a new rust app
+## Adding a new Rust app
 
 1. `mkdir -p userland/apps/<name>/src`
-2. Add `userland/apps/<name>/Cargo.toml` (mirror `apps/hello/Cargo.toml`,
-   replacing the package name and `[[bin]]` entry).
-3. Add `userland/apps/<name>/build.rs` (mirror `apps/hello/build.rs`,
-   replacing `bin=hello=` with `bin=<name>=`).
-4. Add the new app to `userland/Cargo.toml`'s `members` list.
+2. Add `Cargo.toml`, including `runtime`; GUI apps also depend on `libs/gui`.
+3. Add a one-line `build.rs` calling
+   `userland_build_support::configure("<name>")` and its path
+   build-dependency.
+4. Add the app to `userland/Cargo.toml` and add exactly one row to
+   `userland/apps.manifest.sh`. The row declares the source directory, build
+   kind, staged 8.3 name, ship policy, toolchain, and output path. Do not edit
+   `build.sh` or `test.sh`.
 5. Write `src/main.rs`:
 
    ```rust
@@ -226,9 +239,18 @@ deferring the surprise to a confusing kernel-side rejection at run time.
    fn panic(_info: &core::panic::PanicInfo) -> ! { unsafe { exit(1) } }
    ```
 
-6. Update `build.sh` / `test.sh` to stage the new binary at an uppercase
-   8.3 filename in `host_share/` (e.g., `BYE.ELF`).
-7. Rebuild and reboot — see the snapshot caveat below.
+6. Rebuild and reboot — the manifest-driven staging library places the ELF in
+   `host_share/`.
+
+## Adding a ring-3 GUI app
+
+Use `apps/guidemo` as the minimal reference and `apps/notepad` as the
+multi-window/filesystem reference. `gui::Window` creates a server-decorated
+window, `Canvas` renders XRGB8888 pixels, `gui::next_event()` blocks without
+polling, and `Window::present()` performs a full-surface copy. Resize events
+must resize the canvas before the next present; Close remains an application
+decision. Add a direct `/bin` rewrite only when the app should be discoverable
+through `PATH`.
 
 ## Adding a new C++ app
 
@@ -236,8 +258,7 @@ deferring the surprise to a confusing kernel-side rejection at run time.
 2. Mirror `userland/apps/hello-cpp/Makefile`, changing the `BIN` target.
 3. Write `src/main.cpp` — anything compilable with `x86_64-linux-musl-g++`
    that calls `exit_group` either explicitly or via `return` from `main`.
-4. Update `build.sh` / `test.sh` to invoke the new `make` target and
-   stage the binary at an uppercase 8.3 filename in `host_share/`.
+4. Add one `built-every-run` manifest row with the `musl-cxx` toolchain.
 
 ## Adding an upstream C app (zsh-style)
 
@@ -250,11 +271,9 @@ mirror `userland/apps/zsh/`:
    set, runs `make`, and copies a stripped binary to `build/<name>`.
 2. Pin both the source version and the SHA256 in the Makefile and the
    app's `README.md`. Bumping a version bumps the SHA in lockstep.
-3. Add a `stage_<name>` function in `userland/prebuilt-lib.sh` modeled
-   on `stage_zsh`: rebuild-or-copy decision, `readelf` ET_EXEC check,
-   atomic refresh of both `userland/prebuilt/<NAME>.ELF` and
-   `host_share/<NAME>.ELF`. Add the new `stage_<name>` call to
-   `build.sh`, `test.sh`, and `userland/refresh-prebuilt.sh`.
+3. Add a `prebuilt-managed` row to `apps.manifest.sh`. The shared staging
+   library supplies rebuild-or-copy behavior, ET_EXEC validation, atomic
+   staging, and refresh iteration.
 4. Add `build/` to `userland/apps/<name>/.gitignore` — the build tree
    contains tarballs, extracted source, and intermediate artifacts that
    shouldn't be tracked.

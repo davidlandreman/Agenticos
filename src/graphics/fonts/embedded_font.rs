@@ -6,7 +6,7 @@
 //! glyph lookup is a simple slice borrow with no synchronization.
 
 use super::core_font::{Font, Glyph};
-use super::font_data::DEFAULT_8X8_FONT_DATA;
+use fontdata::DEFAULT_8X8_FONT_DATA;
 
 const FIRST_CHAR: u8 = 32;
 const NUM_CHARS: usize = 95;

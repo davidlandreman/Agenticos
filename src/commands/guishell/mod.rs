@@ -223,7 +223,7 @@ fn show_start_menu() {
             .unwrap_or(Rect::new(0, 0, 0, 0));
 
         // Calculate menu dimensions
-        let menu_items = 3; // Terminal, Painting, Calc
+        let menu_items = 4; // Terminal, Notepad, Painting, Calc
         let menu_width = 120u32;
         let menu_height = (menu_items * MENU_ITEM_HEIGHT as usize + 4) as u32;
         let menu_x = BUTTON_GAP as i32;
@@ -335,10 +335,10 @@ fn spawn_calc() {
 
 fn spawn_notepad() {
     crate::debug_info!("GUIShell: Spawning notepad...");
-    if let Err(e) = crate::commands::gui_launch_table::spawn_by_name("notepad") {
-        crate::debug_warn!("GUIShell: Failed to spawn notepad: errno={}", e);
-    }
-    crate::debug_info!("GUIShell: spawn_notepad() completed");
+    crate::window::terminal_factory::spawn_gui_user_app(
+        "/host/NOTEPAD.ELF",
+        alloc::vec![alloc::string::String::from("notepad")],
+    );
 }
 
 /// Toggle the Start menu (show if hidden, hide if shown)

@@ -9,6 +9,8 @@ pub mod bin_namespace;
 pub mod error;
 pub mod etc;
 pub mod fdtable;
+pub mod gui;
+pub mod gui_syscalls;
 pub mod image;
 pub mod kernel_stack;
 pub mod launcher;

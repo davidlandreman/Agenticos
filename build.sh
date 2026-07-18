@@ -104,96 +104,10 @@ mkdir -p "$HOST_SHARE_STAGE"
 # into its managed runtime /etc after mounting the host share.
 REPO_ROOT="$(pwd)"
 export REPO_ROOT HOST_SHARE_STAGE
-# shellcheck source=userland/prebuilt-lib.sh
-. "$REPO_ROOT/userland/prebuilt-lib.sh"
+# shellcheck source=userland/stage-lib.sh
+. "$REPO_ROOT/userland/stage-lib.sh"
 stage_zsh_config || exit 1
-
-if cargo build --release --manifest-path userland/Cargo.toml; then
-    USER_HELLO="userland/target/x86_64-unknown-none/release/hello"
-    if [ -f "$USER_HELLO" ]; then
-        STAGED="$HOST_SHARE_STAGE/HELLO.ELF"
-        TMP="$HOST_SHARE_STAGE/.HELLO.ELF.tmp.$$"
-        cp "$USER_HELLO" "$TMP"
-        mv -f "$TMP" "$STAGED"
-        SIZE=$(wc -c < "$STAGED" | tr -d ' ')
-        echo "📦 Staged $STAGED ($SIZE bytes)"
-    else
-        echo "⚠️  Userland build succeeded but $USER_HELLO not found; skipping stage"
-    fi
-    # GLAUNCH.ELF — kernel-side GUI app launcher (see
-    # docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md).
-    # Tiny multicall binary, built every run (no prebuilt). Surfaces
-    # /bin/painting, /bin/calc, etc. through zsh's PATH lookup via the
-    # /bin/<gui_applet> rewrite in src/userland/bin_namespace.rs.
-    # Staged name is GLAUNCH (7 chars) to fit FAT 8.3; in-tree dir is
-    # `userland/apps/guilaunch/`.
-    USER_GUILAUNCH="userland/target/x86_64-unknown-none/release/guilaunch"
-    if [ -f "$USER_GUILAUNCH" ]; then
-        STAGED="$HOST_SHARE_STAGE/GLAUNCH.ELF"
-        TMP="$HOST_SHARE_STAGE/.GLAUNCH.ELF.tmp.$$"
-        cp "$USER_GUILAUNCH" "$TMP"
-        mv -f "$TMP" "$STAGED"
-        SIZE=$(wc -c < "$STAGED" | tr -d ' ')
-        echo "📦 Staged $STAGED ($SIZE bytes)"
-    else
-        echo "⚠️  Userland build succeeded but $USER_GUILAUNCH not found; skipping stage"
-    fi
-else
-    echo "⚠️  Userland build failed; continuing without HELLO.ELF (kernel tests use embedded fixtures)"
-fi
-
-# C++ userland app — built with the host's musl-based static C++ cross
-# compiler if available. Mirrors the rust userland's soft-fail pattern: a
-# missing toolchain warns + skips so the kernel build still proceeds.
-# Install hint for macOS / Homebrew: `brew install x86_64-linux-musl-cross`
-# or build via musl-cross-make.
-echo "🛠  Building C++ userland (HELLOCPP)..."
-MUSL_GXX="${MUSL_GXX:-x86_64-linux-musl-g++}"
-if command -v "$MUSL_GXX" >/dev/null 2>&1; then
-    if make -C userland/apps/hello-cpp MUSL_GXX="$MUSL_GXX"; then
-        CPP_BIN="userland/apps/hello-cpp/build/hello-cpp"
-        if [ -f "$CPP_BIN" ]; then
-            # Verify ET_EXEC. Some toolchains default to PIE even with
-            # -no-pie; the loader rejects ET_DYN, so we'd rather fail
-            # here with a clear message than at run-time inside the guest.
-            # macOS doesn't ship a host `readelf`; derive it from the
-            # cross-toolchain (e.g. x86_64-linux-musl-g++ → x86_64-linux-musl-readelf)
-            # and fall back to host `readelf` for Linux build hosts.
-            MUSL_READELF="${MUSL_GXX%g++}readelf"
-            command -v "$MUSL_READELF" >/dev/null 2>&1 || MUSL_READELF=readelf
-            ET_TYPE=$("$MUSL_READELF" -h "$CPP_BIN" 2>/dev/null | awk '/Type:/ { print $2 }')
-            if [ "$ET_TYPE" != "EXEC" ]; then
-                echo "❌ $CPP_BIN is $ET_TYPE, expected EXEC. Toolchain likely defaults to PIE."
-                echo "   Try: $MUSL_GXX -static -no-pie -fno-pie ..."
-                exit 1
-            fi
-            STAGED="$HOST_SHARE_STAGE/HELLOCPP.ELF"
-            TMP="$HOST_SHARE_STAGE/.HELLOCPP.ELF.tmp.$$"
-            cp "$CPP_BIN" "$TMP"
-            mv -f "$TMP" "$STAGED"
-            SIZE=$(wc -c < "$STAGED" | tr -d ' ')
-            echo "📦 Staged $STAGED ($SIZE bytes)"
-        else
-            echo "⚠️  C++ build succeeded but $CPP_BIN not found; skipping stage"
-        fi
-    else
-        echo "❌ C++ userland build failed."
-        exit 1
-    fi
-else
-    echo "ℹ️  Optional $MUSL_GXX not found on PATH — skipping HELLOCPP.ELF."
-    echo "   Install hint (macOS): brew install x86_64-linux-musl-cross"
-    echo "   Override the binary name: MUSL_GXX=<path-to-musl-g++> ./build.sh"
-fi
-
-# zsh — first real userland shell. Prebuilt-managed: the committed
-# binary at userland/prebuilt/ZSH.ELF is copied into host_share/ by
-# default, so a fresh clone without the musl toolchain still gets a
-# working zsh. Pass --rebuild-userland (or REBUILD_USERLAND=1 /
-# REBUILD_ZSH=1) to compile from source via userland/apps/zsh/Makefile
-# and refresh the committed prebuilt. See userland/prebuilt/README.md.
-stage_zsh || true      # soft-fail: kernel build + tests don't depend on ZSH.ELF
-stage_busybox || true  # soft-fail: kernel build + tests don't depend on BB.ELF
+stage_userland build 0 || true
 
 # Determine build flags
 BUILD_FLAGS="--release"

@@ -307,6 +307,10 @@ pub mod nr {
     /// kernel-side GUI process. Called by `GLAUNCH.ELF` (ring 3) when
     /// the user types e.g. `painting` in zsh.
     pub const GUI_LAUNCH: u64 = 5000;
+    pub const GUI_WIN_CREATE: u64 = 5001;
+    pub const GUI_WIN_PRESENT: u64 = 5002;
+    pub const GUI_NEXT_EVENT: u64 = 5003;
+    pub const GUI_WIN_DESTROY: u64 = 5004;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -426,6 +430,10 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::RT_SIGRETURN => syscalls::rt_sigreturn_handler(args),
         nr::RT_SIGSUSPEND => syscalls::rt_sigsuspend_handler(args),
         nr::GUI_LAUNCH => syscalls::gui_launch_handler(args),
+        nr::GUI_WIN_CREATE => crate::userland::gui_syscalls::gui_win_create_handler(args),
+        nr::GUI_WIN_PRESENT => crate::userland::gui_syscalls::gui_win_present_handler(args),
+        nr::GUI_NEXT_EVENT => crate::userland::gui_syscalls::gui_next_event_handler(args),
+        nr::GUI_WIN_DESTROY => crate::userland::gui_syscalls::gui_win_destroy_handler(args),
         // Phase B: namespace mutations
         nr::MKDIR => syscalls::mkdir_handler(args),
         nr::MKDIRAT => syscalls::mkdirat_handler(args),

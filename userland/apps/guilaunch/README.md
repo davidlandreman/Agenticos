@@ -9,8 +9,8 @@ syscall, and exits.
 
 ## Why it exists
 
-The kernel-side GUI apps (`painting`, `calc`, `notepad`, `tasks`,
-`explorer`) live in `src/commands/<app>/` and run as kernel processes.
+The remaining kernel-side GUI apps (`painting`, `calc`, `tasks`, `explorer`)
+live in `src/commands/<app>/` and run as kernel processes.
 With zsh as the default terminal shell, the user typing `painting`
 needs to land in ring 3 and ride zsh's normal PATH-lookup +
 `execve` flow.
@@ -29,6 +29,9 @@ GUILAUNCH._start:
 Same multicall trick BusyBox uses, but with a single syscall instead
 of a 240-entry applet dispatcher.
 
+New and migrated GUI apps should use the ring-3 GUI toolkit instead. Notepad
+is a standalone `/host/NOTEPAD.ELF` and does not pass through GUILAUNCH.
+
 ## Build
 
 Built every run by `build.sh` / `test.sh` (the bin is ~4 KB stripped —
@@ -39,11 +42,11 @@ cargo build --release --manifest-path userland/Cargo.toml
 # → userland/target/x86_64-unknown-none/release/guilaunch
 ```
 
-Linker args are wired through `build.rs` mirroring `userland/apps/hello/`.
+Linker args are wired through the shared `userland/build-support` crate.
 
 ## See also
 
 - `src/commands/gui_launch_table.rs` — kernel-side dispatch table.
-- `src/userland/syscalls.rs::gui_launch_handler` — syscall handler.
+- `src/userland/abi.rs` — syscall dispatch.
 - `src/userland/bin_namespace.rs` — `GUI_APPLETS` list and `/bin` rewrite.
 - `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`

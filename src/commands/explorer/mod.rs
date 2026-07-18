@@ -14,8 +14,8 @@
 //!   `.TXT`/`.MD`/`.RS` launch `notepad`, `.ELF` launches `run`,
 //!   anything else surfaces an error message box.
 //!
-//! Multi-instance: each invocation gets its own `usize` instance id
-//! and `BTreeMap`-stored state, mirroring `notepad`.
+//! Multi-instance: each invocation gets its own `usize` instance id and
+//! `BTreeMap`-stored state. Text files launch the standalone ring-3 notepad.
 
 pub mod dir_model;
 pub mod dispatch;
@@ -861,12 +861,13 @@ fn open_file(path: &str) {
     crate::debug_info!("explorer: open_file path={} action={:?}", path, action);
     match action {
         OpenAction::LaunchNotepad => {
-            // The kernel-side GUI launch table doesn't yet pipe argv
-            // through, so notepad opens without the file. Follow-up: add
-            // an argv-carrying variant of spawn_by_name and surface the
-            // file path here.
-            let result = crate::commands::gui_launch_table::spawn_by_name("notepad");
-            crate::debug_info!("explorer: spawn notepad result={:?}", result);
+            crate::window::terminal_factory::spawn_gui_user_app(
+                "/host/NOTEPAD.ELF",
+                alloc::vec![
+                    alloc::string::String::from("notepad"),
+                    alloc::string::String::from(path),
+                ],
+            );
         }
         OpenAction::LaunchRun => {
             // U8: multi-ring-3 lifted the single-app restriction.

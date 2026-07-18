@@ -17,6 +17,7 @@ pub enum FileError {
     AccessDenied,
     #[expect(dead_code, reason = "intentional kernel API surface")]
     BufferTooSmall,
+    #[allow(dead_code)]
     IoError,
     #[expect(dead_code, reason = "intentional kernel API surface")]
     InvalidPath,
@@ -276,6 +277,7 @@ impl File {
     }
 
     /// Read the entire file contents as a UTF-8 string
+    #[allow(dead_code)]
     pub fn read_to_string(&self) -> FileResult<String> {
         let bytes = self.read_to_vec()?;
         String::from_utf8(bytes).map_err(|_| FileError::IoError)

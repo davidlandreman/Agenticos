@@ -32,6 +32,8 @@ pub mod fonts;
 #[cfg(feature = "test")]
 pub mod graphics_device_image;
 #[cfg(feature = "test")]
+pub mod gui_userland;
+#[cfg(feature = "test")]
 pub mod heap;
 #[cfg(feature = "test")]
 pub mod icon_view_tests;
@@ -117,6 +119,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("fat_write", fat_write::get_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
+    ("gui_userland", gui_userland::get_tests),
     ("vm", vm::get_tests),
     ("compiler_compat", compiler_compat::get_tests),
     ("userland_switch", userland_switch::get_tests),

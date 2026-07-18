@@ -13,18 +13,19 @@
 
 use runtime::{argv0_from_stack, exit, gui_launch};
 
+#[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn _start() -> ! {
-    // Pull the initial RSP — argc + argv layout lives at RSP. The
-    // linker script sets ENTRY(_start) and the kernel ELF loader doesn't
-    // touch the stack between iretq and our first instruction.
-    let stack_top: *const u64;
-    core::arch::asm!(
-        "mov {0}, rsp",
-        out(reg) stack_top,
-        options(nomem, nostack, preserves_flags),
+    core::arch::naked_asm!(
+        "mov rdi, rsp",
+        "and rsp, -16",
+        "call {}",
+        "ud2",
+        sym guilaunch_main,
     );
+}
 
+unsafe extern "C" fn guilaunch_main(stack_top: *const u64) -> ! {
     let (name_ptr, name_len) = argv0_from_stack(stack_top);
     if name_ptr.is_null() || name_len == 0 {
         // No argv[0] — the kernel always provides one for /bin/<applet>
