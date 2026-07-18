@@ -90,8 +90,8 @@ pub const CLASSIC_METRICS: FrameMetrics = FrameMetrics {
 pub const AERO_METRICS: FrameMetrics = FrameMetrics {
     title_bar_height: 28,
     border_width: 5,
-    corner_radius_top: 8,
-    corner_radius_bottom: 4,
+    corner_radius_top: 11,
+    corner_radius_bottom: 7,
     shadow_margin: 16,
     // Chosen so close_button_rect is bit-identical to the pre-refactor
     // SIZE=16 / PADDING=4 formula: x = right − 5 − 4 − 16, y = y + 5 + 6.

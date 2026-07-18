@@ -5,7 +5,7 @@ use crate::window::GraphicsDevice;
 pub(super) fn draw(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
     draw_shadow(chrome, device);
     draw_glass(chrome, device);
-    punch_rounded_corners(chrome, device);
+    finish_rounded_corners(chrome, device);
     draw_close_button(chrome, device);
     draw_title(chrome, device);
 }
@@ -16,34 +16,123 @@ fn draw_shadow(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
     let peak = if chrome.active { 96u32 } else { 56u32 };
     for y in bounds.y - margin..bounds.bottom() + margin {
         for x in bounds.x - margin..bounds.right() + margin {
-            let dx = if x < bounds.x {
-                bounds.x - x
-            } else if x >= bounds.right() {
-                x - bounds.right() + 1
-            } else {
-                0
-            };
-            let dy = if y < bounds.y {
-                bounds.y - y
-            } else if y >= bounds.bottom() {
-                y - bounds.bottom() + 1
-            } else {
-                0
-            };
-            if dx == 0 && dy == 0 {
+            if bounds.contains_point(crate::window::Point::new(x, y)) {
                 continue;
             }
-            let edge_x = shadow_falloff(dx, margin, peak);
-            let edge_y = shadow_falloff(dy, margin, peak);
-            let alpha = match (dx == 0, dy == 0) {
-                (true, false) => edge_y,
-                (false, true) => edge_x,
-                (false, false) => (edge_x as u32 * edge_y as u32 / peak.max(1)) as u8,
-                (true, true) => 0,
-            };
+            let distance = shadow_distance_from_frame(x, y, bounds, margin);
+            let alpha = shadow_falloff(distance, margin, peak);
             device.draw_pixel_argb(x, y, Color::BLACK, alpha);
         }
     }
+}
+
+/// Distance from a pixel to the rounded Aero frame outline.
+///
+/// Straight sides retain the original one-dimensional falloff. In each corner
+/// region the distance is measured from the corresponding corner circle, so
+/// the shadow expands concentrically around the same arcs that clip the frame.
+fn shadow_distance_from_frame(x: i32, y: i32, bounds: crate::window::Rect, margin: i32) -> i32 {
+    let top_radius = AERO_METRICS.corner_radius_top as i32;
+    let bottom_radius = AERO_METRICS.corner_radius_bottom as i32;
+
+    if top_radius > 0 && y < bounds.y + top_radius {
+        let center_y = bounds.y + top_radius - 1;
+        if x < bounds.x + top_radius {
+            return distance_from_corner(
+                x,
+                y,
+                bounds.x + top_radius - 1,
+                center_y,
+                top_radius,
+                margin,
+            );
+        }
+        if x >= bounds.right() - top_radius {
+            return distance_from_corner(
+                x,
+                y,
+                bounds.right() - top_radius,
+                center_y,
+                top_radius,
+                margin,
+            );
+        }
+    }
+
+    if bottom_radius > 0 && y >= bounds.bottom() - bottom_radius {
+        let center_y = bounds.bottom() - bottom_radius;
+        if x < bounds.x + bottom_radius {
+            return distance_from_corner(
+                x,
+                y,
+                bounds.x + bottom_radius - 1,
+                center_y,
+                bottom_radius,
+                margin,
+            );
+        }
+        if x >= bounds.right() - bottom_radius {
+            return distance_from_corner(
+                x,
+                y,
+                bounds.right() - bottom_radius,
+                center_y,
+                bottom_radius,
+                margin,
+            );
+        }
+    }
+
+    let dx = if x < bounds.x {
+        bounds.x - x
+    } else if x >= bounds.right() {
+        x - bounds.right() + 1
+    } else {
+        0
+    };
+    let dy = if y < bounds.y {
+        bounds.y - y
+    } else if y >= bounds.bottom() {
+        y - bounds.bottom() + 1
+    } else {
+        0
+    };
+    dx.max(dy)
+}
+
+fn distance_from_corner(
+    x: i32,
+    y: i32,
+    center_x: i32,
+    center_y: i32,
+    radius: i32,
+    margin: i32,
+) -> i32 {
+    let dx = x - center_x;
+    let dy = y - center_y;
+    let distance_sq = dx * dx + dy * dy;
+    let outer_radius = radius + margin;
+    if distance_sq > outer_radius * outer_radius {
+        return margin + 1;
+    }
+    (ceil_sqrt(distance_sq, outer_radius) - radius).max(1)
+}
+
+fn ceil_sqrt(value: i32, upper_bound: i32) -> i32 {
+    if value <= 0 {
+        return 0;
+    }
+    let mut low = 1;
+    let mut high = upper_bound.max(1);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if middle * middle >= value {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
 }
 
 fn shadow_falloff(distance: i32, margin: i32, peak: u32) -> u8 {
@@ -127,7 +216,7 @@ fn draw_glass(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
     );
 }
 
-fn punch_rounded_corners(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
+fn finish_rounded_corners(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
     let bounds = chrome.bounds;
     clip_corner_pair(
         device,
@@ -159,6 +248,8 @@ fn clip_corner_pair(
     let inner_sq = (r - 1).max(0) * (r - 1).max(0);
     let outer_sq = r * r;
     let fringe = (outer_sq - inner_sq).max(1);
+    let shadow_margin = AERO_METRICS.shadow_margin as i32;
+    let shadow_peak = if active { 96u32 } else { 56u32 };
     for oy in 0..r {
         for ox in 0..r {
             let dx = r - 1 - ox;
@@ -182,10 +273,36 @@ fn clip_corner_pair(
             } else {
                 Color::new(185, 190, 195)
             };
+            let shadow_distance = (ceil_sqrt(distance_sq, r + shadow_margin) - r).max(1);
+            let shadow_alpha = shadow_falloff(shadow_distance, shadow_margin, shadow_peak);
+            let (color, alpha) = glass_over_shadow(color, alpha, shadow_alpha);
             device.draw_pixel_argb(bounds.x + ox, y, color, alpha);
             device.draw_pixel_argb(bounds.right() - 1 - ox, y, color, alpha);
         }
     }
+}
+
+/// Combine the anti-aliased glass fringe with the black shadow behind it.
+/// Pixels fully outside the frame arc retain the shadow instead of becoming a
+/// transparent notch between the horizontal and vertical shadow bands.
+fn glass_over_shadow(glass: Color, glass_alpha: u8, shadow_alpha: u8) -> (Color, u8) {
+    let glass_alpha = glass_alpha as u32;
+    let shadow_alpha = shadow_alpha as u32;
+    let inverse_glass = 255 - glass_alpha;
+    let output_alpha = glass_alpha + (shadow_alpha * inverse_glass + 127) / 255;
+    if output_alpha == 0 {
+        return (Color::BLACK, 0);
+    }
+    let channel =
+        |value: u8| ((value as u32 * glass_alpha + output_alpha / 2) / output_alpha).min(255) as u8;
+    (
+        Color::new(
+            channel(glass.red),
+            channel(glass.green),
+            channel(glass.blue),
+        ),
+        output_alpha.min(255) as u8,
+    )
 }
 
 fn draw_close_button(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
