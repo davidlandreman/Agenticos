@@ -26,11 +26,14 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   is current.
 - `lifecycle.rs` — `Process` PCB, `ProcessTable`, the
   install/teardown flow, zombie filing, the demand-grown user-stack
-  page-fault hook, FPU/FS_BASE save/restore orchestrators, and the
-  legacy `KernelContinuation` setjmp/longjmp scaffolding used by
-  today's launch + fork paths.
-- `mod.rs` — `enter_user_mode_with_aspace` (top-level launcher:
-  installs Process, marks Ready, blocks launcher kernel thread) and
+  page-fault hook, FPU/FS_BASE save/restore orchestrators, and orphan
+  adoption for the kernel reaper.
+- `process_service.rs` — persistent kernel launch/reap worker, bounded
+  non-blocking request queue, explicit terminal launch context, cancellation,
+  and completion delivery.
+- `launcher.rs` — serialized CR3-sensitive ELF preparation. Production uses
+  the unstarted prepare/commit split; the blocking wrapper is test compatibility.
+- `mod.rs` — process setup/initial-stack construction and
   `iretq_to_user_with_regs` (same-process iretq with caller-supplied
   UserState — used by execve, rt_sigreturn, signal-delivery).
 - `switch.rs` — U4: `save_ring3` and `resume_ring3` for the
@@ -203,57 +206,30 @@ saving and requeueing the current user process first. Direct ring3-to-ring3
 switching remains available on intervening ticks and blocking syscalls, but
 cannot starve the compositor or network worker when zsh polls for a child.
 
-## Launch flow today (post-U8)
+## Launch flow today
 
-1. Terminal opens → `spawn_zsh_for_terminal` (in `src/window/`)
-   spawns a kernel thread that calls
-   `launcher::launch_user_binary("/host/ZSH.ELF")`.
-2. `launch_user_binary` reads ELF bytes through asynchronous VirtIO block I/O,
-   then holds `BINARY_SETUP_MUTEX` only while it performs
-   `AddressSpace::new → activate → load/map ELF → initialize VMAs once →
-   build stack/install Process`. The setup mutex also serializes teardown;
-   kernel-thread preemption remains enabled; block completion wakes the exact
-   saved kernel continuation.
-3. `enter_user_mode_with_aspace` builds the initial user stack,
-   inserts the Process into `PROCESS_TABLE` with `saved_user_state`
-   populated to the binary's entry frame (rip=entry, rsp=user_rsp,
-   rflags=0x202, GPRs=0), marks ring3_ready, and calls
-   `block_kernel_thread_for_ring3_exit(pid)` which blocks the
-   launcher kernel thread on `BlockReason::WaitingForRing3Exit{pid}`.
-4. Kernel-thread scheduler picks another runnable thread (typically
-   the kernel main loop's idle path; another terminal's launcher; the
-   compositor when U10 lands). The kernel main loop's
-   `save_kernel_and_resume_ring3` checks `ring3_ready` and dispatches
-   the first ready ring-3 process via `resume_ring3` — saving
-   `KERNEL_CONTEXT` so a ring-3 yield-back lands here cleanly.
-5. Ring 3 runs. Syscalls take the SYSCALL fast path; faults take the
-   IDT path. The timer at CPL=3 fires `try_preempt_ring3` (U5) which
-   round-robins between ring3_ready processes via `resume_ring3`.
-6. On exit (cooperative or fault), `long_jump_to_run_or_halt` wakes
-   any kernel thread blocked on this pid's exit (via
-   `wake_threads_waiting_for_ring3_exit`), then yields to the next
-   ring3_ready (`resume_ring3`) or back to the kernel main loop
-   (`yield_to_kernel_main_loop` restores `KERNEL_CONTEXT`).
-7. The kernel scheduler eventually picks the woken launcher thread;
-   it resumes inside `block_kernel_thread_for_ring3_exit`, returns to
-   `enter_user_mode_with_aspace`, reads exit info from the Process,
-   returns to the caller. `release_active_image` (or the caller's
-   cleanup) drops the Process from PROCESS_TABLE, freeing
-   `AddressSpace`/`KernelStack`/fd_table/etc. AddressSpace teardown releases
-   resident leaves and private page-table frames to the reusable allocator.
+1. Start, Run, or Terminal constructs an owned `LaunchSpec` and calls
+   `process_service::submit`, receiving a `LaunchId` before a PID exists.
+2. The persistent `process-service` kernel thread drains the bounded queue and
+   calls `launcher::prepare_user_binary_unstarted`. ELF bytes are read through
+   asynchronous VirtIO block I/O before `BINARY_SETUP_MUTEX` serializes the
+   CR3-sensitive `AddressSpace::new → activate → load/map ELF → initialize
+   VMAs → build stack/install Process` transaction.
+3. Setup installs a complete but unschedulable Process. The service publishes
+   the LaunchId→PID record, checks cancellation, then marks the user entity
+   Ready. Explicit `terminal_id`, cwd, argv, and env replace wrapper-thread
+   inference.
+4. Ring 3 runs on the unified scheduler. On exit it records status, destroys
+   GUI ownership, unregisters its entity, marks process-service work pending,
+   and dispatches away without dropping its live kernel stack.
+5. `process-service` later removes the Process from its own kernel stack,
+   freeing the address space, kernel stack, fds, and timers before invoking a
+   completion handler outside all locks. Fork children remain parent-owned
+   zombies until `wait4`; children of an exited parent are adopted by the
+   kernel reaper.
 
-Two terminals coexisting: two `spawn_zsh_for_terminal` kernel threads
-are created; each calls `enter_user_mode_with_aspace` for its own
-zsh, blocks on `WaitingForRing3Exit{own_pid}`. The kernel scheduler
-runs whichever launcher hasn't blocked yet, then idle dispatches
-each ring-3 process in turn via `save_kernel_and_resume_ring3`. U5's
-timer ISR time-slices between them at CPL=3. When zsh blocks on
-stdin (no input), `read_stdin_blocking` yields via
-`block_current_ring3_and_yield(WaitingForInput)`, which picks the
-next runnable ring-3 (the other zsh) or falls back to the kernel
-main loop. Input from the keyboard ISR's stdin push calls
-`wake_ring3_blocked_on_input`, moving blocked readers back to
-ring3_ready; the next dispatch picks them up.
+`WaitingForRing3Exit` and `launch_user_binary` remain only for synchronous
+QEMU fixtures. Production creates no per-application launcher kernel thread.
 
 ## Virtual memory
 
@@ -359,6 +335,8 @@ Unit status:
   `enter_user_mode_with_regs_asm`, `Process.continuation` field) all
   deleted; `iretq_to_user_with_regs` kept for execve / sigreturn /
   signal-delivery (same-process iretq with new register state).
+  This wrapper-per-terminal lifetime model has since been superseded in
+  production by `process-service`; the blocking path remains for QEMU fixtures.
 - U8 — Terminal launch path: "register and yield" pattern; multiple
   terminals.
 - U9 — Signal / page-fault audit for cross-process correctness.

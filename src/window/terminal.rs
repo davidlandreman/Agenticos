@@ -25,11 +25,13 @@ pub fn get_terminal_window() -> Option<WindowId> {
 
 /// Set the current output terminal for command execution
 /// This should be called by the shell before running a command
+#[expect(dead_code, reason = "legacy kernel-command routing API")]
 pub fn set_current_output_terminal(window_id: WindowId) {
     *CURRENT_OUTPUT_TERMINAL.lock() = Some(window_id);
 }
 
 /// Clear the current output terminal
+#[expect(dead_code, reason = "legacy kernel-command routing API")]
 pub fn clear_current_output_terminal() {
     *CURRENT_OUTPUT_TERMINAL.lock() = None;
 }

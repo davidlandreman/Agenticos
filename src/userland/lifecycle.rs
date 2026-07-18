@@ -773,12 +773,9 @@ pub fn raise_signal_on_terminal(terminal_id: crate::window::WindowId, sig: i32) 
 /// an abandoned frame that the next SYSCALL entry would overwrite. See
 /// the U8 notes in `src/userland/CLAUDE.md`.
 ///
-/// After removing the processes, wakes any kernel launcher thread that
-/// was blocked in `wait_for_ring3_exit` on one of them (mirroring the
-/// normal exit path) so it unblocks and returns from
-/// `launch_user_binary`. Its `release_active_image` then finds the
-/// process already gone and reclaims nothing — that path tolerates a
-/// missing entry precisely for this case.
+/// Production terminal factory first cancels the corresponding process-service
+/// record. The final compatibility wake below exists only for QEMU fixtures
+/// still blocked in `launch_user_binary`.
 pub fn kill_ring3_processes_on_terminal(terminal_id: crate::window::WindowId) {
     // Snapshot the victim PIDs under the table lock, then release it
     // before removing/dropping any `Process`: `remove_process` takes the
@@ -1833,6 +1830,31 @@ pub fn reap_zombie(target_pid: i32, reaper: u32) -> Option<(u32, i64, Option<i32
     Some((pid, z.exit_code, z.signal_termination))
 }
 
+/// Reparent one process whose user parent no longer exists or has already
+/// exited. The common kernel process service calls this from its own stack,
+/// outside the divergent exit path. An already-exited child is removed from
+/// the old parent's zombie table so only the kernel reaper owns its teardown.
+pub fn adopt_one_orphan_for_kernel_reaper() -> Option<u32> {
+    let pid = {
+        let mut table = PROCESS_TABLE.lock();
+        let candidate = table.by_pid.iter().find_map(|(&pid, process)| {
+            if pid == KERNEL_PID || process.parent_pid == KERNEL_PID {
+                return None;
+            }
+            let parent_gone = table
+                .by_pid
+                .get(&process.parent_pid)
+                .map(|parent| !matches!(parent.exit_kind, ExitKind::None))
+                .unwrap_or(true);
+            parent_gone.then_some(pid)
+        })?;
+        table.by_pid.get_mut(&candidate)?.parent_pid = KERNEL_PID;
+        candidate
+    };
+    ZOMBIES.lock().remove(&pid);
+    Some(pid)
+}
+
 /// Helper used by exception handlers: returns true when the saved CS in the
 /// interrupt frame indicates the fault occurred at ring 3 (CPL=3 / RPL=3).
 #[inline]
@@ -2090,24 +2112,17 @@ fn record_exit(kind: ExitKind, code: i64) {
 }
 
 fn long_jump_to_run_or_halt() -> ! {
-    // U8: ring-3 process exit unified through the scheduler-block
-    // model. Both top-level kernel-launched binaries and forked
-    // children leave their `Process` slot in PROCESS_TABLE (its
-    // kernel_stack is what we're executing on; we can't drop it from
-    // here). Cleanup happens later:
-    //   - Top-level binary: `enter_user_mode_with_aspace` is woken
-    //     via `wake_threads_waiting_for_ring3_exit`, returns,
-    //     `remove_process` drops the slot.
-    //   - Forked child: parent's `wait4` reap path calls
-    //     `remove_process`.
+    // A stopped process leaves its Process slot in PROCESS_TABLE because this
+    // handler is still executing on that slot's kernel stack. Cleanup happens
+    // later from a safe stack: process-service owns detached kernel launches,
+    // while a user parent owns fork children through wait4. The synchronous
+    // QEMU compatibility path still wakes a WaitingForRing3Exit thread.
     //
     // We do NOT clear `user_va_bounds`: bounds describe the VA layout
     // shared by all ring-3 processes, and any other ring-3 process
     // still alive expects them in place.
 
-    // Find the current ring-3 PID so we can wake the launching kernel
-    // thread blocked on its exit. If no current_user_pid is set, this
-    // is a synthetic test path; no kernel thread to wake.
+    // If no current_user_pid is set, this is a synthetic test path.
     let exiting_pid = current_user_pid();
     if let Some(pid) = exiting_pid {
         // GUI resources are process-owned and must disappear at death, not
@@ -2116,14 +2131,13 @@ fn long_jump_to_run_or_halt() -> ! {
         crate::userland::gui::cleanup_process(pid);
         let entity = crate::process::entity::EntityId::UserProcess(pid);
         crate::process::timer::cancel_entity(entity);
-        // Wake any kernel thread blocked on this process's exit. The
-        // thread's `block_kernel_thread_for_ring3_exit` returns when
-        // scheduler picks it; it reads exit_kind/exit_code from
-        // PROCESS_TABLE and removes the Process.
+        // Unregister the stopped entity, retain the test-compatibility waiter
+        // wake, and publish durable reaper work for production launches.
         let mut sched = crate::process::scheduler::SCHEDULER.lock();
         sched.unregister_entity(entity);
         sched.wake_threads_waiting_for_ring3_exit(pid);
         drop(sched);
+        crate::userland::process_service::notify_process_exit(pid);
         // Clear current_user_pid — we're no longer running this
         // process. The next ring-3 dispatch (via resume_ring3) will
         // set it to the next pid.

@@ -279,8 +279,8 @@ fn test_text_input_callbacks_and_utf8_limit() {
 
 fn test_run_command_is_one_zsh_argument() {
     let command = "notepad '/data/my note.txt'";
-    let argv = crate::window::terminal_factory::run_command_argv(command);
-    assert_eq!(argv[0], crate::window::terminal_factory::ZSH_HOST_PATH);
+    let argv = crate::commands::guishell::run_command_argv(command);
+    assert_eq!(argv[0], crate::userland::process_service::ZSH_HOST_PATH);
     assert_eq!(argv[1], "-c");
     assert_eq!(argv[2], command);
 }

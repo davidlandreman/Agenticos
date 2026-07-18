@@ -101,6 +101,8 @@ pub enum BlockReason {
     WaitingForBlockIo(u64),
     /// Deferred timer heap has no due work.
     WaitingForTimerWork,
+    /// The shared user-process service has no launch or reap work pending.
+    WaitingForProcessWork,
 }
 
 /// Process Control Block - complete state for a process
