@@ -15,11 +15,11 @@ use core::cmp::Ordering;
 use dialogs::{DialogStatus, MessageBox, MessageChoice, Modal, ModalOutcome};
 use gui::file_ui::{
     capabilities, component_prefix, draw_clipped, draw_file_icon as shared_draw_file_icon,
-    format_modified, format_size, BreadcrumbBar, FileIconKind as EntryKind, FilePlace,
-    FileUiColors, IconButton, MountCapabilities as Capabilities, NavIcon, PlaceIcon, PlacesSidebar,
-    UiRect,
+    format_modified, format_size, BreadcrumbBar, BrowserScrollbar, FileIconKind as EntryKind,
+    FilePlace, FileUiColors, IconButton, MountCapabilities as Capabilities, NavIcon, PlaceIcon,
+    PlacesSidebar, UiRect,
 };
-use gui::{Canvas, TextField, Window};
+use gui::{decode_control_input, Canvas, ControlInput, PointerKind, TextField, Window};
 
 const INITIAL_W: u32 = 920;
 const INITIAL_H: u32 = 580;
@@ -153,6 +153,7 @@ struct FileManager {
     descending: bool,
     view: ViewMode,
     scroll: usize,
+    browser_scroll: BrowserScrollbar,
     filter: TextField,
     location: TextField,
     focus: FocusTarget,
@@ -195,6 +196,7 @@ impl FileManager {
             descending: false,
             view: ViewMode::Details,
             scroll: 0,
+            browser_scroll: BrowserScrollbar::new(),
             filter: TextField::new(0, 0, 180, 28, ""),
             location: TextField::new(0, 0, 300, 28, ""),
             focus: FocusTarget::Content,
@@ -385,6 +387,7 @@ impl FileManager {
         let width = self.window.canvas().width() as i32;
         let height = self.window.canvas().height() as i32;
         let content_bottom = height - STATUS_H;
+        self.sync_browser_scroll();
         self.places.bounds = UiRect::new(
             0,
             TOOLBAR_H,
@@ -438,6 +441,7 @@ impl FileManager {
             ViewMode::Details => self.draw_details(&mut canvas, width, content_bottom),
             ViewMode::Grid => self.draw_grid(&mut canvas, width, content_bottom),
         }
+        self.browser_scroll.draw(&mut canvas);
         let status_text = self.status_text();
         draw_status(
             &mut canvas,
@@ -631,15 +635,7 @@ impl FileManager {
             gui::GUI_EVENT_FOCUS_CHANGE => self.focused = event.payload[0] != 0,
             gui::GUI_EVENT_RESIZE => self.window.resize(event.payload[0], event.payload[1]),
             gui::GUI_EVENT_KEY if event.payload[3] != 0 => self.handle_key(event.payload),
-            gui::GUI_EVENT_MOUSE => {
-                if event.payload[3] == gui::GUI_MOUSE_DOWN
-                    || event.payload[3] == gui::GUI_MOUSE_SCROLL
-                {
-                    self.handle_mouse(event.payload);
-                } else {
-                    return false;
-                }
-            }
+            gui::GUI_EVENT_MOUSE => self.handle_mouse(&event),
             _ => return false,
         }
         self.render();
@@ -747,11 +743,19 @@ impl FileManager {
         }
     }
 
-    fn handle_mouse(&mut self, payload: [u32; 6]) {
-        let x = payload[0] as i32;
-        let y = payload[1] as i32;
-        if payload[3] == gui::GUI_MOUSE_SCROLL {
-            let delta = payload[5] as i32;
+    fn handle_mouse(&mut self, event: &runtime::GuiEvent) {
+        let x = event.payload[0] as i32;
+        let y = event.payload[1] as i32;
+        self.sync_browser_scroll();
+        if let Some(ControlInput::Pointer(input)) = decode_control_input(event) {
+            let response = self.browser_scroll.handle_pointer(input);
+            if response.consumed {
+                self.scroll = self.browser_scroll.first();
+                return;
+            }
+        }
+        if event.payload[3] == gui::GUI_MOUSE_SCROLL {
+            let delta = event.payload[5] as i32;
             let step = match self.view {
                 ViewMode::Details => 3,
                 ViewMode::Grid => self.grid_columns(),
@@ -761,6 +765,15 @@ impl FileManager {
             } else {
                 self.scroll = (self.scroll + step).min(self.visible.len().saturating_sub(1));
             }
+            return;
+        }
+        if !matches!(
+            decode_control_input(event),
+            Some(ControlInput::Pointer(gui::PointerInput {
+                kind: PointerKind::Down,
+                ..
+            }))
+        ) {
             return;
         }
         if let Some(menu) = self.context.take() {
@@ -840,14 +853,14 @@ impl FileManager {
             return;
         };
         let path = self.entries[self.visible[position]].path.clone();
-        let modifiers = payload[2] >> 8;
+        let modifiers = event.payload[2] >> 8;
         let ctrl = modifiers & 2 != 0;
         let shift = modifiers & 1 != 0;
         self.select_position(position, shift, ctrl);
         self.focus = FocusTarget::Content;
         // Mouse button state occupies the low bits; keyboard modifiers are
         // shifted into bits 8.. by the GUI event encoder.
-        let right = payload[2] & 0b10 != 0;
+        let right = event.payload[2] & 0b10 != 0;
         if right {
             let menu_x = x.min(width - 146).max(0);
             let menu_y = y.min(height - STATUS_H - 7 * 24 - 2).max(TOOLBAR_H);
@@ -857,7 +870,7 @@ impl FileManager {
             });
             return;
         }
-        let tick = payload[4] as u64 | ((payload[5] as u64) << 32);
+        let tick = event.payload[4] as u64 | ((event.payload[5] as u64) << 32);
         let double = self.last_click.as_ref().map_or(false, |last| {
             last.path == path
                 && tick.saturating_sub(last.tick) <= 50
@@ -896,6 +909,33 @@ impl FileManager {
 
     fn grid_columns(&self) -> usize {
         ((self.window.canvas().width() as i32 - SIDEBAR_W) / TILE_W).max(1) as usize
+    }
+
+    fn sync_browser_scroll(&mut self) {
+        let width = self.window.canvas().width() as i32;
+        let height = self.window.canvas().height() as i32;
+        let bottom = height - STATUS_H;
+        let (top, page, step) = match self.view {
+            ViewMode::Details => {
+                let top = TOOLBAR_H + HEADER_H;
+                (top, ((bottom - top) / ROW_H).max(1) as usize, 1)
+            }
+            ViewMode::Grid => {
+                let columns = self.grid_columns();
+                let rows = ((bottom - TOOLBAR_H) / TILE_H).max(1) as usize;
+                (TOOLBAR_H, rows * columns, columns)
+            }
+        };
+        self.browser_scroll.configure(
+            width - 2,
+            top + 2,
+            (bottom - top - 4).max(1) as u32,
+            self.visible.len(),
+            page,
+            self.scroll,
+            step,
+        );
+        self.scroll = self.browser_scroll.first();
     }
 
     fn entry_position_at(&self, x: i32, y: i32) -> Option<usize> {

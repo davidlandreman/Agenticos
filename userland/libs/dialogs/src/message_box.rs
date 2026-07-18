@@ -3,7 +3,10 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use gui::{theme, Button, Window, FONT_CELL_WIDTH, FONT_LINE_HEIGHT};
+use gui::{
+    decode_control_input, theme, Button, ButtonAction, ControlInput, Window, FONT_CELL_WIDTH,
+    FONT_LINE_HEIGHT,
+};
 
 use crate::DialogStatus;
 
@@ -137,9 +140,9 @@ impl MessageBox {
                 palette.text,
             );
         }
-        self.affirmative.draw(canvas, true);
+        self.affirmative.draw_control(canvas, true);
         if let Some(negative) = self.negative.as_ref() {
-            negative.draw(canvas, false);
+            negative.draw_control(canvas, false);
         }
         let _ = self.window.present();
     }
@@ -163,16 +166,24 @@ impl MessageBox {
                 }
                 _ => {}
             },
-            runtime::GUI_EVENT_MOUSE if event.payload[3] == runtime::GUI_MOUSE_DOWN => {
-                let x = event.payload[0] as i32;
-                let y = event.payload[1] as i32;
-                if self.affirmative.hit(x, y) {
+            runtime::GUI_EVENT_MOUSE => {
+                let Some(ControlInput::Pointer(input)) = decode_control_input(event) else {
+                    return DialogStatus::Pending;
+                };
+                let affirmative = self.affirmative.handle_pointer(input);
+                if affirmative.action == Some(ButtonAction::Activated) {
                     return DialogStatus::Done(Some(self.affirmative_choice()));
                 }
-                if let Some(negative) = self.negative.as_ref() {
-                    if negative.hit(x, y) {
+                let mut negative_repaint = false;
+                if let Some(negative) = self.negative.as_mut() {
+                    let response = negative.handle_pointer(input);
+                    negative_repaint = response.repaint;
+                    if response.action == Some(ButtonAction::Activated) {
                         return DialogStatus::Done(Some(self.negative_choice()));
                     }
+                }
+                if affirmative.repaint || negative_repaint {
+                    self.render();
                 }
             }
             _ => {}

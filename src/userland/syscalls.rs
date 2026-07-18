@@ -3859,8 +3859,12 @@ pub fn fchdir_handler(args: &mut SyscallArgs) -> i64 {
     let fd = args.rdi as i32;
     let slot = with_fd_slot(fd);
     let path = match slot {
-        Some(FdSlot::File { handle, .. }) => handle.path(),
-        _ => return EBADF,
+        Some(FdSlot::Directory { handle, .. }) => handle.path(),
+        Some(FdSlot::VirtualDir { path, .. }) => (*path).clone(),
+        Some(FdSlot::VirtualBinDir { .. }) => String::from("/bin"),
+        Some(FdSlot::VirtualDevDir { .. }) => String::from("/dev"),
+        Some(_) => return ENOTDIR,
+        None => return EBADF,
     };
     chdir_to(path)
 }
@@ -3873,6 +3877,38 @@ fn chdir_to(path: alloc::string::String) -> i64 {
         set_cwd(path);
         return 0;
     }
+
+    // Kernel-synthesized namespaces participate in path resolution just like
+    // mounted directories. BusyBox top relies on `chdir("/proc")` before it
+    // opens stat/meminfo/loadavg by relative name.
+    if crate::userland::bin_namespace::is_bin_dir(&path) {
+        set_cwd(path);
+        return 0;
+    }
+    if crate::userland::bin_namespace::apply_bin_rewrite(&path).is_some() {
+        return ENOTDIR;
+    }
+    if crate::userland::procfs::is_proc_path(&path) {
+        return match crate::userland::procfs::classify(&path) {
+            Some(crate::userland::procfs::ProcNodeKind::Dir) => {
+                set_cwd(path);
+                0
+            }
+            Some(crate::userland::procfs::ProcNodeKind::File) => ENOTDIR,
+            None => ENOENT,
+        };
+    }
+    if crate::userland::devfs::is_dev_path(&path) {
+        return match crate::userland::devfs::classify(&path) {
+            Some(crate::userland::devfs::DeviceNode::Directory) => {
+                set_cwd(path);
+                0
+            }
+            Some(crate::userland::devfs::DeviceNode::Urandom) => ENOTDIR,
+            None => ENOENT,
+        };
+    }
+
     let meta = match crate::fs::metadata(&path) {
         Ok(m) => m,
         Err(ref e) => return map_fs_err(e),

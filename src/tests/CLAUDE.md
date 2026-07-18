@@ -31,6 +31,9 @@ This folder holds in-kernel test modules that run under QEMU when the kernel is 
   numeric IPv4 `ping`, `nc`, and HTTP-only `wget` smokes, including
   zsh→fork/execve regressions for `ping` and `wget`. `test.sh` supplies
   restricted QEMU networking and repository-owned guest-forwarded services.
+- `procfs.rs` — synthetic `/proc`, `sysinfo(2)`, process accounting/signal
+  coverage, plus booted BusyBox `free`, `top -b`, and `reset` capability
+  smokes that keep the committed multicall binary aligned with the kernel ABI.
 - `entropy.rs` — asserts the default QEMU selects modern VirtIO RNG, requests
   distinct broker output, and covers the RDRAND CPUID decoder.
 
