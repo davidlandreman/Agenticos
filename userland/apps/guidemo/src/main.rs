@@ -9,8 +9,9 @@ use dialogs::{
     Buttons, ColorPicker, DialogStatus, FileDialog, MessageBox, MessageChoice, Modal, ModalOutcome,
 };
 use gui::{
-    theme, Button, ButtonState, ListView, TextField, Window, GUI_EVENT_CLOSE, GUI_EVENT_KEY,
-    GUI_EVENT_MOUSE, GUI_EVENT_RESIZE, GUI_MOUSE_DOWN, GUI_MOUSE_SCROLL,
+    decode_control_input, theme, Button, ButtonState, ControlInput, ListView, PointerKind, Rect,
+    Slider, TextArea, TextAreaOptions, TextField, Window, GUI_EVENT_CLOSE, GUI_EVENT_KEY,
+    GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
 };
 
 /// Why the reference client has a modal open (so its outcome routes correctly).
@@ -28,7 +29,10 @@ struct Demo {
     swatch: u32,
     field: TextField,
     field_focused: bool,
+    area_focused: bool,
     list: ListView,
+    area: TextArea,
+    slider: Slider,
     buttons: [Button; 4],
     modal: Option<Modal>,
     purpose: ModalPurpose,
@@ -43,7 +47,7 @@ const BUTTON_STATES: [ButtonState; 4] = [
 
 impl Demo {
     fn new() -> Result<Self, i64> {
-        let window = Window::new(520, 400, "Ring-3 GUI Demo")?;
+        let window = Window::new(700, 520, "Ring-3 GUI Demo")?;
         let mut list = ListView::new(16, 240, 220, 120);
         list.set_rows(
             (1..=12)
@@ -56,7 +60,16 @@ impl Demo {
             swatch: 0x203050,
             field: TextField::new(16, 196, 220, 24, "Editable text"),
             field_focused: true,
+            area_focused: false,
             list,
+            area: {
+                let mut area =
+                    TextArea::new(Rect::new(260, 300, 410, 180), TextAreaOptions::default());
+                area.set_text("Reusable TextArea\n\nDrag-select this text.\nUse the wheel or scrollbar.\nThe deliberately long line below exercises horizontal scrolling:\n0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789");
+                area.set_modified(false);
+                area
+            },
+            slider: Slider::new(360, 250, 220, 18, 0, 255, 96),
             buttons: [
                 Button::new("Normal", 16, 60, 100, 28),
                 Button::new("Default", 128, 60, 100, 28),
@@ -121,7 +134,10 @@ impl Demo {
             canvas.draw_text(260, 228, "Picked color:", palette.text);
             canvas.fill_rect(260, 240, 64, 40, swatch);
             canvas.rect(260, 240, 64, 40, palette.border);
+            canvas.draw_text(590, 252, "Slider", palette.text);
         }
+        self.slider.draw(self.window.canvas_mut(), false);
+        self.area.draw(self.window.canvas_mut(), self.area_focused);
         let _ = self.window.present();
     }
 
@@ -129,16 +145,15 @@ impl Demo {
         match event.kind {
             GUI_EVENT_CLOSE => return true,
             GUI_EVENT_KEY if event.payload[3] != 0 && self.modal.is_none() => {
-                let key = event.payload[0];
                 let character = char::from_u32(event.payload[1]).unwrap_or('\0');
                 match character.to_ascii_lowercase() {
-                    'c' if !self.field_focused => {
+                    'c' if !self.field_focused && !self.area_focused => {
                         if let Ok(dialog) = ColorPicker::new(self.swatch) {
                             self.purpose = ModalPurpose::Color;
                             self.modal = Some(Modal::Color(dialog));
                         }
                     }
-                    'm' if !self.field_focused => {
+                    'm' if !self.field_focused && !self.area_focused => {
                         if let Ok(dialog) = MessageBox::new(
                             "Confirm",
                             "Exit the GUI demo?\nYes exits, No dismisses.",
@@ -148,37 +163,37 @@ impl Demo {
                             self.modal = Some(Modal::Message(dialog));
                         }
                     }
-                    'o' if !self.field_focused => {
+                    'o' if !self.field_focused && !self.area_focused => {
                         if let Ok(dialog) = FileDialog::open("/host/") {
                             self.purpose = ModalPurpose::Open;
                             self.modal = Some(Modal::File(dialog));
                         }
                     }
-                    _ if self.field_focused => {
-                        self.field.key(key, character);
-                        self.render();
+                    _ => {
+                        if let Some(input) = decode_control_input(event) {
+                            if self.field_focused {
+                                self.field.handle_input(input, true);
+                            } else if self.area_focused {
+                                self.area.handle_input(input, true);
+                            }
+                        }
                     }
-                    _ => {}
                 }
                 self.render();
             }
             GUI_EVENT_MOUSE if self.modal.is_none() => {
-                let x = event.payload[0] as i32;
-                let y = event.payload[1] as i32;
-                match event.payload[3] {
-                    GUI_MOUSE_DOWN => {
-                        self.field_focused = self.field.hit(x, y);
-                        if self.field_focused {
-                            self.field.click(x);
-                        }
-                        self.list.click(x, y);
-                        self.render();
+                if let Some(ControlInput::Pointer(input)) = decode_control_input(event) {
+                    if matches!(input.kind, PointerKind::Down) {
+                        self.field_focused = self.field.hit(input.x, input.y);
+                        self.area_focused = self.area.bounds().contains(input.x, input.y);
                     }
-                    GUI_MOUSE_SCROLL if self.list.hit(x, y) => {
-                        self.list.scroll(event.payload[5] as i32);
-                        self.render();
-                    }
-                    _ => {}
+                    self.field
+                        .handle_input(ControlInput::Pointer(input), self.field_focused);
+                    self.area
+                        .handle_input(ControlInput::Pointer(input), self.area_focused);
+                    self.list.handle_pointer(input);
+                    self.slider.handle_pointer(input);
+                    self.render();
                 }
             }
             GUI_EVENT_RESIZE => {

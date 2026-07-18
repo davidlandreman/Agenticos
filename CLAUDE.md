@@ -22,6 +22,11 @@ Kernel-requested programs use one persistent `process-service`: Start, Run, and 
 
 The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.
 
+The ring-3 GUI control catalog now also includes `TextArea`, interactive
+horizontal/vertical `Scrollbar`, and `Slider`. Notepad consumes the shared
+scrollable `TextArea`; toolkit lists, Task Manager, File Manager, and the common
+file dialog share the scrollbar model and interaction behavior.
+
 The native common `FileDialog` is a modern Finder/Explorer-style chooser with
 Places, navigation history, breadcrumbs, file/type filtering, details and grid
 views, real double-click, and validated Open/Save behavior. Shared browser

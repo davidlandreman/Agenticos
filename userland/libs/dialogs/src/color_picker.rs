@@ -2,7 +2,7 @@
 
 use alloc::format;
 
-use gui::{theme, Button, Window};
+use gui::{decode_control_input, theme, Button, ButtonAction, ControlInput, Slider, Window};
 
 use crate::DialogStatus;
 
@@ -29,10 +29,8 @@ const PALETTE: [u32; SWATCH_COLS * SWATCH_ROWS] = [
 /// the reference consumer of mouse-move-with-button-held drag.
 pub struct ColorPicker {
     window: Window,
-    r: u8,
-    g: u8,
-    b: u8,
-    active_slider: Option<usize>,
+    sliders: [Slider; 3],
+    active_slider: usize,
     ok: Button,
     cancel: Button,
 }
@@ -42,10 +40,12 @@ impl ColorPicker {
         let window = Window::new(360, 320, "Choose Color")?;
         let mut dialog = Self {
             window,
-            r: (initial >> 16) as u8,
-            g: (initial >> 8) as u8,
-            b: initial as u8,
-            active_slider: None,
+            sliders: [
+                Slider::new(0, 0, 100, SLIDER_H as u32, 0, 255, (initial >> 16) & 0xff),
+                Slider::new(0, 0, 100, SLIDER_H as u32, 0, 255, (initial >> 8) & 0xff),
+                Slider::new(0, 0, 100, SLIDER_H as u32, 0, 255, initial & 0xff),
+            ],
+            active_slider: 0,
             ok: Button::new("OK", 0, 0, 88, 26),
             cancel: Button::new("Cancel", 0, 0, 88, 26),
         };
@@ -63,7 +63,7 @@ impl ColorPicker {
     }
 
     fn value(&self) -> u32 {
-        (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32
+        self.sliders[0].value() << 16 | self.sliders[1].value() << 8 | self.sliders[2].value()
     }
 
     fn grid_origin() -> (i32, i32) {
@@ -87,26 +87,19 @@ impl ColorPicker {
         self.cancel.y = button_y;
         self.ok.x = self.cancel.x - 12 - self.ok.w as i32;
         self.ok.y = button_y;
-    }
-
-    fn channel(&mut self, index: usize) -> &mut u8 {
-        match index {
-            0 => &mut self.r,
-            1 => &mut self.g,
-            _ => &mut self.b,
+        for index in 0..3 {
+            let (x, y, w) = self.slider_track(index);
+            self.sliders[index].x = x;
+            self.sliders[index].y = y;
+            self.sliders[index].w = w as u32;
+            self.sliders[index].h = SLIDER_H as u32;
         }
     }
 
-    fn set_channel_from_x(&mut self, index: usize, x: i32) {
-        let (track_x, _, track_w) = self.slider_track(index);
-        let value = (((x - track_x).clamp(0, track_w) * 255) / track_w) as u8;
-        *self.channel(index) = value;
-    }
-
     fn render(&mut self) {
-        let r = self.r;
-        let g = self.g;
-        let b = self.b;
+        let r = self.sliders[0].value() as u8;
+        let g = self.sliders[1].value() as u8;
+        let b = self.sliders[2].value() as u8;
         let value = self.value();
         let hex = format!("#{r:02X}{g:02X}{b:02X}");
         let tracks = [
@@ -115,7 +108,6 @@ impl ColorPicker {
             self.slider_track(2),
         ];
         let (grid_x, grid_y) = Self::grid_origin();
-        let width = self.window.canvas().width() as i32;
         let palette = theme::palette();
         let canvas = self.window.canvas_mut();
         canvas.clear(palette.content_bg);
@@ -132,7 +124,6 @@ impl ColorPicker {
 
         // R/G/B sliders.
         let labels = ["R", "G", "B"];
-        let values = [r, g, b];
         for index in 0..3 {
             let (track_x, track_y, track_w) = tracks[index];
             canvas.draw_text(
@@ -141,29 +132,7 @@ impl ColorPicker {
                 labels[index],
                 palette.text,
             );
-            canvas.fill_rect(
-                track_x,
-                track_y,
-                track_w as u32,
-                SLIDER_H as u32,
-                palette.field_bg,
-            );
-            canvas.rect(
-                track_x,
-                track_y,
-                track_w as u32,
-                SLIDER_H as u32,
-                palette.border,
-            );
-            let knob_x = track_x + (values[index] as i32 * track_w) / 255;
-            canvas.fill_rect(
-                knob_x - 2,
-                track_y - 2,
-                5,
-                SLIDER_H as u32 + 4,
-                palette.text,
-            );
-            let text = format!("{}", values[index]);
+            let text = format!("{}", self.sliders[index].value());
             canvas.draw_text(
                 track_x + track_w + 8,
                 track_y + (SLIDER_H - 8) / 2,
@@ -171,16 +140,17 @@ impl ColorPicker {
                 palette.text,
             );
         }
+        for index in 0..3 {
+            self.sliders[index].draw(canvas, self.active_slider == index);
+        }
 
         // Preview swatch + hex.
         let preview_y = tracks[2].1 + SLIDER_H + 14;
         canvas.fill_rect(MARGIN, preview_y, 64, 40, value);
         canvas.rect(MARGIN, preview_y, 64, 40, palette.border);
         canvas.draw_text(MARGIN + 76, preview_y + 16, &hex, palette.text);
-        let _ = width;
-
-        self.ok.draw(canvas, true);
-        self.cancel.draw(canvas, false);
+        self.ok.draw_control(canvas, true);
+        self.cancel.draw_control(canvas, false);
         let _ = self.window.present();
     }
 
@@ -220,47 +190,61 @@ impl ColorPicker {
                 self.relayout();
                 self.render();
             }
-            runtime::GUI_EVENT_KEY if event.payload[3] != 0 => match event.payload[0] {
-                runtime::KEY_ENTER => return DialogStatus::Done(Some(self.value())),
-                runtime::KEY_ESCAPE => return DialogStatus::Done(None),
-                _ => {}
-            },
+            runtime::GUI_EVENT_KEY if event.payload[3] != 0 => {
+                match event.payload[0] {
+                    runtime::KEY_ENTER => return DialogStatus::Done(Some(self.value())),
+                    runtime::KEY_ESCAPE => return DialogStatus::Done(None),
+                    runtime::KEY_TAB => {
+                        self.active_slider = (self.active_slider + 1) % self.sliders.len();
+                        self.render();
+                        return DialogStatus::Pending;
+                    }
+                    _ => {}
+                }
+                if let Some(ControlInput::Key(input)) = decode_control_input(event) {
+                    let response = self.sliders[self.active_slider].handle_key(input);
+                    if response.repaint || response.action.is_some() {
+                        self.render();
+                    }
+                }
+            }
             runtime::GUI_EVENT_MOUSE => {
                 let x = event.payload[0] as i32;
                 let y = event.payload[1] as i32;
-                match event.payload[3] {
-                    runtime::GUI_MOUSE_DOWN => {
-                        if self.ok.hit(x, y) {
-                            return DialogStatus::Done(Some(self.value()));
-                        }
-                        if self.cancel.hit(x, y) {
-                            return DialogStatus::Done(None);
-                        }
-                        if let Some(swatch) = self.swatch_hit(x, y) {
-                            let color = PALETTE[swatch];
-                            self.r = (color >> 16) as u8;
-                            self.g = (color >> 8) as u8;
-                            self.b = color as u8;
-                            self.render();
-                        } else if let Some(slider) = self.slider_hit(x, y) {
-                            self.active_slider = Some(slider);
-                            self.set_channel_from_x(slider, x);
-                            self.render();
-                        }
+                let mut control_repaint = false;
+                if let Some(ControlInput::Pointer(input)) = decode_control_input(event) {
+                    let ok = self.ok.handle_pointer(input);
+                    if ok.action == Some(ButtonAction::Activated) {
+                        return DialogStatus::Done(Some(self.value()));
                     }
-                    runtime::GUI_MOUSE_MOVE => {
-                        // Drag: update the active slider while the left button is held.
-                        if event.payload[2] & 1 != 0 {
-                            if let Some(slider) = self.active_slider {
-                                self.set_channel_from_x(slider, x);
-                                self.render();
-                            }
-                        } else {
-                            self.active_slider = None;
-                        }
+                    let cancel = self.cancel.handle_pointer(input);
+                    if cancel.action == Some(ButtonAction::Activated) {
+                        return DialogStatus::Done(None);
                     }
-                    runtime::GUI_MOUSE_UP => self.active_slider = None,
-                    _ => {}
+                    control_repaint = ok.repaint || cancel.repaint;
+                }
+                if event.payload[3] == runtime::GUI_MOUSE_DOWN {
+                    if let Some(swatch) = self.swatch_hit(x, y) {
+                        let color = PALETTE[swatch];
+                        self.sliders[0].set_value((color >> 16) & 0xff);
+                        self.sliders[1].set_value((color >> 8) & 0xff);
+                        self.sliders[2].set_value(color & 0xff);
+                        self.render();
+                        return DialogStatus::Pending;
+                    }
+                    if let Some(slider) = self.slider_hit(x, y) {
+                        self.active_slider = slider;
+                    }
+                }
+                if let Some(ControlInput::Pointer(input)) = decode_control_input(event) {
+                    let mut repaint = control_repaint;
+                    for slider in &mut self.sliders {
+                        let response = slider.handle_pointer(input);
+                        repaint |= response.repaint || response.action.is_some();
+                    }
+                    if repaint {
+                        self.render();
+                    }
                 }
             }
             _ => {}

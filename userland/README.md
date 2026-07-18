@@ -45,6 +45,7 @@ userland/
 ├── build-support/      # shared per-binary linker-argument helper
 ├── runtime/            # syscall ABI, startup parsing, brk allocator, GUI events
 ├── libs/
+│   ├── gui-core/       # host-testable control geometry, input, scrolling, text edit models
 │   ├── gui/            # Window, Canvas, system TTF text, menus, widgets, dir listing
 │   ├── gl/             # bounded fixed-function OpenGL-style VirGL frontend
 │   └── dialogs/        # FileDialog, MessageBox, ColorPicker modal compositions
@@ -294,14 +295,38 @@ frame packets, and attaches the resulting VirGL texture to the normal GUI
 window. Context creation requires the strict qualified GPU compositor; the app
 shows a CPU-canvas launch hint when that prerequisite is absent.
 
-`libs/gui` also ships retained-mode widgets — `Button`, `TextField`,
-`ListView`, `MenuBar`, `TabBar`, `ColumnListView` (multi-column, sortable
-headers, key-stable selection), and `TimeSeriesGraph` (ring-buffer area
-chart, fixed or autoscaling y-axis, dual series) — as manually-positioned
-structs (no layout engine). Each draws itself and exposes hit-testing / key
-routing helpers. `apps/taskmgr` is the reference client for the monitoring
-widgets and for the poll-and-sleep (`GUI_NONBLOCK` + `nanosleep`) loop an
-animating app needs instead of the blocking `next_event()`.
+`libs/gui` also ships retained-mode controls — `Button`, `TextField`,
+`TextArea`, `Scrollbar`, `Slider`, `ListView`, `MenuBar`, `TabBar`,
+`ColumnListView` (multi-column, sortable headers, key-stable selection), and
+`TimeSeriesGraph` (ring-buffer area chart, fixed or autoscaling y-axis, dual
+series) — as manually-positioned structs (no layout engine). Controls consume
+typed `ControlInput` values produced by `decode_control_input`; applications no
+longer need to decode signed wheel deltas, button bits, or key modifiers from
+raw GUI payload arrays. Controls report `consumed`, `repaint`, and a typed
+action so domain state changes only for actions such as `Changed` or
+`Activated`.
+
+`TextField` is the single-line control with horizontal caret scrolling and
+selection. `TextArea` is the multiline control used by Notepad; it provides
+selection, line-aware navigation, visible-line rendering, and independent
+`ScrollbarPolicy::{Never, Auto, Always}` settings for both axes. Scrollbars are
+interactive controls with arrow, track-page, wheel, and draggable-thumb input.
+Custom browser views can reuse the same behavior through
+`file_ui::BrowserScrollbar`.
+
+`apps/guidemo` is the reference control gallery. `apps/taskmgr` is the
+reference client for the monitoring widgets and for the poll-and-sleep
+(`GUI_NONBLOCK` + `nanosleep`) loop an animating app needs instead of the
+blocking `next_event()`.
+
+Pure control-model tests run natively without linking the syscall runtime:
+
+```sh
+./userland/test-gui-core.sh
+```
+
+The script invokes `gui-core` outside the repository's forced bare-metal Cargo
+target while retaining the pinned Rust toolchain.
 
 ## Using dialogs (`libs/dialogs`)
 
