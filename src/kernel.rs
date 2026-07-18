@@ -150,11 +150,11 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // both hold at this point, and no ring-3 process exists yet.
     crate::userland::etc::publish_theme(crate::window::theme::active());
 
-    // Mouse, GUIShell desktop, and MCP bridge are not exercised by any
+    // Mouse, GUIShell desktop, and host bridges are not exercised by any
     // in-kernel test. Skipping them under `feature = "test"` removes the
     // largest chunks of `./test.sh` startup latency: GUIShell paints the
-    // wallpaper + initial render; the MCP bridge spawns a kernel process
-    // and brings up COM2.
+    // wallpaper + initial render; the MCP bridge spawns a kernel process,
+    // while the two host bridges bring up COM2 and COM3.
     #[cfg(not(feature = "test"))]
     {
         debug_info!("[boot] mouse");
@@ -169,12 +169,15 @@ pub fn init(boot_info: &'static mut BootInfo) {
 
         debug_info!("[boot] mcp-bridge");
         init_mcp_bridge();
+
+        debug_info!("[boot] host-clipboard");
+        crate::clipboard::init();
     }
 
     #[cfg(feature = "test")]
     {
         let _ = screen_dims;
-        debug_info!("[boot] test mode — skipping mouse, guishell, mcp");
+        debug_info!("[boot] test mode — skipping mouse, guishell, host bridges");
     }
 
     debug_info!("[boot] init complete");

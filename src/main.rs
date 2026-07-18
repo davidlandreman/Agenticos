@@ -10,6 +10,7 @@
 extern crate alloc;
 
 mod bootloader_config;
+mod clipboard;
 mod kernel;
 mod panic;
 

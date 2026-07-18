@@ -78,7 +78,8 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility
   pointer bounds for synthetic tests, and errno constants. Real processes
   use VMA-aware user-copy validation. Unknown syscall numbers always return
-  `-ENOSYS`; trace mode changes logging detail only.
+  `-ENOSYS`; trace mode changes logging detail only. AgenticOS-private syscall
+  5012 is the bounded UTF-8 host-clipboard operation used by `PBCLIP.ELF`.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
   to BusyBox or standalone ELFs. BusyBox includes the procfs-backed `free`
   and `top` monitors, VT `reset`, and `vi`; the namespace adds `vim` as an
@@ -91,7 +92,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   alias), plus `/host/LINKS.ELF` (Links 2.30; `links` and `links2`, with the
   Rust-backed `agenticos` graphics driver), `/host/CURL.ELF` (curl 8.21.0;
   static IPv4 HTTP/HTTPS transfer tool sharing Links' pinned OpenSSL profile
-  and `/etc/ssl/cert.pem` trust store), and GNU
+  and `/etc/ssl/cert.pem` trust store), `/host/PBCLIP.ELF` (text-only
+  `pbcopy` and `pbpaste`, including bounded transforms, inspection modes,
+  shell quoting, and explicit `pbpaste --exec` through zsh), and GNU
   binutils 2.46.0 (`addr2line`, `ar`, `as`, `c++filt`, `elfedit`, `ld`, `nm`,
   `objcopy`, `objdump`, `ranlib`, `readelf`, `size`, `strings`, `strip`). GNU
   `strings` owns that name; the conflicting BusyBox applet is disabled. Links

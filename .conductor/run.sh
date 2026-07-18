@@ -29,6 +29,9 @@ export AGENTICOS_NETWORK="${AGENTICOS_NETWORK:-on}"
 if [[ -z "${AGENTICOS_RPC_SOCK:-}" && -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]]; then
     export AGENTICOS_RPC_SOCK="/tmp/agenticos-rpc-${CONDUCTOR_WORKSPACE_NAME}.sock"
 fi
+if [[ -z "${AGENTICOS_CLIPBOARD_SOCK:-}" && -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]]; then
+    export AGENTICOS_CLIPBOARD_SOCK="/tmp/agenticos-clipboard-${CONDUCTOR_WORKSPACE_NAME}.sock"
+fi
 if [[ -z "${AGENTICOS_SLIRP_SOCK:-}" && -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]]; then
     export AGENTICOS_SLIRP_SOCK="/tmp/agenticos-slirp-${CONDUCTOR_WORKSPACE_NAME}.sock"
 fi

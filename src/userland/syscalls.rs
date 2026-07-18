@@ -1885,6 +1885,10 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
             crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES,
         );
     });
+    // set_tid_address(2) and set_robust_list(2) register pointers into the
+    // pre-exec address space. This path rejects multithreaded exec above, so
+    // the sole group member is the leader named by `tgid`.
+    crate::userland::lifecycle::reset_task_exec_metadata(tgid);
     drop(old_image);
     drop(old_aspace);
     set_user_va_bounds(bounds);
