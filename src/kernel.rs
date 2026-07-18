@@ -46,6 +46,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // hits a valid kernel GS).
     crate::arch::x86_64::syscall::init_syscall_msrs();
     interrupts::init_idt();
+    crate::time::init();
     ps2_controller::init();
 
     // Extract what we need from boot_info before borrowing it
