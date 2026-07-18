@@ -73,6 +73,30 @@ impl PremulArgb {
         )
     }
 
+    /// Linearly interpolate between two premultiplied pixels.
+    ///
+    /// Keeping the operation in premultiplied space preserves the channel <=
+    /// alpha invariant and makes it suitable for mixing sharp and filtered
+    /// backdrops before a source-over operation.
+    pub fn lerp(self, other: Self, amount: u8) -> Self {
+        if amount == 0 {
+            return self;
+        }
+        if amount == u8::MAX {
+            return other;
+        }
+        let inverse = u8::MAX - amount;
+        let mix = |left: u8, right: u8| {
+            ((left as u32 * inverse as u32 + right as u32 * amount as u32 + 127) / 255) as u8
+        };
+        Self::from_premultiplied(
+            mix(self.a(), other.a()),
+            mix(self.r(), other.r()),
+            mix(self.g(), other.g()),
+            mix(self.b(), other.b()),
+        )
+    }
+
     /// Porter-Duff source-over in premultiplied integer space.
     pub fn source_over(self, dst: Self) -> Self {
         let inv = u8::MAX - self.a();

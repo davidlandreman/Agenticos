@@ -24,7 +24,10 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
   bounded separable TGSI shader variants implement the CPU reference's
   three-box backdrop blur for effect-expanded damage. Engine construction
   qualifies the exact copy,
-  ping-pong, multi-sampler combine, transparent-discard, and readback path.
+  ping-pong, multi-sampler combine, alpha-masked blur falloff,
+  transparent-discard, and readback path. Effective source alpha mixes the
+  sharp and blurred snapshots before source-over, so soft window shadows fade
+  the backdrop effect continuously instead of ending at a hard blur boundary.
   Each clipped output-damage rectangle is cleared by a scissored transparent
   overwrite quad, then only intersecting textured layers are drawn with
   premultiplied source-over. The result is fenced and directly scanned out from
