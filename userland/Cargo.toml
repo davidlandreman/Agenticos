@@ -12,6 +12,7 @@ resolver = "2"
 exclude = ["build-support"]
 members = [
     "runtime",
+    "libs/gui-core",
     "libs/gui",
     "libs/gl",
     "libs/dialogs",

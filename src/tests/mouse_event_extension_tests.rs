@@ -144,18 +144,21 @@ impl GraphicsDevice for StubDevice {
 /// mouse event. Avoids needing trait downcasting to inspect a window the
 /// `WindowManager` owns.
 static LAST_MOUSE: Mutex<Option<MouseEvent>> = Mutex::new(None);
+static LAST_MOUSE_WINDOW: Mutex<Option<WindowId>> = Mutex::new(None);
 
 /// Window stub that records the most recent `MouseEvent` it received via
 /// `handle_event` into the static `LAST_MOUSE` slot. Used to assert that
 /// `route_mouse_event` preserves the new `modifiers` field through to the
 /// target window.
 struct RecordingWindow {
+    id: WindowId,
     base: crate::window::windows::base::WindowBase,
 }
 
 impl RecordingWindow {
     fn new(id: WindowId, bounds: Rect) -> Self {
         Self {
+            id,
             base: crate::window::windows::base::WindowBase::new_with_id(id, bounds),
         }
     }
@@ -172,6 +175,7 @@ impl Window for RecordingWindow {
     fn handle_event(&mut self, event: Event) -> EventResult {
         if let Event::Mouse(m) = event {
             *LAST_MOUSE.lock() = Some(m);
+            *LAST_MOUSE_WINDOW.lock() = Some(self.id);
             EventResult::Handled
         } else {
             EventResult::Ignored
@@ -180,6 +184,77 @@ impl Window for RecordingWindow {
     fn can_focus(&self) -> bool {
         true
     }
+}
+
+fn test_left_button_capture_routes_drag_outside_original_target() {
+    *LAST_MOUSE.lock() = None;
+    *LAST_MOUSE_WINDOW.lock() = None;
+
+    let mut wm = WindowManager::new(Box::new(StubDevice));
+    let screen_id = wm.create_screen(ScreenMode::Gui);
+    wm.switch_screen(screen_id);
+
+    let root_id = wm.create_window(None);
+    let root = RecordingWindow::new(root_id, Rect::new(0, 0, 1280, 720));
+    wm.set_window_impl(root_id, Box::new(root));
+    if let Some(screen) = wm.get_active_screen_mut() {
+        screen.set_root_window(root_id);
+    }
+
+    let child_id = wm.create_window(Some(root_id));
+    let mut child = RecordingWindow::new(child_id, Rect::new(20, 20, 50, 50));
+    child.set_parent(Some(root_id));
+    wm.set_window_impl(child_id, Box::new(child));
+
+    wm.route_mouse_event(MouseEvent {
+        event_type: MouseEventType::ButtonDown,
+        position: Point::new(0, 0),
+        global_position: Point::new(30, 30),
+        buttons: MouseButtons {
+            left: true,
+            ..MouseButtons::default()
+        },
+        modifiers: KeyModifiers::default(),
+    });
+    assert_eq!(*LAST_MOUSE_WINDOW.lock(), Some(child_id));
+
+    // The pointer is now far outside the child. Capture must keep motion on
+    // the child and preserve child-local coordinates beyond its bounds.
+    wm.route_mouse_event(MouseEvent {
+        event_type: MouseEventType::Move,
+        position: Point::new(0, 0),
+        global_position: Point::new(200, 200),
+        buttons: MouseButtons {
+            left: true,
+            ..MouseButtons::default()
+        },
+        modifiers: KeyModifiers::default(),
+    });
+    assert_eq!(*LAST_MOUSE_WINDOW.lock(), Some(child_id));
+    assert_eq!(
+        LAST_MOUSE.lock().as_ref().map(|event| event.position),
+        Some(Point::new(180, 180))
+    );
+
+    wm.route_mouse_event(MouseEvent {
+        event_type: MouseEventType::ButtonUp,
+        position: Point::new(0, 0),
+        global_position: Point::new(200, 200),
+        buttons: MouseButtons::default(),
+        modifiers: KeyModifiers::default(),
+    });
+    assert_eq!(*LAST_MOUSE_WINDOW.lock(), Some(child_id));
+
+    // After release, ordinary hit-testing resumes and the root receives the
+    // same outside position.
+    wm.route_mouse_event(MouseEvent {
+        event_type: MouseEventType::Move,
+        position: Point::new(0, 0),
+        global_position: Point::new(200, 200),
+        buttons: MouseButtons::default(),
+        modifiers: KeyModifiers::default(),
+    });
+    assert_eq!(*LAST_MOUSE_WINDOW.lock(), Some(root_id));
 }
 
 fn test_route_mouse_event_preserves_modifiers() {
@@ -250,5 +325,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_mouse_event_with_shift_modifier_preserved,
         &test_ensure_visible_variant_constructs,
         &test_route_mouse_event_preserves_modifiers,
+        &test_left_button_capture_routes_drag_outside_original_target,
     ]
 }
