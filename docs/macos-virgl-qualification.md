@@ -97,7 +97,7 @@ AGENTICOS_QEMU_GL=es \
 
 The qualified production path accelerates ordered textured-quad composition,
 translation, clipping/scissor, layer opacity, premultiplied source-over, and
-radius-4 Aero backdrop blur. Blur uses persistent render-target/sampler scratch
+radius-6 Aero backdrop blur. Blur uses persistent render-target/sampler scratch
 textures, an output-to-scratch copy, separable ping-pong passes, and a
 two-sampler masked combine. Transparent frame pixels are discarded so rounded
 corners preserve the unblurred output; opaque client pixels replace the blur.

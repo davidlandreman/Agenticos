@@ -84,7 +84,7 @@ fn run_backdrop_effect_oracles(virgl: &mut VirglCompositionEngine) {
     let mut scene = SceneFrame::new(8, 8);
     scene.push(Layer::opaque(backdrop_id, Rect::new(0, 0, 8, 8)));
     let mut glass_layer = Layer::opaque(glass_id, Rect::new(0, 0, 8, 8));
-    glass_layer.effect = crate::graphics::scene::LayerEffect::BackdropSample { radius: 4 };
+    glass_layer.effect = crate::graphics::scene::LayerEffect::BackdropSample { radius: 6 };
     scene.push(glass_layer);
     let damage = [Rect::new(0, 0, 8, 8)];
     let mut cpu = CpuCompositionEngine::new(8, 8).unwrap();

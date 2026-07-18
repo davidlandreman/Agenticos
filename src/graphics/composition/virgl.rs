@@ -71,8 +71,6 @@ const BLUR_SURFACE_C: u32 = 20;
 const BLUR_SAMPLER_VIEW_C: u32 = 21;
 const FIRST_SAMPLER_VIEW: u32 = 100;
 const PIPELINE_OBJECT_COUNT: u64 = 21;
-const MAX_GPU_BACKDROP_RADIUS: u16 = 4;
-
 const CLIENT_VERTEX_ELEMENTS: u32 = 30;
 const CLIENT_VERTEX_SHADER: u32 = 31;
 const CLIENT_FRAGMENT_SHADER: u32 = 32;
@@ -411,7 +409,7 @@ impl VirglCompositionEngine {
             glass_id,
             Rect::new(0, 0, fixture_width, fixture_height),
         );
-        glass_layer.effect = LayerEffect::BackdropSample { radius: 4 };
+        glass_layer.effect = LayerEffect::BackdropSample { radius: 6 };
         scene.push(glass_layer);
         let effect_damage = [Rect::new(0, 0, fixture_width, fixture_height)];
         cpu.compose(&scene, &surfaces, &effect_damage)?;
@@ -1294,7 +1292,7 @@ impl CompositionEngine for VirglCompositionEngine {
                 && matches!(
                     layer.effect,
                     LayerEffect::BackdropSample { radius }
-                        if radius > MAX_GPU_BACKDROP_RADIUS
+                        if !gpu_backdrop_radius_supported(radius)
                 )
             {
                 return Err(CompositionError::UnsupportedEffect);
@@ -1803,6 +1801,12 @@ fn blur_shader_handles(radius: u16) -> Option<(u32, u32)> {
         )),
         _ => None,
     }
+}
+
+fn gpu_backdrop_radius_supported(radius: u16) -> bool {
+    backdrop_box_radii(radius)
+        .into_iter()
+        .all(|pass_radius| pass_radius <= 2)
 }
 
 fn set_encoder_scissor(

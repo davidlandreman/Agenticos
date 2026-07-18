@@ -354,49 +354,7 @@ fn draw_title(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
     let y = chrome.bounds.y
         + AERO_METRICS.border_width as i32
         + (AERO_METRICS.title_bar_height as i32 - line_h) / 2;
-    draw_text_argb(
-        device,
-        x + 1,
-        y + 1,
-        chrome.title,
-        font.as_font(),
-        Color::BLACK,
-        140,
-    );
-    device.draw_text(x, y, chrome.title, font.as_font(), Color::WHITE);
-}
-
-fn draw_text_argb(
-    device: &mut dyn GraphicsDevice,
-    x: i32,
-    y: i32,
-    text: &str,
-    font: &dyn crate::graphics::fonts::core_font::Font,
-    color: Color,
-    alpha: u8,
-) {
-    let baseline = y + font.ascent() as i32;
-    let mut pen_x = x;
-    for ch in text.chars() {
-        if ch == '\n' {
-            break;
-        }
-        let Some(glyph) = font.glyph(ch) else {
-            continue;
-        };
-        let glyph_x = pen_x + glyph.x_offset;
-        let glyph_y = baseline + glyph.y_offset;
-        for row in 0..glyph.height as i32 {
-            for col in 0..glyph.width as i32 {
-                let coverage = glyph.coverage[(row * glyph.width as i32 + col) as usize];
-                let effective = ((coverage as u16 * alpha as u16 + 127) / 255) as u8;
-                if effective != 0 {
-                    device.draw_pixel_argb(glyph_x + col, glyph_y + row, color, effective);
-                }
-            }
-        }
-        pen_x += glyph.advance as i32;
-    }
+    device.draw_text(x, y, chrome.title, font.as_font(), Color::BLACK);
 }
 
 fn draw_rect_argb(

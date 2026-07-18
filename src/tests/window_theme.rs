@@ -48,6 +48,7 @@ fn test_theme_selection_and_fallback_matrix() {
 fn test_metrics_and_decoration_geometry() {
     assert_eq!(CLASSIC_METRICS.title_bar_height, 20);
     assert_eq!(CLASSIC_METRICS.border_width, 4);
+    assert_eq!(AERO_BACKDROP_RADIUS, 6);
     assert_eq!(AERO_METRICS.corner_radius_top, 11);
     assert_eq!(AERO_METRICS.corner_radius_bottom, 7);
     assert_eq!(AERO_METRICS.shadow_margin, 16);
@@ -169,13 +170,42 @@ fn test_aero_alpha_corners_shadow_and_client() {
     let bounds = Rect::new(16, 16, 80, 50);
     let chrome = FrameChrome {
         bounds,
-        title: "",
+        title: "M",
         active: true,
         close_button_rect: theme::close_button_rect(bounds, AERO_METRICS),
     };
     let mut surface = Surface::new(SurfaceDesc::new(112, 82)).unwrap();
     let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (112, 82));
     theme::draw_frame_for(ThemeKind::Aero, &chrome, &mut canvas);
+    drop(canvas);
+
+    // Aero captions use clean black text without an offset halo. Pin the
+    // glyph's highest-coverage pixel so this does not regress to white.
+    let font = crate::graphics::fonts::core_font::get_default_font();
+    let glyph = font.glyph('M').expect("caption glyph");
+    let (glyph_pixel, glyph_coverage) = glyph
+        .coverage
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, coverage)| **coverage)
+        .map(|(index, coverage)| (index, *coverage))
+        .expect("covered caption glyph pixel");
+    assert!(glyph_coverage > 192);
+    let glyph_col = glyph_pixel as i32 % glyph.width as i32;
+    let glyph_row = glyph_pixel as i32 / glyph.width as i32;
+    let title_x = bounds.x + AERO_METRICS.border_width as i32 + 8;
+    let title_y = bounds.y
+        + AERO_METRICS.border_width as i32
+        + (AERO_METRICS.title_bar_height as i32 - font.line_height() as i32) / 2;
+    let title_pixel = surface
+        .pixel(
+            (title_x + glyph.x_offset + glyph_col) as u32,
+            (title_y + font.ascent() as i32 + glyph.y_offset + glyph_row) as u32,
+        )
+        .unwrap();
+    let (r, g, b, a) = title_pixel.to_rgba();
+    assert!(r <= 64 && g <= 64 && b <= 64, "caption pixel {r},{g},{b}");
+    assert_eq!(a, 255);
 
     // The transparent frame cutout still contains the shadow behind the
     // rounded arc, preventing a notch where the top and side shadows meet.
