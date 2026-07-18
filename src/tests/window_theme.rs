@@ -48,6 +48,8 @@ fn test_theme_selection_and_fallback_matrix() {
 fn test_metrics_and_decoration_geometry() {
     assert_eq!(CLASSIC_METRICS.title_bar_height, 20);
     assert_eq!(CLASSIC_METRICS.border_width, 4);
+    assert_eq!(AERO_METRICS.corner_radius_top, 11);
+    assert_eq!(AERO_METRICS.corner_radius_bottom, 7);
     assert_eq!(AERO_METRICS.shadow_margin, 16);
 
     // Caption-button footprint drives close_button_rect for both themes.
@@ -175,13 +177,26 @@ fn test_aero_alpha_corners_shadow_and_client() {
     let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (112, 82));
     theme::draw_frame_for(ThemeKind::Aero, &chrome, &mut canvas);
 
-    assert_eq!(surface.pixel(16, 16).unwrap().a(), 0);
+    // The transparent frame cutout still contains the shadow behind the
+    // rounded arc, preventing a notch where the top and side shadows meet.
+    let cutout = surface.pixel(16, 16).unwrap();
+    assert!(cutout.a() > 0 && cutout.a() < 96);
+    assert_eq!((cutout.r(), cutout.g(), cutout.b()), (0, 0, 0));
     let chrome_alpha = surface.pixel(46, 26).unwrap().a();
     assert!((140..=200).contains(&chrome_alpha));
     let near = surface.pixel(15, 40).unwrap().a();
     let middle = surface.pixel(8, 40).unwrap().a();
     let far = surface.pixel(0, 40).unwrap().a();
     assert!(near > middle && middle > far);
+
+    // The shadow follows the rounded top corner instead of retaining the
+    // straight-edge opacity throughout the square corner area.
+    let corner_near = surface.pixel(15, 15).unwrap().a();
+    let corner_middle = surface.pixel(8, 8).unwrap().a();
+    let top_middle = surface.pixel(40, 8).unwrap().a();
+    assert!(corner_near > 0 && corner_near < near);
+    assert!(corner_middle < top_middle);
+
     let client_y = bounds.y as u32 + AERO_METRICS.border_width + AERO_METRICS.title_bar_height + 3;
     assert_eq!(surface.pixel(46, client_y).unwrap().a(), 0);
 }
