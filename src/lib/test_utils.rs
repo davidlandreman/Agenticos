@@ -52,6 +52,7 @@ where
 }
 
 #[cfg(feature = "test")]
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub fn test_runner(tests: &[&dyn Testable]) {
     debug_info!("Running {} tests", tests.len());
     for test in tests {

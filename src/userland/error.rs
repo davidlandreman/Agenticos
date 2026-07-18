@@ -46,11 +46,6 @@ pub enum LoaderError {
     AlignmentBad,
     /// Frame allocator exhausted while mapping a PT_LOAD or stack page.
     OutOfFrames,
-    /// `r_offset` for a relocation does not lie inside a writable PT_LOAD
-    /// segment. **Defends S1 of the doc-review findings**: a crafted ELF
-    /// with `r_offset = 0xFFFF_8000_0000_0000` would otherwise let a kernel-
-    /// mode write corrupt arbitrary kernel memory during relocation.
-    BadRelocOffset,
     /// A PT_LOAD's `p_offset + p_filesz` overflowed `u64` or ran past
     /// `bytes.len()`, or `p_vaddr + p_memsz` overflowed. **Defends S5**.
     SegmentOverflow,

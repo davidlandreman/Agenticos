@@ -1,21 +1,17 @@
-pub mod process;
-pub mod manager;
-pub mod pcb;
 pub mod context;
-pub mod stack;
+pub mod pcb;
+pub mod process;
 pub mod scheduler;
+pub mod stack;
 
-pub use process::{BaseProcess, HasBaseProcess, RunnableProcess, ProcessId, allocate_pid};
-pub use manager::{
-    set_active_stdin, clear_active_stdin, push_keyboard_input,
-};
-pub use pcb::{ProcessControlBlock, ProcessState, BlockReason, WakeEvents, SignalFlags};
 pub use context::CpuContext;
-pub use scheduler::{SCHEDULER, ProcessInfo};
+pub use pcb::{BlockReason, ProcessControlBlock, ProcessState, WakeEvents};
+pub use process::{allocate_pid, ProcessId, RunnableProcess};
+pub use scheduler::{ProcessInfo, SCHEDULER};
 
+use crate::window::WindowId;
 use alloc::boxed::Box;
 use alloc::string::String;
-use crate::window::WindowId;
 
 /// Flag indicating whether we're currently running a spawned process
 static IN_SPAWNED_PROCESS: core::sync::atomic::AtomicBool =
@@ -53,8 +49,8 @@ where
     F: FnOnce() + Send + 'static,
 {
     // Allocate a stack for this process
-    let (stack_base, stack_top) = stack::allocate_stack()
-        .expect("Failed to allocate process stack");
+    let (stack_base, stack_top) =
+        stack::allocate_stack().expect("Failed to allocate process stack");
 
     // Create the PCB
     let pid = allocate_pid();
@@ -79,7 +75,10 @@ where
         crate::debug_info!("spawn_process: spawn() returned PID {:?}", p);
         p
     };
-    crate::debug_info!("spawn_process: scheduler lock released, returning PID {:?}", pid);
+    crate::debug_info!(
+        "spawn_process: scheduler lock released, returning PID {:?}",
+        pid
+    );
     pid
 }
 
@@ -266,8 +265,11 @@ pub fn terminate_current() {
 
         // Get the saved kernel context and switch to it
         let kernel_ctx = unsafe { KERNEL_CONTEXT };
-        crate::debug_trace!("terminate_current: kernel RSP={:#x} RIP={:#x}",
-            kernel_ctx.rsp, kernel_ctx.rip);
+        crate::debug_trace!(
+            "terminate_current: kernel RSP={:#x} RIP={:#x}",
+            kernel_ctx.rsp,
+            kernel_ctx.rip
+        );
 
         unsafe {
             crate::arch::x86_64::context_switch::switch_to_context(&kernel_ctx);
@@ -282,24 +284,6 @@ pub fn terminate_current() {
     }
 }
 
-/// Block the current process waiting for input
-pub fn block_for_input() {
-    let mut sched = scheduler::SCHEDULER.lock();
-    sched.block_current(BlockReason::WaitingForInput);
-
-    // Schedule the next process
-    if let Some(next_pid) = sched.schedule() {
-        if let Some(next_ctx) = sched.get_context(next_pid) {
-            let next_ctx = *next_ctx;
-            drop(sched);
-
-            // Switch to the next process
-            unsafe {
-                crate::arch::x86_64::context_switch::switch_to_context(&next_ctx);
-            }
-        }
-    }
-}
 
 /// U8: block the current kernel thread until ring-3 process `pid`
 /// exits, then return. Called from `enter_user_mode_with_aspace` after
@@ -364,15 +348,19 @@ pub fn block_kernel_thread_for_ring3_exit(pid: u32) {
 /// (kernel main loop, test runner). Polls until `awaited_pid`'s
 /// `exit_kind` becomes non-None.
 fn drive_inline_ring3_until_exit(awaited_pid: u32) {
-    use crate::userland::lifecycle::{
-        pop_next_ring3, with_process, ExitKind,
-    };
+    use crate::userland::lifecycle::{pop_next_ring3, with_process, ExitKind};
     loop {
-        let exited = with_process(awaited_pid, |p| !matches!(p.exit_kind, ExitKind::None))
-            .unwrap_or(true); // process gone (already reaped) → treat as exited
+        let exited =
+            with_process(awaited_pid, |p| !matches!(p.exit_kind, ExitKind::None)).unwrap_or(true); // process gone (already reaped) → treat as exited
         if exited {
             return;
         }
+
+        // Tests and other non-kernel-thread launchers use this inline loop,
+        // so the ordinary `net-rx-tx` kernel worker is not scheduled while
+        // the caller waits. Drive the same bounded one-pass poll here; it
+        // wakes blocked ring-3 socket syscalls after dropping the net lock.
+        crate::net::poll_once();
 
         if let Some(next) = pop_next_ring3() {
             unsafe {
@@ -392,22 +380,6 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
     }
 }
 
-/// Send input to a specific process
-///
-/// # Arguments
-/// * `pid` - The PID of the process to send input to
-/// * `input` - The input line to send
-pub fn send_input_to_process(pid: ProcessId, input: String) {
-    let mut sched = scheduler::SCHEDULER.lock();
-    if let Some(pcb) = sched.get_process_mut(pid) {
-        pcb.push_input(input);
-        if pcb.state == ProcessState::Blocked {
-            if let Some(BlockReason::WaitingForInput) = pcb.block_reason {
-                sched.wake(pid);
-            }
-        }
-    }
-}
 
 /// Handle preemption from the kernel main loop
 ///
@@ -517,7 +489,8 @@ pub fn try_run_scheduled_processes() {
 
     if let Some(next_pid) = sched.schedule() {
         // Get process name for logging
-        let process_name = sched.get_process(next_pid)
+        let process_name = sched
+            .get_process(next_pid)
             .map(|p| p.name.clone())
             .unwrap_or_else(|| alloc::string::String::from("unknown"));
 
@@ -529,7 +502,11 @@ pub fn try_run_scheduled_processes() {
 
             drop(sched);
 
-            crate::debug_trace!("try_run: Switching to process {:?} '{}'", next_pid, process_name);
+            crate::debug_trace!(
+                "try_run: Switching to process {:?} '{}'",
+                next_pid,
+                process_name
+            );
             crate::debug_trace!("try_run:   Target RIP: {:#x}", ctx_copy.rip);
             crate::debug_trace!("try_run:   Target RSP: {:#x}", ctx_copy.rsp);
 
@@ -602,7 +579,9 @@ pub fn terminate_process(pid: ProcessId) {
 /// # Arguments
 /// * `elapsed_ticks` - Number of timer ticks since last update
 pub fn update_cpu_percentages(elapsed_ticks: u64) {
-    scheduler::SCHEDULER.lock().update_cpu_percentages(elapsed_ticks);
+    scheduler::SCHEDULER
+        .lock()
+        .update_cpu_percentages(elapsed_ticks);
 }
 
 // =============================================================================
@@ -618,8 +597,8 @@ pub fn update_cpu_percentages(elapsed_ticks: u64) {
 /// * `ticks` - Number of timer ticks to sleep (minimum 1)
 pub fn sleep_ticks(ticks: u64) {
     use crate::arch::x86_64::context_switch::switch_context;
-    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
     use crate::arch::x86_64::interrupts::get_timer_ticks;
+    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
     use core::sync::atomic::Ordering;
 
     let ticks = ticks.max(1);
@@ -722,92 +701,6 @@ pub fn sleep_ms(ms: u64) {
     sleep_ticks(ticks.max(1));
 }
 
-/// Sleep the current process until signaled by specific events
-///
-/// The process will be blocked until any of the specified events occur.
-/// When woken, use `check_signals()` to see which event triggered the wake.
-///
-/// # Arguments
-/// * `events` - Bitmask of events that can wake this process
-pub fn sleep_until_event(events: WakeEvents) {
-    use crate::arch::x86_64::context_switch::switch_context;
-    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
-    use crate::arch::x86_64::interrupts::get_timer_ticks;
-    use core::sync::atomic::Ordering;
-
-    let result: Option<(*mut CpuContext, SwitchTarget)> = {
-        let mut sched = scheduler::SCHEDULER.lock();
-        let current_pid = match sched.current() {
-            Some(pid) => pid,
-            None => return,
-        };
-
-        // Update activity tick before sleeping (shows process is making progress)
-        if let Some(pcb) = sched.get_process_mut(current_pid) {
-            pcb.last_activity_tick = get_timer_ticks();
-        }
-
-        // Mark as waiting for signal
-        sched.sleep_until_signaled(events);
-
-        // Get context pointer for current process
-        let old_ctx = match sched.get_context_mut(current_pid) {
-            Some(ctx) => ctx as *mut CpuContext,
-            None => return,
-        };
-
-        // Check if there are any real processes to run (not counting idle)
-        let switch_target = if sched.ready_count() > 0 {
-            if let Some(next_pid) = sched.schedule() {
-                if let Some(ctx) = sched.get_context(next_pid) {
-                    SwitchTarget::Process(*ctx)
-                } else {
-                    SwitchTarget::Kernel
-                }
-            } else {
-                SwitchTarget::Kernel
-            }
-        } else {
-            SwitchTarget::Kernel
-        };
-
-        Some((old_ctx, switch_target))
-    };
-
-    let Some((old_ctx_ptr, switch_target)) = result else {
-        return;
-    };
-
-    match switch_target {
-        SwitchTarget::Process(new_ctx) => {
-            // Pre-map the stack pages before switching context
-            // This is critical because if we page fault with an unmapped stack,
-            // the CPU can't push the exception frame and we get a triple fault
-            let stack_top = new_ctx.rsp;
-            unsafe {
-                let page_size = 4096u64;
-                for offset in (0..page_size * 4).step_by(page_size as usize) {
-                    let addr = stack_top - offset - 8;
-                    // Volatile read to trigger page fault (which will map the page)
-                    core::ptr::read_volatile(addr as *const u8);
-                }
-            }
-
-            unsafe {
-                switch_context(old_ctx_ptr, &new_ctx);
-            }
-        }
-        SwitchTarget::Kernel => {
-            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
-            let kernel_ctx = unsafe { KERNEL_CONTEXT };
-            unsafe {
-                switch_context(old_ctx_ptr, &kernel_ctx);
-            }
-            IN_SPAWNED_PROCESS.store(true, Ordering::Release);
-        }
-    }
-}
-
 /// Signal a specific process to wake up
 ///
 /// If the process is waiting for the given event type, it will be woken
@@ -818,39 +711,4 @@ pub fn sleep_until_event(events: WakeEvents) {
 /// * `signal` - The event type to signal
 pub fn signal_process(pid: ProcessId, signal: WakeEvents) {
     scheduler::SCHEDULER.lock().signal_process(pid, signal);
-}
-
-/// Signal all processes waiting for a specific event type
-///
-/// All processes in the signal waiters list will be woken if they're
-/// waiting for this event type.
-///
-/// # Arguments
-/// * `signal` - The event type to broadcast
-pub fn broadcast_signal(signal: WakeEvents) {
-    scheduler::SCHEDULER.lock().broadcast_signal(signal);
-}
-
-/// Check and clear pending signals for the current process
-///
-/// Call this after waking from `sleep_until_event()` to see which
-/// event triggered the wake.
-///
-/// # Returns
-/// The pending signal flags, which are then cleared
-pub fn check_signals() -> SignalFlags {
-    let mut sched = scheduler::SCHEDULER.lock();
-    if let Some(pid) = sched.current() {
-        if let Some(pcb) = sched.get_process_mut(pid) {
-            let signals = pcb.pending_signals;
-            pcb.pending_signals.clear_all();
-            return signals;
-        }
-    }
-    SignalFlags::NONE
-}
-
-/// Get the number of sleeping processes
-pub fn sleeping_count() -> usize {
-    scheduler::SCHEDULER.lock().sleeping_count()
 }

@@ -38,6 +38,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   consumed by U5 onward.
 - `syscalls.rs` — every kernel-side syscall handler. ~5k lines;
   fork/wait4/sigreturn are the most fragile pieces.
+- `network_syscalls.rs` — finite Linux `AF_INET` socket ABI, sockaddr/iovec
+  usercopy, blocking/restart behavior, and socket option mapping. Protocol
+  state and buffers remain in `src/net/`.
 - `signal.rs` — POSIX signal dispositions, blocked/pending masks.
 - `fdtable.rs` — per-process file-descriptor table.
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility
@@ -50,7 +53,7 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
 - `error.rs` — loader-side error enum.
-- `user_state.rs` — `UserState`: 14 GPRs + RIP + RFLAGS + RSP. Layout
+- `user_state.rs` — `UserState`: 16 GPRs + RIP + RFLAGS + RSP. Layout
   is **load-bearing** — `enter_user_mode_with_regs_asm`,
   `iretq_to_user_with_regs`, and `resume_ring3_asm` all read fields by
   hard-coded offset. `test_user_state_offsets_match_asm_contract`
@@ -76,12 +79,31 @@ Each process owns:
 - `fs_base` (per-process FS_BASE MSR value),
 - `fpu_state` (512-byte 16-aligned FXSAVE area),
 - `saved_user_state` (U4 snapshot used by `resume_ring3`).
+- `network_wait` (restart-stable absolute deadline for a blocked socket
+  syscall; cleared on success, close, signal, exit, or syscall identity
+  change).
+
+Socket slots hold `Arc<net::socket::SocketHandle>`. The handle is a shared
+open-file description: dup/fork share `O_NONBLOCK` and protocol state, while
+`FD_CLOEXEC` remains per descriptor. Do not take the network lock from an
+FD-table mutation or hold process/network locks or user pointers across a
+yield. Final handle drop uses the deferred-close queue documented in
+`src/net/CLAUDE.md`.
 
 Processes live in `lifecycle::PROCESS_TABLE`, indexed by PID. The
 single field `current_user_pid: Option<u32>` names which process's
 CR3 / FS_BASE / FPU / kernel-stack are loaded right now. Today only
 one real ring-3 process is ever current; U5 wires the time-slicing
 that makes the "current" field meaningful as a per-instant pointer.
+`PROCESS_TABLE` uses `InterruptMutex`, not a plain `spin::Mutex`. This is
+load-bearing on the single CPU: timer-preemptible launcher/compositor threads
+and IF-cleared page-fault/SYSCALL paths share the table, so every acquisition
+must mask timer preemption until its guard releases the spinlock.
+
+The ring-3 timer hands control back to `KERNEL_CONTEXT` every second tick,
+saving and requeueing the current user process first. Direct ring3-to-ring3
+switching remains available on intervening ticks and blocking syscalls, but
+cannot starve the compositor or network worker when zsh polls for a child.
 
 ## Launch flow today (post-U8)
 
@@ -279,12 +301,13 @@ the assertion test `test_user_state_offsets_match_asm_contract` in
 `src/tests/userland_switch.rs`. Any reorder in `UserState` breaks both
 the asm and the test at compile time.
 
-**Validation:** the diverging asm is structurally identical to
+**Validation:** the diverging asm has the same iretq-frame shape as
 `iretq_to_user_with_regs` and the back half of
-`enter_user_mode_with_regs_asm`, both of which boot zsh / hello-world
-every test cycle. End-to-end ring-3 switching falls out of U5's
-integration test (two synthetic ring-3 processes coexisting); U4 itself
-is validated by unit tests around `save_ring3` and the offset contract.
+`enter_user_mode_with_regs_asm`, but additionally restores RCX/R11 because
+timer interrupts may land while both contain live values. End-to-end ring-3
+switching falls out of U5's integration test (two synthetic ring-3 processes
+coexisting); U4 itself is validated by unit tests around `save_ring3` and the
+offset contract.
 
 ## Cross-references
 

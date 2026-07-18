@@ -172,6 +172,7 @@ pub const APPLETS: &[&str] = &[
     "mv",
     "nanddump",
     "nandwrite",
+    "nc",
     "nl",
     "nohup",
     "nologin",
@@ -182,6 +183,7 @@ pub const APPLETS: &[&str] = &[
     "patch",
     "pgrep",
     "pidof",
+    "ping",
     "pipe_progress",
     "pkill",
     "pmap",
@@ -232,7 +234,6 @@ pub const APPLETS: &[&str] = &[
     "smemcap",
     "sort",
     "split",
-    "ssl_client",
     "start-stop-daemon",
     "stat",
     "strings",
@@ -285,6 +286,7 @@ pub const APPLETS: &[&str] = &[
     "wall",
     "watch",
     "wc",
+    "wget",
     "which",
     "who",
     "whoami",
@@ -299,6 +301,7 @@ pub const APPLETS: &[&str] = &[
 
 /// True if `name` is any known applet (BusyBox or GUI). O(log N) per
 /// list via `binary_search`.
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn is_applet(name: &str) -> bool {
     APPLETS.binary_search(&name).is_ok() || GUI_APPLETS.binary_search(&name).is_ok()
 }
@@ -314,7 +317,10 @@ pub fn lookup(name: &str) -> Option<&'static str> {
 /// Look up an applet name in the GUI list and return the canonical
 /// `&'static str`.
 pub fn lookup_gui(name: &str) -> Option<&'static str> {
-    GUI_APPLETS.binary_search(&name).ok().map(|i| GUI_APPLETS[i])
+    GUI_APPLETS
+        .binary_search(&name)
+        .ok()
+        .map(|i| GUI_APPLETS[i])
 }
 
 /// If `normalized` is `/bin/<applet>` for a known applet, return
@@ -422,7 +428,9 @@ mod tests_internal {
     }
 
     fn test_applets_includes_core_set() {
-        for name in ["ls", "cat", "grep", "sed", "awk", "wc", "head", "tail", "sh", "echo"] {
+        for name in [
+            "ls", "cat", "grep", "sed", "awk", "wc", "head", "tail", "sh", "echo",
+        ] {
             assert!(is_applet(name), "expected applet not present: {}", name);
         }
     }
@@ -514,7 +522,11 @@ mod tests_internal {
         args.rsi = 0;
         let ret = syscall_dispatch(&mut args);
         crate::userland::abi::clear_user_va_bounds();
-        assert_eq!(ret, ENOENT, "expected ENOENT for unknown applet; got {}", ret);
+        assert_eq!(
+            ret, ENOENT,
+            "expected ENOENT for unknown applet; got {}",
+            ret
+        );
     }
 
     /// `stat("/bin/ls", &buf)` returns 0 and fills a regular-file
@@ -540,7 +552,12 @@ mod tests_internal {
         // st_mode is at offset 16 in LinuxStat (u64 dev, u64 ino, u64 nlink, u32 mode).
         // 0o100000 = S_IFREG. Just check the type bits are S_IFREG.
         let mode = u32::from_ne_bytes([statbuf[24], statbuf[25], statbuf[26], statbuf[27]]);
-        assert_eq!(mode & 0o170000, 0o100000, "expected S_IFREG mode, got {:o}", mode);
+        assert_eq!(
+            mode & 0o170000,
+            0o100000,
+            "expected S_IFREG mode, got {:o}",
+            mode
+        );
     }
 
     fn test_is_bin_dir() {
@@ -608,8 +625,14 @@ mod tests_internal {
             );
         }
         // Spot-check that both lists' entries are present.
-        assert!(entries.contains(&"ls"), "merged stream missing BusyBox 'ls'");
-        assert!(entries.contains(&"painting"), "merged stream missing GUI 'painting'");
+        assert!(
+            entries.contains(&"ls"),
+            "merged stream missing BusyBox 'ls'"
+        );
+        assert!(
+            entries.contains(&"painting"),
+            "merged stream missing GUI 'painting'"
+        );
     }
 
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {

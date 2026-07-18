@@ -42,6 +42,7 @@ fn synthetic_process(pid: u32) -> Process {
         brk_current: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        network_wait: None,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -84,7 +85,7 @@ fn patterned_frame() -> InterruptStackFrame {
         // CPU-pushed half: use distinct patterns so a mistaken
         // assignment (e.g., rsp ← rflags) shows up unambiguously.
         rip: 0x0000_7FFF_DEAD_0010,
-        cs: 0x23, // user code RPL=3
+        cs: 0x23,                      // user code RPL=3
         rflags: 0x0000_0000_0000_0202, // IF set, reserved bit
         rsp: 0x0000_7FFF_BBBB_8000,
         ss: 0x1B, // user data RPL=3
@@ -113,16 +114,15 @@ fn test_save_ring3_copies_every_gpr() {
     assert_eq!(s.r13, frame.r13, "r13");
     assert_eq!(s.r14, frame.r14, "r14");
     assert_eq!(s.r15, frame.r15, "r15");
+    assert_eq!(s.rcx, frame.rcx, "rcx");
+    assert_eq!(s.r11, frame.r11, "r11");
     assert_eq!(s.rip, frame.rip, "rip");
     assert_eq!(s.rflags, frame.rflags, "rflags");
     assert_eq!(s.rsp, frame.rsp, "rsp");
 }
 
-/// `UserState` does not carry `rcx` or `r11` — the SYSCALL ABI clobbers
-/// both, and the resume asm intentionally zeroes them. Verify save_ring3
-/// doesn't accidentally try to thread rcx through some other field
-/// (e.g., overwriting r10 with rcx — a plausible foot-gun).
-fn test_save_ring3_discards_rcx_and_r11() {
+/// Timer interrupts, unlike SYSCALL, must preserve caller-saved RCX/R11.
+fn test_save_ring3_preserves_rcx_and_r11() {
     let mut p = synthetic_process(9101);
     let mut frame = patterned_frame();
     frame.rcx = 0xCCCC_CCCC_CCCC_CCCC;
@@ -130,12 +130,8 @@ fn test_save_ring3_discards_rcx_and_r11() {
 
     save_ring3(&mut p, &frame);
 
-    // The pattern in r10 / r9 / r8 etc. must match the frame's
-    // patterned value, not the clobbered rcx/r11. A buggy save that
-    // wrote rcx into r10 would surface here.
-    assert_eq!(p.saved_user_state.r10, frame.r10);
-    assert_eq!(p.saved_user_state.r9, frame.r9);
-    assert_eq!(p.saved_user_state.r8, frame.r8);
+    assert_eq!(p.saved_user_state.rcx, frame.rcx);
+    assert_eq!(p.saved_user_state.r11, frame.r11);
 }
 
 /// `save_ring3` also captures FS_BASE into the process's `fs_base`
@@ -204,7 +200,10 @@ fn test_save_ring3_roundtrips_fpu_state() {
             options(nostack, preserves_flags),
         );
     }
-    assert_eq!(observed, staged, "save_ring3 → restore_user_cpu_state must round-trip XMM0");
+    assert_eq!(
+        observed, staged,
+        "save_ring3 → restore_user_cpu_state must round-trip XMM0"
+    );
 
     // Restore FS_BASE in case the FPU dance perturbed anything.
     crate::arch::x86_64::msr::set_fs_base(saved_fs);
@@ -233,7 +232,9 @@ fn test_user_state_offsets_match_asm_contract() {
     assert_eq!(offset_of!(UserState, r15), 104);
     assert_eq!(offset_of!(UserState, rip), 112);
     assert_eq!(offset_of!(UserState, rflags), 120);
-    assert_eq!(core::mem::size_of::<UserState>(), 128);
+    assert_eq!(offset_of!(UserState, rcx), 128);
+    assert_eq!(offset_of!(UserState, r11), 136);
+    assert_eq!(core::mem::size_of::<UserState>(), 144);
 }
 
 // ---------- U5: try_preempt_ring3 decision logic ----------
@@ -277,7 +278,7 @@ impl Drop for PreemptTestGuard {
 /// removes via `remove_process` (or relies on the guard's cleanup if
 /// they only need queue mutations).
 fn insert_synthetic(pid: u32) {
-    use crate::userland::lifecycle::{insert_process, Process, ExitKind};
+    use crate::userland::lifecycle::{insert_process, ExitKind, Process};
     let p = Process {
         pid,
         parent_pid: 0,
@@ -288,6 +289,7 @@ fn insert_synthetic(pid: u32) {
         brk_current: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        network_wait: None,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -319,9 +321,7 @@ fn test_try_preempt_ring3_returns_none_when_no_current() {
 /// current_user_pid is set but ring3_ready is empty → no preempt.
 /// Returns None so the timer ISR iretq's back to the same process.
 fn test_try_preempt_ring3_returns_none_when_queue_empty() {
-    use crate::userland::lifecycle::{
-        remove_process, set_current_user_pid, try_preempt_ring3,
-    };
+    use crate::userland::lifecycle::{remove_process, set_current_user_pid, try_preempt_ring3};
     let _g = PreemptTestGuard::new();
 
     insert_synthetic(9200);
@@ -340,8 +340,7 @@ fn test_try_preempt_ring3_returns_none_when_queue_empty() {
 /// would write into the same slot we're about to "switch to").
 fn test_try_preempt_ring3_self_at_front_is_noop() {
     use crate::userland::lifecycle::{
-        mark_ring3_ready, remove_process, set_current_user_pid, try_preempt_ring3,
-        with_process,
+        mark_ring3_ready, remove_process, set_current_user_pid, try_preempt_ring3, with_process,
     };
     let _g = PreemptTestGuard::new();
 
@@ -371,8 +370,8 @@ fn test_try_preempt_ring3_self_at_front_is_noop() {
 /// of the queue (round-robin).
 fn test_try_preempt_ring3_switches_to_other() {
     use crate::userland::lifecycle::{
-        mark_ring3_ready, peek_next_ring3, remove_process, set_current_user_pid,
-        try_preempt_ring3, with_process,
+        mark_ring3_ready, peek_next_ring3, remove_process, set_current_user_pid, try_preempt_ring3,
+        with_process,
     };
     let _g = PreemptTestGuard::new();
 
@@ -403,6 +402,30 @@ fn test_try_preempt_ring3_switches_to_other() {
     remove_process(9221);
 }
 
+/// Periodic ring3→kernel fairness saves and requeues the current process so
+/// kernel workers cannot be starved by runnable user processes.
+fn test_preempt_ring3_to_kernel_saves_and_requeues_current() {
+    use crate::userland::lifecycle::{
+        current_user_pid, peek_next_ring3, preempt_ring3_to_kernel, remove_process,
+        set_current_user_pid, with_process,
+    };
+    let _g = PreemptTestGuard::new();
+
+    insert_synthetic(9230);
+    set_current_user_pid(Some(9230));
+    let frame = patterned_frame();
+
+    assert!(preempt_ring3_to_kernel(&frame));
+    assert_eq!(current_user_pid(), None);
+    assert_eq!(peek_next_ring3(), Some(9230));
+    let saved = with_process(9230, |p| p.saved_user_state).unwrap();
+    assert_eq!(saved.rip, frame.rip);
+    assert_eq!(saved.rcx, frame.rcx);
+    assert_eq!(saved.r11, frame.r11);
+
+    remove_process(9230);
+}
+
 // ---------- U9: cross-process signal isolation ----------
 
 /// Signals raised on process A must land in A's signal_state, not in
@@ -416,9 +439,7 @@ fn test_try_preempt_ring3_switches_to_other() {
 /// A's pending mask carries SIGUSR1 and B's does not — proving the
 /// raise targeted the correct slot.
 fn test_signal_raised_on_other_process_does_not_land_in_current() {
-    use crate::userland::lifecycle::{
-        remove_process, set_current_user_pid, with_process,
-    };
+    use crate::userland::lifecycle::{remove_process, set_current_user_pid, with_process};
     use crate::userland::signal::SIGUSR1;
 
     let _g = PreemptTestGuard::new();
@@ -460,9 +481,7 @@ fn test_signal_raised_on_other_process_does_not_land_in_current() {
 /// return cleanly. The signal sits in A's queue until A itself
 /// returns from a syscall.
 fn test_signal_delivery_consumes_from_current_only() {
-    use crate::userland::lifecycle::{
-        remove_process, set_current_user_pid, with_process,
-    };
+    use crate::userland::lifecycle::{remove_process, set_current_user_pid, with_process};
     use crate::userland::signal::{SigAction, SIGUSR1};
 
     let _g = PreemptTestGuard::new();
@@ -489,8 +508,7 @@ fn test_signal_delivery_consumes_from_current_only() {
 
     // B is the current process; "deliver" via consume_deliverable on B.
     set_current_user_pid(Some(9311));
-    let b_consumed = with_process(9311, |p| p.signal_state.consume_deliverable())
-        .unwrap();
+    let b_consumed = with_process(9311, |p| p.signal_state.consume_deliverable()).unwrap();
     assert!(
         b_consumed.is_none(),
         "B's consume_deliverable must return None — its mask is clean"
@@ -507,8 +525,7 @@ fn test_signal_delivery_consumes_from_current_only() {
     // Now switch to A as current. consume_deliverable on A returns
     // SIGUSR1, mirroring what would happen on A's next syscall exit.
     set_current_user_pid(Some(9310));
-    let a_consumed = with_process(9310, |p| p.signal_state.consume_deliverable())
-        .unwrap();
+    let a_consumed = with_process(9310, |p| p.signal_state.consume_deliverable()).unwrap();
     let (sig, _action) = a_consumed.expect("A's consume must return SIGUSR1");
     assert_eq!(sig, SIGUSR1);
 
@@ -520,7 +537,7 @@ fn test_signal_delivery_consumes_from_current_only() {
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_save_ring3_copies_every_gpr,
-        &test_save_ring3_discards_rcx_and_r11,
+        &test_save_ring3_preserves_rcx_and_r11,
         &test_save_ring3_captures_fs_base,
         &test_save_ring3_roundtrips_fpu_state,
         &test_user_state_offsets_match_asm_contract,
@@ -528,6 +545,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_try_preempt_ring3_returns_none_when_queue_empty,
         &test_try_preempt_ring3_self_at_front_is_noop,
         &test_try_preempt_ring3_switches_to_other,
+        &test_preempt_ring3_to_kernel_saves_and_requeues_current,
         &test_signal_raised_on_other_process_does_not_land_in_current,
         &test_signal_delivery_consumes_from_current_only,
     ]

@@ -18,6 +18,7 @@ pub struct VBox {
 
 impl VBox {
     /// Create a new `VBox` covering `bounds`.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect) -> Self {
         VBox {
             base: WindowBase::new(bounds),

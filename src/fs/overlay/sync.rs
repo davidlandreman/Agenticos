@@ -38,13 +38,11 @@
 //!     if file: [data_len u32 LE][data bytes]
 //! ```
 
-use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::fs::filesystem::{FileMode, Filesystem, FilesystemError};
 use crate::fs::tmpfs::filesystem::{DirBody, TmpNode, Tmpfs};
-use crate::lib::arc::Arc;
 use spin::Mutex;
 
 const MAGIC: &[u8; 4] = b"AGOV";
@@ -484,27 +482,3 @@ pub fn synchronized_flush(overlay: &Overlay) -> Result<(), FilesystemError> {
     let _g = SYNC_LOCK.lock();
     overlay_persistent_sync(overlay)
 }
-
-/// Helper used by the `/bin/sync` syscall path (added by U5; this
-/// hook is fired in `vfs::vfs_sync_all`). Walks all mounts and, for
-/// each overlay mount, performs the persistent flush.
-pub fn flush_all_overlays() -> Result<(), FilesystemError> {
-    use crate::fs::vfs::get_vfs;
-    let vfs = get_vfs();
-    let mut last_err = Ok(());
-    for mount in vfs.list_mounts() {
-        if mount.filesystem.name() == "overlay" {
-            let ptr = mount.filesystem as *const dyn Filesystem as *const Overlay;
-            let overlay: &Overlay = unsafe { &*ptr };
-            if let Err(e) = synchronized_flush(overlay) {
-                last_err = Err(e);
-            }
-        }
-    }
-    last_err
-}
-
-#[allow(dead_code)]
-fn _unused_btreemap() -> BTreeMap<String, ()> { BTreeMap::new() }
-#[allow(dead_code)]
-fn _unused_arc<T: Clone>(a: Arc<T>) -> Arc<T> { a }

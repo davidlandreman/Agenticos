@@ -109,9 +109,6 @@ impl Overlay {
         self.upper
     }
 
-    pub fn lower(&self) -> &'static dyn Filesystem {
-        self.lower
-    }
 
     /// Has the parent directory of `path` been marked opaque in upper?
     fn parent_is_opaque(&self, path: &str) -> bool {

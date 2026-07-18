@@ -17,6 +17,12 @@ Physical and virtual memory management: frame allocation, virtual paging with de
 - Provides `#[global_allocator]`, which enables `alloc::*` collections (`Vec`, `String`, etc.) — see `.claude/rules/no-std.md`.
 - Heap pages are mapped on demand: pages get backing frames only when first accessed.
 
+The global heap allocator uses `InterruptMutex`, not a plain `spin::Mutex`.
+This is load-bearing on the single CPU: timer-preemptible compositor/kernel
+threads allocate frequently, while page-fault and SYSCALL paths may allocate
+with IF already cleared. A preempted allocator owner plus an exception-context
+allocation otherwise spins forever with interrupts disabled.
+
 ## Virtual address partition
 
 The kernel address space is partitioned into disjoint regions, each owned by exactly one subsystem:

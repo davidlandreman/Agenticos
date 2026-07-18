@@ -16,7 +16,7 @@ See `docs/ai-context-conventions.md` for the convention in detail (when to add a
 
 AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch with the eventual goal of supporting agent-based computing capabilities.
 
-**Current State**: The OS has a solid foundation with memory management, filesystem support, display/graphics, and basic process management. A window system provides hierarchical window management, event routing, and mouse support. The OS boots into a GUI desktop with a blue background; clicking Start → Terminal opens a windowed terminal that launches ring-3 `zsh` (`/host/ZSH.ELF`) directly as its shell. A real ring-3 userland runs Linux static-musl binaries: `zsh` is the interactive shell, a static BusyBox (`BB.ELF`) provides ~240 coreutils applets via a kernel-side virtual `/bin/<applet>` namespace (`src/userland/bin_namespace.rs`), and a small `GLAUNCH.ELF` multicall binary surfaces the kernel-side GUI apps (`painting`, `calc`, `notepad`, `tasks`, `explorer`) at `/bin/<name>` so zsh's PATH lookup spawns them via the AgenticOS-internal `sys_gui_launch` syscall. Write-side BusyBox applets (`cp`, `mv`, `rm`, …) surface `EROFS` at runtime because the FS is read-only. The "Agentic" aspects (agent runtime, advanced process management) are not yet implemented.
+**Current State**: The OS has memory management, writable overlay/data filesystems, display/graphics, preemptive kernel and ring-3 scheduling, and a Linux static-musl process platform. A window system provides hierarchical window management, event routing, and mouse support. The OS boots into a GUI desktop; clicking Start → Terminal opens a windowed terminal that launches ring-3 `zsh` (`/host/ZSH.ELF`) directly as its shell. A static BusyBox (`BB.ELF`) provides core utilities plus numeric-address `ping`, `nc`, and HTTP-only `wget` through the virtual `/bin/<applet>` namespace. A single-interface, polling-driven IPv4 stack uses modern VirtIO-net + smoltcp for DHCPv4, ICMP, UDP, and TCP. DNS servers are recorded but name lookup, IPv6, TLS, and interrupt-driven NIC I/O are deferred. The "Agentic" runtime is not yet implemented.
 
 The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.
 
@@ -34,7 +34,7 @@ The legacy kernel-side command interpreter (the `shell/` process that hand-parse
 
 **Prebuilt userland ELFs**: `ZSH.ELF` (and any future Linux ports that fetch upstream tarballs) ship as committed binaries under `userland/prebuilt/`. Fresh clones boot a working zsh without the `x86_64-linux-musl-cross` toolchain installed. `HELLO.ELF` (Rust) and `HELLOCPP.ELF` (small C++ wrapper) are NOT prebuilt — they build from source on every run. After changing the upstream source / Makefile / patches of a prebuilt-managed app, run `./userland/refresh-prebuilt.sh` and commit the updated binary alongside the source change.
 
-**QEMU Configuration**: 2 GiB RAM by default (override with `AGENTICOS_QEMU_MEMORY`), serial output, VirtIO tablet for seamless mouse, `isa-debug-exit` for test integration.
+**QEMU Configuration**: 2 GiB RAM by default (override with `AGENTICOS_QEMU_MEMORY`), serial output, VirtIO tablet, explicit modern VirtIO-net with QEMU user-mode NAT, and `isa-debug-exit` for test integration. Set `AGENTICOS_NETWORK=off` for a no-NIC interactive boot; tests use restricted networking plus repository-owned guest-forwarded services.
 
 ### Testing
 - `./test.sh` — Run all kernel tests in QEMU with automatic exit
@@ -76,6 +76,7 @@ Each entry below points to the folder's own `CLAUDE.md`, which carries the detai
 - `src/input/` — Lock-free input pipeline (SPSC queue, scancode state machines). See [`src/input/CLAUDE.md`](src/input/CLAUDE.md).
 - `src/lib/` — Custom `Arc`, debug logging, `Testable` trait. See [`src/lib/CLAUDE.md`](src/lib/CLAUDE.md).
 - `src/mm/` — Frame allocator, heap allocator, paging, page-fault demand mapping. See [`src/mm/CLAUDE.md`](src/mm/CLAUDE.md).
+- `src/net/` — Single-interface IPv4/DHCP/ICMP/UDP/TCP stack and bounded socket registry. See [`src/net/CLAUDE.md`](src/net/CLAUDE.md).
 - `src/process/` — Process traits and the live preemptive scheduler. (The shell-command registry that used to live here was removed when zsh became the default terminal.) See [`src/process/CLAUDE.md`](src/process/CLAUDE.md).
 - `src/stdlib/` — `Read`/`Write` traits, async waker. No folder file yet — currently thin.
 - `src/terminal/` — VT100/xterm terminal emulation: PTY pair, ANSI/VT parser, character grid + scrollback + alt-screen, caret, per-pty termios/winsize, key encoding. See [`src/terminal/CLAUDE.md`](src/terminal/CLAUDE.md).
@@ -109,6 +110,7 @@ These are cross-cutting (not subsystem-local). Subsystem-specific known issues l
 3. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
 4. **Global State** — Heavy use of `static mut` and `lazy_static`.
 5. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.
+6. **Network scope is deliberately small** — One polling modern VirtIO NIC, IPv4 and numeric addresses only; DNS lookup, IPv6, TLS, and NIC interrupts are follow-ups.
 
 ### Areas Needing Refactoring
 1. **Graphics Subsystem** — Complex relationships between display modules. (Detail in `src/graphics/CLAUDE.md`.)

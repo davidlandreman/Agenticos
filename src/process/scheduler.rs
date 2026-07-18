@@ -155,6 +155,7 @@ impl Scheduler {
     /// `Runnable::RingThree(pid)` that's the U4 switch primitive;
     /// for `Runnable::KernelThread(pid)` it's the existing
     /// context_switch path.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn next_runnable(&mut self) -> Runnable {
         if let Some(pid) = crate::userland::lifecycle::pop_next_ring3() {
             return Runnable::RingThree(pid);
@@ -362,9 +363,6 @@ impl Scheduler {
     }
 
     /// Get the total number of processes (including blocked/idle)
-    pub fn process_count(&self) -> usize {
-        self.processes.len()
-    }
 
     /// Check if the scheduler has been initialized
     pub fn is_initialized(&self) -> bool {
@@ -372,20 +370,8 @@ impl Scheduler {
     }
 
     /// Get the context of the current process
-    pub fn current_context(&self) -> Option<&CpuContext> {
-        self.current.and_then(|pid| {
-            self.processes.get(&pid).map(|pcb| &pcb.context)
-        })
-    }
 
     /// Get mutable context of the current process
-    pub fn current_context_mut(&mut self) -> Option<&mut CpuContext> {
-        if let Some(pid) = self.current {
-            self.processes.get_mut(&pid).map(|pcb| &mut pcb.context)
-        } else {
-            None
-        }
-    }
 
     /// Get the context of a specific process
     pub fn get_context(&self, pid: ProcessId) -> Option<&CpuContext> {
@@ -475,28 +461,6 @@ impl Scheduler {
         }
     }
 
-    /// Put the current process to sleep until signaled by specific events
-    ///
-    /// The process will be woken when any of the specified events occur.
-    /// Does nothing if there is no current process.
-    ///
-    /// # Arguments
-    /// * `wake_events` - Events that can wake this process
-    pub fn sleep_until_signaled(&mut self, wake_events: WakeEvents) {
-        if let Some(pid) = self.current.take() {
-            if let Some(pcb) = self.processes.get_mut(&pid) {
-                pcb.state = ProcessState::Blocked;
-                pcb.block_reason = Some(BlockReason::WaitingForSignal);
-                pcb.wake_events = wake_events;
-                pcb.wake_at_tick = None;
-
-                crate::debug_trace!("Scheduler: Process {:?} waiting for events {:?}", pid, wake_events);
-            }
-
-            self.signal_waiters.push(pid);
-        }
-    }
-
     /// Check the sleep queue and wake any processes whose time has come
     ///
     /// This should be called from the timer interrupt handler.
@@ -566,23 +530,4 @@ impl Scheduler {
         self.wake_from_sleep(pid, signal);
     }
 
-    /// Signal all processes waiting for a specific event type
-    ///
-    /// All processes in the signal_waiters list that are waiting for this
-    /// event type will be woken.
-    ///
-    /// # Arguments
-    /// * `signal` - The event type to broadcast
-    pub fn broadcast_signal(&mut self, signal: WakeEvents) {
-        let waiters: Vec<ProcessId> = self.signal_waiters.drain(..).collect();
-        for pid in waiters {
-            self.wake_from_sleep(pid, signal);
-        }
-    }
-
-    /// Get the number of sleeping processes (timed + signal waiters)
-    pub fn sleeping_count(&self) -> usize {
-        let timed: usize = self.sleep_queue.values().map(|v| v.len()).sum();
-        timed + self.signal_waiters.len()
-    }
 }

@@ -113,6 +113,7 @@ impl IconView {
     }
 
     /// Drop all tiles and clear the selection.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn clear_tiles(&mut self) {
         self.tiles.clear();
         self.selection = Selection::None;
@@ -152,11 +153,13 @@ impl IconView {
     }
 
     /// Current selection mode.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn selection_mode(&self) -> SelectionMode {
         self.selection_mode
     }
 
     /// Set the selection-change callback.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn on_select<F>(&mut self, callback: F)
     where
         F: FnMut(&Selection) + Send + 'static,
@@ -183,34 +186,40 @@ impl IconView {
     }
 
     /// Tile width (px).
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn tile_width(&self) -> u32 {
         self.tile_w
     }
 
     /// Tile height (px).
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn tile_height(&self) -> u32 {
         self.tile_h
     }
 
     /// Set the background color.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn set_bg_color(&mut self, color: Color) {
         self.bg_color = color;
         self.base.invalidate();
     }
 
     /// Set the label text color.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn set_text_color(&mut self, color: Color) {
         self.text_color = color;
         self.base.invalidate();
     }
 
     /// Set the background color for selected tiles.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn set_selected_bg_color(&mut self, color: Color) {
         self.selected_bg_color = color;
         self.base.invalidate();
     }
 
     /// Set the label color for selected tiles.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn set_selected_text_color(&mut self, color: Color) {
         self.selected_text_color = color;
         self.base.invalidate();

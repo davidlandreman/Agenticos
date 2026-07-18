@@ -6,7 +6,6 @@
 //! - Frame lifecycle (begin_frame/end_frame)
 
 use alloc::vec::Vec;
-use crate::graphics::framebuffer::SavedRegion;
 use crate::window::types::Rect;
 
 /// Maximum number of dirty regions to track before forcing full repaint.
@@ -125,6 +124,7 @@ impl DirtyRectManager {
     }
 
     /// Get the bounding box of all dirty regions.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn bounding_box(&self) -> Option<Rect> {
         if self.force_full_repaint {
             return Some(Rect::new(0, 0, self.screen_width, self.screen_height));
@@ -230,140 +230,11 @@ impl<'a> Iterator for DirtyRegionIter<'a> {
     }
 }
 
-/// Cursor overlay for proper mouse cursor rendering.
-///
-/// Saves the background under the cursor and restores it before
-/// drawing at a new position, preventing cursor trails.
-#[derive(Debug)]
-pub struct CursorOverlay {
-    /// Saved background under the cursor
-    saved_background: SavedRegion,
-    /// Current cursor position
-    position: (usize, usize),
-    /// Cursor dimensions
-    width: usize,
-    height: usize,
-    /// Whether the cursor is currently visible
-    visible: bool,
-    /// Whether the cursor is currently drawn on screen
-    drawn: bool,
-}
-
-impl CursorOverlay {
-    /// Create a new cursor overlay with the given cursor dimensions.
-    pub fn new(cursor_width: usize, cursor_height: usize) -> Self {
-        CursorOverlay {
-            saved_background: SavedRegion::new(),
-            position: (0, 0),
-            width: cursor_width,
-            height: cursor_height,
-            visible: true,
-            drawn: false,
-        }
-    }
-
-    /// Get current cursor position.
-    pub fn position(&self) -> (usize, usize) {
-        self.position
-    }
-
-    /// Check if the cursor has moved to a new position.
-    pub fn has_moved(&self, new_x: usize, new_y: usize) -> bool {
-        (new_x, new_y) != self.position
-    }
-
-    /// Get the bounding rectangle of the cursor at its current position.
-    pub fn bounds(&self) -> Rect {
-        Rect::new(
-            self.position.0 as i32,
-            self.position.1 as i32,
-            self.width as u32,
-            self.height as u32,
-        )
-    }
-
-    /// Get the bounding rectangle at a new position (for dirty tracking).
-    pub fn bounds_at(&self, x: usize, y: usize) -> Rect {
-        Rect::new(x as i32, y as i32, self.width as u32, self.height as u32)
-    }
-
-    /// Set cursor visibility.
-    pub fn set_visible(&mut self, visible: bool) {
-        self.visible = visible;
-    }
-
-    /// Check if cursor is visible.
-    pub fn is_visible(&self) -> bool {
-        self.visible
-    }
-
-    /// Check if cursor is currently drawn on screen.
-    pub fn is_drawn(&self) -> bool {
-        self.drawn
-    }
-
-    /// Store the saved background region.
-    pub fn store_background(&mut self, region: SavedRegion) {
-        self.saved_background = region;
-    }
-
-    /// Get the saved background for restoration.
-    pub fn saved_background(&self) -> &SavedRegion {
-        &self.saved_background
-    }
-
-    /// Take ownership of the saved background.
-    pub fn take_background(&mut self) -> SavedRegion {
-        core::mem::take(&mut self.saved_background)
-    }
-
-    /// Update cursor position and return the old and new bounds for dirty tracking.
-    pub fn move_to(&mut self, new_x: usize, new_y: usize) -> (Rect, Rect) {
-        let old_bounds = self.bounds();
-        self.position = (new_x, new_y);
-        let new_bounds = self.bounds();
-        (old_bounds, new_bounds)
-    }
-
-    /// Mark the cursor as drawn.
-    pub fn mark_drawn(&mut self) {
-        self.drawn = true;
-    }
-
-    /// Mark the cursor as erased.
-    pub fn mark_erased(&mut self) {
-        self.drawn = false;
-    }
-}
-
-impl Default for CursorOverlay {
-    fn default() -> Self {
-        Self::new(12, 12) // Default cursor size
-    }
-}
-
-/// Frame state for coordinating rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameState {
-    /// Not currently rendering
-    Idle,
-    /// Frame has begun, accepting draw calls
-    Drawing,
-    /// Frame is being finalized
-    Finalizing,
-}
-
 /// Compositor that coordinates dirty tracking and overlays.
 pub struct Compositor {
     /// Dirty region manager
     pub dirty: DirtyRectManager,
-    /// Cursor overlay
-    pub cursor: CursorOverlay,
-    /// Current frame state
-    state: FrameState,
-    /// Screen dimensions
-    width: u32,
-    height: u32,
+    cursor_position: (usize, usize),
 }
 
 impl Compositor {
@@ -371,32 +242,15 @@ impl Compositor {
     pub fn new(width: u32, height: u32) -> Self {
         Compositor {
             dirty: DirtyRectManager::new(width, height),
-            cursor: CursorOverlay::default(),
-            state: FrameState::Idle,
-            width,
-            height,
+            cursor_position: (0, 0),
         }
-    }
-
-    /// Begin a new frame.
-    ///
-    /// Call this at the start of each render cycle.
-    pub fn begin_frame(&mut self) {
-        self.state = FrameState::Drawing;
     }
 
     /// End the current frame.
     ///
     /// Call this after all drawing is complete.
     pub fn end_frame(&mut self) {
-        self.state = FrameState::Finalizing;
         self.dirty.clear();
-        self.state = FrameState::Idle;
-    }
-
-    /// Get the current frame state.
-    pub fn state(&self) -> FrameState {
-        self.state
     }
 
     /// Check if anything needs rendering this frame.
@@ -404,9 +258,9 @@ impl Compositor {
         self.dirty.is_dirty()
     }
 
-    /// Mark a window region as needing repaint.
-    pub fn invalidate_window(&mut self, bounds: Rect) {
-        self.dirty.mark_dirty(bounds);
+    /// Return the last pointer position recorded by the compositor.
+    pub const fn cursor_position(&self) -> (usize, usize) {
+        self.cursor_position
     }
 
     /// Record that the cursor has moved.
@@ -423,15 +277,11 @@ impl Compositor {
     /// wallpaper bleeding through child windows that early-return when
     /// their own content hasn't changed.
     pub fn update_cursor(&mut self, new_x: usize, new_y: usize) -> bool {
-        if !self.cursor.has_moved(new_x, new_y) {
+        let new_position = (new_x, new_y);
+        if self.cursor_position == new_position {
             return false;
         }
-        self.cursor.move_to(new_x, new_y);
+        self.cursor_position = new_position;
         true
-    }
-
-    /// Get screen dimensions.
-    pub fn dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
     }
 }

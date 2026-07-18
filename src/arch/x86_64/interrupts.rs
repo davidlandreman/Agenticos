@@ -516,35 +516,6 @@ pub fn check_and_clear_preemption() -> bool {
     PREEMPTION_PENDING.swap(false, Ordering::SeqCst)
 }
 
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-
-    // Only log every 100 ticks to avoid spam
-    if ticks % 100 == 0 {
-        crate::debug_debug!("Timer tick: {}", ticks);
-    }
-
-    // Check if scheduler is initialized and if preemption is needed
-    if crate::process::scheduler::SCHEDULER
-        .try_lock()
-        .map_or(false, |mut sched| {
-            if sched.is_initialized() {
-                sched.timer_tick()
-            } else {
-                false
-            }
-        })
-    {
-        // Set preemption flag - the kernel main loop will handle the context switch
-        PREEMPTION_PENDING.store(true, Ordering::SeqCst);
-    }
-
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-    }
-}
-
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use crate::input::{RawInputEvent, INPUT_QUEUE};
     use x86_64::instructions::port::Port;
@@ -557,9 +528,6 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         // Queue full - this should be rare with 256 entry buffer
         crate::debug_warn!("Input queue full, dropping scancode 0x{:02x}", scancode);
     }
-
-    // Wake up any processes waiting for stdin input
-    crate::stdlib::waker::wake_stdin_waiters();
 
     unsafe {
         PICS.lock()

@@ -2,91 +2,95 @@
 pub mod filter;
 
 #[cfg(feature = "test")]
-pub mod basic;
-#[cfg(feature = "test")]
-pub mod memory;
-#[cfg(feature = "test")]
-pub mod display;
-#[cfg(feature = "test")]
-pub mod interrupts;
-#[cfg(feature = "test")]
-pub mod heap;
-#[cfg(feature = "test")]
 pub mod arc;
 #[cfg(feature = "test")]
-pub mod filesystem;
-#[cfg(feature = "test")]
-pub mod fat_write;
-#[cfg(feature = "test")]
-pub mod tools;
-#[cfg(feature = "test")]
-pub mod userland;
-#[cfg(feature = "test")]
-pub mod userland_fixtures;
+pub mod basic;
 #[cfg(feature = "test")]
 pub mod compiler_compat;
 #[cfg(feature = "test")]
-pub mod userland_switch;
+pub mod composition_cpu;
 #[cfg(feature = "test")]
-pub mod vm;
+pub mod compositor;
 #[cfg(feature = "test")]
-pub mod fonts;
+pub mod compositor_selection;
 #[cfg(feature = "test")]
-pub mod window_clipping;
-#[cfg(feature = "test")]
-pub mod graphics_device_image;
+pub mod desktop_backing_store;
 #[cfg(feature = "test")]
 pub mod desktop_window;
 #[cfg(feature = "test")]
-pub mod mouse_event_extension_tests;
-#[cfg(feature = "test")]
-pub mod layout_tests;
-#[cfg(feature = "test")]
-pub mod selection_tests;
-#[cfg(feature = "test")]
-pub mod scroll_view_tests;
-#[cfg(feature = "test")]
-pub mod trait_delegation_tests;
-#[cfg(feature = "test")]
-pub mod list_migration_tests;
-#[cfg(feature = "test")]
-pub mod tree_view_tests;
-#[cfg(feature = "test")]
-pub mod splitter_tests;
-#[cfg(feature = "test")]
-pub mod toolbar_status_tests;
-#[cfg(feature = "test")]
-pub mod path_bar_tests;
-#[cfg(feature = "test")]
-pub mod icon_view_tests;
-#[cfg(feature = "test")]
-pub mod progress_bar_tests;
-#[cfg(feature = "test")]
-pub mod text_editor_migration_tests;
+pub mod display;
 #[cfg(feature = "test")]
 pub mod explorer_dir_model_tests;
 #[cfg(feature = "test")]
 pub mod explorer_dispatch_tests;
 #[cfg(feature = "test")]
-pub mod compositor;
+pub mod fat_write;
 #[cfg(feature = "test")]
-pub mod window_manager_render;
+pub mod filesystem;
 #[cfg(feature = "test")]
-pub mod window_buffer;
+pub mod fonts;
 #[cfg(feature = "test")]
-pub mod desktop_backing_store;
+pub mod graphics_device_image;
 #[cfg(feature = "test")]
-pub mod surface_alpha;
+pub mod heap;
+#[cfg(feature = "test")]
+pub mod icon_view_tests;
+#[cfg(feature = "test")]
+pub mod interrupts;
+#[cfg(feature = "test")]
+pub mod layout_tests;
+#[cfg(feature = "test")]
+pub mod list_migration_tests;
+#[cfg(feature = "test")]
+pub mod memory;
+#[cfg(feature = "test")]
+pub mod mouse_event_extension_tests;
+#[cfg(feature = "test")]
+pub mod network;
+#[cfg(feature = "test")]
+pub mod network_userland;
+#[cfg(feature = "test")]
+pub mod path_bar_tests;
+#[cfg(feature = "test")]
+pub mod progress_bar_tests;
 #[cfg(feature = "test")]
 pub mod retained_scene;
 #[cfg(feature = "test")]
-pub mod composition_cpu;
+pub mod scroll_view_tests;
 #[cfg(feature = "test")]
-pub mod compositor_selection;
+pub mod selection_tests;
+#[cfg(feature = "test")]
+pub mod splitter_tests;
+#[cfg(feature = "test")]
+pub mod surface_alpha;
+#[cfg(feature = "test")]
+pub mod text_editor_migration_tests;
+#[cfg(feature = "test")]
+pub mod toolbar_status_tests;
+#[cfg(feature = "test")]
+pub mod tools;
+#[cfg(feature = "test")]
+pub mod trait_delegation_tests;
+#[cfg(feature = "test")]
+pub mod tree_view_tests;
+#[cfg(feature = "test")]
+pub mod userland;
+#[cfg(feature = "test")]
+pub mod userland_fixtures;
+#[cfg(feature = "test")]
+pub mod userland_switch;
 #[cfg(feature = "test")]
 pub mod window_theme;
 #[cfg(feature = "test")]
 pub mod virtio_gpu_protocol;
+#[cfg(feature = "test")]
+pub mod vm;
+#[cfg(feature = "test")]
+pub mod window_buffer;
+#[cfg(feature = "test")]
+pub mod window_clipping;
+#[cfg(feature = "test")]
+pub mod window_manager_render;
 
 #[cfg(feature = "test")]
 type GetTestsFn = fn() -> &'static [&'static dyn crate::lib::test_utils::Testable];
@@ -99,6 +103,8 @@ type GetTestsFn = fn() -> &'static [&'static dyn crate::lib::test_utils::Testabl
 static MODULES: &[(&str, GetTestsFn)] = &[
     ("basic", basic::get_tests),
     ("memory", memory::get_tests),
+    ("network", network::get_tests),
+    ("network_userland", network_userland::get_tests),
     ("display", display::get_tests),
     ("interrupts", interrupts::get_tests),
     ("heap", heap::get_tests),
@@ -114,14 +120,23 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("compiler_compat", compiler_compat::get_tests),
     ("userland_switch", userland_switch::get_tests),
     ("path", crate::userland::path::path_tests),
-    ("bin_namespace", crate::userland::bin_namespace::bin_namespace_tests),
-    ("gui_launch_table", crate::commands::gui_launch_table::gui_launch_table_tests),
+    (
+        "bin_namespace",
+        crate::userland::bin_namespace::bin_namespace_tests,
+    ),
+    (
+        "gui_launch_table",
+        crate::commands::gui_launch_table::gui_launch_table_tests,
+    ),
     ("painting", crate::commands::painting::get_tests),
     ("fonts", fonts::get_tests),
     ("window_clipping", window_clipping::get_tests),
     ("graphics_device_image", graphics_device_image::get_tests),
     ("desktop_window", desktop_window::get_tests),
-    ("mouse_event_extension", mouse_event_extension_tests::get_tests),
+    (
+        "mouse_event_extension",
+        mouse_event_extension_tests::get_tests,
+    ),
     ("layout", layout_tests::get_tests),
     ("selection", selection_tests::get_tests),
     ("scroll_view", scroll_view_tests::get_tests),
@@ -133,7 +148,10 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("path_bar", path_bar_tests::get_tests),
     ("icon_view", icon_view_tests::get_tests),
     ("progress_bar", progress_bar_tests::get_tests),
-    ("text_editor_migration", text_editor_migration_tests::get_tests),
+    (
+        "text_editor_migration",
+        text_editor_migration_tests::get_tests,
+    ),
     ("explorer_dir_model", explorer_dir_model_tests::get_tests),
     ("explorer_dispatch", explorer_dispatch_tests::get_tests),
     ("compositor", compositor::get_tests),

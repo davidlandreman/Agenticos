@@ -3,18 +3,18 @@
 //! Implements a driver for VirtIO input devices, specifically for tablet/mouse
 //! with absolute positioning. This enables seamless mouse integration in QEMU.
 
-use spin::Mutex;
-use lazy_static::lazy_static;
-use alloc::boxed::Box;
-use crate::drivers::pci;
-use crate::drivers::virtio::common::{VirtioDevice, Virtqueue};
-use crate::debug_info;
 use crate::debug_trace;
+use crate::drivers::pci;
+use crate::drivers::virtio::common::{DmaPage, VirtioDevice, Virtqueue};
+use crate::{debug_info, debug_warn};
+use lazy_static::lazy_static;
+use spin::Mutex;
 
 /// VirtIO input event types (from Linux input-event-codes.h)
 pub mod event_types {
     pub const EV_SYN: u16 = 0x00;
     pub const EV_KEY: u16 = 0x01;
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const EV_REL: u16 = 0x02;
     pub const EV_ABS: u16 = 0x03;
 }
@@ -45,17 +45,13 @@ pub struct VirtioInputEvent {
 /// Size of a VirtIO input event
 const EVENT_SIZE: usize = core::mem::size_of::<VirtioInputEvent>();
 
-/// Buffer for receiving events
-#[repr(C, align(8))]
-struct EventBuffer {
-    events: [VirtioInputEvent; 64],
-}
+const EVENT_BUFFER_COUNT: usize = 64;
 
 /// VirtIO tablet device state
 pub struct VirtioTablet {
     device: VirtioDevice,
     eventq: Virtqueue,
-    event_buffers: Box<EventBuffer>,
+    event_page: DmaPage,
     /// Absolute X position (0-32767)
     abs_x: u32,
     /// Absolute Y position (0-32767)
@@ -91,20 +87,20 @@ impl VirtioTablet {
         let eventq = device.setup_queue(0)?;
         debug_info!("VirtIO input eventq size: {}", eventq.size);
 
-        // Create event buffers
-        let event_buffers = Box::new(EventBuffer {
-            events: [VirtioInputEvent::default(); 64],
-        });
+        let event_page = DmaPage::new_zeroed()?;
 
         // Complete initialization
         device.finish_init();
 
-        debug_info!("VirtIO tablet initialized (status: 0x{:02x})", device.read_status());
+        debug_info!(
+            "VirtIO tablet initialized (status: 0x{:02x})",
+            device.read_status()
+        );
 
         let mut tablet = Self {
             device,
             eventq,
-            event_buffers,
+            event_page,
             abs_x: 0,
             abs_y: 0,
             buttons: 0,
@@ -122,10 +118,9 @@ impl VirtioTablet {
     /// Submit buffers to receive events
     fn submit_buffers(&mut self) {
         // Submit each event slot as a separate buffer
-        for i in 0..self.event_buffers.events.len().min(self.eventq.size as usize) {
-            let event_ptr = &self.event_buffers.events[i] as *const _ as *const u8;
-            let buffer = unsafe { core::slice::from_raw_parts(event_ptr, EVENT_SIZE) };
-            if self.eventq.add_buffer(buffer, true).is_some() {
+        for i in 0..EVENT_BUFFER_COUNT.min(self.eventq.size as usize) {
+            let phys = self.event_page.phys_addr() + (i * EVENT_SIZE) as u64;
+            if self.eventq.submit(phys, EVENT_SIZE, true, i as u16).is_ok() {
                 debug_trace!("Submitted event buffer {}", i);
             }
         }
@@ -143,17 +138,38 @@ impl VirtioTablet {
         }
 
         // Process used buffers
-        while let Some((desc_idx, _len)) = self.eventq.pop_used() {
+        loop {
+            let used = match self.eventq.pop_used() {
+                Ok(Some(used)) => used,
+                Ok(None) => break,
+                Err(error) => {
+                    debug_warn!("VirtIO input malformed completion: {:?}", error);
+                    continue;
+                }
+            };
+            let index = used.token as usize;
+            if index >= EVENT_BUFFER_COUNT || used.len as usize != EVENT_SIZE {
+                debug_warn!(
+                    "VirtIO input invalid event token/length: token={} len={}",
+                    used.token,
+                    used.len
+                );
+                continue;
+            }
             had_events = true;
-
-            // Copy the event to avoid borrow issues
-            let event = self.event_buffers.events[desc_idx as usize];
+            let event_ptr = unsafe {
+                self.event_page
+                    .as_ptr::<u8>()
+                    .add(index * EVENT_SIZE)
+                    .cast::<VirtioInputEvent>()
+            };
+            let event = unsafe { core::ptr::read_volatile(event_ptr) };
             self.process_event(&event);
 
-            // Re-submit the buffer
-            let event_ptr = &self.event_buffers.events[desc_idx as usize] as *const _ as *const u8;
-            let buffer = unsafe { core::slice::from_raw_parts(event_ptr, EVENT_SIZE) };
-            self.eventq.add_buffer(buffer, true);
+            let phys = self.event_page.phys_addr() + (index * EVENT_SIZE) as u64;
+            if let Err(error) = self.eventq.submit(phys, EVENT_SIZE, true, used.token) {
+                debug_warn!("VirtIO input could not requeue event: {:?}", error);
+            }
         }
 
         if had_events {
@@ -166,23 +182,21 @@ impl VirtioTablet {
     /// Process a single input event
     fn process_event(&mut self, event: &VirtioInputEvent) {
         match event.event_type {
-            event_types::EV_ABS => {
-                match event.code {
-                    abs_codes::ABS_X => {
-                        self.abs_x = event.value;
-                        self.position_updated = true;
-                        debug_trace!("Tablet ABS_X: {}", event.value);
-                    }
-                    abs_codes::ABS_Y => {
-                        self.abs_y = event.value;
-                        self.position_updated = true;
-                        debug_trace!("Tablet ABS_Y: {}", event.value);
-                    }
-                    _ => {
-                        debug_trace!("Tablet ABS unknown code {}: {}", event.code, event.value);
-                    }
+            event_types::EV_ABS => match event.code {
+                abs_codes::ABS_X => {
+                    self.abs_x = event.value;
+                    self.position_updated = true;
+                    debug_trace!("Tablet ABS_X: {}", event.value);
                 }
-            }
+                abs_codes::ABS_Y => {
+                    self.abs_y = event.value;
+                    self.position_updated = true;
+                    debug_trace!("Tablet ABS_Y: {}", event.value);
+                }
+                _ => {
+                    debug_trace!("Tablet ABS unknown code {}: {}", event.code, event.value);
+                }
+            },
             event_types::EV_KEY => {
                 let pressed = event.value != 0;
                 match event.code {
@@ -192,7 +206,10 @@ impl VirtioTablet {
                         } else {
                             self.buttons &= !0x01;
                         }
-                        debug_info!("Tablet left button: {}", if pressed { "pressed" } else { "released" });
+                        debug_info!(
+                            "Tablet left button: {}",
+                            if pressed { "pressed" } else { "released" }
+                        );
                     }
                     btn_codes::BTN_RIGHT => {
                         if pressed {
@@ -200,7 +217,10 @@ impl VirtioTablet {
                         } else {
                             self.buttons &= !0x02;
                         }
-                        debug_info!("Tablet right button: {}", if pressed { "pressed" } else { "released" });
+                        debug_info!(
+                            "Tablet right button: {}",
+                            if pressed { "pressed" } else { "released" }
+                        );
                     }
                     btn_codes::BTN_MIDDLE => {
                         if pressed {
@@ -208,7 +228,10 @@ impl VirtioTablet {
                         } else {
                             self.buttons &= !0x04;
                         }
-                        debug_info!("Tablet middle button: {}", if pressed { "pressed" } else { "released" });
+                        debug_info!(
+                            "Tablet middle button: {}",
+                            if pressed { "pressed" } else { "released" }
+                        );
                     }
                     _ => {
                         debug_trace!("Tablet KEY unknown code {}: {}", event.code, event.value);
@@ -220,8 +243,12 @@ impl VirtioTablet {
                 debug_trace!("Tablet SYN");
             }
             _ => {
-                debug_trace!("Tablet event type {}: code {} value {}",
-                    event.event_type, event.code, event.value);
+                debug_trace!(
+                    "Tablet event type {}: code {} value {}",
+                    event.event_type,
+                    event.code,
+                    event.value
+                );
             }
         }
     }
@@ -235,29 +262,12 @@ impl VirtioTablet {
         (x, y)
     }
 
-    /// Get raw absolute coordinates (0-32767)
-    pub fn get_absolute_position(&self) -> (u32, u32) {
-        (self.abs_x, self.abs_y)
-    }
-
     /// Get button state
     pub fn get_buttons(&self) -> u8 {
         self.buttons
     }
 
-    /// Check if position was updated since last check
-    pub fn take_position_updated(&mut self) -> bool {
-        let updated = self.position_updated;
-        self.position_updated = false;
-        updated
     }
-
-    /// Update screen dimensions (for coordinate scaling)
-    pub fn set_screen_size(&mut self, width: u32, height: u32) {
-        self.screen_width = width;
-        self.screen_height = height;
-    }
-}
 
 /// Initialize the global VirtIO tablet if available
 pub fn init(screen_width: u32, screen_height: u32) -> bool {
@@ -273,8 +283,14 @@ pub fn init(screen_width: u32, screen_height: u32) -> bool {
 
     // Try to initialize the first one
     for dev in devices {
-        debug_info!("Trying VirtIO input device {:04x}:{:04x} at {:02x}:{:02x}.{}",
-            dev.vendor_id, dev.device_id, dev.bus, dev.device, dev.function);
+        debug_info!(
+            "Trying VirtIO input device {:04x}:{:04x} at {:02x}:{:02x}.{}",
+            dev.vendor_id,
+            dev.device_id,
+            dev.bus,
+            dev.device,
+            dev.function
+        );
 
         if let Some(tablet) = VirtioTablet::new(dev, screen_width, screen_height) {
             *TABLET.lock() = Some(tablet);
@@ -287,10 +303,6 @@ pub fn init(screen_width: u32, screen_height: u32) -> bool {
     false
 }
 
-/// Check if VirtIO tablet is available
-pub fn is_available() -> bool {
-    TABLET.lock().is_some()
-}
 
 /// Poll for events (call from main loop or interrupt handler)
 pub fn poll() -> bool {
@@ -308,9 +320,4 @@ pub fn get_state() -> Option<(i32, i32, u8)> {
         let (x, y) = t.get_screen_position();
         (x, y, t.get_buttons())
     })
-}
-
-/// Handle VirtIO input interrupt
-pub fn handle_interrupt() {
-    poll();
 }

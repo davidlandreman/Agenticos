@@ -190,59 +190,6 @@ pub unsafe extern "C" fn switch_context_full_restore(
     );
 }
 
-/// Switch to a process context restoring ALL registers (via iretq).
-///
-/// Used when resuming a process that was preempted by a timer interrupt.
-/// Sets up an iretq frame on the CURRENT stack, restores registers, then
-/// uses iretq to atomically load RIP, RSP, and RFLAGS.
-///
-/// # Safety
-///
-/// Same safety requirements as `switch_context`.
-#[unsafe(naked)]
-pub unsafe extern "C" fn switch_to_full_context_iretq(new_ctx: *const CpuContext) {
-    naked_asm!(
-        // rdi = new_ctx pointer
-        // CpuContext layout:
-        // 0:  rbx, 8: rbp, 16: r12, 24: r13, 32: r14, 40: r15
-        // 48: rsp, 56: rip, 64: rflags
-        // 72: rax, 80: rcx, 88: rdx, 96: rsi, 104: rdi
-        // 112: r8, 120: r9, 128: r10, 136: r11
-
-        // Set up iretq frame on CURRENT stack (don't corrupt target stack).
-        // iretq frame (low to high): RIP, CS, RFLAGS, RSP, SS.
-        // CS/SS come from the saved CpuContext at offsets 144/152.
-        "push qword ptr [rdi + 152]",  // SS
-        "push qword ptr [rdi + 48]",   // RSP
-        "push qword ptr [rdi + 64]",   // RFLAGS
-        "push qword ptr [rdi + 144]",  // CS
-        "push qword ptr [rdi + 56]",   // RIP
-
-        // Now restore all registers from context
-        // (rdi still points to context)
-        "mov rbx, [rdi + 0]",
-        "mov rbp, [rdi + 8]",
-        "mov r12, [rdi + 16]",
-        "mov r13, [rdi + 24]",
-        "mov r14, [rdi + 32]",
-        "mov r15, [rdi + 40]",
-
-        "mov rax, [rdi + 72]",
-        "mov rcx, [rdi + 80]",
-        "mov rdx, [rdi + 88]",
-        "mov rsi, [rdi + 96]",
-        // rdi loaded last
-        "mov r8, [rdi + 112]",
-        "mov r9, [rdi + 120]",
-        "mov r10, [rdi + 128]",
-        "mov r11, [rdi + 136]",
-        "mov rdi, [rdi + 104]",  // Load rdi last
-
-        // Return via iretq - atomically sets RIP, CS, RFLAGS, RSP, SS
-        "iretq",
-    );
-}
-
 /// Wrapper function for entry point of new processes
 ///
 /// This function is called when a new process starts. It retrieves

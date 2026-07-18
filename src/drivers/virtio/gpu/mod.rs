@@ -41,6 +41,7 @@ pub struct ScanoutResource {
 pub struct VirtioGpu {
     device: VirtioDevice,
     control: ControlQueue,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     cursor: CursorQueue,
     features: u32,
     next_resource_id: u32,
@@ -72,6 +73,7 @@ impl VirtioGpu {
         })
     }
 
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn virgl_advertised(&self) -> bool {
         self.features & VIRTIO_GPU_F_VIRGL != 0
     }
@@ -224,20 +226,7 @@ impl VirtioGpu {
         Ok(())
     }
 
-    pub fn acknowledge_display_event(&self) {
-        let events: u32 = self.device.read_device_config(0);
-        if events != 0 {
-            self.device.write_device_config(4, events);
-        }
-    }
 
-    fn detach(&mut self, resource_id: u32) -> Result<(), GpuError> {
-        self.control.submit_nodata(&ResourceRef {
-            header: CtrlHeader::command(CMD_RESOURCE_DETACH_BACKING),
-            resource_id,
-            padding: 0,
-        })
-    }
 
     fn unref(&mut self, resource_id: u32) -> Result<(), GpuError> {
         self.control.submit_nodata(&ResourceRef {
@@ -247,33 +236,7 @@ impl VirtioGpu {
         })
     }
 
-    pub fn destroy_scanout(&mut self, resource: ScanoutResource) -> Result<(), GpuError> {
-        if resource.active {
-            let disable = SetScanout {
-                header: CtrlHeader::command(CMD_SET_SCANOUT),
-                rect: GpuRect::default(),
-                scanout_id: resource.scanout_id,
-                resource_id: 0,
-            };
-            self.control.submit_nodata(&disable)?;
-        }
-        self.detach(resource.resource_id)?;
-        self.unref(resource.resource_id)
-    }
 
-    pub fn update_cursor(
-        &mut self,
-        command: &UpdateCursor,
-        move_only: bool,
-    ) -> Result<(), GpuError> {
-        let mut command = *command;
-        command.header = CtrlHeader::command(if move_only {
-            CMD_MOVE_CURSOR
-        } else {
-            CMD_UPDATE_CURSOR
-        });
-        self.cursor.submit(&command)
-    }
 
     /// Reset the whole device after a malformed response/timeout so VGA
     /// compatibility can resume instead of leaving a stale scanout active.

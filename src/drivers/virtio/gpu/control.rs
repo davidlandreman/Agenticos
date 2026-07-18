@@ -10,6 +10,7 @@ pub struct ControlQueue {
 }
 
 pub struct CursorQueue {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     queue: Virtqueue,
 }
 
@@ -18,20 +19,7 @@ impl CursorQueue {
         Self { queue }
     }
 
-    pub fn submit<Req>(&mut self, request: &Req) -> Result<(), GpuError> {
-        let head = self
-            .queue
-            .add_buffer(bytes_of(request), false)
-            .ok_or(GpuError::Queue(
-                crate::drivers::virtio::common::VirtqueueError::NoDescriptors,
-            ))?;
-        self.queue.notify();
-        self.queue
-            .wait_used(head, CONTROL_TIMEOUT_SPINS)
-            .map_err(GpuError::Queue)?;
-        Ok(())
     }
-}
 
 impl ControlQueue {
     pub fn new(queue: Virtqueue) -> Self {
@@ -54,12 +42,11 @@ impl ControlQueue {
         expected: u32,
     ) -> Result<(), GpuError> {
         response.fill(0);
-        let mut buffers = VirtqBuffer::from_slice_segments(request, false);
-        buffers.extend(VirtqBuffer::from_mut_slice_segments(response));
-        let head = self
-            .queue
-            .add_chain(&buffers)
-            .map_err(GpuError::Queue)?;
+        let mut buffers =
+            VirtqBuffer::try_from_slice_segments(request, false).map_err(GpuError::Queue)?;
+        buffers
+            .extend(VirtqBuffer::try_from_mut_slice_segments(response).map_err(GpuError::Queue)?);
+        let head = self.queue.add_chain(&buffers).map_err(GpuError::Queue)?;
         self.queue.notify();
         let used = self
             .queue

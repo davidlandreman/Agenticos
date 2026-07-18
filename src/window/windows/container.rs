@@ -14,6 +14,7 @@ pub struct ContainerWindow {
 
 impl ContainerWindow {
     /// Create a new container window
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect) -> Self {
         ContainerWindow {
             base: WindowBase::new(bounds),

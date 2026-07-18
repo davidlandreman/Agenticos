@@ -43,9 +43,6 @@ impl Com2 {
         }
     }
 
-    pub fn write_byte(&self, b: u8) {
-        self.port.lock().send(b);
-    }
 
     pub fn write_all(&self, bytes: &[u8]) {
         let mut port = self.port.lock();
@@ -58,6 +55,7 @@ impl Com2 {
 static COM2: Once<Com2> = Once::new();
 
 /// Initialize the COM2 driver. Call once during kernel boot.
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub fn init() {
     COM2.call_once(Com2::new);
 }

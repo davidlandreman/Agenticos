@@ -2353,6 +2353,7 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        network_wait: None,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -2720,8 +2721,8 @@ fn test_fork_then_wait_returns_to_parent() {
 fn test_address_space_clone_for_child_uses_cow() {
     use crate::mm::paging::{CowOutcome, UserPerms, USER_LOAD_BASE};
     use crate::userland::address_space::AddressSpace;
-    use x86_64::structures::paging::PageTableFlags;
     use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
 
     let kernel_frame = crate::mm::paging::kernel_l4_frame().expect("kernel L4 captured at boot");
@@ -2758,7 +2759,10 @@ fn test_address_space_clone_for_child_uses_cow() {
             .expect("child leaf")
     })
     .expect("memory mapper");
-    assert_eq!(parent_frame, child_frame, "fork must initially share backing");
+    assert_eq!(
+        parent_frame, child_frame,
+        "fork must initially share backing"
+    );
     assert!(parent_flags.contains(PageTableFlags::BIT_9));
     assert!(child_flags.contains(PageTableFlags::BIT_9));
     assert!(!parent_flags.contains(PageTableFlags::WRITABLE));
@@ -4042,6 +4046,7 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        network_wait: None,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -4099,6 +4104,7 @@ fn test_has_children_sees_live_child() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        network_wait: None,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -4242,6 +4248,7 @@ fn test_remove_process_cleans_ring3_queues() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        network_wait: None,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -4267,6 +4274,7 @@ fn test_remove_process_cleans_ring3_queues() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        network_wait: None,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),

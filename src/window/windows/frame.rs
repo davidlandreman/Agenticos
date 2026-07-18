@@ -2,9 +2,8 @@ use alloc::string::{String, ToString};
 
 use crate::graphics::scene::LayerEffect;
 use crate::window::theme::{self, FrameChrome, ThemeKind};
-use crate::window::types::HitTestResult;
 use crate::window::{
-    CompositorProperties, Event, EventResult, GraphicsDevice, Insets, Point, Rect, Window, WindowId,
+    CompositorProperties, Event, EventResult, GraphicsDevice, Insets, Rect, Window, WindowId,
 };
 
 use super::base::WindowBase;
@@ -40,10 +39,6 @@ impl FrameWindow {
         self.base.invalidate();
     }
 
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-
     pub fn content_area(&self) -> Rect {
         let metrics = theme::metrics();
         let border = metrics.border_width;
@@ -58,45 +53,6 @@ impl FrameWindow {
         )
     }
 
-    /// Perform a hit test at the given window-local coordinates.
-    pub fn hit_test(&self, local_point: Point) -> HitTestResult {
-        let bounds = self.base.bounds();
-        let (x, y) = (local_point.x, local_point.y);
-        if x < 0 || y < 0 || x >= bounds.width as i32 || y >= bounds.height as i32 {
-            return HitTestResult::None;
-        }
-        let metrics = theme::metrics();
-        let border = metrics.border_width as i32;
-        let title_height = metrics.title_bar_height as i32;
-        if y >= border
-            && y < border + title_height
-            && x >= border
-            && x < bounds.width as i32 - border
-        {
-            let local_bounds = Rect::new(0, 0, bounds.width, bounds.height);
-            if theme::close_button_rect(local_bounds, metrics).contains_point(local_point) {
-                return HitTestResult::CloseButton;
-            }
-            return HitTestResult::TitleBar;
-        }
-
-        let at_left = x < border;
-        let at_right = x >= bounds.width as i32 - border;
-        let at_top = y < border;
-        let at_bottom = y >= bounds.height as i32 - border;
-        use crate::window::types::ResizeEdge;
-        match (at_top, at_bottom, at_left, at_right) {
-            (true, _, true, _) => HitTestResult::Border(ResizeEdge::TopLeft),
-            (true, _, _, true) => HitTestResult::Border(ResizeEdge::TopRight),
-            (_, true, true, _) => HitTestResult::Border(ResizeEdge::BottomLeft),
-            (_, true, _, true) => HitTestResult::Border(ResizeEdge::BottomRight),
-            (true, _, _, _) => HitTestResult::Border(ResizeEdge::Top),
-            (_, true, _, _) => HitTestResult::Border(ResizeEdge::Bottom),
-            (_, _, true, _) => HitTestResult::Border(ResizeEdge::Left),
-            (_, _, _, true) => HitTestResult::Border(ResizeEdge::Right),
-            _ => HitTestResult::Client,
-        }
-    }
 }
 
 impl Window for FrameWindow {

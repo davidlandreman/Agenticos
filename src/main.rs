@@ -2,18 +2,16 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
-// AgenticOS is a single binary crate whose subsystem APIs are also exercised by
-// the feature-gated QEMU test harness. In a normal kernel build, rustc therefore
-// sees many intentionally dormant API surfaces as dead code. Keep useful lints
-// enabled while suppressing that structural noise and the intentional `lib.rs`
-// module name used by the kernel's internal support library.
-#![allow(dead_code, special_module_name)]
+#![deny(dead_code)]
+// AgenticOS intentionally uses `lib.rs` as an internal support module in this
+// binary crate.
+#![allow(special_module_name)]
 
 extern crate alloc;
 
+mod bootloader_config;
 mod kernel;
 mod panic;
-mod bootloader_config;
 
 // Module structure
 mod arch;
@@ -24,8 +22,8 @@ mod graphics;
 mod input;
 mod lib;
 mod mm;
+mod net;
 mod process;
-mod stdlib;
 mod terminal;
 mod tests;
 mod tools;
@@ -39,9 +37,9 @@ entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kernel::init(boot_info);
-    
+
     #[cfg(feature = "test")]
     tests::run_tests();
-    
+
     kernel::run();
 }

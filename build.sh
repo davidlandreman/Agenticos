@@ -67,6 +67,8 @@ if [ "$HELP" = true ]; then
     echo "                          starts maximized to the display. AGENTICOS_QEMU_SCALE=N"
     echo "                          enlarges the window to N times its native size on open"
     echo "                          (default 4; needs Accessibility permission for the terminal)."
+    echo "                          Networking defaults on; set"
+    echo "                          AGENTICOS_NETWORK=off to pass -nic none."
     echo "  -h, --help              Show this help message"
     echo ""
     echo "Default: Build in release mode, create images, and run in QEMU"
@@ -265,6 +267,16 @@ if [ "$RUN_QEMU" = true ]; then
     ) &
     DATA_IMAGE="${AGENTICOS_DATA_IMAGE:-target/bootloader/data.img}"
     echo "💽 Persistent data disk: $DATA_IMAGE"
+    if [ "${AGENTICOS_NETWORK:-on}" = "off" ]; then
+        NETWORK_ARGS=(-nic none)
+        echo "🌐 Networking disabled (AGENTICOS_NETWORK=off)"
+    else
+        NETWORK_ARGS=(
+            -netdev "user,id=agenticos-net"
+            -device "virtio-net-pci,disable-legacy=on,netdev=agenticos-net,mac=02:41:47:4e:54:01"
+        )
+        echo "🌐 QEMU user networking enabled"
+    fi
     QEMU_ARGS=(
         -drive "format=raw,file=$BIOS_IMAGE,if=ide,index=0"
         -drive "file=fat:ro:$HOST_SHARE,if=ide,index=1,snapshot=on"
@@ -277,6 +289,7 @@ if [ "$RUN_QEMU" = true ]; then
         -device virtio-tablet-pci
         -m "$QEMU_MEMORY"
     )
+    QEMU_ARGS+=("${NETWORK_ARGS[@]}")
     # On macOS the cocoa backend has no initial-scale flag, so open the window
     # then enlarge it to AGENTICOS_QEMU_SCALE (default 4x) via a backgrounded
     # AppleScript helper. zoom-to-fit=on (set by qemu-compositor.sh) scales the

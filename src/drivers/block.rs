@@ -25,19 +25,23 @@ pub trait BlockDevice {
     fn total_blocks(&self) -> u64;
 
     /// Get the total capacity in bytes
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn capacity(&self) -> u64 {
         self.total_blocks() * self.block_size() as u64
     }
 
     /// Check if the device is read-only
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn is_read_only(&self) -> bool {
         false
     }
 
     /// Get a human-readable name for the device
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn name(&self) -> &str;
 
     /// Flush any pending writes to the device
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn flush(&self) -> Result<(), &'static str> {
         Ok(()) // Default implementation does nothing
     }
@@ -45,6 +49,7 @@ pub trait BlockDevice {
 
 /// Error type for block device operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(dead_code, reason = "intentional kernel API surface")]
 pub enum BlockDeviceError {
     /// The requested block is out of range
     InvalidBlock,

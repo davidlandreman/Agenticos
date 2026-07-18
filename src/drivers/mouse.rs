@@ -10,11 +10,6 @@ const MOUSE_STATUS_PORT: u16 = 0x64;
 const MOUSE_COMMAND_PORT: u16 = 0x64;
 
 // PS/2 Controller Commands
-const ENABLE_AUX_DEVICE: u8 = 0xA8;
-const DISABLE_AUX_DEVICE: u8 = 0xA7;
-const TEST_AUX_PORT: u8 = 0xA9;
-const ENABLE_KEYBOARD: u8 = 0xAE;
-const DISABLE_KEYBOARD: u8 = 0xAD;
 
 // Mouse Commands (sent via 0xD4 prefix)
 const WRITE_TO_AUX: u8 = 0xD4;
@@ -24,7 +19,6 @@ const MOUSE_SET_DEFAULTS: u8 = 0xF6;
 
 // Expected responses
 const ACK: u8 = 0xFA;
-const MOUSE_ID: u8 = 0x00;
 
 lazy_static! {
     static ref MOUSE_DATA: Mutex<MouseData> = Mutex::new(MouseData::new());
@@ -67,6 +61,7 @@ pub fn init_with_screen(screen_width: u32, screen_height: u32) {
     init_ps2();
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub fn init() {
     // Default to 1280x720 for legacy init
     init_with_screen(1280, 720);
@@ -164,12 +159,6 @@ fn wait_controller() {
     }
 }
 
-fn send_controller_command(cmd: u8) {
-    unsafe {
-        wait_controller();
-        Port::<u8>::new(MOUSE_COMMAND_PORT).write(cmd);
-    }
-}
 
 fn send_mouse_command(cmd: u8) -> bool {
     unsafe {

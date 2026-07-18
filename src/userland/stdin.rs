@@ -25,6 +25,7 @@ pub fn install_for_terminal(terminal_id: WindowId) {
     );
 }
 
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn clear_for_terminal(terminal_id: WindowId) {
     pty::clear_for_terminal(terminal_id);
 }
@@ -68,10 +69,12 @@ pub fn clear() {
     pty::clear_legacy();
 }
 
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn is_active() -> bool {
     pty::is_active_legacy()
 }
 
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn push_bytes(bytes: &[u8]) {
     let Some(master) = pty::legacy_master() else { return; };
     let pushed = master.push_input(bytes);
@@ -80,6 +83,7 @@ pub fn push_bytes(bytes: &[u8]) {
     }
 }
 
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn pop_into(dst: &mut [u8]) -> usize {
     let Some(slave) = pty::legacy_slave() else { return 0; };
     slave.read(dst)

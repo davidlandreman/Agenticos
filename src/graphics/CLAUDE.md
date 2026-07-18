@@ -5,8 +5,6 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
 ## Key files
 
 - `color.rs` — RGB colors and the predefined palette.
-- `core_gfx.rs` — primitives: Bresenham lines, circles, rectangles, polygons.
-- `core_text.rs` — font-agnostic text rendering.
 - `compositor.rs` — dirty-rectangle tracking and cursor-overlay management.
 - `surface.rs` — retained canonical premultiplied ARGB8888 surfaces, local
   damage merging, and explicit allocation budgeting.
@@ -17,11 +15,8 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
   by Aero glass layers.
 - `present/` — scanout boundary. The boot-framebuffer presenter converts only
   damaged pixels; VirtIO-GPU 2D presentation is owned by `src/drivers/`.
-- `framebuffer.rs` — region save/restore (`SavedRegion`, `RegionCapableBuffer` trait).
-- `render.rs` — `RenderTarget` abstraction for efficient row-based drawing.
-- `mouse_cursor.rs` — 12×12 arrow sprite with background save/restore.
 - `fonts/` — font support. `core_font.rs` defines the glyph-centric `Font` trait + `Glyph<'a>` struct (8bpp coverage). `ttf.rs` is the TTF/OTF backend (parses via `ttf-parser`, rasterizes via `ab_glyph_rasterizer`, ASCII pre-rendered into per-glyph `Box<[u8]>` slots, non-ASCII lazy via `BTreeMap`). `embedded_font.rs` is the 8x8 bitmap fallback used only on TTF parse failure. `font_data.rs` holds the embedded font's bit-packed source. The system TTF lives at `assets/system.ttf` and is `include_bytes!`-baked into the kernel; `init_fonts()` parses it once during boot, after heap init.
-- `images/` — `bmp.rs` (full Windows BMP, 1/4/8/16/24/32-bit). `png.rs` (header parsing only — no decompression yet). Parsed images implement the `Image` trait and can be drawn through `GraphicsDevice::draw_image` / `draw_image_scaled` (defined in `src/window/graphics.rs`); both have per-pixel default implementations that respect the device's clip rect, so any adapter gets image rendering for free without an override.
+- `images/` — `bmp.rs` supports full Windows BMP (1/4/8/16/24/32-bit). Parsed images implement the `Image` trait and can be drawn through `GraphicsDevice::draw_image` / `draw_image_scaled` (defined in `src/window/graphics.rs`); both have per-pixel default implementations that respect the device's clip rect, so any adapter gets image rendering for free without an override.
 
 ## Double buffering
 
@@ -44,7 +39,7 @@ These have been measured; treat them as constraints, not preferences:
 - **Bulk copies are fast.** `core::ptr::copy()` for swapping buffers and scrolling beats per-pixel work by an order of magnitude.
 - **Scrolling = `memmove`.** Don't redraw all rows when shifting; move them in memory.
 - **Static allocation** for the back buffer avoids heap fragmentation in a critical path.
-- **Cursor uses direct-framebuffer.** The double-buffer path's full-frame copy is too slow for cursor latency (see `src/window/CLAUDE.md`).
+- **Legacy cursor uses direct-framebuffer.** The double-buffer path's full-frame copy is too slow for cursor latency (see `src/window/CLAUDE.md`).
 - **`TextWindow` is incremental.** Dirty-cell tracking avoids redrawing all glyphs on every keystroke.
 
 ## Known architecture issues (open work)
@@ -61,7 +56,7 @@ The intended next refactor establishes clear layers:
 1. Raw framebuffer access.
 2. Drawing primitives.
 3. Text/font rendering.
-4. Image loading/display. (BMP parsing + `GraphicsDevice` rendering landed; PNG decompression and per-adapter bulk-row blits remain.)
+4. Image loading/display. (BMP parsing + `GraphicsDevice` rendering landed; additional formats and per-adapter bulk-row blits remain.)
 5. Composite operations (windows, widgets).
 
 This is a known-pain marker — when touching this folder, prefer additions that move toward this layering rather than entrenching the current shape.

@@ -77,16 +77,15 @@ impl TextEditor {
     }
 
     /// Create a new text editor (generates its own ID)
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect) -> Self {
         Self::new_with_id(WindowId::new(), bounds)
     }
 
     /// Get the full text content
-    pub fn text(&self) -> String {
-        self.lines.join("\n")
-    }
 
     /// Set the text content
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn set_text(&mut self, text: &str) {
         self.lines = text.lines().map(String::from).collect();
         if self.lines.is_empty() {
@@ -100,31 +99,15 @@ impl TextEditor {
     }
 
     /// Clear all text
-    pub fn clear(&mut self) {
-        self.lines = vec![String::new()];
-        self.cursor_col = 0;
-        self.cursor_row = 0;
-        self.modified = false;
-        self.queue_cursor_into_view();
-        self.base.invalidate();
-    }
 
     /// Check if text has been modified
-    pub fn is_modified(&self) -> bool {
-        self.modified
-    }
 
     /// Set modified state
-    pub fn set_modified(&mut self, modified: bool) {
-        self.modified = modified;
-    }
 
     /// Get number of lines
-    pub fn line_count(&self) -> usize {
-        self.lines.len()
-    }
 
     /// Get cursor position (col, row)
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn cursor_position(&self) -> (usize, usize) {
         (self.cursor_col, self.cursor_row)
     }
@@ -157,9 +140,6 @@ impl TextEditor {
     /// the window manager after each event dispatch; if the value is
     /// `Some`, the manager forwards an `Event::EnsureVisible(rect)` to
     /// the nearest enclosing `ScrollView` ancestor.
-    pub fn take_pending_ensure_visible_rect(&mut self) -> Option<Rect> {
-        self.pending_ensure_visible.take()
-    }
 
     /// Get current line length
     fn current_line_len(&self) -> usize {

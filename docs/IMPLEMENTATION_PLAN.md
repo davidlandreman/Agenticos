@@ -146,6 +146,16 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
   - Integration with shell for filesystem exploration
 - **Future Filesystem Support**: Ready for ext2/3/4, NTFS implementations
 
+#### Basic IPv4 Network Stack ✓
+- **Status**: Complete (bounded first release)
+- Modern VirtIO-net PCI driver with page-safe DMA pools and checked tokenized queues
+- Pinned `no_std` smoltcp 0.12 for Ethernet/ARP/IPv4/DHCPv4/ICMP/UDP/TCP
+- Kernel-owned DHCP address/default-route configuration and DNS metadata snapshot
+- Bounded TCP/UDP/ICMP registry with shared socket FD lifetime and deferred close
+- Linux x86-64 `AF_INET` socket subset, blocking/nonblocking restart, and poll readiness
+- Hermetic restricted-QEMU static-musl fixture plus BusyBox numeric IPv4 `ping`, `nc`, and HTTP `wget`
+- Poll-driven single interface; DNS lookup, IPv6, TLS, offloads, and NIC IRQs remain future work
+
 ### 🔄 Recent Architectural Improvements
 
 #### Code Organization Refactor (Completed)
@@ -210,10 +220,11 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
   - Resource quotas
   - Agent sandboxing
   - Performance monitoring
-- **8.3 Network Stack**
-  - Network driver support
-  - TCP/IP implementation
-  - Networked agent communication
+- **8.3 Network Stack** ✓ (basic IPv4 slice complete)
+  - ✓ Modern VirtIO-net, DHCPv4, ICMP, UDP, and TCP
+  - ✓ Ring-3 Linux socket ABI and selected BusyBox applets
+  - **TODO**: DNS/IPv6/TLS and interrupt-driven receive
+  - **TODO**: Networked agent communication
 
 ## Development Guidelines
 
@@ -373,6 +384,7 @@ agenticos/
 - [x] Lock-free input processing pipeline (SPSC queue)
 - [x] Window system with hierarchical management
 - [x] GUI desktop with windowed terminal
+- [x] Basic IPv4 network stack with DHCP, ICMP, UDP, TCP, and ring-3 sockets
 
 ### ⏳ In Progress
 - [ ] PNG image format support (decompression needed)
@@ -388,7 +400,8 @@ agenticos/
 - [ ] Process management
 - [ ] System call interface
 - [ ] Agent execution environment
-- [ ] Network stack
+- [x] Basic IPv4 network stack
+- [ ] DNS, IPv6, TLS, and networked agent protocols
 - [ ] Full agent-based computing platform
 
 ## Technical Debt and Future Improvements

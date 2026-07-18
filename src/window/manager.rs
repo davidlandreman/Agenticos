@@ -12,7 +12,6 @@ use super::types::{
 };
 use super::windows::MenuBarPopup;
 use super::{
-    keyboard::{scancode_to_keycode, KeyboardState},
     Event, EventResult, GraphicsDevice, KeyboardEvent, MouseEvent, MouseEventType, Point, Rect,
     Screen, ScreenId, ScreenMode, Window, WindowId,
 };
@@ -44,10 +43,6 @@ pub struct WindowManager {
     graphics_device: Box<dyn GraphicsDevice>,
     /// Compositor for dirty tracking and cursor overlay
     compositor: Compositor,
-    /// Keyboard state tracker
-    keyboard_state: KeyboardState,
-    /// Whether we're expecting a break code after 0xF0
-    expecting_break_code: bool,
     /// Current window interaction state (dragging, resizing)
     interaction_state: InteractionState,
     /// Last known mouse button state for detecting clicks
@@ -125,8 +120,6 @@ impl WindowManager {
             focus_stack: Vec::new(),
             graphics_device,
             compositor: Compositor::new(width, height),
-            keyboard_state: KeyboardState::default(),
-            expecting_break_code: false,
             interaction_state: InteractionState::Idle,
             last_mouse_buttons: 0,
             cursor: CursorRenderer::new(),
@@ -146,21 +139,16 @@ impl WindowManager {
         wm
     }
 
-    /// Capture an owned framebuffer snapshot for the screenshot tool.
-    pub fn framebuffer_snapshot(&self) -> Option<super::graphics::Snapshot> {
-        match &self.renderer {
-            RendererState::Retained(renderer) => Some(renderer.snapshot()),
-            RendererState::Legacy => self.graphics_device.snapshot(),
-        }
-    }
-
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn renderer_selection(&self) -> RendererSelection {
         self.renderer_selection
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const fn render_stats(&self) -> RenderStats {
         self.last_render_stats
     }
 
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn compositor_capabilities(&self) -> super::CompositorCapabilities {
         match self.renderer.kind() {
             RendererKind::Legacy => super::CompositorCapabilities {
@@ -184,32 +172,6 @@ impl WindowManager {
         }
     }
 
-    pub fn set_window_compositor_properties(
-        &mut self,
-        id: WindowId,
-        properties: super::CompositorProperties,
-    ) -> bool {
-        let capabilities = self.compositor_capabilities();
-        if properties.opacity != u8::MAX && !capabilities.opacity {
-            return false;
-        }
-        if properties.transform != crate::graphics::scene::Transform2D::IDENTITY
-            && !capabilities.translation
-        {
-            return false;
-        }
-        if !matches!(properties.effect, crate::graphics::scene::LayerEffect::None)
-            && !capabilities.backdrop_sample
-        {
-            return false;
-        }
-        if let Some(window) = self.window_registry.get_mut(&id) {
-            window.set_compositor_properties(properties);
-            true
-        } else {
-            false
-        }
-    }
 
     // Screen management
 
@@ -354,63 +316,6 @@ impl WindowManager {
     // Event routing
 
     /// Process keyboard interrupt data
-    pub fn handle_keyboard_scancode(&mut self, scancode: u8) {
-        crate::debug_trace!(
-            "WindowManager::handle_keyboard_scancode: 0x{:02x}",
-            scancode
-        );
-
-        // Special handling for 0xF0 prefix (scancode set 2 break code prefix)
-        if scancode == 0xF0 {
-            crate::debug_info!("Got 0xF0 prefix, next scancode will be a break code");
-            self.expecting_break_code = true;
-            return;
-        }
-
-        // Check if this is a break code (key release)
-        let is_break = self.expecting_break_code;
-        self.expecting_break_code = false;
-
-        if is_break {
-            crate::debug_info!(
-                "Processing break code (key release) for scancode 0x{:02x}",
-                scancode
-            );
-            // Handle modifier key releases
-            match scancode {
-                0x12 | 0x59 => self.keyboard_state.modifiers.shift = false, // Shift release
-                0x14 => self.keyboard_state.modifiers.ctrl = false,         // Ctrl release
-                0x11 => self.keyboard_state.modifiers.alt = false,          // Alt release
-                _ => {}
-            }
-            // Don't process break codes further for now
-            return;
-        }
-
-        // Update modifier state for make codes
-        crate::debug_trace!("Updating keyboard modifiers...");
-        self.keyboard_state.update_modifiers(scancode);
-        crate::debug_trace!("Modifiers updated");
-
-        // Convert scancode to KeyCode
-        crate::debug_trace!("Converting scancode to keycode...");
-        if let Some(key_code) = scancode_to_keycode(scancode) {
-            crate::debug_trace!("Converted to KeyCode: {:?}", key_code);
-
-            let event = KeyboardEvent {
-                key_code,
-                pressed: true, // We're only handling make codes
-                modifiers: self.keyboard_state.modifiers,
-            };
-
-            crate::debug_trace!("Routing keyboard event: pressed={}", event.pressed);
-            self.route_keyboard_event(event);
-            crate::debug_trace!("route_keyboard_event returned");
-        } else {
-            crate::debug_trace!("No KeyCode mapping for scancode 0x{:02x}", scancode);
-        }
-        crate::debug_trace!("handle_keyboard_scancode complete");
-    }
 
     /// Route a keyboard event to the appropriate window
     pub fn route_keyboard_event(&mut self, event: KeyboardEvent) {
@@ -836,7 +741,7 @@ impl WindowManager {
         // cursor footprints out of repaint damage; retained consumes the
         // previous position below as composition/presentation-only damage.
         // Clamp to unsigned coordinates for the shared cursor state.
-        let previous_cursor_position = self.compositor.cursor.position();
+        let previous_cursor_position = self.compositor.cursor_position();
         let mouse_moved = self
             .compositor
             .update_cursor(mouse_x.max(0) as usize, mouse_y.max(0) as usize);
@@ -878,7 +783,6 @@ impl WindowManager {
         }
 
         if matches!(self.renderer, RendererState::Retained(_)) {
-            self.compositor.begin_frame();
             let state = core::mem::replace(&mut self.renderer, RendererState::Legacy);
             let RendererState::Retained(mut retained) = state else {
                 unreachable!()
@@ -898,9 +802,6 @@ impl WindowManager {
             }
             return;
         }
-
-        // Begin frame
-        self.compositor.begin_frame();
 
         let old_cursor_bounds = self.cursor.saved_bounds();
 
@@ -1433,11 +1334,26 @@ impl WindowManager {
     /// Test-only: return the compositor's current pointer position.
     #[cfg(feature = "test")]
     pub fn test_cursor_position(&self) -> Point {
-        let (x, y) = self.compositor.cursor.position();
+        let (x, y) = self.compositor.cursor_position();
         Point::new(
             x.min(i32::MAX as usize) as i32,
             y.min(i32::MAX as usize) as i32,
         )
+    }
+
+    /// Test-only: read one pixel from the canonical retained output.
+    #[cfg(feature = "test")]
+    pub fn test_retained_output_pixel(&self, position: Point) -> Option<(u8, u8, u8, u8)> {
+        if position.x < 0 || position.y < 0 {
+            return None;
+        }
+        let RendererState::Retained(retained) = &self.renderer else {
+            return None;
+        };
+        retained
+            .output()
+            .pixel(position.x as u32, position.y as u32)
+            .map(crate::graphics::surface::PremulArgb::to_rgba)
     }
 
     /// Test-only: render a cursor-only retained frame at an injected position.
@@ -1449,7 +1365,6 @@ impl WindowManager {
                 .update_cursor(position.x.max(0) as usize, position.y.max(0) as usize),
             "test cursor position must change"
         );
-        self.compositor.begin_frame();
         let state = core::mem::replace(&mut self.renderer, RendererState::Legacy);
         let RendererState::Retained(mut retained) = state else {
             panic!("test requires retained renderer")
@@ -1506,12 +1421,6 @@ impl WindowManager {
     }
 
     /// Mark a window as needing repaint (for external callers).
-    pub fn invalidate_window(&mut self, window_id: WindowId) {
-        if let Some(window) = self.window_registry.get(&window_id) {
-            let bounds = window.bounds();
-            self.compositor.dirty.mark_dirty(bounds);
-        }
-    }
 
     /// Force a full repaint on the next frame.
     pub fn force_full_repaint(&mut self) {
@@ -2025,9 +1934,6 @@ impl WindowManager {
     }
 
     /// Get the active popup menu
-    pub fn get_active_menu(&self) -> Option<WindowId> {
-        self.active_menu
-    }
 
     /// Close the active menu if one is open
     pub fn close_active_menu(&mut self) {
@@ -2053,9 +1959,6 @@ impl WindowManager {
     }
 
     /// Get the taskbar window ID
-    pub fn get_taskbar_id(&self) -> Option<WindowId> {
-        self.taskbar_id
-    }
 
     // Modal Dialog Management
 
@@ -2070,14 +1973,8 @@ impl WindowManager {
     }
 
     /// Get the current modal dialog window ID
-    pub fn get_modal_dialog(&self) -> Option<WindowId> {
-        self.modal_dialog
-    }
 
     /// Check if a modal dialog is currently active
-    pub fn has_modal_dialog(&self) -> bool {
-        self.modal_dialog.is_some()
-    }
 
     /// Check if a window is part of the modal dialog (is the dialog or a child of it)
     fn is_modal_window(&self, window_id: WindowId) -> bool {

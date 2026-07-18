@@ -1,6 +1,6 @@
 # `src/drivers/` — Hardware Drivers
 
-PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet for seamless mouse), and the framebuffer display driver.
+PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet and network), and the framebuffer display driver.
 
 ## Key files
 
@@ -8,16 +8,17 @@ PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet for se
 - `ide.rs` — IDE/ATA PIO-mode storage driver. Supports up to 4 drives.
 - `block.rs` — `BlockDevice` trait used by `src/fs/`.
 - `ps2_controller.rs` — shared PS/2 controller setup; enables IRQ1 (keyboard) and IRQ12 (mouse).
-- `keyboard.rs` — PS/2 keyboard driver (scancode set 2).
+- `src/input/keyboard_driver.rs` — PS/2 keyboard state machine (scancode set 2).
 - `mouse.rs` — PS/2 mouse driver, fallback when VirtIO tablet is absent.
 - `mouse_old.rs` — legacy mouse code; **triage before relying on it**. If dead, remove in a separate PR; if intentional, document why.
 - `virtio/mod.rs` — VirtIO module init.
-- `virtio/common.rs` — VirtIO device abstraction and Virtqueue.
+- `virtio/common.rs` — modern VirtIO PCI feature negotiation, page-safe DMA storage, tokenized queue ownership, and descriptor chains.
 - `virtio/gpu/` — VirtIO 1.3 GPU wire layouts, checked control/cursor queues,
   guest-backed 2D resources, display discovery/events, exact damage transfer +
   flush, and scanout lifecycle. This is a presenter, not an accelerated
   composition engine.
 - `virtio/input.rs` — VirtIO tablet (absolute pointing, seamless mouse in QEMU).
+- `virtio/net.rs` — polling modern VirtIO-net device, bounded RX/TX DMA pools, and smoltcp Ethernet adapter.
 - `display/` — framebuffer driver. `display.rs` controls single/double buffering (the `USE_DOUBLE_BUFFER` flag lives here even though graphics primitives live in `src/graphics/`). `frame_buffer.rs` is the low-level abstraction; `text_buffer.rs` and `double_buffered_text.rs` handle text rendering; `double_buffer.rs` provides the 8 MiB static back buffer.
 
 ## IDE PIO atomicity (load-bearing)
@@ -49,6 +50,21 @@ can show a black window for an otherwise valid scanout; set
 `AGENTICOS_QEMU_2D=on` only for diagnostics. Presence of `virtio-vga-gl` alone
 never makes the kernel report acceleration.
 
+## VirtIO DMA and network invariants
+
+Virtqueue submissions use physical addresses plus caller tokens; completion
+returns the token only after validating the device-written descriptor ID and
+length. Translation failure is an error—never substitute a virtual address.
+Ring and packet DMA objects are page-aligned/page-contained and remain owned
+until completion. Publish/consume boundaries use release/acquire fences.
+
+The network driver accepts only modern device ID `0x1041`, requires
+`VIRTIO_F_VERSION_1`, and optionally negotiates `VIRTIO_NET_F_MAC`. It does not
+enable checksum/GSO, merged RX buffers, multiqueue, or a control queue. The
+modern non-merged header is 12 bytes (including `num_buffers`), followed by an
+Ethernet frame no larger than 1514 bytes. Malformed completions and pool
+exhaustion increment counters and drop work rather than panic.
+
 ## PS/2 mouse packet format
 
 Mouse driver reads 3-byte packets from the controller. **Bit 3 of byte 0 must always be set** (sync bit) — packets failing this check are dropped to recover from sync loss. The driver tracks position with screen-boundary clamping and exposes button state for left / right / middle.
@@ -58,4 +74,5 @@ Mouse driver reads 3-byte packets from the controller. **Bit 3 of byte 0 must al
 - Raw input events go to a lock-free queue consumed by `src/input/` — see `src/input/CLAUDE.md`.
 - Mouse cursor *rendering* (background save/restore, cursor sprite) is owned by the window system, NOT here — see `src/window/CLAUDE.md`.
 - Block storage feeds `src/fs/` — see `src/fs/CLAUDE.md`.
+- VirtIO-net feeds the protocol and socket layer in `src/net/` — see `src/net/CLAUDE.md`.
 - The `USE_DOUBLE_BUFFER` flag in `display/display.rs` is mentioned by `src/graphics/CLAUDE.md` because flipping it affects graphics behavior; the flag itself lives here.

@@ -308,6 +308,18 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
         unsafe {
             PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
         }
+        // Give kernel threads a regular share of the CPU. Direct ring3→ring3
+        // switching alone can starve the network worker and compositor when
+        // a shell remains runnable while its child blocks. Every second tick
+        // saves/requeues the current user process and returns to the kernel
+        // main loop; intervening ticks retain the low-latency direct switch.
+        if ticks.is_multiple_of(2)
+            && crate::userland::lifecycle::preempt_ring3_to_kernel(frame)
+        {
+            unsafe {
+                crate::userland::switch::yield_to_kernel_main_loop();
+            }
+        }
         if let Some(next_pid) = crate::userland::lifecycle::try_preempt_ring3(frame) {
             // Diverges. resume_ring3 swaps CR3 / TSS.rsp0 / GSBASE /
             // FS_BASE / FPU, then `iretq`s into next_pid at CPL=3.

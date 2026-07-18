@@ -872,12 +872,9 @@ fn test_retained_cursor_move_presents_old_and_new_without_window_rasterization()
     // Establish retained surfaces and the initial cursor overlay.
     wm.render();
     let old = wm.test_cursor_position();
-    let initial_snapshot = wm.framebuffer_snapshot().unwrap();
-    let old_initial_offset = (old.y as usize * initial_snapshot.stride + old.x as usize)
-        * initial_snapshot.bytes_per_pixel;
     assert_eq!(
-        &initial_snapshot.pixels[old_initial_offset..old_initial_offset + 3],
-        &[255, 255, 255],
+        wm.test_retained_output_pixel(old),
+        Some((255, 255, 255, 255)),
         "initial retained cursor hotspot should be white",
     );
     let new = Point::new(
@@ -896,19 +893,14 @@ fn test_retained_cursor_move_presents_old_and_new_without_window_rasterization()
 
     wm.test_render_retained_cursor_at(new);
 
-    let moved_snapshot = wm.framebuffer_snapshot().unwrap();
-    let old_moved_offset =
-        (old.y as usize * moved_snapshot.stride + old.x as usize) * moved_snapshot.bytes_per_pixel;
-    let new_moved_offset =
-        (new.y as usize * moved_snapshot.stride + new.x as usize) * moved_snapshot.bytes_per_pixel;
     assert_eq!(
-        &moved_snapshot.pixels[old_moved_offset..old_moved_offset + 3],
-        &[10, 10, 10],
+        wm.test_retained_output_pixel(old),
+        Some((10, 10, 10, 255)),
         "old retained cursor hotspot should be restored from the scene",
     );
     assert_eq!(
-        &moved_snapshot.pixels[new_moved_offset..new_moved_offset + 3],
-        &[255, 255, 255],
+        wm.test_retained_output_pixel(new),
+        Some((255, 255, 255, 255)),
         "new retained cursor hotspot should be white",
     );
 

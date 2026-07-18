@@ -246,12 +246,6 @@ impl PtyInner {
         out
     }
 
-    /// Cheap "any output pending?" check used by the compositor's
-    /// dirty-terminal pass so it doesn't take the master mutex for a
-    /// full drain when there's nothing to show.
-    pub fn master_output_pending(&self) -> bool {
-        !self.master_queue.is_empty()
-    }
 }
 
 // ---------------------------------------------------------------------
@@ -266,6 +260,7 @@ pub struct PtyMaster {
 }
 
 impl PtyMaster {
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn terminal_id(&self) -> WindowId {
         self.inner.lock().terminal_id
     }
@@ -286,14 +281,17 @@ impl PtyMaster {
         self.with(|p| p.drain_master_output())
     }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn termios(&self) -> Termios {
         self.with(|p| p.termios)
     }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn set_termios(&self, t: Termios) {
         self.with(|p| p.termios = t);
     }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn winsize(&self) -> Winsize {
         self.with(|p| p.winsize)
     }
@@ -331,6 +329,7 @@ impl PtySlave {
         self.with(|p| p.slave_read(dst))
     }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn readable(&self) -> usize {
         self.with(|p| p.slave_readable())
     }

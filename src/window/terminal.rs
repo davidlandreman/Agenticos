@@ -18,13 +18,6 @@ static CURRENT_OUTPUT_TERMINAL: Mutex<Option<WindowId>> = Mutex::new(None);
 /// Per-terminal output buffers
 static TERMINAL_BUFFERS: Mutex<BTreeMap<WindowId, Vec<String>>> = Mutex::new(BTreeMap::new());
 
-/// Set the terminal window that should receive print output (default terminal)
-pub fn set_terminal_window(window_id: WindowId) {
-    *TERMINAL_WINDOW.lock() = Some(window_id);
-    // Initialize buffer for this terminal
-    TERMINAL_BUFFERS.lock().entry(window_id).or_insert_with(Vec::new);
-}
-
 /// Get the current default terminal window
 pub fn get_terminal_window() -> Option<WindowId> {
     *TERMINAL_WINDOW.lock()
@@ -62,11 +55,6 @@ pub fn register_terminal(window_id: WindowId) {
     crate::userland::stdin::install_for_terminal(window_id);
 }
 
-/// Unregister a terminal and drop its pty.
-pub fn unregister_terminal(window_id: WindowId) {
-    TERMINAL_BUFFERS.lock().remove(&window_id);
-    crate::userland::stdin::clear_for_terminal(window_id);
-}
 
 /// Update the pty's `Winsize` for `terminal_id` to match the rendered
 /// grid. Raises `SIGWINCH` on every process bound to this terminal
@@ -109,15 +97,6 @@ pub fn write_to_terminal_id(terminal_id: WindowId, text: &str) {
     }
 }
 
-/// Write text to the current output terminal (used by print! macro)
-/// Routes to the current output terminal if set, otherwise the default terminal
-pub fn write_to_terminal(text: &str) {
-    // Use current output terminal (set by shell) or fall back to default
-    if let Some(terminal_id) = get_current_output_terminal() {
-        // Write to this terminal's buffer
-        write_to_terminal_id(terminal_id, text);
-    }
-}
 
 /// Take pending output for a terminal. Drains the pty master's output
 /// queue first (where ring-3 writes + kernel `write_to_terminal_id`
@@ -143,17 +122,6 @@ pub fn take_terminal_output(terminal_id: WindowId) -> Vec<String> {
     out
 }
 
-/// Check if a terminal has pending output. Inspects both the pty
-/// master queue and the legacy buffer.
-pub fn has_terminal_output(terminal_id: WindowId) -> bool {
-    if let Some(master) = crate::terminal::pty::master_for_terminal(terminal_id) {
-        if master.with(|p| p.master_output_pending()) {
-            return true;
-        }
-    }
-    let buffers = TERMINAL_BUFFERS.lock();
-    buffers.get(&terminal_id).map_or(false, |b| !b.is_empty())
-}
 
 /// Compositor-side: invalidate every terminal window with pending
 /// buffered output. Called from
@@ -182,4 +150,3 @@ pub fn invalidate_dirty_terminals() {
         }
     });
 }
-

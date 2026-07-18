@@ -1,6 +1,6 @@
 //! Calculator command using GUI widgets
 
-use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
+use crate::process::RunnableProcess;
 use crate::window::{self, Window, WindowId, Rect};
 use crate::window::windows::{ContainerWindow, FrameWindow, Label, Button};
 use crate::window::windows::label::TextAlign;
@@ -165,27 +165,11 @@ fn evaluate_pending(state: &mut CalcState) {
     }
 }
 
-pub struct CalcProcess {
-    base: BaseProcess,
-    args: Vec<String>,
-}
+pub struct CalcProcess;
 
 impl CalcProcess {
-    pub fn new_with_args(args: Vec<String>) -> Self {
-        Self {
-            base: BaseProcess::new("calc"),
-            args,
-        }
-    }
-}
-
-impl HasBaseProcess for CalcProcess {
-    fn base(&self) -> &BaseProcess {
-        &self.base
-    }
-
-    fn base_mut(&mut self) -> &mut BaseProcess {
-        &mut self.base
+    pub fn new_with_args(_args: Vec<String>) -> Self {
+        Self
     }
 }
 

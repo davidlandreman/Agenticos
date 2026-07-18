@@ -25,6 +25,7 @@ impl Transform2D {
         tx: 0,
         ty: 0,
     };
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const fn translation(tx: i32, ty: i32) -> Self {
         Self {
             tx,
@@ -41,6 +42,7 @@ impl Transform2D {
 pub enum LayerEffect {
     None,
     /// Test/extension point for per-pixel alpha content already in the surface.
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     AlphaMask,
     /// Blur/sample already-composed layers behind this layer.
     BackdropSample {
@@ -112,6 +114,7 @@ impl SceneFrame {
         self.layers.push(layer);
     }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn sort_by_z(&mut self) {
         // Stable sort preserves tree order among equal-z layers.
         self.layers.sort_by_key(|layer| layer.z_index);

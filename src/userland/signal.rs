@@ -20,25 +20,19 @@
 pub const NSIG: usize = 64;
 
 // ---- well-known signal numbers (subset Linux exposes) ----
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub const SIGHUP: i32 = 1;
-pub const SIGINT: i32 = 2;
-pub const SIGQUIT: i32 = 3;
 pub const SIGILL: i32 = 4;
-pub const SIGABRT: i32 = 6;
 pub const SIGFPE: i32 = 8;
 pub const SIGKILL: i32 = 9;
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub const SIGUSR1: i32 = 10;
 pub const SIGSEGV: i32 = 11;
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub const SIGUSR2: i32 = 12;
-pub const SIGPIPE: i32 = 13;
-pub const SIGALRM: i32 = 14;
-pub const SIGTERM: i32 = 15;
 pub const SIGCHLD: i32 = 17;
 pub const SIGBUS: i32 = 7;
-pub const SIGSYS: i32 = 31;
-pub const SIGCONT: i32 = 18;
 pub const SIGSTOP: i32 = 19;
-pub const SIGTSTP: i32 = 20;
 pub const SIGWINCH: i32 = 28;
 
 // ---- well-known sa_handler sentinels ----
@@ -126,19 +120,7 @@ impl SignalState {
         self.pending |= 1u64 << (sig - 1);
     }
 
-    pub fn is_pending(&self, sig: i32) -> bool {
-        if sig < 1 || (sig as usize) > NSIG {
-            return false;
-        }
-        (self.pending & (1u64 << (sig - 1))) != 0
-    }
 
-    pub fn clear_pending(&mut self, sig: i32) {
-        if sig < 1 || (sig as usize) > NSIG {
-            return;
-        }
-        self.pending &= !(1u64 << (sig - 1));
-    }
 
     /// Set the action for `sig`, returning the previous one. SIGKILL
     /// and SIGSTOP cannot have their disposition changed (POSIX

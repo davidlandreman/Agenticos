@@ -53,6 +53,7 @@ pub static NULL_BLOCK_DEVICE: NullBlockDevice = NullBlockDevice;
 pub struct MountPoint {
     pub path: &'static str,
     pub filesystem: &'static dyn Filesystem,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub device: &'static dyn BlockDevice,
 }
 
@@ -95,26 +96,7 @@ impl VirtualFilesystem {
     }
     
     /// Unmount a filesystem
-    pub fn unmount(&mut self, path: &str) -> Result<(), FilesystemError> {
-        for i in 0..self.mount_count {
-            if let Some(mount) = &self.mounts[i] {
-                if mount.path == path {
-                    // Shift remaining mounts down
-                    for j in i..self.mount_count - 1 {
-                        self.mounts[j] = self.mounts[j + 1].take();
-                    }
-                    self.mounts[self.mount_count - 1] = None;
-                    self.mount_count -= 1;
-                    
-                    debug_info!("Unmounted filesystem at {}", path);
-                    return Ok(());
-                }
-            }
-        }
         
-        Err(FilesystemError::NotFound)
-    }
-    
     /// Find the filesystem for a given path
     pub fn find_filesystem<'a>(&'a self, path: &'a str) -> Option<(&'a dyn Filesystem, &'a str)> {
         let mut best_match: Option<(&MountPoint, usize)> = None;

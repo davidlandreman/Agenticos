@@ -6,10 +6,8 @@ use crate::graphics::color::Color;
 use bootloader_api::info::{FrameBuffer, PixelFormat};
 use core::fmt;
 use spin::Mutex;
-use crate::debug_info;
 use crate::graphics::fonts::core_font::get_default_font;
 
-const DEFAULT_COLOR: Color = Color::WHITE;
 const BACKGROUND_COLOR: Color = Color::BLACK;
 
 pub struct TextBuffer {
@@ -26,41 +24,6 @@ pub struct TextBuffer {
 }
 
 impl TextBuffer {
-    pub fn new(framebuffer: &'static mut FrameBuffer) -> Self {
-        let info = framebuffer.info();
-        let width = info.width;
-        let height = info.height;
-
-        let font = get_default_font();
-        let cell_width = font.cell_width() as usize;
-        let line_height = font.line_height() as usize;
-        debug_info!("TextBuffer font cell: {}x{}", cell_width, line_height);
-
-        let text_cols = width / cell_width.max(1);
-        let text_rows = height / line_height.max(1);
-
-        debug_info!(
-            "TextBuffer dimensions: {}x{} pixels, {}x{} chars",
-            width, height, text_cols, text_rows
-        );
-
-        let mut buffer = Self {
-            framebuffer,
-            width,
-            height,
-            cursor_x: 0,
-            cursor_y: 0,
-            text_cols,
-            text_rows,
-            current_color: DEFAULT_COLOR,
-            cell_width,
-            line_height,
-        };
-
-        buffer.clear();
-        buffer
-    }
-
     pub fn set_color(&mut self, color: Color) {
         self.current_color = color;
     }
@@ -219,11 +182,6 @@ impl TextBuffer {
         self.fill_rect(0, last_row_y, self.width, self.line_height, BACKGROUND_COLOR);
     }
 
-    pub fn clear(&mut self) {
-        self.fill_rect(0, 0, self.width, self.height, BACKGROUND_COLOR);
-        self.cursor_x = 0;
-        self.cursor_y = 0;
-    }
 }
 
 impl fmt::Write for TextBuffer {
@@ -237,10 +195,6 @@ impl fmt::Write for TextBuffer {
 
 static TEXT_BUFFER: Mutex<Option<TextBuffer>> = Mutex::new(None);
 
-pub fn init(framebuffer: &'static mut FrameBuffer) {
-    let mut buffer = TEXT_BUFFER.lock();
-    *buffer = Some(TextBuffer::new(framebuffer));
-}
 
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
@@ -253,17 +207,5 @@ pub fn _print(args: fmt::Arguments) {
 pub fn set_color(color: Color) {
     if let Some(ref mut buffer) = *TEXT_BUFFER.lock() {
         buffer.set_color(color);
-    }
-}
-
-pub fn clear_screen() {
-    if let Some(ref mut buffer) = *TEXT_BUFFER.lock() {
-        buffer.clear();
-    }
-}
-
-pub fn set_cursor_y(y: usize) {
-    if let Some(ref mut buffer) = *TEXT_BUFFER.lock() {
-        buffer.cursor_y = y;
     }
 }

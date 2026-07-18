@@ -3,7 +3,7 @@
 //! Displays running processes with metrics and allows killing processes
 //! via a right-click context menu.
 
-use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess, ProcessId, ProcessState};
+use crate::process::{RunnableProcess, ProcessId, ProcessState};
 use crate::window::{self, Window, WindowId, Rect, Point};
 use crate::window::windows::{ContainerWindow, FrameWindow, MultiColumnList, Column, MenuWindow};
 use crate::graphics::color::Color;
@@ -320,27 +320,11 @@ fn refresh_process_list(tasks_id: usize) {
     });
 }
 
-pub struct TasksProcess {
-    base: BaseProcess,
-    args: Vec<String>,
-}
+pub struct TasksProcess;
 
 impl TasksProcess {
-    pub fn new_with_args(args: Vec<String>) -> Self {
-        Self {
-            base: BaseProcess::new("tasks"),
-            args,
-        }
-    }
-}
-
-impl HasBaseProcess for TasksProcess {
-    fn base(&self) -> &BaseProcess {
-        &self.base
-    }
-
-    fn base_mut(&mut self) -> &mut BaseProcess {
-        &mut self.base
+    pub fn new_with_args(_args: Vec<String>) -> Self {
+        Self
     }
 }
 

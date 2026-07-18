@@ -80,6 +80,7 @@ pub fn queue_action(action: PendingAction) {
 static GUISHELL_STATE: Mutex<GUIShellState> = Mutex::new(GUIShellState::new());
 
 /// Initialize the GUIShell desktop environment
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub fn init_guishell() {
     let mut state = GUISHELL_STATE.lock();
     if state.initialized {
@@ -326,68 +327,6 @@ fn spawn_notepad() {
     crate::debug_info!("GUIShell: spawn_notepad() completed");
 }
 
-/// Poll the GUIShell - updates taskbar buttons and handles events
-pub fn poll() {
-    // First, sync menu state with window manager
-    // The window manager may have closed the menu via click-outside detection
-    // without notifying us, so we need to check if our menu_id is still valid
-    {
-        let mut state = GUISHELL_STATE.lock();
-        if let Some(menu_id) = state.menu_id {
-            // Check if the menu window still exists
-            let menu_exists = window::with_window_manager(|wm| {
-                wm.window_registry.contains_key(&menu_id)
-            }).unwrap_or(false);
-
-            if !menu_exists {
-                crate::debug_info!("GUIShell: Menu {:?} was destroyed externally, clearing state", menu_id);
-                state.menu_id = None;
-            }
-        }
-    }
-
-    // Take any pending action
-    let pending_action = {
-        let mut state = GUISHELL_STATE.lock();
-
-        if !state.initialized {
-            return;
-        }
-
-        state.pending_action.take()
-    };
-
-    // Process pending action (outside the lock to avoid deadlocks)
-    if let Some(action) = pending_action {
-        match action {
-            PendingAction::ToggleStartMenu => {
-                toggle_start_menu();
-            }
-            PendingAction::SpawnTerminal => {
-                close_start_menu();
-                spawn_terminal();
-            }
-            PendingAction::SpawnPainting => {
-                close_start_menu();
-                spawn_painting();
-            }
-            PendingAction::SpawnCalc => {
-                close_start_menu();
-                spawn_calc();
-            }
-            PendingAction::SpawnNotepad => {
-                close_start_menu();
-                spawn_notepad();
-            }
-            PendingAction::FocusWindow(frame_id) => {
-                focus_window(frame_id);
-            }
-        }
-    }
-
-    // Sync window buttons with current frame windows
-    sync_taskbar_buttons();
-}
 
 /// Toggle the Start menu (show if hidden, hide if shown)
 fn toggle_start_menu() {
@@ -590,26 +529,9 @@ fn focus_window(frame_id: WindowId) {
     });
 }
 
-/// Check if the Start button was clicked and handle it
-pub fn check_start_button_click() {
-    // This would be called from the event loop if we detect the start button was clicked
-    // For now, we use the button's on_click callback instead
-}
 
-/// Get the desktop window ID
-pub fn get_desktop_id() -> Option<WindowId> {
-    GUISHELL_STATE.lock().desktop_id
-}
 
-/// Get the taskbar window ID
-pub fn get_taskbar_id() -> Option<WindowId> {
-    GUISHELL_STATE.lock().taskbar_id
-}
 
-/// Check if GUIShell is initialized
-pub fn is_initialized() -> bool {
-    GUISHELL_STATE.lock().initialized
-}
 
 // =============================================================================
 // Process-Based GUIShell

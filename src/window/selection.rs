@@ -24,6 +24,7 @@ pub enum SelectionMode {
     /// At most one item may be selected at a time.
     Single,
     /// Any subset of items may be selected.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     Multi,
 }
 
@@ -36,6 +37,7 @@ pub struct ClickMods {
 }
 
 impl ClickMods {
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const NONE: ClickMods = ClickMods { shift: false, ctrl: false };
 
     pub const fn new(shift: bool, ctrl: bool) -> Self {
@@ -87,6 +89,7 @@ impl Selection {
     }
 
     /// Number of selected items.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn len(&self) -> usize {
         match self {
             Selection::None => 0,
@@ -100,6 +103,7 @@ impl Selection {
     }
 
     /// Returns `true` when nothing is selected.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn is_empty(&self) -> bool {
         matches!(self, Selection::None)
     }
@@ -119,6 +123,7 @@ impl Selection {
     }
 
     /// Drop all selected items.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn clear(&mut self) {
         *self = Selection::None;
     }
@@ -213,6 +218,7 @@ impl Selection {
     /// Extend the current selection to a new endpoint, anchored on the
     /// existing anchor (or `idx` itself when no anchor is available).
     /// Used for shift-click.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn extend_to(&mut self, idx: usize) {
         let anchor = self.current_anchor().unwrap_or(idx);
         *self = Selection::Range { anchor, end: idx };

@@ -9,12 +9,13 @@
 //! asm reads, so reordering here without updating the asm is a
 //! load-bearing bug.
 
-/// Full snapshot of a user thread's registers at a syscall boundary.
+/// Full snapshot of a user thread's registers at a resumable boundary.
 ///
-/// `rcx` and `r11` are intentionally absent — the SYSCALL instruction
-/// clobbers them (CPU stashes user RIP in rcx, RFLAGS in r11), so
-/// userland's syscall ABI documents them as undefined on return.
-/// We don't restore them when re-entering ring 3.
+/// `rcx` and `r11` are undefined after a SYSCALL, but they are ordinary
+/// caller-saved registers when an asynchronous timer interrupt lands.
+/// Keep them in the common snapshot so timer preemption can resume at
+/// any instruction without corrupting live user state. Syscall-created
+/// snapshots initialize both fields to zero.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 pub struct UserState {
@@ -34,9 +35,11 @@ pub struct UserState {
     pub r15: u64,
     pub rip: u64,
     pub rflags: u64,
+    pub rcx: u64,
+    pub r11: u64,
 }
 
-const _SIZE_CHECK: () = assert!(core::mem::size_of::<UserState>() == 16 * 8);
+const _SIZE_CHECK: () = assert!(core::mem::size_of::<UserState>() == 18 * 8);
 
 /// Six callee-saved user registers, returned by
 /// [`read_user_callee_saved`]. The `r12_register` field carries the

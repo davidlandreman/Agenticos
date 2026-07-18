@@ -24,6 +24,7 @@ pub struct Label {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlign {
     Left,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Center,
     Right,
 }
@@ -54,6 +55,7 @@ impl Label {
     }
 
     /// Get the current text
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn text(&self) -> &str {
         &self.text
     }

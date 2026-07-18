@@ -11,6 +11,7 @@ use crate::graphics::surface::{Surface, SurfaceId};
 use crate::window::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(dead_code, reason = "intentional kernel API surface")]
 pub enum CompositionEngineKind {
     Cpu,
     Virgl,
@@ -27,6 +28,7 @@ pub struct RenderStats {
 }
 
 pub trait CompositionEngine {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn kind(&self) -> CompositionEngineKind;
     fn compose(
         &mut self,
@@ -43,6 +45,7 @@ pub enum CompositionError {
     InvalidOutput,
     MissingSurface(SurfaceId),
     UnsupportedTransform,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     UnsupportedEffect,
     SurfaceAllocation,
 }

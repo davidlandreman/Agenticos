@@ -16,12 +16,15 @@ impl Color {
     pub const GREEN: Color = Color { red: 0, green: 255, blue: 0 };
     pub const BLUE: Color = Color { red: 0, green: 0, blue: 255 };
     pub const YELLOW: Color = Color { red: 255, green: 255, blue: 0 };
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const CYAN: Color = Color { red: 0, green: 255, blue: 255 };
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const MAGENTA: Color = Color { red: 255, green: 0, blue: 255 };
     pub const GRAY: Color = Color { red: 128, green: 128, blue: 128 };
     pub const LIGHT_GRAY: Color = Color { red: 192, green: 192, blue: 192 };
     pub const DARK_GRAY: Color = Color { red: 64, green: 64, blue: 64 };
     
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn from_hex(hex: u32) -> Self {
         Color {
             red: ((hex >> 16) & 0xFF) as u8,
@@ -30,6 +33,7 @@ impl Color {
         }
     }
     
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn to_hex(&self) -> u32 {
         ((self.red as u32) << 16) | ((self.green as u32) << 8) | (self.blue as u32)
     }

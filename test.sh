@@ -39,8 +39,9 @@ at the start and/or end:
 
 Flags:
   --skip-userland     Skip building optional userland apps and hello-cpp
-                      (mandatory committed compiler-compat fixtures are still
-                      staged). Wins over --rebuild-userland if both are passed.
+                      (mandatory committed compiler-compat, network, and
+                      BusyBox fixtures are still staged). Wins over
+                      --rebuild-userland if both are passed.
   --rebuild-userland  Force rebuild of prebuilt-managed userland apps (zsh).
                       Default copies the committed userland/prebuilt/ELF into
                       host_share/. Equivalent: REBUILD_USERLAND=1 env.
@@ -50,6 +51,7 @@ Flags:
 Environment:
   AGENTICOS_TEST_MEMORY  QEMU RAM for tests (default: 256M; use 128M for
                          reclamation stress runs).
+  AGENTICOS_TEST_NETWORK Set to off for an explicit no-NIC boot smoke.
   AGENTICOS_QEMU_BIN     Exact qemu-system-x86_64 binary to launch.
   AGENTICOS_COMPOSITOR   Boot policy: legacy (default), retained, gpu, or auto.
   AGENTICOS_GPU_STRICT   Set to 1 to make unavailable GPU mode fail loudly.
@@ -124,6 +126,32 @@ for name in CCCRT.ELF CCLIBC.ELF CCPROBE.ELF; do
     mv -f "$TMP" "$STAGED"
     echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
 done
+
+# Mandatory static-musl networking fixture. Like compiler-compat, this is a
+# committed test input and is staged even with --skip-userland.
+NETWORK_FIXTURE="userland/prebuilt/network/NETTEST.ELF"
+if [ ! -f "$NETWORK_FIXTURE" ]; then
+    echo "Missing mandatory network fixture: $NETWORK_FIXTURE" >&2
+    exit 1
+fi
+STAGED="$HOST_SHARE_STAGE/NETTEST.ELF"
+TMP="$HOST_SHARE_STAGE/.NETTEST.ELF.tmp.$$"
+cp "$NETWORK_FIXTURE" "$TMP"
+mv -f "$TMP" "$STAGED"
+echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
+
+# The committed BusyBox is also a mandatory input: network_userland boots its
+# ping/nc/wget applets directly, including in --skip-userland runs.
+BUSYBOX_FIXTURE="userland/prebuilt/BB.ELF"
+if [ ! -f "$BUSYBOX_FIXTURE" ]; then
+    echo "Missing mandatory BusyBox fixture: $BUSYBOX_FIXTURE" >&2
+    exit 1
+fi
+STAGED="$HOST_SHARE_STAGE/BB.ELF"
+TMP="$HOST_SHARE_STAGE/.BB.ELF.tmp.$$"
+cp "$BUSYBOX_FIXTURE" "$TMP"
+mv -f "$TMP" "$STAGED"
+echo "Staged $STAGED ($(wc -c < "$STAGED" | tr -d ' ') bytes)"
 
 # Stage userland apps into host_share/ so test boots see the same artifacts
 # as interactive boots. Failures here do not block tests (they use embedded
@@ -222,6 +250,15 @@ QEMU_ARGS=(
     -no-reboot
     -m "${AGENTICOS_TEST_MEMORY:-256M}"
 )
+if [ "${AGENTICOS_TEST_NETWORK:-on}" = "off" ]; then
+    QEMU_ARGS+=(-nic none)
+    echo "Test networking disabled (AGENTICOS_TEST_NETWORK=off)"
+else
+    QEMU_ARGS+=(
+        -netdev "user,id=agenticos-net,restrict=on,guestfwd=tcp:10.0.2.100:8080-cmd:$(pwd)/tools/net-test-echo.py,guestfwd=tcp:10.0.2.101:8081-cmd:$(pwd)/tools/net-test-http.py"
+        -device "virtio-net-pci,disable-legacy=on,netdev=agenticos-net,mac=02:41:47:4e:54:01"
+    )
+fi
 if [ -n "$FILTER" ]; then
     ESCAPED_FILTER=${FILTER//,/,,}
     QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/test_filter,string=$ESCAPED_FILTER")
