@@ -3391,6 +3391,8 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
+        signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
+        membarrier_private_registered: false,
         kernel_stack: None,
         exe_path: None,
         cmdline: alloc::vec::Vec::new(),
@@ -3547,6 +3549,194 @@ fn test_signal_delivery_handler_runs() {
         "expected handler to run and exit 42, got {} (99 means signal didn't deliver)",
         result.1,
     );
+}
+
+// ---------- Tier 3: libuv plumbing ----------
+
+fn test_dispatch_eventfd_epoll_edge_round_trip() {
+    setup_phase2_active_user();
+    let mut value = 1u64;
+    let mut readback = 0u64;
+    let mut interest = [0u8; 12];
+    interest[..4].copy_from_slice(&(0x001u32 | (1u32 << 31)).to_ne_bytes());
+    interest[4..].copy_from_slice(&0xfeed_beef_cafe_babeu64.to_ne_bytes());
+    let mut events = [0u8; 12];
+    let pointers = [
+        &mut value as *mut u64 as u64,
+        &mut readback as *mut u64 as u64,
+        interest.as_mut_ptr() as u64,
+        events.as_mut_ptr() as u64,
+    ];
+    abi::set_user_va_bounds(UserVaBounds {
+        start: *pointers.iter().min().unwrap(),
+        end: pointers[0]
+            .saturating_add(8)
+            .max(pointers[1].saturating_add(8))
+            .max(pointers[2].saturating_add(12))
+            .max(pointers[3].saturating_add(12)),
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::EVENTFD2;
+    args.rsi = 0x800; // EFD_NONBLOCK
+    let event_fd = syscall_dispatch(&mut args);
+    assert!(event_fd >= 3);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::EPOLL_CREATE1;
+    let epoll_fd = syscall_dispatch(&mut args);
+    assert!(epoll_fd >= 3);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::EPOLL_CTL;
+    args.rdi = epoll_fd as u64;
+    args.rsi = 1; // EPOLL_CTL_ADD
+    args.rdx = event_fd as u64;
+    args.r10 = interest.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::EPOLL_WAIT;
+    args.rdi = epoll_fd as u64;
+    args.rsi = events.as_mut_ptr() as u64;
+    args.rdx = 1;
+    args.r10 = 0;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::WRITE;
+    args.rdi = event_fd as u64;
+    args.rsi = &value as *const u64 as u64;
+    args.rdx = 8;
+    assert_eq!(syscall_dispatch(&mut args), 8);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::EPOLL_WAIT;
+    args.rdi = epoll_fd as u64;
+    args.rsi = events.as_mut_ptr() as u64;
+    args.rdx = 1;
+    args.r10 = 0;
+    assert_eq!(syscall_dispatch(&mut args), 1);
+    assert_eq!(u32::from_ne_bytes(events[..4].try_into().unwrap()), 0x001);
+    assert_eq!(
+        u64::from_ne_bytes(events[4..].try_into().unwrap()),
+        0xfeed_beef_cafe_babe
+    );
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::READ;
+    args.rdi = event_fd as u64;
+    args.rsi = &mut readback as *mut u64 as u64;
+    args.rdx = 8;
+    assert_eq!(syscall_dispatch(&mut args), 8);
+    assert_eq!(readback, 1);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_socketpair_full_duplex() {
+    setup_phase2_active_user();
+    let mut fds = [-1i32; 2];
+    let payload = *b"libuv-pair";
+    let mut output = [0u8; 10];
+    let fds_pointer = fds.as_mut_ptr() as u64;
+    let payload_pointer = payload.as_ptr() as u64;
+    let output_pointer = output.as_mut_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: fds_pointer.min(payload_pointer).min(output_pointer),
+        end: (fds_pointer + 8)
+            .max(payload_pointer + payload.len() as u64)
+            .max(output_pointer + output.len() as u64),
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::SOCKETPAIR;
+    args.rdi = 1; // AF_UNIX
+    args.rsi = 1 | 0x800; // SOCK_STREAM | SOCK_NONBLOCK
+    args.r10 = fds_pointer;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    assert!(fds[0] >= 3 && fds[1] >= 3 && fds[0] != fds[1]);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::WRITE;
+    args.rdi = fds[0] as u64;
+    args.rsi = payload_pointer;
+    args.rdx = payload.len() as u64;
+    assert_eq!(syscall_dispatch(&mut args), payload.len() as i64);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::READ;
+    args.rdi = fds[1] as u64;
+    args.rsi = output_pointer;
+    args.rdx = output.len() as u64;
+    assert_eq!(syscall_dispatch(&mut args), output.len() as i64);
+    assert_eq!(output, payload);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_sigaltstack_membarrier_and_yield_profile() {
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct StackT {
+        sp: u64,
+        flags: i32,
+        padding: u32,
+        size: u64,
+    }
+    setup_phase2_active_user();
+    crate::userland::lifecycle::with_current_group(|process| {
+        process.signal_alt_stack = crate::userland::signal::SignalAltStack::default();
+        process.membarrier_private_registered = false;
+    });
+    let mut stack = [0u8; 4096];
+    let requested = StackT {
+        sp: stack.as_mut_ptr() as u64,
+        flags: 0,
+        padding: 0,
+        size: stack.len() as u64,
+    };
+    let mut observed = StackT::default();
+    let requested_pointer = &requested as *const StackT as u64;
+    let observed_pointer = &mut observed as *mut StackT as u64;
+    let stack_pointer = stack.as_mut_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: requested_pointer.min(observed_pointer).min(stack_pointer),
+        end: (requested_pointer + core::mem::size_of::<StackT>() as u64)
+            .max(observed_pointer + core::mem::size_of::<StackT>() as u64)
+            .max(stack_pointer + stack.len() as u64),
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::SIGALTSTACK;
+    args.rdi = requested_pointer;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let mut args = SyscallArgs::default();
+    args.rax = nr::SIGALTSTACK;
+    args.rsi = observed_pointer;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    assert_eq!(observed.sp, stack_pointer);
+    assert_eq!(observed.size, 4096);
+    assert_eq!(observed.flags, 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::MEMBARRIER;
+    assert_eq!(syscall_dispatch(&mut args), (1 << 3) | (1 << 4));
+    args.rdi = 1 << 3;
+    assert_eq!(syscall_dispatch(&mut args), EPERM);
+    args.rdi = 1 << 4;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    args.rdi = 1 << 3;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::SCHED_YIELD;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
 }
 
 // ---------- Phase 5 PR-A: pipes ----------
@@ -5400,6 +5590,8 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
+        signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
+        membarrier_private_registered: false,
         kernel_stack: None,
         exe_path: None,
         cmdline: alloc::vec::Vec::new(),
@@ -5465,6 +5657,8 @@ fn test_has_children_sees_live_child() {
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
+        signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
+        membarrier_private_registered: false,
         kernel_stack: None,
         exe_path: None,
         cmdline: alloc::vec::Vec::new(),
@@ -5616,6 +5810,8 @@ fn test_remove_process_cleans_ring3_queues() {
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
+        signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
+        membarrier_private_registered: false,
         kernel_stack: None,
         exe_path: None,
         cmdline: alloc::vec::Vec::new(),
@@ -5649,6 +5845,8 @@ fn test_remove_process_cleans_ring3_queues() {
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
+        signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
+        membarrier_private_registered: false,
         kernel_stack: None,
         exe_path: None,
         cmdline: alloc::vec::Vec::new(),
@@ -5780,6 +5978,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_write_file_large_chunked,
         &test_writev_file_large_iovs,
         &test_pwrite_large_and_pread_short,
+        &test_dispatch_eventfd_epoll_edge_round_trip,
+        &test_dispatch_socketpair_full_duplex,
+        &test_dispatch_sigaltstack_membarrier_and_yield_profile,
         &test_dispatch_chmod_fchmod_noops,
         &test_utf8_safe_chunk_len_boundaries,
         &test_exit_group_handler_records_code,

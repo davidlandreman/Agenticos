@@ -42,6 +42,8 @@ pub mod interrupts;
 #[cfg(feature = "test")]
 pub mod layout_tests;
 #[cfg(feature = "test")]
+pub mod libuv_plumbing;
+#[cfg(feature = "test")]
 pub mod list_migration_tests;
 #[cfg(feature = "test")]
 pub mod memory;
@@ -141,6 +143,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("fat_write", fat_write::get_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
+    ("libuv", libuv_plumbing::get_tests),
     ("procfs", procfs::get_tests),
     ("pthreads", pthreads::get_tests),
     (

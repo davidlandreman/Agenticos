@@ -36,6 +36,8 @@ fn synthetic_process(pid: u32) -> Process {
         cwd: String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
+        signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
+        membarrier_private_registered: false,
         kernel_stack: None,
         exe_path: Some(String::from("/host/FAKE.ELF")),
         cmdline: alloc::vec![String::from("fake"), String::from("--flag")],

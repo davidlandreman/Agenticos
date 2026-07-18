@@ -12,6 +12,9 @@
 use crate::fs::file_handle::{Directory, File};
 use crate::lib::arc::Arc;
 use crate::net::socket::SocketHandle;
+use crate::userland::epoll::EpollInstance;
+use crate::userland::eventfd::EventFd;
+use crate::userland::local_stream::LocalStreamEndpoint;
 use crate::userland::pipe::{PipeReadHandle, PipeWriteHandle};
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -133,9 +136,72 @@ pub enum FdSlot {
         handle: Arc<GuiEventHandle>,
         cloexec: bool,
     },
+    /// Linux event counter used by libuv's cross-thread async wake path.
+    EventFd {
+        handle: Arc<EventFd>,
+        cloexec: bool,
+    },
+    /// Bounded epoll interest set. The instance is an open-file description:
+    /// dup/fork share registrations, while close-on-exec stays per fd.
+    Epoll {
+        handle: Arc<EpollInstance>,
+        cloexec: bool,
+    },
+    LocalStream {
+        handle: Arc<LocalStreamEndpoint>,
+        cloexec: bool,
+    },
 }
 
-impl FdSlot {}
+impl FdSlot {
+    /// Whether two descriptor slots refer to the same Linux open-file
+    /// description. Per-descriptor close-on-exec bits are intentionally
+    /// ignored.
+    pub fn same_open_description(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stdin, Self::Stdin)
+            | (Self::Stdout, Self::Stdout)
+            | (Self::Stderr, Self::Stderr)
+            | (Self::Urandom { .. }, Self::Urandom { .. }) => true,
+            (Self::File { handle: left, .. }, Self::File { handle: right, .. }) => {
+                Arc::ptr_eq(left, right)
+            }
+            (Self::Directory { handle: left, .. }, Self::Directory { handle: right, .. }) => {
+                Arc::ptr_eq(left, right)
+            }
+            (Self::PipeRead(left, _), Self::PipeRead(right, _)) => {
+                left.same_open_description(right)
+            }
+            (Self::PipeWrite(left, _), Self::PipeWrite(right, _)) => {
+                left.same_open_description(right)
+            }
+            (Self::Socket { handle: left, .. }, Self::Socket { handle: right, .. }) => {
+                Arc::ptr_eq(left, right)
+            }
+            (Self::VirtualFile { data: left, .. }, Self::VirtualFile { data: right, .. }) => {
+                Arc::ptr_eq(left, right)
+            }
+            (Self::VirtualDir { entries: left, .. }, Self::VirtualDir { entries: right, .. }) => {
+                Arc::ptr_eq(left, right)
+            }
+            (Self::GuiEvents { handle: left, .. }, Self::GuiEvents { handle: right, .. }) => {
+                Arc::ptr_eq(left, right)
+            }
+            (Self::EventFd { handle: left, .. }, Self::EventFd { handle: right, .. }) => {
+                Arc::ptr_eq(left, right)
+            }
+            (Self::Epoll { handle: left, .. }, Self::Epoll { handle: right, .. }) => {
+                Arc::ptr_eq(left, right)
+            }
+            (Self::LocalStream { handle: left, .. }, Self::LocalStream { handle: right, .. }) => {
+                Arc::ptr_eq(left, right)
+            }
+            (Self::VirtualBinDir { .. }, Self::VirtualBinDir { .. })
+            | (Self::VirtualDevDir { .. }, Self::VirtualDevDir { .. }) => false,
+            _ => false,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct FdTable {
@@ -224,6 +290,26 @@ impl FdTable {
         Ok(())
     }
 
+    pub fn contains_open_description(&self, description: &FdSlot) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|slot| slot.same_open_description(description))
+    }
+
+    pub fn epoll_instances(&self) -> alloc::vec::Vec<Arc<EpollInstance>> {
+        let mut instances = alloc::vec::Vec::new();
+        for slot in self.slots.iter().flatten() {
+            let FdSlot::Epoll { handle, .. } = slot else {
+                continue;
+            };
+            if !instances.iter().any(|old| Arc::ptr_eq(old, handle)) {
+                instances.push(handle.clone());
+            }
+        }
+        instances
+    }
+
     /// `dup(fd)` — clone the slot into the lowest free index ≥ 3.
     pub fn dup(&mut self, fd: i32) -> Option<i32> {
         let slot = self.get(fd)?.clone();
@@ -265,6 +351,10 @@ impl FdTable {
             FdSlot::VirtualDevDir { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::Urandom { cloexec: ce } => *ce = cloexec,
             FdSlot::GuiEvents { cloexec: ce, .. } => *ce = cloexec,
+            FdSlot::EventFd { cloexec: ce, .. } | FdSlot::Epoll { cloexec: ce, .. } => {
+                *ce = cloexec
+            }
+            FdSlot::LocalStream { cloexec: ce, .. } => *ce = cloexec,
             _ => {}
         }
         Ok(())
@@ -283,6 +373,8 @@ impl FdTable {
             FdSlot::VirtualDevDir { cloexec, .. } => *cloexec,
             FdSlot::Urandom { cloexec } => *cloexec,
             FdSlot::GuiEvents { cloexec, .. } => *cloexec,
+            FdSlot::EventFd { cloexec, .. } | FdSlot::Epoll { cloexec, .. } => *cloexec,
+            FdSlot::LocalStream { cloexec, .. } => *cloexec,
             _ => false,
         })
     }

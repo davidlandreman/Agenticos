@@ -220,6 +220,9 @@ pub mod nr {
     pub const READV: u64 = 19;
     pub const WRITEV: u64 = 20;
     pub const SELECT: u64 = 23;
+    pub const SCHED_YIELD: u64 = 24;
+    pub const MREMAP: u64 = 25;
+    pub const MADVISE: u64 = 28;
     pub const NANOSLEEP: u64 = 35;
     pub const SETITIMER: u64 = 38;
     pub const SOCKET: u64 = 41;
@@ -234,6 +237,7 @@ pub mod nr {
     pub const LISTEN: u64 = 50;
     pub const GETSOCKNAME: u64 = 51;
     pub const GETPEERNAME: u64 = 52;
+    pub const SOCKETPAIR: u64 = 53;
     pub const SETSOCKOPT: u64 = 54;
     pub const GETSOCKOPT: u64 = 55;
     pub const ACCESS: u64 = 21;
@@ -313,6 +317,15 @@ pub mod nr {
     pub const TGKILL: u64 = 234;
     pub const RT_SIGRETURN: u64 = 15;
     pub const RT_SIGSUSPEND: u64 = 130;
+    pub const SIGALTSTACK: u64 = 131;
+    pub const EPOLL_CREATE: u64 = 213;
+    pub const EPOLL_WAIT: u64 = 232;
+    pub const EPOLL_CTL: u64 = 233;
+    pub const EPOLL_PWAIT: u64 = 281;
+    pub const EVENTFD: u64 = 284;
+    pub const EVENTFD2: u64 = 290;
+    pub const EPOLL_CREATE1: u64 = 291;
+    pub const MEMBARRIER: u64 = 324;
 
     // AgenticOS-internal syscalls. Numbers picked well above the Linux
     // x86-64 range (currently ~450, growing) so a future Linux number
@@ -388,11 +401,19 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GETPEERNAME => crate::userland::network_syscalls::getpeername_handler(args),
         nr::SETSOCKOPT => crate::userland::network_syscalls::setsockopt_handler(args),
         nr::GETSOCKOPT => crate::userland::network_syscalls::getsockopt_handler(args),
+        nr::SOCKETPAIR => crate::userland::local_stream::socketpair_handler(args),
         // U3: musl-init / zsh-startup surface
         nr::POLL => syscalls::poll_handler(args),
         nr::SELECT => syscalls::select_handler(args),
         nr::PPOLL => syscalls::ppoll_handler(args),
         nr::PSELECT6 => syscalls::pselect6_handler(args),
+        nr::EPOLL_CREATE => crate::userland::epoll::epoll_create_handler(args),
+        nr::EPOLL_CREATE1 => crate::userland::epoll::epoll_create1_handler(args),
+        nr::EPOLL_CTL => crate::userland::epoll::epoll_ctl_handler(args),
+        nr::EPOLL_WAIT => crate::userland::epoll::epoll_wait_handler(args),
+        nr::EPOLL_PWAIT => crate::userland::epoll::epoll_pwait_handler(args),
+        nr::EVENTFD => crate::userland::eventfd::eventfd_handler(args),
+        nr::EVENTFD2 => crate::userland::eventfd::eventfd2_handler(args),
         nr::READLINK => syscalls::readlink_handler(args),
         nr::READLINKAT => syscalls::readlinkat_handler(args),
         nr::GETRLIMIT => syscalls::getrlimit_handler(args),
@@ -405,6 +426,9 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::SET_TID_ADDRESS => syscalls::set_tid_address_handler(args),
         nr::SET_ROBUST_LIST => syscalls::set_robust_list_handler(args),
         nr::GETTID => syscalls::gettid_handler(args),
+        nr::SCHED_YIELD => syscalls::sched_yield_handler(args),
+        nr::SIGALTSTACK => syscalls::sigaltstack_handler(args),
+        nr::MEMBARRIER => syscalls::membarrier_handler(args),
         nr::FUTEX => crate::userland::futex::handler(args),
         // Phase 2: files
         nr::OPEN => syscalls::open_handler(args),
@@ -493,6 +517,8 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::PREAD64 => syscalls::pread64_handler(args),
         nr::PWRITE64 => syscalls::pwrite64_handler(args),
         nr::SENDFILE => syscalls::sendfile_handler(args),
+        nr::MADVISE => syscalls::madvise_handler(args),
+        nr::MREMAP => syscalls::mremap_handler(args),
         _ => unhandled_syscall(args),
     };
 

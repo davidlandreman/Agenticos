@@ -325,6 +325,7 @@ pub fn start_service() {
 fn service_main() {
     loop {
         if take_work_pending() {
+            crate::userland::readiness::retry_pending_wake();
             let now = crate::arch::x86_64::interrupts::get_timer_ticks();
             let _ = process_due(now);
             if deadline_due(now) {
@@ -375,7 +376,7 @@ pub fn deadline_due(now: u64) -> bool {
 /// PIT-side notification: no heap lock or allocation. The due flag is atomic;
 /// waking the service performs one bounded scheduler-ready operation.
 pub fn on_tick(now: u64) {
-    if deadline_due(now) {
+    if deadline_due(now) || crate::userland::readiness::wake_pending() {
         WORK_PENDING.store(true, Ordering::Release);
         let pid = TIMER_SERVICE_PID.load(Ordering::Acquire);
         if pid != 0 {

@@ -564,5 +564,64 @@ pub unsafe fn block_current_ring3_and_yield(args: &SyscallArgs, reason: Ring3Blo
     }
     mark_ring3_blocked(me, reason);
 
+    // A readiness producer may have fired after the syscall scanned its fds
+    // but before the blocked reason became visible. Producers increment the
+    // sequence before waking, so a post-publication recheck closes both sides
+    // of that race. The conservative wake removes us from the blocked index
+    // and makes the saved continuation runnable again before dispatch.
+    if let Ring3BlockReason::WaitingForReadiness {
+        observed_sequence, ..
+    } = reason
+    {
+        if crate::userland::readiness::changed_since(observed_sequence) {
+            crate::userland::lifecycle::wake_ring3_blocked_on_readiness();
+        }
+    }
+
+    dispatch_after_user_stop()
+}
+
+/// Save a successful post-SYSCALL continuation, put the current ring-3 entity
+/// back on the ready queue, and dispatch another entity. Unlike a blocking
+/// syscall, RIP is not rewound and RAX is the successful return value zero.
+pub unsafe fn yield_current_ring3(args: &SyscallArgs) -> ! {
+    let raw = args as *const SyscallArgs as *const u64;
+    let user_rip = core::ptr::read(raw.add(7));
+    let user_rflags = core::ptr::read(raw.add(8));
+    let saved = crate::userland::user_state::read_user_callee_saved(args as *const SyscallArgs);
+    let user_r12 = crate::userland::user_state::read_user_r12(args as *const SyscallArgs);
+    let snapshot = UserState {
+        rax: 0,
+        rdi: args.rdi,
+        rsi: args.rsi,
+        rdx: args.rdx,
+        r10: args.r10,
+        r8: args.r8,
+        r9: args.r9,
+        rbx: saved.rbx,
+        rbp: saved.rbp,
+        rsp: saved.r12_register,
+        r12: user_r12,
+        r13: saved.r13,
+        r14: saved.r14,
+        r15: saved.r15,
+        rip: user_rip,
+        rflags: user_rflags,
+        rcx: 0,
+        r11: 0,
+    };
+    let me = current_user_pid().expect("yield_current_ring3: no current ring-3 process");
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let process = table
+            .by_pid
+            .get_mut(&me)
+            .expect("yield_current_ring3: current task missing");
+        process.saved_user_state = snapshot;
+        save_user_cpu_state(process);
+    }
+    crate::process::scheduler::SCHEDULER
+        .lock()
+        .yield_entity(crate::process::entity::EntityId::UserProcess(me));
     dispatch_after_user_stop()
 }
