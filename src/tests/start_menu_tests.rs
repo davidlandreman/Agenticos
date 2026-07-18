@@ -90,9 +90,16 @@ fn test_menu_model_order_and_geometry() {
             action: StartMenuAction::ShutDown
         }
     ));
-    assert_eq!(START_MENU_PROGRAM_ITEMS.len(), 7);
+    assert_eq!(START_MENU_PROGRAM_ITEMS.len(), 8);
     assert!(matches!(
-        START_MENU_PROGRAM_ITEMS[6],
+        START_MENU_PROGRAM_ITEMS[1],
+        StartMenuItem::Action {
+            label: "Web Browser",
+            action: StartMenuAction::WebBrowser
+        }
+    ));
+    assert!(matches!(
+        START_MENU_PROGRAM_ITEMS[7],
         StartMenuItem::Action {
             label: "Task Manager",
             action: StartMenuAction::TaskManager
@@ -128,13 +135,19 @@ fn test_enabled_and_disabled_dispatch() {
     menu.on_select(|action| *LAST_ACTION.lock() = Some(action));
 
     menu.handle_event(mouse(MouseEventType::Move, root_row_center(0)));
-    let calc = program_row_center(4);
+    let browser = program_row_center(1);
+    menu.handle_event(mouse(MouseEventType::ButtonDown, browser));
+    menu.handle_event(mouse(MouseEventType::ButtonUp, browser));
+    assert_eq!(*LAST_ACTION.lock(), Some(StartMenuAction::WebBrowser));
+
+    *LAST_ACTION.lock() = None;
+    let calc = program_row_center(5);
     menu.handle_event(mouse(MouseEventType::ButtonDown, calc));
     menu.handle_event(mouse(MouseEventType::ButtonUp, calc));
     assert_eq!(*LAST_ACTION.lock(), Some(StartMenuAction::Calc));
 
     *LAST_ACTION.lock() = None;
-    let gl_arena = program_row_center(5);
+    let gl_arena = program_row_center(6);
     menu.handle_event(mouse(MouseEventType::ButtonDown, gl_arena));
     menu.handle_event(mouse(MouseEventType::ButtonUp, gl_arena));
     assert_eq!(*LAST_ACTION.lock(), Some(StartMenuAction::GlGame));
@@ -330,6 +343,13 @@ fn test_run_command_is_one_zsh_argument() {
     assert_eq!(argv[2], command);
 }
 
+fn test_web_browser_uses_native_graphics_driver() {
+    assert_eq!(
+        crate::commands::guishell::web_browser_argv(),
+        ["links2", "-g", "-driver", "agenticos", "-no-connect"]
+    );
+}
+
 pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
     &[
         &test_menu_model_order_and_geometry,
@@ -340,5 +360,6 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_start_menu_renders_embedded_svg_icons,
         &test_text_input_callbacks_and_utf8_limit,
         &test_run_command_is_one_zsh_argument,
+        &test_web_browser_uses_native_graphics_driver,
     ]
 }

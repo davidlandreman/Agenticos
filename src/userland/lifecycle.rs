@@ -877,6 +877,29 @@ pub fn wake_ring3_blocked_on_pipe_writable() {
     });
 }
 
+/// Wake the owner of a GUI queue when a new event becomes readable. This
+/// covers both the legacy blocking `gui_next_event` syscall and processes
+/// parked in poll/select on a GUI event descriptor.
+pub fn wake_ring3_blocked_on_gui_event(pid: u32) {
+    if pid == KERNEL_PID {
+        return;
+    }
+    let Some(mut table) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let should_wake = matches!(
+        table.ring3_blocked.get(&pid),
+        Some(Ring3BlockReason::WaitingForGuiEvent | Ring3BlockReason::WaitingForNetwork { .. })
+    );
+    if should_wake {
+        table.ring3_blocked.remove(&pid);
+    }
+    drop(table);
+    if should_wake {
+        mark_ring3_ready(pid);
+    }
+}
+
 /// Wake network waiters after a socket state change. Deadline expiration is
 /// targeted by the shared timer heap and never discovered by scanning this
 /// wait-reason index. The per-process `network_wait` record is retained across

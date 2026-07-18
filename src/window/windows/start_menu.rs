@@ -28,7 +28,7 @@ const ROOT_ICON_SIZE: u32 = 24;
 const PROGRAM_ICON_SIZE: u32 = 18;
 
 lazy_static::lazy_static! {
-    static ref START_MENU_ICONS: [SvgImage<'static>; 12] = [
+    static ref START_MENU_ICONS: [SvgImage<'static>; 13] = [
         SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/programs.svg"))
             .expect("embedded Programs SVG must be valid"),
         SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/documents.svg"))
@@ -53,6 +53,8 @@ lazy_static::lazy_static! {
             .expect("embedded GL Arena SVG must be valid"),
         SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/task-manager.svg"))
             .expect("embedded Task Manager SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/web-browser.svg"))
+            .expect("embedded Web Browser SVG must be valid"),
     ];
 }
 
@@ -61,6 +63,7 @@ lazy_static::lazy_static! {
 pub enum StartMenuAction {
     Settings,
     FileManager,
+    WebBrowser,
     Terminal,
     Notepad,
     Painting,
@@ -110,6 +113,10 @@ pub const START_MENU_PROGRAM_ITEMS: &[StartMenuItem] = &[
     StartMenuItem::Action {
         label: "File Manager",
         action: StartMenuAction::FileManager,
+    },
+    StartMenuItem::Action {
+        label: "Web Browser",
+        action: StartMenuAction::WebBrowser,
     },
     StartMenuItem::Action {
         label: "Terminal",
@@ -361,6 +368,7 @@ impl StartMenuWindow {
                 StartMenuAction::Calc => 9,
                 StartMenuAction::GlGame => 10,
                 StartMenuAction::TaskManager => 11,
+                StartMenuAction::WebBrowser => 12,
             },
             StartMenuItem::Separator => 0,
         };

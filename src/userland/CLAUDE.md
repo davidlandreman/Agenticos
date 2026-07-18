@@ -57,8 +57,8 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   device reads use the kernel cryptographic random broker.
 - `gui.rs` — per-PID window ownership plus the bounded, coalescing GUI event
   queue and process-death teardown.
-- `gui_syscalls.rs` — syscalls 5001-5005: create, copy-present, next-event,
-  destroy, and update a window title.
+- `gui_syscalls.rs` — syscalls 5001-5005 plus 5011: create, copy-present,
+  next-event, destroy, update a window title, and open a selectable event fd.
 - `gui_gl.rs` — validated GL syscalls 5006-5009, per-PID logical-context
   ownership, bounded packet parsing, mailbox publication, and teardown.
 - `etc.rs` — kernel-managed `/etc` namespace: static account/hosts files,
@@ -81,11 +81,13 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   (compat command `explorer`), `/host/GLGAME.ELF`, `/host/NOTEPAD.ELF`,
   `/host/PAINTING.ELF`, `/host/TASKMGR.ELF` (`taskmgr` + legacy
   `tasks` alias), and `/host/TCC.ELF` (TinyCC; both `tcc` and the `cc`
-  alias), plus `/host/LINKS.ELF` (Links 2.30; `links` and `links2`) and GNU
+  alias), plus `/host/LINKS.ELF` (Links 2.30; `links` and `links2`, with the
+  Rust-backed `agenticos` graphics driver) and GNU
   binutils 2.46.0 (`addr2line`, `ar`, `as`, `c++filt`, `elfedit`, `ld`, `nm`,
   `objcopy`, `objdump`, `ranlib`, `readelf`, `size`, `strings`, `strip`). GNU
-  `strings` owns that name; the conflicting BusyBox applet is disabled. Links is
-  text-mode IPv4/HTTP-only; HTTPS still needs a separate TLS trust-stack
+  `strings` owns that name; the conflicting BusyBox applet is disabled. Links
+  supports text and GUI IPv4/HTTP browsing; HTTPS still needs a separate TLS
+  trust-stack
   integration even though cryptographic entropy is now available.
   The `GLAUNCH.ELF` GUI-applet list is empty today.
 - `procfs.rs` — synthetic read-only `/proc` namespace, modeled on the
@@ -193,7 +195,7 @@ must mask timer preemption until its guard releases the spinlock.
 
 ## Ring-3 GUI ABI
 
-The AgenticOS-private range extends syscall 5000 with nine GUI calls:
+The AgenticOS-private range extends syscall 5000 with ten GUI calls:
 
 - 5001 `gui_win_create(width, height, title, title_len, flags)`
 - 5002 `gui_win_present(handle, pixels, width, height, stride)`
@@ -204,6 +206,7 @@ The AgenticOS-private range extends syscall 5000 with nine GUI calls:
 - 5007 `gui_gl_submit_frame(context, packet, len, flags)`
 - 5008 `gui_gl_get_info(context, info, len)`
 - 5009 `gui_gl_context_destroy(context)`
+- 5011 `gui_event_open(O_NONBLOCK | O_CLOEXEC)`
 
 Private syscall 5010 is the versioned `system_control` command surface used by
 `CONTROL.ELF` to query renderer/display/personalization state and to apply
@@ -213,10 +216,14 @@ persistent theme or wallpaper changes. Preferences live at
 Pixels are little-endian XRGB8888 (`u32` value `0x00RRGGBB`). Presents copy a
 full client surface into kernel memory. Events use a fixed 32-byte
 `GuiEvent { kind, window, payload[6] }`; an empty blocking read parks on
-`WaitingForGuiEvent`, while `GUI_NONBLOCK` returns `-EAGAIN`. Each PID has a
-128-entry queue: consecutive motion events coalesce and other overflow drops
-the oldest entry. Mouse button events carry a 64-bit PIT tick in payload slots
-4 and 5; mouse modifier bits occupy payload slot 2 above the button-state byte.
+`WaitingForGuiEvent`, while `GUI_NONBLOCK` returns `-EAGAIN`. A selectable
+event descriptor integrates that same queue with poll/select;
+reads contain only whole event records, dup shares `O_NONBLOCK`, and fork drops
+the process-owned descriptor rather than allowing a child to drain the parent.
+Each PID has a 128-entry queue: consecutive motion events coalesce and other
+overflow drops the oldest entry. Mouse button events carry a 64-bit PIT tick
+in payload slots 4 and 5; mouse modifier bits occupy payload slot 2 above the
+button-state byte.
 Title updates and destruction are ownership-checked. Removing a process
 destroys every frame it owns.
 

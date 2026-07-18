@@ -1,0 +1,33 @@
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -27 +27 @@
+-links_SOURCES=af_unix.c avif.c auth.c beos.c bfu.c block.c bookmark.c cache.c charsets.c compress.c connect.c cookies.c data.c default.c dip.c directfb.c dither.c dns.c doh.c dos.c drivers.c error.c file.c finger.c fn_impl.c fontconf.c font_inc.c framebuf.c freetype.c ftp.c gif.c grx.c hpux.c html.c html_gr.c html_r.c html_tbl.c http.c https.c img.c imgcache.c jpeg.c jsint.c kbd.c language.c listedit.c lru.c mailto.c main.c memory.c menu.c objreq.c os_dep.c pmshell.c png.c sched.c select.c session.c smb.c string.c suffix.c svg.c svgalib.c terminal.c tiff.c types.c url.c view.c view_gr.c vms.c webp.c x.c xbm.c beos.h bits.h cfg.h codepage.h com-defs.h config-vms.h dfb_cur.h hpux.h language.h links.h os_dep.h os_depx.h setup.h arrow.inc certs.inc codepage.inc entity.inc fbcommon.inc language.inc links_ic.inc locase.inc suffix.inc suffix_x.inc uni_7b.inc upcase.inc vpipe.inc
++links_SOURCES=agenticos.c af_unix.c avif.c auth.c beos.c bfu.c block.c bookmark.c cache.c charsets.c compress.c connect.c cookies.c data.c default.c dip.c directfb.c dither.c dns.c doh.c dos.c drivers.c error.c file.c finger.c fn_impl.c fontconf.c font_inc.c framebuf.c freetype.c ftp.c gif.c grx.c hpux.c html.c html_gr.c html_r.c html_tbl.c http.c https.c img.c imgcache.c jpeg.c jsint.c kbd.c language.c listedit.c lru.c mailto.c main.c memory.c menu.c objreq.c os_dep.c pmshell.c png.c sched.c select.c session.c smb.c string.c suffix.c svg.c svgalib.c terminal.c tiff.c types.c url.c view.c view_gr.c vms.c webp.c x.c xbm.c beos.h bits.h cfg.h codepage.h com-defs.h config-vms.h dfb_cur.h hpux.h language.h links.h os_dep.h os_depx.h setup.h arrow.inc certs.inc codepage.inc entity.inc fbcommon.inc language.inc links_ic.inc locase.inc suffix.inc suffix_x.inc uni_7b.inc upcase.inc vpipe.inc
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -81 +81 @@
+-links_SOURCES = af_unix.c avif.c auth.c beos.c bfu.c block.c bookmark.c cache.c charsets.c compress.c connect.c cookies.c data.c default.c dip.c directfb.c dither.c dns.c doh.c dos.c drivers.c error.c file.c finger.c fn_impl.c fontconf.c font_inc.c framebuf.c freetype.c ftp.c gif.c grx.c hpux.c html.c html_gr.c html_r.c html_tbl.c http.c https.c img.c imgcache.c jpeg.c jsint.c kbd.c language.c listedit.c lru.c mailto.c main.c memory.c menu.c objreq.c os_dep.c pmshell.c png.c sched.c select.c session.c smb.c string.c suffix.c svg.c svgalib.c terminal.c tiff.c types.c url.c view.c view_gr.c vms.c webp.c x.c xbm.c beos.h bits.h cfg.h codepage.h com-defs.h config-vms.h dfb_cur.h hpux.h language.h links.h os_dep.h os_depx.h setup.h arrow.inc certs.inc codepage.inc entity.inc fbcommon.inc language.inc links_ic.inc locase.inc suffix.inc suffix_x.inc uni_7b.inc upcase.inc vpipe.inc
++links_SOURCES = agenticos.c af_unix.c avif.c auth.c beos.c bfu.c block.c bookmark.c cache.c charsets.c compress.c connect.c cookies.c data.c default.c dip.c directfb.c dither.c dns.c doh.c dos.c drivers.c error.c file.c finger.c fn_impl.c fontconf.c font_inc.c framebuf.c freetype.c ftp.c gif.c grx.c hpux.c html.c html_gr.c html_r.c html_tbl.c http.c https.c img.c imgcache.c jpeg.c jsint.c kbd.c language.c listedit.c lru.c mailto.c main.c memory.c menu.c objreq.c os_dep.c pmshell.c png.c sched.c select.c session.c smb.c string.c suffix.c svg.c svgalib.c terminal.c tiff.c types.c url.c view.c view_gr.c vms.c webp.c x.c xbm.c beos.h bits.h cfg.h codepage.h com-defs.h config-vms.h dfb_cur.h hpux.h language.h links.h os_dep.h os_depx.h setup.h arrow.inc certs.inc codepage.inc entity.inc fbcommon.inc language.inc links_ic.inc locase.inc suffix.inc suffix_x.inc uni_7b.inc upcase.inc vpipe.inc
+@@ -97 +97 @@
+-links_OBJECTS =  af_unix.o avif.o auth.o beos.o bfu.o block.o bookmark.o \
++links_OBJECTS =  agenticos.o af_unix.o avif.o auth.o beos.o bfu.o block.o bookmark.o \
+--- a/configure
++++ b/configure
+@@ -8410 +8410 @@
+-	drivers=""
++	drivers=" AGENTICOS"
+--- a/configure.in
++++ b/configure.in
+@@ -1054 +1054 @@
+-	drivers=""
++	drivers=" AGENTICOS"
+--- a/drivers.c
++++ b/drivers.c
+@@ -43,0 +44,3 @@
++#ifdef GRDRV_AGENTICOS
++extern struct graphics_driver agenticos_driver;
++#endif
+@@ -50,0 +54,3 @@
++#ifdef GRDRV_AGENTICOS
++	&agenticos_driver,
++#endif
