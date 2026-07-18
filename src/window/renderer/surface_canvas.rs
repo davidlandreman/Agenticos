@@ -61,11 +61,15 @@ impl GraphicsDevice for SurfaceCanvas<'_> {
     }
 
     fn draw_pixel(&mut self, x: i32, y: i32, color: Color) {
+        self.draw_pixel_argb(x, y, color, u8::MAX);
+    }
+
+    fn draw_pixel_argb(&mut self, x: i32, y: i32, color: Color, alpha: u8) {
         if let Some((x, y)) = self.local(x, y) {
             self.surface.set_pixel(
                 x,
                 y,
-                PremulArgb::from_rgba(color.red, color.green, color.blue, u8::MAX),
+                PremulArgb::from_rgba(color.red, color.green, color.blue, alpha),
             );
         }
     }
@@ -117,9 +121,13 @@ impl GraphicsDevice for SurfaceCanvas<'_> {
     }
 
     fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
+        self.fill_rect_argb(x, y, width, height, color, u8::MAX);
+    }
+
+    fn fill_rect_argb(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color, alpha: u8) {
         for py in y..y.saturating_add(height as i32) {
             for px in x..x.saturating_add(width as i32) {
-                self.draw_pixel(px, py, color);
+                self.draw_pixel_argb(px, py, color, alpha);
             }
         }
     }

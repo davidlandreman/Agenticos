@@ -46,6 +46,13 @@ pub trait GraphicsDevice: Send {
     /// Draw a single pixel
     fn draw_pixel(&mut self, x: i32, y: i32, color: Color);
 
+    /// Explicit-alpha write. Retained surfaces use replacement semantics;
+    /// legacy devices approximate by blending against their RGB pixel.
+    fn draw_pixel_argb(&mut self, x: i32, y: i32, color: Color, alpha: u8) {
+        let background = self.read_pixel(x, y);
+        self.draw_pixel(x, y, background.blend(&color, alpha));
+    }
+
     /// Read a pixel at the given position. Returns `Color::BLACK` when the
     /// position is outside the device or active clip rect.
     fn read_pixel(&self, x: i32, y: i32) -> Color;
@@ -58,6 +65,14 @@ pub trait GraphicsDevice: Send {
 
     /// Fill a rectangle with a color
     fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color);
+
+    fn fill_rect_argb(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color, alpha: u8) {
+        for py in y..y.saturating_add(height.min(i32::MAX as u32) as i32) {
+            for px in x..x.saturating_add(width.min(i32::MAX as u32) as i32) {
+                self.draw_pixel_argb(px, py, color, alpha);
+            }
+        }
+    }
 
     /// Draw text at a position. `(x, y)` is the top-left of the text cell;
     /// the baseline is `y + font.ascent()`.

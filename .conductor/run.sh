@@ -10,6 +10,11 @@ set -euo pipefail
 # Conductor sets CONDUCTOR_WORKSPACE_PATH; honor it but tolerate manual runs.
 cd "${CONDUCTOR_WORKSPACE_PATH:-$(git rev-parse --show-toplevel)}"
 
+# Exercise retained composition with classic window chrome.
+# Explicit caller values still override these defaults.
+export AGENTICOS_COMPOSITOR="${AGENTICOS_COMPOSITOR:-retained}"
+export AGENTICOS_THEME="${AGENTICOS_THEME:-classic}"
+
 # build.sh's manual-run default is machine-global. Give each Conductor
 # workspace its own RPC socket so parallel QEMUs cannot unlink or replace one
 # another's endpoint.
@@ -33,6 +38,8 @@ echo "=================================================================="
 echo " AgenticOS — running workspace ${CONDUCTOR_WORKSPACE_NAME:-<local>}"
 echo "------------------------------------------------------------------"
 echo " image path     : $bios_image"
+echo " compositor     : $AGENTICOS_COMPOSITOR"
+echo " window theme   : $AGENTICOS_THEME"
 echo " reserved ports : ${port_lo}-${port_hi} (currently unused; future GDB)"
 echo "=================================================================="
 

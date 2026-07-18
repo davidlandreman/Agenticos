@@ -84,6 +84,8 @@ pub mod composition_cpu;
 #[cfg(feature = "test")]
 pub mod compositor_selection;
 #[cfg(feature = "test")]
+pub mod window_theme;
+#[cfg(feature = "test")]
 pub mod virtio_gpu_protocol;
 
 #[cfg(feature = "test")]
@@ -142,6 +144,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("retained_scene", retained_scene::get_tests),
     ("composition_cpu", composition_cpu::get_tests),
     ("compositor_selection", compositor_selection::get_tests),
+    ("window_theme", window_theme::get_tests),
     ("virtio_gpu_protocol", virtio_gpu_protocol::get_tests),
     ("filter", filter::get_tests),
     ("terminal", crate::terminal::get_tests),

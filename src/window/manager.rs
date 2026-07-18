@@ -90,6 +90,7 @@ impl WindowManager {
         };
         let selection = select_renderer(request, strict, retained_candidate.is_some(), false)
             .unwrap_or_else(|error| panic!("strict compositor initialization failed: {:?}", error));
+        crate::window::theme::init_boot_policy(selection.selected);
         let renderer = match selection.selected {
             RendererKind::RetainedCpu => RendererState::Retained(
                 retained_candidate
@@ -171,7 +172,7 @@ impl WindowManager {
             RendererKind::RetainedCpu => super::CompositorCapabilities {
                 opacity: true,
                 translation: true,
-                backdrop_sample: false,
+                backdrop_sample: true,
                 accelerated: false,
             },
             RendererKind::Virgl => super::CompositorCapabilities {
@@ -831,12 +832,20 @@ impl WindowManager {
         // Handle window dragging
         self.handle_dragging(mouse_x, mouse_y, buttons);
 
-        // Update cursor position in compositor (this marks dirty regions).
-        // The compositor still works in unsigned screen coordinates; clamp
-        // the mouse position to the device for that path only.
+        // Update the compositor cursor position. Legacy deliberately keeps
+        // cursor footprints out of repaint damage; retained consumes the
+        // previous position below as composition/presentation-only damage.
+        // Clamp to unsigned coordinates for the shared cursor state.
+        let previous_cursor_position = self.compositor.cursor.position();
         let mouse_moved = self
             .compositor
             .update_cursor(mouse_x.max(0) as usize, mouse_y.max(0) as usize);
+        let previous_cursor_position = mouse_moved.then(|| {
+            Point::new(
+                previous_cursor_position.0.min(i32::MAX as usize) as i32,
+                previous_cursor_position.1.min(i32::MAX as usize) as i32,
+            )
+        });
 
         // Per-frame preparation pass — run BEFORE cascade and dirty
         // marking so any window that needs to drain external buffers
@@ -874,7 +883,7 @@ impl WindowManager {
             let RendererState::Retained(mut retained) = state else {
                 unreachable!()
             };
-            match self.render_retained(&mut retained, mouse_x, mouse_y) {
+            match self.render_retained(&mut retained, mouse_x, mouse_y, previous_cursor_position) {
                 Ok(()) => {
                     self.renderer = RendererState::Retained(retained);
                     self.compositor.end_frame();
@@ -981,6 +990,7 @@ impl WindowManager {
         retained: &mut RetainedRenderer,
         mouse_x: i32,
         mouse_y: i32,
+        previous_cursor_position: Option<Point>,
     ) -> Result<(), super::renderer::RetainedRendererError> {
         let full_repaint = self.compositor.dirty.needs_full_repaint();
         if full_repaint {
@@ -991,14 +1001,46 @@ impl WindowManager {
 
         let regions: Vec<Rect> = self.compositor.dirty.dirty_regions().collect();
         let roots = self.collect_layer_roots();
+        let decorated_roots: Vec<(WindowId, Rect)> = roots.iter().map(|(id, bounds)| {
+            let insets = self.window_registry.get(id)
+                .map(|window| window.decoration_insets()).unwrap_or_default();
+            (*id, insets.expand(*bounds))
+        }).collect();
         let root_ids: Vec<WindowId> = roots.iter().map(|(id, _)| *id).collect();
         retained.retain_roots(&root_ids);
+        let mut compose_regions = regions.clone();
+        let screen_bounds = Rect::new(0, 0, self.graphics_device.width() as u32, self.graphics_device.height() as u32);
+
+        // Cursor motion is composition/presentation damage, not surface
+        // repaint damage. Recompose the old footprint to erase the previous
+        // overlay, then present both it and the newly drawn footprint. Keep
+        // these rectangles out of `regions` so cursor-only movement never
+        // asks widgets to repaint or rerasterizes their retained surfaces.
+        if let Some(previous) = previous_cursor_position {
+            Self::add_present_region(
+                &mut compose_regions,
+                CursorRenderer::bounds_at(previous.x, previous.y),
+                screen_bounds,
+            );
+            Self::add_present_region(
+                &mut compose_regions,
+                CursorRenderer::bounds_at(mouse_x, mouse_y),
+                screen_bounds,
+            );
+        }
 
         let mut windows_rasterized = 0u64;
         let mut surface_pixels_updated = 0u64;
-        for (root, bounds) in &roots {
+        for ((root, _), (_, bounds)) in roots.iter().zip(decorated_roots.iter()) {
             let previous = retained.previous_bounds(*root);
             let (surface_id, created) = retained.ensure_surface(*root, *bounds)?;
+            if created {
+                Self::add_present_region(&mut compose_regions, *bounds, screen_bounds);
+            } else if let Some(previous) = previous {
+                if previous != *bounds {
+                    Self::add_present_region(&mut compose_regions, previous.union(bounds), screen_bounds);
+                }
+            }
             let subtree_dirty = self.subtree_needs_repaint(*root, &root_ids);
             let moved_only = !created
                 && previous
@@ -1045,14 +1087,15 @@ impl WindowManager {
                     (self.graphics_device.width(), self.graphics_device.height()),
                 );
                 windows_rasterized = windows_rasterized.saturating_add(
-                    self.render_layer_tree_in_region(*root, repaint, 0, 0, &root_ids, &mut canvas)
-                        as u64,
+                    self.render_layer_tree_in_region(
+                        *root, repaint, 0, 0, &root_ids, *root, *bounds, &mut canvas,
+                    ) as u64,
                 );
                 surface_pixels_updated = surface_pixels_updated.saturating_add(local.area());
             }
         }
 
-        let mut scene = retained.build_scene(&roots);
+        let mut scene = retained.build_scene(&decorated_roots);
         for (layer, (root, _)) in scene.layers.iter_mut().zip(roots.iter()) {
             if let Some(window) = self.window_registry.get(root) {
                 let properties = window.compositor_properties();
@@ -1061,7 +1104,8 @@ impl WindowManager {
                 layer.effect = properties.effect;
             }
         }
-        let mut stats = retained.compose(&scene, &regions)?;
+        compose_regions = Self::expand_backdrop_damage(&scene, &compose_regions);
+        let mut stats = retained.compose(&scene, &compose_regions)?;
 
         // Retained cursor overlay: recomposition restores the old location;
         // drawing into the canonical output makes the cursor topmost without
@@ -1076,11 +1120,11 @@ impl WindowManager {
             self.cursor.draw(mouse_x, mouse_y, &mut canvas);
         }
 
-        let presented_by_virtio = retained.present_virtio(&regions)?;
+        let presented_by_virtio = retained.present_virtio(&compose_regions)?;
         if !presented_by_virtio {
             let mut presenter = BootFramebufferPresenter::new(&mut *self.graphics_device);
             presenter
-                .present(retained.output(), &regions)
+                .present(retained.output(), &compose_regions)
                 .map_err(|_| super::renderer::RetainedRendererError::Composition)?;
         }
         stats.windows_rasterized = windows_rasterized;
@@ -1179,6 +1223,8 @@ impl WindowManager {
         parent_x: i32,
         parent_y: i32,
         layer_roots: &[WindowId],
+        layer_root: WindowId,
+        root_paint_bounds: Rect,
         canvas: &mut SurfaceCanvas<'_>,
     ) -> usize {
         let Some(mut window) = self.window_registry.remove(&window_id) else {
@@ -1195,7 +1241,8 @@ impl WindowManager {
         }
 
         let mut painted = 0;
-        if let Some(clip) = bounds.intersection(&region) {
+        let paint_bounds = if window_id == layer_root { root_paint_bounds } else { bounds };
+        if let Some(clip) = paint_bounds.intersection(&region) {
             let original = window.bounds();
             window.set_bounds_no_invalidate(bounds);
             canvas.set_clip_rect(Some(clip));
@@ -1218,6 +1265,8 @@ impl WindowManager {
                 bounds.x,
                 bounds.y,
                 layer_roots,
+                layer_root,
+                root_paint_bounds,
                 canvas,
             );
         }
@@ -1241,6 +1290,35 @@ impl WindowManager {
             }
         }
         regions.push(merged);
+    }
+
+    fn expand_backdrop_damage(
+        scene: &crate::graphics::scene::SceneFrame,
+        damage: &[Rect],
+    ) -> Vec<Rect> {
+        let screen = Rect::new(0, 0, scene.output_size.0, scene.output_size.1);
+        let mut expanded = Vec::new();
+        for &rect in damage {
+            Self::add_present_region(&mut expanded, rect, screen);
+            for layer in &scene.layers {
+                let crate::graphics::scene::LayerEffect::BackdropSample { radius } = layer.effect else { continue };
+                let halo = crate::graphics::scene::inflate_rect(rect, radius as u32);
+                if let Some(affected) = halo.intersection(&layer.output_bounds())
+                    .and_then(|value| value.intersection(&layer.clip_rect))
+                {
+                    Self::add_present_region(&mut expanded, affected, screen);
+                }
+            }
+        }
+        expanded
+    }
+
+    #[cfg(feature = "test")]
+    pub fn test_expand_backdrop_damage(
+        scene: &crate::graphics::scene::SceneFrame,
+        damage: &[Rect],
+    ) -> Vec<Rect> {
+        Self::expand_backdrop_damage(scene, damage)
     }
 
     /// Walk the render-order tree and mark every invalidated window's
@@ -1272,7 +1350,7 @@ impl WindowManager {
     fn mark_dirty_for_invalidated_windows(&mut self) {
         let order = self.collect_render_order();
         for (window_id, abs_bounds) in &order {
-            let (needs_repaint, composition_dirty, hint) = self
+            let (needs_repaint, composition_dirty, hint, insets) = self
                 .window_registry
                 .get(window_id)
                 .map(|w| {
@@ -1280,9 +1358,10 @@ impl WindowManager {
                         w.needs_repaint(),
                         w.composition_dirty(),
                         w.dirty_rect_hint(),
+                        w.decoration_insets(),
                     )
                 })
-                .unwrap_or((false, false, None));
+                .unwrap_or((false, false, None, super::Insets::ZERO));
             if !needs_repaint && !composition_dirty {
                 continue;
             }
@@ -1296,7 +1375,7 @@ impl WindowManager {
                     local.width,
                     local.height,
                 ),
-                None => *abs_bounds,
+                None => insets.expand(*abs_bounds),
             };
             self.compositor.dirty.mark_dirty(dirty_rect);
             crate::debug_trace!(
@@ -1338,6 +1417,47 @@ impl WindowManager {
     #[cfg(feature = "test")]
     pub fn test_mark_full_repaint(&mut self) {
         self.compositor.dirty.mark_full_repaint();
+    }
+
+    /// Test-only: replace the selected renderer with retained CPU rendering.
+    #[cfg(feature = "test")]
+    pub fn test_force_retained_renderer(&mut self) {
+        let width = self.graphics_device.width() as u32;
+        let height = self.graphics_device.height() as u32;
+        self.renderer = RendererState::Retained(
+            RetainedRenderer::new(width, height).expect("test retained renderer should initialize"),
+        );
+        self.compositor.dirty.mark_full_repaint();
+    }
+
+    /// Test-only: return the compositor's current pointer position.
+    #[cfg(feature = "test")]
+    pub fn test_cursor_position(&self) -> Point {
+        let (x, y) = self.compositor.cursor.position();
+        Point::new(
+            x.min(i32::MAX as usize) as i32,
+            y.min(i32::MAX as usize) as i32,
+        )
+    }
+
+    /// Test-only: render a cursor-only retained frame at an injected position.
+    #[cfg(feature = "test")]
+    pub fn test_render_retained_cursor_at(&mut self, position: Point) {
+        let previous = self.test_cursor_position();
+        assert!(
+            self.compositor
+                .update_cursor(position.x.max(0) as usize, position.y.max(0) as usize),
+            "test cursor position must change"
+        );
+        self.compositor.begin_frame();
+        let state = core::mem::replace(&mut self.renderer, RendererState::Legacy);
+        let RendererState::Retained(mut retained) = state else {
+            panic!("test requires retained renderer")
+        };
+        self.render_retained(&mut retained, position.x, position.y, Some(previous))
+            .expect("retained cursor-only frame should render");
+        self.renderer = RendererState::Retained(retained);
+        self.compositor.end_frame();
     }
 
     /// Test-only: drive just the active screen's render-tree walk. Skips the
@@ -1667,10 +1787,9 @@ impl WindowManager {
                 let local_y = mouse_y - bounds.y;
 
                 if bounds.contains_point(Point::new(mouse_x, mouse_y)) {
-                    // Hit test for frame-like windows
-                    // Constants: 2px border, 24px title bar (so title bar area is y 2..26)
-                    let border = 2;
-                    let title_height = 24;
+                    let metrics = crate::window::theme::metrics();
+                    let border = metrics.border_width as i32;
+                    let title_height = metrics.title_bar_height as i32;
 
                     // Check border regions first (corners before edges)
                     let at_left = local_x < border;
@@ -1711,19 +1830,10 @@ impl WindowManager {
                         target_hit = HitTestResult::Border(ResizeEdge::Right);
                         break;
                     } else if local_y >= border && local_y < border + title_height {
-                        // Title bar (inside border, top 24 pixels)
-                        // Check for close button first (16x16 button, 4px from right edge)
-                        let close_btn_size = 16;
-                        let close_btn_padding = 4;
-                        let close_btn_x =
-                            bounds.width as i32 - border - close_btn_padding - close_btn_size;
-                        let close_btn_y = border + (title_height - close_btn_size) / 2;
-
-                        if local_x >= close_btn_x
-                            && local_x < close_btn_x + close_btn_size
-                            && local_y >= close_btn_y
-                            && local_y < close_btn_y + close_btn_size
-                        {
+                        let local_button = crate::window::theme::close_button_rect(
+                            Rect::new(0, 0, bounds.width, bounds.height), metrics,
+                        );
+                        if local_button.contains_point(Point::new(local_x, local_y)) {
                             target_window = Some(window_id);
                             target_hit = HitTestResult::CloseButton;
                             break;
@@ -1875,10 +1985,9 @@ impl WindowManager {
                 let children = window.children().to_vec();
                 let bounds = window.bounds();
 
-                // Calculate content area - for FrameWindow this excludes borders/title
-                // Constants: 2px border on all sides, 24px title bar
-                let border = 2u32;
-                let title_height = 24u32;
+                let metrics = crate::window::theme::metrics();
+                let border = metrics.border_width;
+                let title_height = metrics.title_bar_height;
 
                 // Content area is relative to the parent window
                 let content_area = Rect::new(

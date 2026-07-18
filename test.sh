@@ -53,6 +53,7 @@ Environment:
   AGENTICOS_QEMU_BIN     Exact qemu-system-x86_64 binary to launch.
   AGENTICOS_COMPOSITOR   Boot policy: legacy (default), retained, gpu, or auto.
   AGENTICOS_GPU_STRICT   Set to 1 to make unavailable GPU mode fail loudly.
+  AGENTICOS_THEME        Frame theme: classic, aero, or auto (default auto).
 EOF
 }
 
@@ -228,10 +229,13 @@ fi
 
 COMPOSITOR_REQUEST="${AGENTICOS_COMPOSITOR:-legacy}"
 GPU_STRICT="${AGENTICOS_GPU_STRICT:-0}"
+THEME_REQUEST="${AGENTICOS_THEME:-auto}"
 case "$COMPOSITOR_REQUEST" in legacy|retained|gpu|auto) ;; *) echo "Invalid AGENTICOS_COMPOSITOR: $COMPOSITOR_REQUEST" >&2; exit 2 ;; esac
 case "$GPU_STRICT" in 0|1) ;; *) echo "AGENTICOS_GPU_STRICT must be 0 or 1" >&2; exit 2 ;; esac
+case "$THEME_REQUEST" in classic|aero|auto) ;; *) echo "Invalid AGENTICOS_THEME: $THEME_REQUEST" >&2; exit 2 ;; esac
 QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/compositor,string=$COMPOSITOR_REQUEST")
 QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/gpu_strict,string=$GPU_STRICT")
+QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/theme,string=$THEME_REQUEST")
 
 QEMU_BIN="${AGENTICOS_QEMU_BIN:-$(command -v qemu-system-x86_64 || true)}"
 if [ -z "$QEMU_BIN" ] || [ ! -x "$QEMU_BIN" ]; then

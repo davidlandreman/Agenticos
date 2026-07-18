@@ -864,6 +864,79 @@ fn test_render_presents_dirty_region_and_cursor_footprint() {
     );
 }
 
+fn test_retained_cursor_move_presents_old_and_new_without_window_rasterization() {
+    let (mut wm, state) = make_manager(800, 600);
+    build_simple_scene(&mut wm, Rect::new(0, 0, 800, 600), &[]);
+    wm.test_force_retained_renderer();
+
+    // Establish retained surfaces and the initial cursor overlay.
+    wm.render();
+    let old = wm.test_cursor_position();
+    let initial_snapshot = wm.framebuffer_snapshot().unwrap();
+    let old_initial_offset = (old.y as usize * initial_snapshot.stride + old.x as usize)
+        * initial_snapshot.bytes_per_pixel;
+    assert_eq!(
+        &initial_snapshot.pixels[old_initial_offset..old_initial_offset + 3],
+        &[255, 255, 255],
+        "initial retained cursor hotspot should be white",
+    );
+    let new = Point::new(
+        if old.x < 400 {
+            old.x + 100
+        } else {
+            old.x - 100
+        },
+        if old.y < 300 {
+            old.y + 100
+        } else {
+            old.y - 100
+        },
+    );
+    state.lock().reset();
+
+    wm.test_render_retained_cursor_at(new);
+
+    let moved_snapshot = wm.framebuffer_snapshot().unwrap();
+    let old_moved_offset =
+        (old.y as usize * moved_snapshot.stride + old.x as usize) * moved_snapshot.bytes_per_pixel;
+    let new_moved_offset =
+        (new.y as usize * moved_snapshot.stride + new.x as usize) * moved_snapshot.bytes_per_pixel;
+    assert_eq!(
+        &moved_snapshot.pixels[old_moved_offset..old_moved_offset + 3],
+        &[10, 10, 10],
+        "old retained cursor hotspot should be restored from the scene",
+    );
+    assert_eq!(
+        &moved_snapshot.pixels[new_moved_offset..new_moved_offset + 3],
+        &[255, 255, 255],
+        "new retained cursor hotspot should be white",
+    );
+
+    let state = state.lock();
+    assert_eq!(state.presented_batches.len(), 1);
+    let batch = &state.presented_batches[0];
+    assert!(
+        batch.contains(&Rect::new(old.x - 1, old.y - 1, 17, 17)),
+        "expected old retained cursor footprint in presentation batch, got {:?}",
+        batch,
+    );
+    assert!(
+        batch.contains(&Rect::new(new.x - 1, new.y - 1, 17, 17)),
+        "expected new retained cursor footprint in presentation batch, got {:?}",
+        batch,
+    );
+    assert_eq!(
+        wm.render_stats().windows_rasterized,
+        0,
+        "cursor-only retained frame must not rerasterize windows",
+    );
+    assert_eq!(
+        wm.render_stats().surface_pixels_updated,
+        0,
+        "cursor-only retained frame must reuse existing surfaces",
+    );
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         // U3 — absolute-bounds dirty marking
@@ -886,5 +959,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         // Regional front-buffer presentation includes both repaint damage
         // and cursor overlay writes.
         &test_render_presents_dirty_region_and_cursor_footprint,
+        &test_retained_cursor_move_presents_old_and_new_without_window_rasterization,
     ]
 }

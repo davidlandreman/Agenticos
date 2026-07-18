@@ -13,7 +13,8 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
 - `scene.rs` — backend-neutral ordered layers, opacity, 16.16 transforms, and
   reserved effect metadata.
 - `composition/cpu.rs` — pixel-correct premultiplied source-over reference
-  compositor and runtime fallback.
+  compositor and runtime fallback, including the three-pass backdrop blur used
+  by Aero glass layers.
 - `present/` — scanout boundary. The boot-framebuffer presenter converts only
   damaged pixels; VirtIO-GPU 2D presentation is owned by `src/drivers/`.
 - `framebuffer.rs` — region save/restore (`SavedRegion`, `RegionCapableBuffer` trait).

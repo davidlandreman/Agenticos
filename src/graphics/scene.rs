@@ -42,7 +42,7 @@ pub enum LayerEffect {
     None,
     /// Test/extension point for per-pixel alpha content already in the surface.
     AlphaMask,
-    /// Reserved contract for a later glass pass; not currently rendered.
+    /// Blur/sample already-composed layers behind this layer.
     BackdropSample {
         radius: u16,
     },
@@ -77,27 +77,22 @@ impl Layer {
     }
 
     pub fn output_bounds(self) -> Rect {
-        let translated = Rect::new(
+        Rect::new(
             self.destination_rect.x.saturating_add(self.transform.tx),
             self.destination_rect.y.saturating_add(self.transform.ty),
             self.destination_rect.width,
             self.destination_rect.height,
-        );
-        let radius = match self.effect {
-            LayerEffect::BackdropSample { radius } => radius as i32,
-            _ => 0,
-        };
-        Rect::new(
-            translated.x.saturating_sub(radius),
-            translated.y.saturating_sub(radius),
-            translated
-                .width
-                .saturating_add((radius as u32).saturating_mul(2)),
-            translated
-                .height
-                .saturating_add((radius as u32).saturating_mul(2)),
         )
     }
+}
+
+pub fn inflate_rect(rect: Rect, radius: u32) -> Rect {
+    Rect::new(
+        rect.x.saturating_sub(radius.min(i32::MAX as u32) as i32),
+        rect.y.saturating_sub(radius.min(i32::MAX as u32) as i32),
+        rect.width.saturating_add(radius.saturating_mul(2)),
+        rect.height.saturating_add(radius.saturating_mul(2)),
+    )
 }
 
 pub struct SceneFrame {
