@@ -1,15 +1,9 @@
 //! Per-process L4 (PML4) page table.
 //!
-//! Phase 4 PR-B. Each ring-3 user process gets its own L4 frame. The
-//! kernel half (every PML4 entry except [0]) is shared with the kernel
-//! L4 by *copying the entries themselves* — the underlying L3/L2/L1
-//! tables they point at are physically shared, so kernel heap pages
-//! installed by the page-fault handler while one process is active are
-//! visible to every other process and to the kernel itself.
-//!
-//! PML4[0] (the user-VA window 0..512 GiB, of which we use only the
-//! first 1 GiB at `USER_VA_RANGE_START..USER_VA_RANGE_END`) is
-//! exclusively per-process — that's the whole point.
+//! Each ring-3 process gets its own lower-canonical page-table trees.
+//! Upper-half entries and the two explicitly reserved lower-half kernel
+//! slots are copied from the kernel L4; every other lower-half slot is
+//! private and initially empty.
 //!
 //! Lifecycle: `RunProcess::run_path` constructs an `AddressSpace`,
 //! activates it (writes CR3) before calling `load_elf`, and switches
@@ -33,28 +27,24 @@ pub enum AddressSpaceError {
 
 /// A per-process page-table root.
 ///
-/// Owns one L4 frame. Dropping the value does not free the frame today
-/// — the boot-time frame allocator is forward-only and matches the
-/// existing leak behavior of `UserImage`. A future bitmap allocator
-/// will plug this.
+/// Owns the root and every user page-table subtree reachable from it.
 pub struct AddressSpace {
     l4_frame: PhysFrame<Size4KiB>,
+    vmas: crate::userland::vm::VmaSet,
 }
 
 impl AddressSpace {
-    /// Allocate a fresh L4 frame and populate it with the kernel-shared
-    /// PML4 entries (every entry except [0]). PML4[0] is left empty so
-    /// the loader can install user mappings into it without colliding
-    /// with anything from a previous process.
+    /// Allocate a fresh L4 and copy only shared kernel-owned slots.
     pub fn new() -> Result<Self, AddressSpaceError> {
-        let kernel_frame = crate::mm::paging::kernel_l4_frame()
-            .ok_or(AddressSpaceError::KernelL4Missing)?;
+        let kernel_frame =
+            crate::mm::paging::kernel_l4_frame().ok_or(AddressSpaceError::KernelL4Missing)?;
 
         let result = with_memory_mapper(|mapper| {
             let phys_offset = mapper.physical_memory_offset().as_u64();
             let frame = mapper
                 .allocate_one_frame()
                 .ok_or(AddressSpaceError::OutOfFrames)?;
+            mapper.zero_frame(frame);
 
             let new_l4_va = phys_offset + frame.start_address().as_u64();
             let kernel_l4_va = phys_offset + kernel_frame.start_address().as_u64();
@@ -68,20 +58,18 @@ impl AddressSpace {
                 let new_table = &mut *(new_l4_va as *mut PageTable);
                 let kernel_table = &*(kernel_l4_va as *const PageTable);
                 for i in 0..512 {
-                    if i == 0 {
-                        // PML4[0] = user half. Per-process; start empty.
-                        new_table[i].set_unused();
-                    } else {
-                        // Share kernel-half entries by reference. The
-                        // L3/L2/L1 tables they point at are physically
-                        // shared with every other L4, so heap pages
-                        // mapped by any process show up everywhere.
+                    if i >= 256 || crate::mm::paging::is_kernel_reserved_slot(i) {
                         new_table[i] = kernel_table[i].clone();
+                    } else {
+                        new_table[i].set_unused();
                     }
                 }
             }
 
-            Ok(AddressSpace { l4_frame: frame })
+            Ok(AddressSpace {
+                l4_frame: frame,
+                vmas: crate::userland::vm::VmaSet::new(),
+            })
         });
 
         match result {
@@ -96,24 +84,74 @@ impl AddressSpace {
         self.l4_frame
     }
 
-    /// Phase 4 PR-C: build a child address space that copies the
-    /// parent's user-half (PML4[0]) by **eager copy** of every leaf
-    /// page. Kernel-half PML4 entries are still shared by reference,
-    /// so kernel heap/stack mappings remain visible to the child.
-    ///
-    /// Eager copy gives independent backing for the child's user pages,
-    /// which is what fork() requires (writes by either side don't
-    /// affect the other). A future copy-on-write optimization would
-    /// share frames and mark them read-only until first write.
-    ///
-    /// Returns a fresh `AddressSpace` whose L4 has the child's own
-    /// PML4[0] subtree. The parent's L4 is untouched.
-    pub fn clone_for_child(parent_l4_frame: PhysFrame<Size4KiB>) -> Result<Self, AddressSpaceError> {
+    pub fn vmas(&self) -> &crate::userland::vm::VmaSet {
+        &self.vmas
+    }
+
+    pub fn vmas_mut(&mut self) -> &mut crate::userland::vm::VmaSet {
+        &mut self.vmas
+    }
+
+    pub fn clone_vmas_from(&mut self, parent: &Self) {
+        self.vmas = parent.vmas.clone();
+    }
+
+    pub fn initialize_vmas_from_image(
+        &mut self,
+        image: &crate::userland::image::UserImage,
+    ) -> Result<(), crate::userland::vm::VmError> {
+        use crate::mm::paging::UserPerms;
+        use crate::userland::vm::{VmProt, Vma, VmaBacking};
+
+        self.vmas = crate::userland::vm::VmaSet::new();
+        for mapping in image.mappings() {
+            let prot = match mapping.perms {
+                UserPerms::ReadExecute => VmProt::READ.union(VmProt::EXEC),
+                UserPerms::ReadOnly => VmProt::READ,
+                UserPerms::ReadWrite => VmProt::READ.union(VmProt::WRITE),
+            };
+            let start = mapping.virt_start.as_u64();
+            let end = start + mapping.page_count * 0x1000;
+            let backing = if let Some(elf) = image.elf_backing(start) {
+                VmaBacking::Elf {
+                    file: elf.file.clone(),
+                    file_offset: elf.file_offset,
+                    file_len: elf.file_len,
+                    zero_tail: elf.zero_tail,
+                }
+            } else if image.tls_fs_base.is_some_and(|tcb| {
+                start == tcb.as_u64() || end == tcb.as_u64()
+            }) {
+                VmaBacking::Tls
+            } else {
+                VmaBacking::ElfResident
+            };
+            self.vmas.insert(Vma::new(start, end, prot, backing)?)?;
+        }
+
+        self.vmas.insert(Vma::new(
+            image.stack_max_growth_floor,
+            image.stack_top.as_u64(),
+            VmProt::READ.union(VmProt::WRITE),
+            VmaBacking::Stack {
+                floor: image.stack_max_growth_floor,
+                guard_bytes: crate::mm::paging::USER_STACK_GUARD_PAGES * 0x1000,
+            },
+        )?)?;
+        Ok(())
+    }
+
+    /// Clone page-table structure while sharing resident leaves. Writable
+    /// private leaves become read-only COW mappings in both processes;
+    /// nonresident VMAs allocate no leaves.
+    pub fn clone_for_child(
+        parent_l4_frame: PhysFrame<Size4KiB>,
+    ) -> Result<Self, AddressSpaceError> {
         // Build the child like a fresh AddressSpace — kernel half copied
         // from the kernel L4, PML4[0] empty.
         let child = Self::new()?;
 
-        // Now eagerly copy the parent's PML4[0] subtree into the child.
+        // Clone every user-owned lower-half subtree using shared leaves.
         let result = with_memory_mapper(|mapper| {
             let phys_offset = mapper.physical_memory_offset().as_u64();
             let parent_l4_va = phys_offset + parent_l4_frame.start_address().as_u64();
@@ -126,25 +164,29 @@ impl AddressSpace {
             // mutation. The child's L4 is freshly allocated; we own
             // the only reference and mutate freely.
             unsafe {
-                let parent_table = &*(parent_l4_va as *const PageTable);
+                let parent_table = &mut *(parent_l4_va as *mut PageTable);
                 let child_table = &mut *(child_l4_va as *mut PageTable);
-                if !parent_table[0].is_unused() {
-                    let parent_pdpt_pa = parent_table[0].addr().as_u64();
-                    let parent_flags = parent_table[0].flags();
+                for slot in 0..256 {
+                    if crate::mm::paging::is_kernel_reserved_slot(slot)
+                        || parent_table[slot].is_unused()
+                    {
+                        continue;
+                    }
+                    let parent_pdpt_pa = parent_table[slot].addr().as_u64();
+                    let parent_flags = parent_table[slot].flags();
                     let child_pdpt_frame = mapper
                         .allocate_one_frame()
                         .ok_or(AddressSpaceError::OutOfFrames)?;
+                    mapper.zero_frame(child_pdpt_frame);
+                    child_table[slot].set_addr(child_pdpt_frame.start_address(), parent_flags);
                     clone_pdpt(
                         mapper,
                         phys_offset,
                         parent_pdpt_pa,
                         child_pdpt_frame.start_address().as_u64(),
                     )?;
-                    child_table[0].set_addr(
-                        x86_64::PhysAddr::new(child_pdpt_frame.start_address().as_u64()),
-                        parent_flags,
-                    );
                 }
+                x86_64::instructions::tlb::flush_all();
             }
             Ok(())
         });
@@ -170,16 +212,14 @@ impl AddressSpace {
     }
 }
 
-/// Recursively clone a PDPT (L3) subtree from parent to child. Allocates
-/// fresh frames for L2/L1 tables along the way and copies leaf data
-/// pages so the child's writes don't aliasing the parent's memory.
+/// Recursively clone page-table structure while sharing leaf frames.
 unsafe fn clone_pdpt(
     mapper: &mut crate::mm::paging::MemoryMapper,
     phys_offset: u64,
     parent_pa: u64,
     child_pa: u64,
 ) -> Result<(), AddressSpaceError> {
-    let parent = &*((phys_offset + parent_pa) as *const PageTable);
+    let parent = &mut *((phys_offset + parent_pa) as *mut PageTable);
     let child = &mut *((phys_offset + child_pa) as *mut PageTable);
     for i in 0..512 {
         if parent[i].is_unused() {
@@ -190,8 +230,14 @@ unsafe fn clone_pdpt(
         let new_frame = mapper
             .allocate_one_frame()
             .ok_or(AddressSpaceError::OutOfFrames)?;
-        clone_pd(mapper, phys_offset, p_pa, new_frame.start_address().as_u64())?;
-        child[i].set_addr(x86_64::PhysAddr::new(new_frame.start_address().as_u64()), flags);
+        mapper.zero_frame(new_frame);
+        child[i].set_addr(new_frame.start_address(), flags);
+        clone_pd(
+            mapper,
+            phys_offset,
+            p_pa,
+            new_frame.start_address().as_u64(),
+        )?;
     }
     Ok(())
 }
@@ -202,7 +248,7 @@ unsafe fn clone_pd(
     parent_pa: u64,
     child_pa: u64,
 ) -> Result<(), AddressSpaceError> {
-    let parent = &*((phys_offset + parent_pa) as *const PageTable);
+    let parent = &mut *((phys_offset + parent_pa) as *mut PageTable);
     let child = &mut *((phys_offset + child_pa) as *mut PageTable);
     for i in 0..512 {
         if parent[i].is_unused() {
@@ -213,8 +259,14 @@ unsafe fn clone_pd(
         let new_frame = mapper
             .allocate_one_frame()
             .ok_or(AddressSpaceError::OutOfFrames)?;
-        clone_pt(mapper, phys_offset, p_pa, new_frame.start_address().as_u64())?;
-        child[i].set_addr(x86_64::PhysAddr::new(new_frame.start_address().as_u64()), flags);
+        mapper.zero_frame(new_frame);
+        child[i].set_addr(new_frame.start_address(), flags);
+        clone_pt(
+            mapper,
+            phys_offset,
+            p_pa,
+            new_frame.start_address().as_u64(),
+        )?;
     }
     Ok(())
 }
@@ -225,30 +277,23 @@ unsafe fn clone_pt(
     parent_pa: u64,
     child_pa: u64,
 ) -> Result<(), AddressSpaceError> {
-    let parent = &*((phys_offset + parent_pa) as *const PageTable);
+    let parent = &mut *((phys_offset + parent_pa) as *mut PageTable);
     let child = &mut *((phys_offset + child_pa) as *mut PageTable);
     for i in 0..512 {
         if parent[i].is_unused() {
             continue;
         }
-        let p_pa = parent[i].addr().as_u64();
-        let flags = parent[i].flags();
-        // Allocate a fresh frame for the child's leaf and copy 4 KiB
-        // of parent data. This is the eager-fork hot path; a future
-        // copy-on-write swap would share the frame here and mark both
-        // sides read-only.
-        let new_frame = mapper
-            .allocate_one_frame()
-            .ok_or(AddressSpaceError::OutOfFrames)?;
-        let src = (phys_offset + p_pa) as *const u8;
-        let dst = (phys_offset + new_frame.start_address().as_u64()) as *mut u8;
-        core::ptr::copy_nonoverlapping(src, dst, 0x1000);
-
-        // Preserve the parent's leaf flags exactly. PRESENT, USER,
-        // WRITABLE, NX all carry over so the child sees the same
-        // permissions on each user page as the parent did.
-        let _ = PageTableFlags::PRESENT;
-        child[i].set_addr(x86_64::PhysAddr::new(new_frame.start_address().as_u64()), flags);
+        let frame = PhysFrame::containing_address(parent[i].addr());
+        if !mapper.retain_frame(frame) {
+            return Err(AddressSpaceError::OutOfFrames);
+        }
+        let mut flags = parent[i].flags();
+        if flags.contains(PageTableFlags::WRITABLE) {
+            flags.remove(PageTableFlags::WRITABLE);
+            flags.insert(PageTableFlags::BIT_9);
+            parent[i].set_flags(flags);
+        }
+        child[i].set_addr(frame.start_address(), flags);
     }
     Ok(())
 }
@@ -264,10 +309,15 @@ impl Drop for AddressSpace {
             // SAFETY: every L4 we built shares the kernel half by
             // copying the kernel L4's PML4 entries, so the code after
             // this write is still mapped.
-            unsafe { crate::mm::paging::activate_kernel_l4(); }
+            unsafe {
+                crate::mm::paging::activate_kernel_l4();
+            }
         }
-        // Today the boot-time frame allocator is forward-only — the L4
-        // frame leaks. A future bitmap-backed allocator will reclaim
-        // it here, along with any L3/L2/L1 tables under PML4[0].
+        let destroyed =
+            with_memory_mapper(|mapper| mapper.destroy_user_address_space(self.l4_frame));
+        debug_assert!(
+            destroyed.is_some(),
+            "memory mapper unavailable during address-space drop"
+        );
     }
 }

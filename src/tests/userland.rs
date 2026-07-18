@@ -3,15 +3,15 @@ use crate::lib::test_utils::Testable;
 use crate::mm::paging::{
     UserMapError, UserPerms, USER_LOAD_BASE, USER_VA_RANGE_END, USER_VA_RANGE_START,
 };
+use crate::tests::userland_fixtures as fix;
 use crate::userland::abi::{
-    self, nr, syscall_dispatch, validate_user_slice, EBADF, EFAULT, EINVAL, ENOENT, ENOSYS, ENOTTY,
-    ERANGE, EROFS, LAST_EXIT_CODE, UserVaBounds,
+    self, nr, syscall_dispatch, validate_user_slice, UserVaBounds, EBADF, EFAULT, EINVAL, ENOENT,
+    ENOSYS, ENOTTY, ERANGE, EROFS, LAST_EXIT_CODE,
 };
 use crate::userland::error::LoaderError;
 use crate::userland::fdtable::{FdSlot, FdTable};
 use crate::userland::loader::load_elf;
 use crate::userland::path::{copy_user_cstr, normalize_path};
-use crate::tests::userland_fixtures as fix;
 use alloc::vec;
 use x86_64::VirtAddr;
 
@@ -21,7 +21,7 @@ use x86_64::VirtAddr;
 /// existing naked asm in `src/arch/x86_64/{preemption,context_switch}.rs`
 /// hard-codes when constructing `iretq` frames.
 fn test_gdt_kernel_selectors() {
-    use x86_64::instructions::segmentation::{CS, SS, Segment};
+    use x86_64::instructions::segmentation::{Segment, CS, SS};
     let cs = CS::get_reg();
     let ss = SS::get_reg();
     assert_eq!(cs.0, 0x08, "kernel CS must remain at GDT slot 1");
@@ -30,8 +30,8 @@ fn test_gdt_kernel_selectors() {
 
 /// The user selectors live at known offsets and carry RPL=3.
 fn test_gdt_user_selectors() {
-    use x86_64::PrivilegeLevel;
     use crate::arch::x86_64::gdt::selectors;
+    use x86_64::PrivilegeLevel;
     let sel = selectors();
     assert_eq!(sel.user_data.0 & !0x3, 0x18, "user data at GDT slot 3");
     assert_eq!(sel.user_code.0 & !0x3, 0x20, "user code at GDT slot 4");
@@ -62,18 +62,20 @@ fn test_tss_loaded() {
     unsafe {
         core::arch::asm!("str {:x}", out(reg) tr, options(nomem, nostack, preserves_flags));
     }
-    assert_ne!(tr, 0, "TR must be loaded with the TSS selector after gdt::init()");
+    assert_ne!(
+        tr, 0,
+        "TR must be loaded with the TSS selector after gdt::init()"
+    );
 }
 
 // ---------- mm: user-region mapper ----------
 
 fn test_map_user_region_kernel_can_read() {
     let va = VirtAddr::new(USER_LOAD_BASE);
-    let frames = crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(va, 1, UserPerms::ReadWrite)
-    })
-    .expect("mapper")
-    .expect("map");
+    let frames =
+        crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 1, UserPerms::ReadWrite))
+            .expect("mapper")
+            .expect("map");
     assert_eq!(frames.len(), 1);
 
     let mut sum: u64 = 0;
@@ -92,14 +94,11 @@ fn test_map_user_region_kernel_can_read() {
 
 fn test_map_user_region_propagates_user_bit() {
     let va = VirtAddr::new(USER_LOAD_BASE + 0x1000);
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(va, 1, UserPerms::ReadExecute)
-    })
-    .unwrap()
-    .unwrap();
-
-    let ok = crate::mm::memory::with_memory_mapper(|m| m.user_bit_set_on_all_parents(va))
+    crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 1, UserPerms::ReadExecute))
+        .unwrap()
         .unwrap();
+
+    let ok = crate::mm::memory::with_memory_mapper(|m| m.user_bit_set_on_all_parents(va)).unwrap();
     assert!(ok, "USER bit must be set on every parent table entry");
 
     crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(va, 1))
@@ -109,11 +108,10 @@ fn test_map_user_region_propagates_user_bit() {
 
 fn test_unmap_user_region_returns_frames() {
     let va = VirtAddr::new(USER_LOAD_BASE + 0x2000);
-    let mapped = crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(va, 2, UserPerms::ReadWrite)
-    })
-    .unwrap()
-    .unwrap();
+    let mapped =
+        crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 2, UserPerms::ReadWrite))
+            .unwrap()
+            .unwrap();
     assert_eq!(mapped.len(), 2);
 
     let unmapped = crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(va, 2))
@@ -126,17 +124,14 @@ fn test_unmap_user_region_returns_frames() {
 
 fn test_map_user_region_rejects_double_map() {
     let va = VirtAddr::new(USER_LOAD_BASE + 0x4000);
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(va, 1, UserPerms::ReadWrite)
-    })
-    .unwrap()
-    .unwrap();
+    crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 1, UserPerms::ReadWrite))
+        .unwrap()
+        .unwrap();
 
-    let err = crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(va, 1, UserPerms::ReadWrite)
-    })
-    .unwrap()
-    .unwrap_err();
+    let err =
+        crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 1, UserPerms::ReadWrite))
+            .unwrap()
+            .unwrap_err();
     assert_eq!(err, UserMapError::PageAlreadyMapped);
 
     crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(va, 1))
@@ -147,19 +142,11 @@ fn test_map_user_region_rejects_double_map() {
 fn test_map_user_region_rejects_out_of_range() {
     crate::mm::memory::with_memory_mapper(|m| {
         // Kernel heap address.
-        let r = m.map_user_region(
-            VirtAddr::new(0x_4444_4444_0000),
-            1,
-            UserPerms::ReadWrite,
-        );
+        let r = m.map_user_region(VirtAddr::new(0x_4444_4444_0000), 1, UserPerms::ReadWrite);
         assert_eq!(r.unwrap_err(), UserMapError::VaOutOfRange);
 
         // Above the user range.
-        let r = m.map_user_region(
-            VirtAddr::new(USER_VA_RANGE_END),
-            1,
-            UserPerms::ReadWrite,
-        );
+        let r = m.map_user_region(VirtAddr::new(USER_VA_RANGE_END), 1, UserPerms::ReadWrite);
         assert_eq!(r.unwrap_err(), UserMapError::VaOutOfRange);
 
         // Misaligned start.
@@ -271,7 +258,9 @@ fn test_unknown_syscall_trace_mode_off_does_not_mark() {
 /// ENOSYS without panicking and `unknown_syscall_was_seen` reports false
 /// (those numbers are not tracked individually — they log every time).
 fn test_unknown_syscall_trace_mode_capacity_overflow() {
-    use crate::userland::abi::{reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen};
+    use crate::userland::abi::{
+        reset_unknown_syscall_trace, set_trace_mode, unknown_syscall_was_seen,
+    };
     set_trace_mode(true);
     reset_unknown_syscall_trace();
     let nr = 9999; // > 512
@@ -292,11 +281,27 @@ fn test_dispatch_poll_streams_ready() {
     // Three pollfd entries on stdin/stdout/stderr asking for read+write.
     #[repr(C)]
     #[derive(Clone, Copy)]
-    struct PollFd { fd: i32, events: i16, revents: i16 }
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
     let mut fds = [
-        PollFd { fd: 0, events: 0x0001 | 0x0004, revents: 0 },
-        PollFd { fd: 1, events: 0x0001 | 0x0004, revents: 0 },
-        PollFd { fd: 2, events: 0x0001 | 0x0004, revents: 0 },
+        PollFd {
+            fd: 0,
+            events: 0x0001 | 0x0004,
+            revents: 0,
+        },
+        PollFd {
+            fd: 1,
+            events: 0x0001 | 0x0004,
+            revents: 0,
+        },
+        PollFd {
+            fd: 2,
+            events: 0x0001 | 0x0004,
+            revents: 0,
+        },
     ];
     let ptr = fds.as_mut_ptr() as u64;
     let bytes = (fds.len() * core::mem::size_of::<PollFd>()) as u64;
@@ -322,8 +327,16 @@ fn test_dispatch_poll_unknown_fd_returns_pollnval() {
     install_streams_for_dispatcher_test();
     #[repr(C)]
     #[derive(Clone, Copy)]
-    struct PollFd { fd: i32, events: i16, revents: i16 }
-    let mut fds = [PollFd { fd: 999, events: 0x0001, revents: 0 }];
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    let mut fds = [PollFd {
+        fd: 999,
+        events: 0x0001,
+        revents: 0,
+    }];
     let ptr = fds.as_mut_ptr() as u64;
     let bytes = (fds.len() * core::mem::size_of::<PollFd>()) as u64;
     crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
@@ -392,7 +405,9 @@ fn test_dispatch_readlink_proc_self_exe() {
     assert_eq!(ret, b"/HOST/ZSH.ELF".len() as i64);
     assert_eq!(&buf[..ret as usize], b"/HOST/ZSH.ELF");
     crate::userland::abi::clear_user_va_bounds();
-    with_active_user(|p| { p.exe_path = None; });
+    with_active_user(|p| {
+        p.exe_path = None;
+    });
 }
 
 /// `readlink("/proc/self/fd/0", ...)` returns "/dev/tty" when stdin is
@@ -501,7 +516,8 @@ fn test_dispatch_getrlimit_returns_infinity() {
     let ptr = out.as_mut_ptr() as u64;
     let bytes = (out.len() * 8) as u64;
     crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
-        start: ptr, end: ptr + bytes,
+        start: ptr,
+        end: ptr + bytes,
     });
     let mut args = SyscallArgs::default();
     args.rax = crate::userland::abi::nr::GETRLIMIT;
@@ -521,7 +537,8 @@ fn test_dispatch_prlimit64_old_value_writes_infinity() {
     let ptr = out.as_mut_ptr() as u64;
     let bytes = (out.len() * 8) as u64;
     crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
-        start: ptr, end: ptr + bytes,
+        start: ptr,
+        end: ptr + bytes,
     });
     let mut args = SyscallArgs::default();
     args.rax = crate::userland::abi::nr::PRLIMIT64;
@@ -555,7 +572,8 @@ fn test_dispatch_getrusage_self_zero_fills_and_rejects_unknown_who() {
     let ptr = out.as_mut_ptr() as u64;
     let bytes = out.len() as u64;
     crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
-        start: ptr, end: ptr + bytes,
+        start: ptr,
+        end: ptr + bytes,
     });
     let mut args = SyscallArgs::default();
     args.rax = crate::userland::abi::nr::GETRUSAGE;
@@ -580,7 +598,7 @@ fn test_dispatch_setitimer_and_nanosleep_stubs_return_zero() {
     args.rax = crate::userland::abi::nr::SETITIMER;
     args.rdi = 0;
     args.rsi = 0xdead_beef; // pointer not validated when no old buffer
-    args.rdx = 0;           // old_value NULL → no validation
+    args.rdx = 0; // old_value NULL → no validation
     assert_eq!(syscall_dispatch(&mut args), 0);
 
     let mut args = SyscallArgs::default();
@@ -664,7 +682,10 @@ fn test_write_handler_rejects_span_past_bounds() {
     install_streams_for_dispatcher_test();
     let buf: [u8; 8] = [0; 8];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + 8 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 8,
+    });
     let mut args = SyscallArgs::default();
     args.rax = nr::WRITE;
     args.rdi = 1;
@@ -680,7 +701,10 @@ fn test_write_handler_rejects_span_past_bounds() {
 /// bounds are wide. checked_add is the defense.
 fn test_write_handler_rejects_pointer_wraparound() {
     install_streams_for_dispatcher_test();
-    abi::set_user_va_bounds(UserVaBounds { start: 0, end: u64::MAX });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: 0,
+        end: u64::MAX,
+    });
     let mut args = SyscallArgs::default();
     args.rax = nr::WRITE;
     args.rdi = 1;
@@ -712,9 +736,7 @@ fn test_write_handler_zero_len_succeeds() {
 fn test_exit_group_handler_records_code() {
     *LAST_EXIT_CODE.lock() = None;
     let prior_pid = crate::userland::lifecycle::current_user_pid();
-    crate::userland::lifecycle::set_current_user_pid(Some(
-        crate::userland::lifecycle::KERNEL_PID,
-    ));
+    crate::userland::lifecycle::set_current_user_pid(Some(crate::userland::lifecycle::KERNEL_PID));
     let mut args = SyscallArgs::default();
     args.rax = nr::EXIT_GROUP;
     args.rdi = 42;
@@ -747,16 +769,14 @@ fn test_loader_happy_path() {
     // U2: stack window is exposed on the image for U3 to install on Process.
     assert_eq!(
         image.stack_initial_bottom,
-        crate::mm::paging::USER_STACK_TOP
-            - crate::mm::paging::USER_STACK_INITIAL_PAGES * 0x1000
+        crate::mm::paging::USER_STACK_TOP - crate::mm::paging::USER_STACK_INITIAL_PAGES * 0x1000
     );
     // For a one-page PT_LOAD at USER_LOAD_BASE, the global cap binds:
     // USER_STACK_TOP - 768*0x1000 = 0x50_0000 (3 MiB of stack room),
     // which is above the per-binary floor (0x40_1000 + 16*0x1000).
     assert_eq!(
         image.stack_max_growth_floor,
-        crate::mm::paging::USER_STACK_TOP
-            - crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES * 0x1000
+        crate::mm::paging::USER_STACK_TOP - crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES * 0x1000
     );
 
     unsafe {
@@ -880,7 +900,10 @@ fn test_loader_overlapping_pt_load() {
         truncate_to: None,
     }
     .build();
-    assert_eq!(load_elf(&bytes).unwrap_err(), LoaderError::OverlappingPtLoad);
+    assert_eq!(
+        load_elf(&bytes).unwrap_err(),
+        LoaderError::OverlappingPtLoad
+    );
 }
 
 fn test_loader_entry_not_mapped() {
@@ -996,7 +1019,10 @@ fn test_loader_pt_interp_rejected() {
         truncate_to: None,
     }
     .build();
-    assert_eq!(load_elf(&bytes).unwrap_err(), LoaderError::InterpUnsupported);
+    assert_eq!(
+        load_elf(&bytes).unwrap_err(),
+        LoaderError::InterpUnsupported
+    );
 }
 
 fn test_loader_segment_overflow() {
@@ -1005,8 +1031,12 @@ fn test_loader_segment_overflow() {
     fix::write_u64(&mut bytes, 64 + 32, 100);
     let err = load_elf(&bytes).unwrap_err();
     assert!(
-        matches!(err, LoaderError::SegmentOverflow | LoaderError::AlignmentBad),
-        "got {:?}", err
+        matches!(
+            err,
+            LoaderError::SegmentOverflow | LoaderError::AlignmentBad
+        ),
+        "got {:?}",
+        err
     );
 }
 
@@ -1022,11 +1052,7 @@ fn test_loader_unsupported_reloc() {
 /// undefined extern is rejected as `UnresolvedImport` — the kernel-side
 /// name registry is gone, so the loader has no resolver to consult.
 fn test_loader_glob_dat_unresolved() {
-    let bytes = fix::elf_with_one_reloc(
-        "anything",
-        fix::R_X86_64_GLOB_DAT,
-        0x40_1000,
-    );
+    let bytes = fix::elf_with_one_reloc("anything", fix::R_X86_64_GLOB_DAT, 0x40_1000);
     assert_eq!(load_elf(&bytes).unwrap_err(), LoaderError::UnresolvedImport);
 }
 
@@ -1049,20 +1075,32 @@ fn test_loader_rollback_unmaps_on_reloc_failure() {
         m.map_user_region(VirtAddr::new(0x40_0000), 1, UserPerms::ReadExecute)
     })
     .unwrap();
-    assert!(r1.is_ok(), "PT_LOAD #1 was not unmapped on rollback: {:?}", r1.err());
+    assert!(
+        r1.is_ok(),
+        "PT_LOAD #1 was not unmapped on rollback: {:?}",
+        r1.err()
+    );
 
     let r2 = crate::mm::memory::with_memory_mapper(|m| {
         m.map_user_region(VirtAddr::new(0x40_1000), 1, UserPerms::ReadWrite)
     })
     .unwrap();
-    assert!(r2.is_ok(), "PT_LOAD #2 was not unmapped on rollback: {:?}", r2.err());
+    assert!(
+        r2.is_ok(),
+        "PT_LOAD #2 was not unmapped on rollback: {:?}",
+        r2.err()
+    );
 
     let stack_bottom = crate::mm::paging::USER_STACK_TOP - 8 * 0x1000;
     let r3 = crate::mm::memory::with_memory_mapper(|m| {
         m.map_user_region(VirtAddr::new(stack_bottom), 8, UserPerms::ReadWrite)
     })
     .unwrap();
-    assert!(r3.is_ok(), "user stack was not unmapped on rollback: {:?}", r3.err());
+    assert!(
+        r3.is_ok(),
+        "user stack was not unmapped on rollback: {:?}",
+        r3.err()
+    );
 
     crate::mm::memory::with_memory_mapper(|m| {
         m.unmap_user_region(VirtAddr::new(0x40_0000), 1).unwrap();
@@ -1146,7 +1184,10 @@ fn test_run_unknown_syscall_returns_enosys() {
 
     use crate::userland::lifecycle::ExitKind;
     assert!(matches!(result.0, ExitKind::Cooperative));
-    assert_eq!(result.1, 0, "fixture did not observe -ENOSYS from syscall 999");
+    assert_eq!(
+        result.1, 0,
+        "fixture did not observe -ENOSYS from syscall 999"
+    );
 }
 
 /// Fixture A — SYSCALL fast-path smoke test. The smallest possible end-to-end
@@ -1260,9 +1301,9 @@ fn test_run_fault_pf() {
 /// staged and the run completed; `false` (skip) if not staged.
 #[cfg(feature = "test")]
 fn drive_zsh(argv_after_path: &[&str]) -> bool {
-    use alloc::string::String;
     use crate::userland::lifecycle::with_active_user;
-    let path = "/host/ZSH.ELF";
+    use alloc::string::String;
+    let path = crate::window::terminal_factory::ZSH_HOST_PATH;
     if !crate::fs::exists(path) {
         crate::debug_info!("[u8] {} not staged; skipping", path);
         return false;
@@ -1279,17 +1320,24 @@ fn drive_zsh(argv_after_path: &[&str]) -> bool {
         argv_owned.push(String::from(*a));
     }
     let argv_borrows: alloc::vec::Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
-    let _ = crate::userland::launcher::launch_user_binary(path, &argv_borrows, &[]);
+    let _ = crate::userland::launcher::launch_user_binary(
+        path,
+        &argv_borrows,
+        &crate::window::terminal_factory::TERMINAL_SHELL_ENV,
+    );
 
     crate::userland::abi::set_trace_mode(prior_trace);
     let still_active = with_active_user(|au| au.image.is_some());
-    assert!(!still_active, "active-user slot should be empty after zsh run() returns");
+    assert!(
+        !still_active,
+        "active-user slot should be empty after zsh run() returns"
+    );
     true
 }
 
-/// `zsh -f +m -c 'exit 0'` — proves the binary loads, musl init runs,
-/// the parser handles -c, the builtin exit dispatches, and the
-/// cooperative-exit path long-jumps back cleanly.
+/// `zsh -f +m -c 'exit 0'` with the exact desktop-terminal environment —
+/// proves the normal terminal launch profile loads, musl init runs, the
+/// parser handles -c, and cooperative exit returns cleanly.
 fn test_run_zsh_minimal_exit() {
     let _ran = drive_zsh(&["-f", "+m", "-c", "exit 0"]);
 }
@@ -1359,8 +1407,11 @@ fn test_user_stdin_install_push_pop() {
     assert!(crate::userland::stdin::is_active());
 
     let mut buf = [0u8; 16];
-    assert_eq!(crate::userland::stdin::pop_into(&mut buf), 0,
-        "empty queue must return 0 (caller treats as block-needed)");
+    assert_eq!(
+        crate::userland::stdin::pop_into(&mut buf),
+        0,
+        "empty queue must return 0 (caller treats as block-needed)"
+    );
 
     crate::userland::stdin::push_bytes(b"hi\n");
     assert_eq!(crate::userland::stdin::queued_len(), 3);
@@ -1390,7 +1441,10 @@ fn test_dispatch_read_returns_queued_bytes() {
     install_streams_for_dispatcher_test();
     let buf = [0u8; 32];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + 32 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 32,
+    });
 
     let terminal_id = crate::window::WindowId::new();
     let prior_terminal = crate::userland::lifecycle::with_active_user(|p| {
@@ -1424,7 +1478,10 @@ fn test_dispatch_read_no_active_user_returns_zero() {
     install_streams_for_dispatcher_test();
     let buf = [0u8; 16];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + 16 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 16,
+    });
     crate::userland::stdin::clear();
 
     let mut args = SyscallArgs::default();
@@ -1449,8 +1506,8 @@ fn test_enter_user_mode_with_argv_envp() {
     let image = load_elf(&bytes).expect("load_elf");
     let argv = ["/host/HELLO.ELF", "alpha", "beta"];
     let envp = ["PATH=/host", "HOME=/", "TERM=dumb"];
-    let result = crate::userland::enter_user_mode_with(image, &argv, &envp)
-        .expect("enter_user_mode_with");
+    let result =
+        crate::userland::enter_user_mode_with(image, &argv, &envp).expect("enter_user_mode_with");
     let _ = crate::userland::release_active_image();
 
     use crate::userland::lifecycle::ExitKind;
@@ -1569,7 +1626,10 @@ fn test_dispatch_getcwd_returns_default() {
     setup_phase2_active_user();
     let buf = [0u8; 64];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + 64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::GETCWD;
@@ -1587,7 +1647,10 @@ fn test_dispatch_getcwd_short_buffer_returns_erange() {
     setup_phase2_active_user();
     let buf = [0u8; 4];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + 4 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 4,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::GETCWD;
@@ -1603,7 +1666,10 @@ fn test_dispatch_chdir_root_succeeds() {
     setup_phase2_active_user();
     let path = b"/\0";
     let ptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::CHDIR;
@@ -1621,7 +1687,10 @@ fn test_dispatch_chdir_nonexistent_returns_enoent() {
     setup_phase2_active_user();
     let path = b"/nonexistent_directory_xyz\0";
     let ptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::CHDIR;
@@ -1636,7 +1705,10 @@ fn test_dispatch_open_nonexistent_returns_enoent() {
     setup_phase2_active_user();
     let path = b"/host/NEVER_EXISTS_XYZ.TXT\0";
     let ptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::OPEN;
@@ -1652,7 +1724,10 @@ fn test_dispatch_open_writable_flag_returns_erofs() {
     setup_phase2_active_user();
     let path = b"/host/HELLO.ELF\0";
     let ptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::OPEN;
@@ -1678,7 +1753,10 @@ fn test_dispatch_open_etc_passwd_via_rewriter() {
     setup_phase2_active_user();
     let path = b"/etc/passwd\0";
     let ptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::OPEN;
@@ -1702,7 +1780,10 @@ fn test_dispatch_open_etc_unstaged_returns_enoent() {
     setup_phase2_active_user();
     let path = b"/etc/shadow\0";
     let ptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::OPEN;
@@ -1725,7 +1806,10 @@ fn test_dispatch_open_etc_traversal_collapses() {
     setup_phase2_active_user();
     let path = b"/etc/../etc/passwd\0";
     let ptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::OPEN;
@@ -1745,7 +1829,8 @@ fn test_dispatch_close_stream_is_noop() {
     args.rdi = 1; // stdout
     assert_eq!(syscall_dispatch(&mut args), 0);
 
-    let still_open = crate::userland::lifecycle::with_active_user(|au| au.fd_table.get(1).is_some());
+    let still_open =
+        crate::userland::lifecycle::with_active_user(|au| au.fd_table.get(1).is_some());
     assert!(still_open, "stdout must remain open after a close attempt");
     teardown_phase2_active_user();
 }
@@ -1781,7 +1866,10 @@ fn test_dispatch_clock_gettime_writes_timespec() {
     setup_phase2_active_user();
     let buf = [0u8; 16];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + 16 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 16,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::CLOCK_GETTIME;
@@ -1792,7 +1880,11 @@ fn test_dispatch_clock_gettime_writes_timespec() {
     // tv_nsec at offset 8 must be < 1e9
     let ns_bytes: [u8; 8] = buf[8..16].try_into().unwrap();
     let nsec = i64::from_ne_bytes(ns_bytes);
-    assert!((0..1_000_000_000).contains(&nsec), "nsec out of range: {}", nsec);
+    assert!(
+        (0..1_000_000_000).contains(&nsec),
+        "nsec out of range: {}",
+        nsec
+    );
 
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
@@ -1802,7 +1894,10 @@ fn test_dispatch_clock_gettime_invalid_clock_einval() {
     setup_phase2_active_user();
     let buf = [0u8; 16];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + 16 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 16,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::CLOCK_GETTIME;
@@ -1818,7 +1913,10 @@ fn test_dispatch_getrandom_fills_buffer() {
     setup_phase2_active_user();
     let buf = [0u8; 32];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + 32 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 32,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::GETRANDOM;
@@ -1836,7 +1934,10 @@ fn test_dispatch_uname_writes_sysname_linux() {
     setup_phase2_active_user();
     let buf = [0u8; 6 * 65];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + buf.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + buf.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::UNAME;
@@ -1860,8 +1961,7 @@ fn test_address_space_new_kernel_half_shared() {
     use crate::userland::address_space::AddressSpace;
     use x86_64::structures::paging::PageTable;
 
-    let kernel_frame =
-        crate::mm::paging::kernel_l4_frame().expect("kernel L4 captured at boot");
+    let kernel_frame = crate::mm::paging::kernel_l4_frame().expect("kernel L4 captured at boot");
 
     let aspace = AddressSpace::new().expect("AddressSpace::new should succeed");
     assert_ne!(
@@ -1872,8 +1972,7 @@ fn test_address_space_new_kernel_half_shared() {
 
     // Walk both L4s through the bootloader's offset mapping and
     // compare PML4 entries.
-    let phys_offset = crate::mm::memory::get_physical_memory_offset()
-        .expect("phys offset");
+    let phys_offset = crate::mm::memory::get_physical_memory_offset().expect("phys offset");
     let kernel_va = phys_offset + kernel_frame.start_address().as_u64();
     let user_va = phys_offset + aspace.l4_frame().start_address().as_u64();
     let kernel_table = unsafe { &*(kernel_va as *const PageTable) };
@@ -1907,14 +2006,15 @@ fn test_address_space_drop_restores_kernel_cr3() {
     use crate::userland::address_space::AddressSpace;
     use x86_64::registers::control::Cr3;
 
-    let kernel_frame =
-        crate::mm::paging::kernel_l4_frame().expect("kernel L4 captured at boot");
+    let kernel_frame = crate::mm::paging::kernel_l4_frame().expect("kernel L4 captured at boot");
 
     {
         let aspace = AddressSpace::new().expect("AddressSpace::new");
         // SAFETY: kernel half copied from kernel L4 — the code after
         // the CR3 write is still mapped.
-        unsafe { aspace.activate(); }
+        unsafe {
+            aspace.activate();
+        }
         let (after, _) = Cr3::read();
         assert_eq!(after, aspace.l4_frame());
         // aspace dropped here.
@@ -1924,6 +2024,34 @@ fn test_address_space_drop_restores_kernel_cr3() {
     assert_eq!(
         final_cr3, kernel_frame,
         "AddressSpace::Drop must revert CR3 to the kernel L4"
+    );
+}
+
+fn test_address_space_drop_reclaims_leaf_and_all_table_levels() {
+    use crate::mm::paging::UserPerms;
+    use crate::userland::address_space::AddressSpace;
+    use x86_64::VirtAddr;
+
+    let before = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
+    {
+        let aspace = AddressSpace::new().expect("AddressSpace::new");
+        unsafe {
+            aspace.activate();
+        }
+        // Separate PTs and PDPTs force teardown to visit/release L1, L2,
+        // L3, leaf, and finally L4 ownership.
+        for address in [0x400000, 0x600000, 0x4000_0000] {
+            crate::mm::memory::with_memory_mapper(|m| {
+                m.map_user_region(VirtAddr::new(address), 1, UserPerms::ReadWrite)
+                    .expect("cross-level user map")
+            })
+            .expect("memory mapper");
+        }
+    }
+    let after = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
+    assert_eq!(
+        after, before,
+        "dropping an active address space must reclaim every owned frame"
     );
 }
 
@@ -2033,7 +2161,10 @@ fn test_dispatch_rt_sigaction_rejects_sigkill_sigstop() {
     assert_eq!(syscall_dispatch(&mut args), 0);
 
     let installed = crate::userland::lifecycle::with_current_process(|p| {
-        p.signal_state.action(SIGKILL).unwrap_or_default().sa_handler
+        p.signal_state
+            .action(SIGKILL)
+            .unwrap_or_default()
+            .sa_handler
     });
     assert_eq!(installed, 0, "SIGKILL action must remain SIG_DFL");
 
@@ -2044,7 +2175,7 @@ fn test_dispatch_rt_sigaction_rejects_sigkill_sigstop() {
 /// `rt_sigprocmask(SIG_BLOCK, &set, &oldset)` ORs into the blocked
 /// mask; SIGKILL/SIGSTOP cannot be blocked even if the set requests it.
 fn test_dispatch_rt_sigprocmask_block_strips_kill_stop() {
-    use crate::userland::signal::{SIG_BLOCK, SIGKILL, SIGSTOP, SIGUSR1};
+    use crate::userland::signal::{SIGKILL, SIGSTOP, SIGUSR1, SIG_BLOCK};
     setup_phase2_active_user();
 
     let set: u64 = (1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1)) | (1 << (SIGUSR1 - 1));
@@ -2067,8 +2198,16 @@ fn test_dispatch_rt_sigprocmask_block_strips_kill_stop() {
 
     let blocked = crate::userland::lifecycle::with_current_process(|p| p.signal_state.blocked);
     assert_eq!(blocked & (1 << (SIGUSR1 - 1)), 1 << (SIGUSR1 - 1));
-    assert_eq!(blocked & (1 << (SIGKILL - 1)), 0, "SIGKILL must not be blockable");
-    assert_eq!(blocked & (1 << (SIGSTOP - 1)), 0, "SIGSTOP must not be blockable");
+    assert_eq!(
+        blocked & (1 << (SIGKILL - 1)),
+        0,
+        "SIGKILL must not be blockable"
+    );
+    assert_eq!(
+        blocked & (1 << (SIGSTOP - 1)),
+        0,
+        "SIGSTOP must not be blockable"
+    );
 
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
@@ -2078,7 +2217,7 @@ fn test_dispatch_rt_sigprocmask_block_strips_kill_stop() {
 /// process and returns `-EINTR`. SIGKILL/SIGSTOP must be stripped from
 /// the installed mask even if the user requests blocking them.
 fn test_dispatch_rt_sigsuspend_installs_mask_and_returns_eintr() {
-    use crate::userland::signal::{SIGKILL, SIGSTOP, SIGCHLD};
+    use crate::userland::signal::{SIGCHLD, SIGKILL, SIGSTOP};
     setup_phase2_active_user();
 
     // Pre-set an arbitrary "old" mask so we can confirm sigsuspend
@@ -2087,10 +2226,12 @@ fn test_dispatch_rt_sigsuspend_installs_mask_and_returns_eintr() {
         p.signal_state.blocked = 0xFFFF_FFFF_FFFF_FFFF;
     });
 
-    let new_mask: u64 =
-        (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1)) | (1u64 << (SIGCHLD - 1));
+    let new_mask: u64 = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1)) | (1u64 << (SIGCHLD - 1));
     let mask_ptr = &new_mask as *const u64 as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: mask_ptr, end: mask_ptr + 8 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: mask_ptr,
+        end: mask_ptr + 8,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::RT_SIGSUSPEND;
@@ -2162,19 +2303,16 @@ fn test_fork_child_exit_sets_sigchld_on_parent() {
     use crate::userland::signal::SIGCHLD;
     reset_active_user();
 
-    let aspace = crate::userland::address_space::AddressSpace::new()
-        .expect("AddressSpace::new");
-    unsafe { aspace.activate(); }
+    let aspace = crate::userland::address_space::AddressSpace::new().expect("AddressSpace::new");
+    unsafe {
+        aspace.activate();
+    }
 
     let bytes = fix::fork_then_wait_elf();
     let image = load_elf(&bytes).expect("load_elf");
-    let result = crate::userland::enter_user_mode_with_aspace(
-        image,
-        &["agenticos-app"],
-        &[],
-        Some(aspace),
-    )
-    .expect("enter_user_mode_with_aspace");
+    let result =
+        crate::userland::enter_user_mode_with_aspace(image, &["agenticos-app"], &[], Some(aspace))
+            .expect("enter_user_mode_with_aspace");
 
     // Parent process is still installed at this point — the run
     // command hasn't called release_active_image yet (we drive
@@ -2197,8 +2335,8 @@ fn test_fork_child_exit_sets_sigchld_on_parent() {
 /// `rt_sigsuspend` after `ls` crashed.
 fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
     use crate::userland::lifecycle::{
-        insert_process, notify_parent_of_exit, reap_zombie, remove_process, with_process,
-        Process, ExitKind,
+        insert_process, notify_parent_of_exit, reap_zombie, remove_process, with_process, ExitKind,
+        Process,
     };
     use crate::userland::signal::SIGCHLD;
 
@@ -2212,6 +2350,7 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         exit_kind: ExitKind::None,
         exit_code: 0,
         brk_current: 0,
+        brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         cwd: alloc::string::String::from("/"),
@@ -2279,19 +2418,16 @@ fn test_fork_post_resume_user_va_bounds_restored() {
     use crate::userland::lifecycle::ExitKind;
     reset_active_user();
 
-    let aspace = crate::userland::address_space::AddressSpace::new()
-        .expect("AddressSpace::new");
-    unsafe { aspace.activate(); }
+    let aspace = crate::userland::address_space::AddressSpace::new().expect("AddressSpace::new");
+    unsafe {
+        aspace.activate();
+    }
 
     let bytes = fix::fork_then_wait_with_status_elf();
     let image = load_elf(&bytes).expect("load_elf");
-    let result = crate::userland::enter_user_mode_with_aspace(
-        image,
-        &["agenticos-app"],
-        &[],
-        Some(aspace),
-    )
-    .expect("enter_user_mode_with_aspace");
+    let result =
+        crate::userland::enter_user_mode_with_aspace(image, &["agenticos-app"], &[], Some(aspace))
+            .expect("enter_user_mode_with_aspace");
 
     let _ = crate::userland::release_active_image();
 
@@ -2318,9 +2454,10 @@ fn test_signal_delivery_handler_runs() {
 
     reset_active_user();
 
-    let aspace = crate::userland::address_space::AddressSpace::new()
-        .expect("AddressSpace::new");
-    unsafe { aspace.activate(); }
+    let aspace = crate::userland::address_space::AddressSpace::new().expect("AddressSpace::new");
+    unsafe {
+        aspace.activate();
+    }
 
     let (bytes, handler_offset) = fix::signal_delivery_handler_exits_elf();
     let image = load_elf(&bytes).expect("load_elf");
@@ -2343,13 +2480,9 @@ fn test_signal_delivery_handler_runs() {
         },
     );
 
-    let result = crate::userland::enter_user_mode_with_aspace(
-        image,
-        &["agenticos-app"],
-        &[],
-        Some(aspace),
-    )
-    .expect("enter_user_mode_with_aspace");
+    let result =
+        crate::userland::enter_user_mode_with_aspace(image, &["agenticos-app"], &[], Some(aspace))
+            .expect("enter_user_mode_with_aspace");
     let _ = crate::userland::release_active_image();
 
     assert!(matches!(result.0, ExitKind::Cooperative));
@@ -2511,23 +2644,24 @@ fn test_fork_execve_badpath_returns_to_parent() {
     use crate::userland::lifecycle::ExitKind;
     reset_active_user();
 
-    let aspace = crate::userland::address_space::AddressSpace::new()
-        .expect("AddressSpace::new");
-    unsafe { aspace.activate(); }
+    let aspace = crate::userland::address_space::AddressSpace::new().expect("AddressSpace::new");
+    unsafe {
+        aspace.activate();
+    }
 
     let bytes = fix::fork_execve_badpath_elf();
     let image = load_elf(&bytes).expect("load_elf");
-    let result = crate::userland::enter_user_mode_with_aspace(
-        image,
-        &["agenticos-app"],
-        &[],
-        Some(aspace),
-    )
-    .expect("enter_user_mode_with_aspace");
+    let result =
+        crate::userland::enter_user_mode_with_aspace(image, &["agenticos-app"], &[], Some(aspace))
+            .expect("enter_user_mode_with_aspace");
     let _ = crate::userland::release_active_image();
 
     assert!(matches!(result.0, ExitKind::Cooperative));
-    assert_eq!(result.1, 11, "parent's final exit code should be 11, got {}", result.1);
+    assert_eq!(
+        result.1, 11,
+        "parent's final exit code should be 11, got {}",
+        result.1
+    );
 }
 
 // ---------- Phase 4 PR-C2: fork + wait4 round trip ----------
@@ -2553,48 +2687,50 @@ fn test_fork_then_wait_returns_to_parent() {
     let aspace = crate::userland::address_space::AddressSpace::new()
         .expect("AddressSpace::new for fork fixture");
     // SAFETY: kernel half copied — kernel code post-CR3-write mapped.
-    unsafe { aspace.activate(); }
+    unsafe {
+        aspace.activate();
+    }
 
     let bytes = fix::fork_then_wait_elf();
     let image = load_elf(&bytes).expect("load_elf");
-    let result = crate::userland::enter_user_mode_with_aspace(
-        image,
-        &["agenticos-app"],
-        &[],
-        Some(aspace),
-    )
-    .expect("enter_user_mode_with_aspace");
+    let result =
+        crate::userland::enter_user_mode_with_aspace(image, &["agenticos-app"], &[], Some(aspace))
+            .expect("enter_user_mode_with_aspace");
     let _ = crate::userland::release_active_image();
 
     assert!(matches!(result.0, ExitKind::Cooperative));
-    assert_eq!(result.1, 7, "parent's final exit code should be 7, got {}", result.1);
+    assert_eq!(
+        result.1, 7,
+        "parent's final exit code should be 7, got {}",
+        result.1
+    );
 }
 
 // ---------- Phase 4 PR-C: AddressSpace clone (foundation for fork) ----------
 
-/// `AddressSpace::clone_for_child` produces a child L4 that:
-/// - is distinct from both kernel L4 and parent L4,
-/// - has PML4[0] populated (parent had user pages),
-/// - decouples leaf data: writes to a child page don't bleed into the
-///   parent's matching page.
+/// `AddressSpace::clone_for_child` shares resident leaves read-only and
+/// marks writable mappings COW. Resolving the child's first write must
+/// allocate private backing without changing the parent's contents.
 ///
 /// Drives the clone path on the active user L4 — we activate a parent
 /// address space, map a single page, write a magic byte pattern, then
 /// clone. After switching to the child, the same VA reads the magic;
 /// after switching back to parent and overwriting, switching to the
 /// child again reads the original magic (independent backing).
-fn test_address_space_clone_for_child_eager_copies_pages() {
-    use crate::mm::paging::{UserPerms, USER_LOAD_BASE};
+fn test_address_space_clone_for_child_uses_cow() {
+    use crate::mm::paging::{CowOutcome, UserPerms, USER_LOAD_BASE};
     use crate::userland::address_space::AddressSpace;
+    use x86_64::structures::paging::PageTableFlags;
     use x86_64::registers::control::Cr3;
     use x86_64::VirtAddr;
 
-    let kernel_frame =
-        crate::mm::paging::kernel_l4_frame().expect("kernel L4 captured at boot");
+    let kernel_frame = crate::mm::paging::kernel_l4_frame().expect("kernel L4 captured at boot");
 
     let parent = AddressSpace::new().expect("parent AddressSpace::new");
     // SAFETY: kernel half copied — kernel code post-CR3-write is mapped.
-    unsafe { parent.activate(); }
+    unsafe {
+        parent.activate();
+    }
 
     // Map one user page in the parent and write a magic value.
     crate::mm::memory::with_memory_mapper(|m| {
@@ -2602,27 +2738,62 @@ fn test_address_space_clone_for_child_eager_copies_pages() {
             .expect("parent map");
     });
     let parent_va = USER_LOAD_BASE as *mut u32;
-    unsafe { core::ptr::write_volatile(parent_va, 0xAABB_CCDD); }
+    unsafe {
+        core::ptr::write_volatile(parent_va, 0xAABB_CCDD);
+    }
 
     // Build the child by cloning the parent's L4. Stay on parent's L4
     // for the clone walk — `clone_for_child` reads parent's tables.
-    let child = AddressSpace::clone_for_child(parent.l4_frame())
-        .expect("clone_for_child");
+    let child = AddressSpace::clone_for_child(parent.l4_frame()).expect("clone_for_child");
     assert_ne!(child.l4_frame(), parent.l4_frame());
     assert_ne!(child.l4_frame(), kernel_frame);
 
-    // Activate the child. The cloned page should read the magic value.
-    unsafe { child.activate(); }
+    let (parent_frame, parent_flags) = crate::mm::memory::with_memory_mapper(|m| {
+        m.leaf_info(parent.l4_frame(), VirtAddr::new(USER_LOAD_BASE))
+            .expect("parent leaf")
+    })
+    .expect("memory mapper");
+    let (child_frame, child_flags) = crate::mm::memory::with_memory_mapper(|m| {
+        m.leaf_info(child.l4_frame(), VirtAddr::new(USER_LOAD_BASE))
+            .expect("child leaf")
+    })
+    .expect("memory mapper");
+    assert_eq!(parent_frame, child_frame, "fork must initially share backing");
+    assert!(parent_flags.contains(PageTableFlags::BIT_9));
+    assert!(child_flags.contains(PageTableFlags::BIT_9));
+    assert!(!parent_flags.contains(PageTableFlags::WRITABLE));
+    assert!(!child_flags.contains(PageTableFlags::WRITABLE));
+    assert_eq!(
+        crate::mm::memory::with_memory_mapper(|m| m.frame_refcount(parent_frame))
+            .expect("memory mapper"),
+        Some(2)
+    );
+
+    // Activate the child. The shared page should read the magic value.
+    unsafe {
+        child.activate();
+    }
     let child_val = unsafe { core::ptr::read_volatile(parent_va) };
     assert_eq!(child_val, 0xAABB_CCDD, "child must inherit parent's data");
 
-    // Modify child's page; check parent's page is unchanged.
-    unsafe { core::ptr::write_volatile(parent_va, 0x1111_2222); }
-    unsafe { parent.activate(); }
+    // Simulate the child's write fault, then modify its now-private page.
+    assert_eq!(
+        crate::mm::memory::with_memory_mapper(|m| {
+            m.resolve_cow(child.l4_frame(), VirtAddr::new(USER_LOAD_BASE))
+        })
+        .expect("memory mapper"),
+        CowOutcome::Copied
+    );
+    unsafe {
+        core::ptr::write_volatile(parent_va, 0x1111_2222);
+    }
+    unsafe {
+        parent.activate();
+    }
     let parent_val = unsafe { core::ptr::read_volatile(parent_va) };
     assert_eq!(
         parent_val, 0xAABB_CCDD,
-        "parent must not see child's writes (eager copy isolated them)"
+        "parent must not see child's writes after COW resolution"
     );
 
     // Cleanup: drop both address spaces. Drop reverts CR3 to kernel L4.
@@ -2649,9 +2820,8 @@ fn test_getpid_returns_real_pid() {
     // ring-3 path mirrors the kernel-side current_pid).
     let bytes = fix::hello_exit0_elf();
     let image = load_elf(&bytes).expect("load_elf");
-    let _result =
-        crate::userland::enter_user_mode_with(image, &["agenticos-app"], &[])
-            .expect("enter_user_mode_with");
+    let _result = crate::userland::enter_user_mode_with(image, &["agenticos-app"], &[])
+        .expect("enter_user_mode_with");
     // The active-user slot still carries the PID until release.
     let pid_after = crate::userland::lifecycle::with_current_process(|p| p.pid);
     assert!(pid_after >= 1, "expected ≥1, got {}", pid_after);
@@ -2681,7 +2851,12 @@ fn test_pid_allocation_is_monotonic() {
     let pid2 = crate::userland::lifecycle::with_current_process(|p| p.pid);
     let _ = crate::userland::release_active_image();
 
-    assert!(pid2 > pid1, "PIDs must be monotonic: pid1={} pid2={}", pid1, pid2);
+    assert!(
+        pid2 > pid1,
+        "PIDs must be monotonic: pid1={} pid2={}",
+        pid1,
+        pid2
+    );
 }
 
 /// `getppid()` returns 0 (kernel sentinel) for binaries launched by
@@ -2692,8 +2867,7 @@ fn test_getppid_returns_kernel_sentinel() {
     let image = load_elf(&bytes).expect("load_elf");
     let _ = crate::userland::enter_user_mode_with(image, &["agenticos-app"], &[])
         .expect("enter_user_mode_with");
-    let parent_pid =
-        crate::userland::lifecycle::with_current_process(|p| p.parent_pid);
+    let parent_pid = crate::userland::lifecycle::with_current_process(|p| p.parent_pid);
     assert_eq!(parent_pid, 0);
     let _ = crate::userland::release_active_image();
 }
@@ -2716,7 +2890,10 @@ fn test_dispatch_ioctl_tcgets_returns_termios() {
 
     let buf = [0u8; 36];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + buf.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + buf.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::IOCTL;
@@ -2752,7 +2929,10 @@ fn test_dispatch_ioctl_tcsets_updates_termios() {
     let _ = (&mut buf, 0u32);
 
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + buf.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + buf.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::IOCTL;
@@ -2785,7 +2965,10 @@ fn test_dispatch_ioctl_on_file_returns_enotty() {
     }
     let path = b"/host\0";
     let pp = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: pp, end: pp + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: pp,
+        end: pp + path.len() as u64,
+    });
     let mut args = SyscallArgs::default();
     args.rax = nr::OPEN;
     args.rdi = pp;
@@ -2796,7 +2979,10 @@ fn test_dispatch_ioctl_on_file_returns_enotty() {
 
     let buf = [0u8; 36];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + buf.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + buf.len() as u64,
+    });
     let mut args = SyscallArgs::default();
     args.rax = nr::IOCTL;
     args.rdi = fd as u64;
@@ -2812,7 +2998,10 @@ fn test_dispatch_ioctl_tiocgwinsz_returns_80x24() {
     setup_phase2_active_user();
     let buf = [0u8; 8];
     let ptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + buf.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + buf.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::IOCTL;
@@ -2872,7 +3061,10 @@ fn test_dispatch_open_host_directory_succeeds() {
     setup_phase2_active_user();
     let path = b"/host\0";
     let ptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: ptr, end: ptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
 
     let mut args = SyscallArgs::default();
     args.rax = nr::OPEN;
@@ -2902,7 +3094,10 @@ fn test_dispatch_read_on_directory_returns_eisdir() {
 
     let path = b"/host\0";
     let pptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: pptr, end: pptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: pptr,
+        end: pptr + path.len() as u64,
+    });
     let mut args = SyscallArgs::default();
     args.rax = nr::OPEN;
     args.rdi = pptr;
@@ -2913,7 +3108,10 @@ fn test_dispatch_read_on_directory_returns_eisdir() {
 
     let buf = [0u8; 64];
     let bptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: bptr, end: bptr + 64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: bptr,
+        end: bptr + 64,
+    });
     let mut args = SyscallArgs::default();
     args.rax = nr::READ;
     args.rdi = fd as u64;
@@ -2937,7 +3135,10 @@ fn test_dispatch_getdents64_emits_records() {
     // open
     let path = b"/host\0";
     let pptr = path.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: pptr, end: pptr + path.len() as u64 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: pptr,
+        end: pptr + path.len() as u64,
+    });
     let mut args = SyscallArgs::default();
     args.rax = nr::OPEN;
     args.rdi = pptr;
@@ -2949,14 +3150,21 @@ fn test_dispatch_getdents64_emits_records() {
     // getdents64
     let buf = [0u8; 1024];
     let bptr = buf.as_ptr() as u64;
-    abi::set_user_va_bounds(UserVaBounds { start: bptr, end: bptr + 1024 });
+    abi::set_user_va_bounds(UserVaBounds {
+        start: bptr,
+        end: bptr + 1024,
+    });
     let mut args = SyscallArgs::default();
     args.rax = nr::GETDENTS64;
     args.rdi = fd as u64;
     args.rsi = bptr;
     args.rdx = 1024;
     let written = syscall_dispatch(&mut args);
-    assert!(written > 0, "getdents64 should emit at least one record, got {}", written);
+    assert!(
+        written > 0,
+        "getdents64 should emit at least one record, got {}",
+        written
+    );
 
     // Walk the records: first u64 is d_ino (should be non-zero), bytes
     // 16/17 are reclen (LE u16), 18 is d_type, name starts at 19.
@@ -2966,7 +3174,12 @@ fn test_dispatch_getdents64_emits_records() {
         let reclen_bytes: [u8; 2] = buf[off + 16..off + 18].try_into().unwrap();
         let reclen = u16::from_ne_bytes(reclen_bytes) as usize;
         assert!(reclen > 19 && reclen <= written as usize - off);
-        assert_eq!(reclen % 8, 0, "reclen must be 8-byte aligned, got {}", reclen);
+        assert_eq!(
+            reclen % 8,
+            0,
+            "reclen must be 8-byte aligned, got {}",
+            reclen
+        );
         // d_ino non-zero
         let ino_bytes: [u8; 8] = buf[off..off + 8].try_into().unwrap();
         assert_ne!(u64::from_ne_bytes(ino_bytes), 0, "d_ino must be non-zero");
@@ -3020,8 +3233,11 @@ fn test_write_handler_non_utf8_returns_full_len() {
     args.rsi = ptr;
     args.rdx = buf.len() as u64;
     let ret = syscall_dispatch(&mut args);
-    assert_eq!(ret, buf.len() as i64,
-        "write must accept the full slice even with non-UTF-8 bytes");
+    assert_eq!(
+        ret,
+        buf.len() as i64,
+        "write must accept the full slice even with non-UTF-8 bytes"
+    );
 
     abi::clear_user_va_bounds();
     clear_streams_after_dispatcher_test();
@@ -3056,9 +3272,13 @@ fn test_run_leak_loop_fault() {
         reset_active_user();
         let bytes = fix::fault_ud_elf();
         let image = load_elf(&bytes).expect("load_elf in fault leak loop");
-        let result = crate::userland::enter_user_mode(image).expect("enter_user_mode in fault leak loop");
+        let result =
+            crate::userland::enter_user_mode(image).expect("enter_user_mode in fault leak loop");
         let _ = crate::userland::release_active_image();
-        assert!(matches!(result.0, crate::userland::lifecycle::ExitKind::Abnormal { .. }));
+        assert!(matches!(
+            result.0,
+            crate::userland::lifecycle::ExitKind::Abnormal { .. }
+        ));
     }
 }
 
@@ -3084,7 +3304,11 @@ fn test_handler_blocked_mask_preserves_old_bits() {
 
     let old = 1u64 << (SIGHUP - 1);
     let m = handler_blocked_mask(old, 1u64 << (SIGUSR2 - 1), SIGUSR1);
-    assert_ne!(m & (1u64 << (SIGHUP - 1)), 0, "pre-existing block must persist");
+    assert_ne!(
+        m & (1u64 << (SIGHUP - 1)),
+        0,
+        "pre-existing block must persist"
+    );
     assert_ne!(m & (1u64 << (SIGUSR1 - 1)), 0);
     assert_ne!(m & (1u64 << (SIGUSR2 - 1)), 0);
 }
@@ -3097,8 +3321,16 @@ fn test_handler_blocked_mask_strips_kill_and_stop() {
 
     let evil_sa_mask = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
     let m = handler_blocked_mask(0, evil_sa_mask, SIGUSR1);
-    assert_eq!(m & (1u64 << (SIGKILL - 1)), 0, "SIGKILL must not be blocked");
-    assert_eq!(m & (1u64 << (SIGSTOP - 1)), 0, "SIGSTOP must not be blocked");
+    assert_eq!(
+        m & (1u64 << (SIGKILL - 1)),
+        0,
+        "SIGKILL must not be blocked"
+    );
+    assert_eq!(
+        m & (1u64 << (SIGSTOP - 1)),
+        0,
+        "SIGSTOP must not be blocked"
+    );
     assert_ne!(m & (1u64 << (SIGUSR1 - 1)), 0, "signum bit still added");
 }
 
@@ -3143,11 +3375,13 @@ fn test_maybe_deliver_signal_installs_handler_mask() {
         Some((sig, action, old_blocked))
     });
 
-    let (sig, action, old_blocked) =
-        prepared.expect("a deliverable signal was queued");
+    let (sig, action, old_blocked) = prepared.expect("a deliverable signal was queued");
     assert_eq!(sig, SIGUSR1);
     assert_eq!(action.sa_handler, 0xDEAD_BEEF);
-    assert_eq!(old_blocked, 0, "saved blocked must be the pre-install value");
+    assert_eq!(
+        old_blocked, 0,
+        "saved blocked must be the pre-install value"
+    );
 
     with_current_process(|p| {
         // Handler mask installed.
@@ -3160,7 +3394,10 @@ fn test_maybe_deliver_signal_installs_handler_mask() {
         p.signal_state.blocked = old_blocked;
     });
     with_current_process(|p| {
-        assert_eq!(p.signal_state.blocked, 0, "restore returns to pre-delivery mask");
+        assert_eq!(
+            p.signal_state.blocked, 0,
+            "restore returns to pre-delivery mask"
+        );
     });
 
     // Cleanup: reset the action and Process state.
@@ -3175,12 +3412,7 @@ fn test_maybe_deliver_signal_installs_handler_mask() {
 
 /// Helper: drop into Process and stage a stack window. Returns the
 /// snapshot so the caller can restore after the test.
-fn stage_stack_window(
-    top: u64,
-    bottom: u64,
-    floor: u64,
-    budget: u64,
-) -> (u64, u64, u64, u64, u64) {
+fn stage_stack_window(top: u64, bottom: u64, floor: u64, budget: u64) -> (u64, u64, u64, u64, u64) {
     use crate::userland::lifecycle::with_current_process;
     with_current_process(|p| {
         let snap = (
@@ -3214,9 +3446,7 @@ fn restore_stack_window(snap: (u64, u64, u64, u64, u64)) {
 /// with budget remaining, returns `Grew` and updates stack_bottom.
 fn test_try_grow_user_stack_grew() {
     use crate::mm::paging::USER_STACK_TOP;
-    use crate::userland::lifecycle::{
-        try_grow_user_stack, with_current_process, GrowOutcome,
-    };
+    use crate::userland::lifecycle::{try_grow_user_stack, with_current_process, GrowOutcome};
     use x86_64::VirtAddr;
 
     let top = USER_STACK_TOP;
@@ -3249,9 +3479,7 @@ fn test_try_grow_user_stack_grew() {
     });
 
     // Cleanup: unmap the grown stack.
-    crate::userland::lifecycle::with_current_process(
-        crate::userland::lifecycle::unmap_user_stack,
-    );
+    crate::userland::lifecycle::with_current_process(crate::userland::lifecycle::unmap_user_stack);
     restore_stack_window(snap);
 }
 
@@ -3259,9 +3487,7 @@ fn test_try_grow_user_stack_grew() {
 /// mutate stack_bottom or call the mapper.
 fn test_try_grow_user_stack_overflow_below_floor() {
     use crate::mm::paging::USER_STACK_TOP;
-    use crate::userland::lifecycle::{
-        try_grow_user_stack, with_current_process, GrowOutcome,
-    };
+    use crate::userland::lifecycle::{try_grow_user_stack, with_current_process, GrowOutcome};
     use x86_64::VirtAddr;
 
     let top = USER_STACK_TOP;
@@ -3286,9 +3512,7 @@ fn test_try_grow_user_stack_overflow_below_floor() {
 /// `BudgetExhausted` and does not call the mapper.
 fn test_try_grow_user_stack_budget_exhausted() {
     use crate::mm::paging::USER_STACK_TOP;
-    use crate::userland::lifecycle::{
-        try_grow_user_stack, with_current_process, GrowOutcome,
-    };
+    use crate::userland::lifecycle::{try_grow_user_stack, with_current_process, GrowOutcome};
     use x86_64::VirtAddr;
 
     let top = USER_STACK_TOP;
@@ -3297,7 +3521,10 @@ fn test_try_grow_user_stack_budget_exhausted() {
     let snap = stage_stack_window(top, bottom, floor, 0);
 
     let fault_addr = VirtAddr::new(bottom - 0x800);
-    assert_eq!(try_grow_user_stack(fault_addr), GrowOutcome::BudgetExhausted);
+    assert_eq!(
+        try_grow_user_stack(fault_addr),
+        GrowOutcome::BudgetExhausted
+    );
 
     with_current_process(|p| {
         assert_eq!(p.stack_bottom, bottom);
@@ -3325,11 +3552,9 @@ fn test_try_grow_user_stack_fills_gap_above_bottom() {
     .unwrap()
     .unwrap();
     let gap_page = bottom + 0x2000;
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.unmap_user_region(VirtAddr::new(gap_page), 1)
-    })
-    .unwrap()
-    .unwrap();
+    crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(VirtAddr::new(gap_page), 1))
+        .unwrap()
+        .unwrap();
     let snap = stage_stack_window(top, bottom, floor, 100);
 
     assert_eq!(
@@ -3342,9 +3567,7 @@ fn test_try_grow_user_stack_fills_gap_above_bottom() {
         assert_eq!(p.growth_faults_remaining, 99);
     });
 
-    crate::userland::lifecycle::with_current_process(
-        crate::userland::lifecycle::unmap_user_stack,
-    );
+    crate::userland::lifecycle::with_current_process(crate::userland::lifecycle::unmap_user_stack);
     restore_stack_window(snap);
 }
 
@@ -3374,9 +3597,7 @@ fn test_try_grow_user_stack_rejects_mapped_and_out_of_range_pages() {
         GrowOutcome::NotStackGrow,
     );
 
-    crate::userland::lifecycle::with_current_process(
-        crate::userland::lifecycle::unmap_user_stack,
-    );
+    crate::userland::lifecycle::with_current_process(crate::userland::lifecycle::unmap_user_stack);
     restore_stack_window(snap);
 }
 
@@ -3402,12 +3623,9 @@ fn test_try_grow_user_stack_sentinel_is_not_stack_grow() {
 fn test_try_grow_user_stack_widens_validated_bounds() {
     use crate::mm::paging::USER_STACK_TOP;
     use crate::userland::abi::{
-        clear_user_va_bounds, set_user_va_bounds, user_va_bounds,
-        validate_user_slice, UserVaBounds,
+        clear_user_va_bounds, set_user_va_bounds, user_va_bounds, validate_user_slice, UserVaBounds,
     };
-    use crate::userland::lifecycle::{
-        try_grow_user_stack, with_current_process, GrowOutcome,
-    };
+    use crate::userland::lifecycle::{try_grow_user_stack, with_current_process, GrowOutcome};
     use x86_64::VirtAddr;
 
     let top = USER_STACK_TOP;
@@ -3453,8 +3671,8 @@ fn test_try_grow_user_stack_widens_validated_bounds() {
 /// initial commit bottom, and a full growth budget.
 fn test_install_new_process_populates_stack_window() {
     use crate::mm::paging::{
-        USER_BRK_BASE, USER_MMAP_BASE, USER_STACK_INITIAL_PAGES,
-        USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP,
+        USER_BRK_BASE, USER_MMAP_BASE, USER_STACK_INITIAL_PAGES, USER_STACK_MAX_GROWTH_PAGES,
+        USER_STACK_TOP,
     };
     use crate::userland::lifecycle::{install_new_process_opt, with_current_process};
 
@@ -3497,20 +3715,15 @@ fn test_install_new_process_populates_stack_window() {
 
 // --- U2: loader growth-floor + bounds_start + per-binary floor ---
 
-/// The per-binary floor (`highest_pt_load_end + 16-page guard`) is what
-/// caps stack growth in practice today — the global cap saturates at
-/// USER_LOAD_BASE because the 4 MiB user-VA slice is too small to host
-/// the intent-level 3 MiB cap. Once the user-VA layout is repartitioned,
-/// the global cap may bind for small binaries.
+/// A sufficiently high PT_LOAD makes its guard-derived floor bind more
+/// tightly than the global 64 MiB stack-growth cap.
 fn test_loader_per_binary_floor_from_pt_load_end() {
-    use crate::mm::paging::{
-        USER_STACK_GUARD_PAGES, USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP,
-    };
+    use crate::mm::paging::{USER_STACK_GUARD_PAGES, USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP};
 
-    // Global floor is `USER_STACK_TOP - 768*0x1000 = 0x50_0000`. Place
-    // the PT_LOAD so its end + 16-page guard exceeds the global cap and
-    // the per-binary floor binds.
-    let p_vaddr = 0x60_0000u64; // one page, ends at 0x60_1000
+    let global_floor = USER_STACK_TOP - USER_STACK_MAX_GROWTH_PAGES * 0x1000;
+    // Keep the segment below the initial stack while placing its guarded
+    // end above the global floor.
+    let p_vaddr = global_floor + 0x20_0000;
     let payload: alloc::vec::Vec<u8> = (0..16u8).collect();
     let p_offset = 0x1000u64;
     let phdr = fix::PhdrSpec {
@@ -3535,9 +3748,8 @@ fn test_loader_per_binary_floor_from_pt_load_end() {
     .build();
 
     let image = load_elf(&bytes).expect("load_elf per-binary floor");
-    let pt_load_end = 0x60_1000u64;
+    let pt_load_end = p_vaddr + 0x1000;
     let per_binary = pt_load_end + USER_STACK_GUARD_PAGES * 0x1000;
-    let global_floor = USER_STACK_TOP - USER_STACK_MAX_GROWTH_PAGES * 0x1000;
     assert!(per_binary > global_floor, "test premise broken");
     assert_eq!(image.stack_max_growth_floor, per_binary);
 }
@@ -3551,12 +3763,9 @@ fn test_loader_per_binary_floor_from_pt_load_end() {
 fn test_loader_rejects_binary_too_big_for_initial_stack() {
     use crate::mm::paging::{USER_STACK_GUARD_PAGES, USER_STACK_INITIAL_PAGES, USER_STACK_TOP};
 
-    // PT_LOAD ending at 0x7F_F000 forces floor = 0x7F_F000 + 16*0x1000
-    // = 0x80_F000 > USER_STACK_TOP, which is also > initial_stack_bottom
-    // (0x7F_8000). Loader must refuse.
     let initial_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 0x1000;
-    let p_vaddr = 0x7F_E000u64; // 1 page, ends at 0x7F_F000
-    let projected_floor = 0x7F_F000u64 + USER_STACK_GUARD_PAGES * 0x1000;
+    let p_vaddr = initial_bottom - USER_STACK_GUARD_PAGES * 0x1000;
+    let projected_floor = p_vaddr + 0x1000 + USER_STACK_GUARD_PAGES * 0x1000;
     assert!(projected_floor > initial_bottom, "test premise broken");
 
     let payload: alloc::vec::Vec<u8> = (0..16u8).collect();
@@ -3762,15 +3971,15 @@ fn test_fpu_state_fresh_has_default_mxcsr() {
 /// This is the load-bearing proof for U4 — without it, ring-3 switches
 /// would silently corrupt the XMM register file across processes.
 fn test_fpu_save_restore_preserves_xmm0() {
-    use crate::arch::x86_64::fpu::{save_fpu, restore_fpu, FpuState};
+    use crate::arch::x86_64::fpu::{restore_fpu, save_fpu, FpuState};
 
     // The kernel is built with `+soft-float` so Rust codegen never
     // touches XMM. We use inline asm with memory operands to stage and
     // observe register values — `movdqu` doesn't need the operand
     // aligned, which keeps the test self-contained.
     let pattern: [u8; 16] = [
-        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-        0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE,
+        0xF0,
     ];
     let mut readback: [u8; 16] = [0; 16];
 
@@ -3818,7 +4027,7 @@ fn test_fpu_save_restore_preserves_xmm0() {
 /// verifies the original value is back.
 fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
     use crate::userland::lifecycle::{
-        save_user_cpu_state, restore_user_cpu_state, Process, ExitKind,
+        restore_user_cpu_state, save_user_cpu_state, ExitKind, Process,
     };
 
     let saved_original = crate::arch::x86_64::msr::read_fs_base();
@@ -3830,6 +4039,7 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         exit_kind: ExitKind::None,
         exit_code: 0,
         brk_current: 0,
+        brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         cwd: alloc::string::String::from("/"),
@@ -3878,7 +4088,7 @@ fn test_has_children_returns_false_when_no_children() {
 
 /// has_children returns true when a child Process is in the table.
 fn test_has_children_sees_live_child() {
-    use crate::userland::lifecycle::{insert_process, remove_process, Process, ExitKind};
+    use crate::userland::lifecycle::{insert_process, remove_process, ExitKind, Process};
     let child = Process {
         pid: 8001,
         parent_pid: 8000,
@@ -3886,6 +4096,7 @@ fn test_has_children_sees_live_child() {
         exit_kind: ExitKind::None,
         exit_code: 0,
         brk_current: 0,
+        brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         cwd: alloc::string::String::from("/"),
@@ -3912,7 +4123,7 @@ fn test_has_children_sees_live_child() {
 /// has_children returns true when a zombie is filed for me. Cleanup
 /// drains the zombie so subsequent tests aren't affected.
 fn test_has_children_sees_zombie_child() {
-    use crate::userland::lifecycle::{record_zombie, reap_zombie};
+    use crate::userland::lifecycle::{reap_zombie, record_zombie};
     record_zombie(8101, 8100, 0);
     assert!(crate::userland::lifecycle::has_children(8100));
     let _ = reap_zombie(8101, 8100);
@@ -4028,6 +4239,7 @@ fn test_remove_process_cleans_ring3_queues() {
         exit_kind: crate::userland::lifecycle::ExitKind::None,
         exit_code: 0,
         brk_current: 0,
+        brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         cwd: alloc::string::String::from("/"),
@@ -4052,6 +4264,7 @@ fn test_remove_process_cleans_ring3_queues() {
         exit_kind: crate::userland::lifecycle::ExitKind::None,
         exit_code: 0,
         brk_current: 0,
+        brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         cwd: alloc::string::String::from("/"),
@@ -4270,8 +4483,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         // Phase 4 PR-B: per-process address spaces
         &test_address_space_new_kernel_half_shared,
         &test_address_space_drop_restores_kernel_cr3,
+        &test_address_space_drop_reclaims_leaf_and_all_table_levels,
         // Phase 4 PR-C: clone for fork
-        &test_address_space_clone_for_child_eager_copies_pages,
+        &test_address_space_clone_for_child_uses_cow,
         // Phase 4 PR-C2: fork + wait4
         &test_fork_then_wait_returns_to_parent,
         // Phase 4 PR-D: execve (negative path)

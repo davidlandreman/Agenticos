@@ -30,12 +30,14 @@ use core::mem::size_of;
 use x86_64::VirtAddr;
 
 use crate::mm::paging::{
-    UserPerms, USER_BRK_BASE, USER_LOAD_BASE, USER_MMAP_BASE, USER_STACK_GUARD_PAGES,
+    UserPerms, USER_LOAD_BASE, USER_MMAP_BASE, USER_STACK_GUARD_PAGES,
     USER_STACK_INITIAL_PAGES, USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP, USER_TCB_VA,
     USER_TLS_IMAGE_VA, USER_VA_RANGE_END, USER_VA_RANGE_START,
 };
 use crate::userland::error::LoaderError;
 use crate::userland::image::UserImage;
+use crate::fs::File;
+use crate::lib::arc::Arc;
 
 // ---------- ELF64 constants ----------
 
@@ -235,6 +237,17 @@ struct ParsedPtTls {
 /// image is dropped — its `Drop` unmaps anything that was already installed,
 /// so kernel page-table state is unchanged from before the call.
 pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
+    load_elf_impl(bytes, None)
+}
+
+/// Production sparse loader. Parsing still uses a bounded kernel byte buffer,
+/// while PT_LOAD contents remain backed by the retained file and page in on
+/// first access.
+pub fn load_elf_file(bytes: &[u8], file: Arc<File>) -> Result<UserImage, LoaderError> {
+    load_elf_impl(bytes, Some(file))
+}
+
+fn load_elf_impl(bytes: &[u8], backing_file: Option<Arc<File>>) -> Result<UserImage, LoaderError> {
     // ---- Phase 1: validate ----
     // Magic-bytes check first so a 4-byte "XXXX" returns BadMagic instead of
     // the more generic Truncated.
@@ -294,13 +307,8 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
     // and PT_LOAD-spill checks below must use it (not the initial
     // commit bottom).
     //
-    // The global cap (`USER_STACK_MAX_GROWTH_PAGES`) expresses *intent*
-    // — "if the binary leaves room, we'd allow up to this much stack."
-    // The user-VA slice (`USER_LOAD_BASE..USER_STACK_TOP`) is only 4
-    // MiB today, so `USER_STACK_TOP - cap*0x1000` can land below
-    // `USER_LOAD_BASE` (or underflow). We saturate at `USER_LOAD_BASE`;
-    // the per-binary floor below is the real enforcement when the
-    // saturation kicks in.
+    // The stack owns a 64 MiB sparse reservation below the canonical
+    // lower-half ceiling. Only the top eight pages are committed here.
     let highest_pt_load_end = pt_loads
         .iter()
         .map(|s| s.page_va + s.page_count * 0x1000)
@@ -331,12 +339,41 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
         return Err(LoaderError::VaOutOfRange);
     }
 
-    // bounds: union over PT_LOADs, the *initial* stack commit, and
-    // (when present) the TLS region. bounds_start tracks what is
-    // currently MAPPED so `validate_user_slice` never accepts a user
-    // pointer into an unmapped page. `try_grow_user_stack` (U4)
-    // widens bounds on every successful growth via
-    // `set_user_va_bounds`.
+    // Prefer the historical TLS addresses for compatibility, but move the
+    // two-page TLS/TCB block above a large PT_LOAD when those addresses are
+    // occupied. This keeps TLS collision-aware without introducing ASLR.
+    let tls_layout = if pt_tls.is_some() {
+        let fixed_end = USER_TCB_VA + 0x1000;
+        let fixed_free = pt_loads.iter().all(|segment| {
+            let segment_end = segment.page_va + segment.page_count * 0x1000;
+            segment_end <= USER_TLS_IMAGE_VA || segment.page_va >= fixed_end
+        });
+        let tls_image_va = if fixed_free {
+            USER_TLS_IMAGE_VA
+        } else {
+            highest_pt_load_end
+                .checked_add(0x1fff)
+                .map(|value| value & !0xfff)
+                .ok_or(LoaderError::VaOutOfRange)?
+        };
+        let tcb_va = tls_image_va
+            .checked_add(0x1000)
+            .ok_or(LoaderError::VaOutOfRange)?;
+        let tls_end = tcb_va
+            .checked_add(0x1000)
+            .ok_or(LoaderError::VaOutOfRange)?;
+        crate::userland::vm::validate_range(tls_image_va, tls_end)
+            .map_err(|_| LoaderError::VaOutOfRange)?;
+        if tls_end > stack_max_growth_floor {
+            return Err(LoaderError::VaOutOfRange);
+        }
+        Some((tls_image_va, tcb_va, tls_end))
+    } else {
+        None
+    };
+
+    // Legacy bounds remain for kernel-only fixtures. Production pointer
+    // validation uses the AddressSpace VMA set.
     let mut bounds_start = pt_loads
         .iter()
         .map(|s| s.page_va)
@@ -349,15 +386,18 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
         .max()
         .unwrap_or(USER_LOAD_BASE)
         .max(USER_STACK_TOP);
-    if pt_tls.is_some() {
-        bounds_start = bounds_start.min(USER_TLS_IMAGE_VA);
-        bounds_end = bounds_end.max(USER_TCB_VA + 0x1000);
+    if let Some((tls_image_va, _, tls_end)) = tls_layout {
+        bounds_start = bounds_start.min(tls_image_va);
+        bounds_end = bounds_end.max(tls_end);
     }
-    // Reserve brk + mmap arena VA space in the bounds so user pointers
-    // returned by `mmap` and reads from the brk region pass
-    // `validate_user_slice`. Mappings here are demand-allocated by the
-    // syscall handlers, but the bounds reflect the reachable region.
-    bounds_start = bounds_start.min(USER_BRK_BASE);
+    // Derive brk from the image end rather than a fixed 32 MiB address.
+    let brk_base = tls_layout
+        .map(|(_, _, tls_end)| highest_pt_load_end.max(tls_end))
+        .unwrap_or(highest_pt_load_end)
+        .checked_add(1024 * 1024)
+        .map(|value| (value + 0xfff) & !0xfff)
+        .ok_or(LoaderError::VaOutOfRange)?;
+    bounds_start = bounds_start.min(brk_base);
     bounds_end = bounds_end.max(USER_VA_RANGE_END);
     let _ = USER_MMAP_BASE;
 
@@ -368,6 +408,7 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
         bounds_end,
     );
     image.set_stack_window(initial_stack_bottom, stack_max_growth_floor);
+    image.set_brk_base(brk_base);
 
     // Capture the raw phdr bytes for the initial-stack builder's AT_PHDR.
     // Bounds were already validated against bytes.len() above.
@@ -379,6 +420,30 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
     for seg in &pt_loads {
         let perms = perms_for_p_flags(seg.p_flags);
 
+        if let Some(file) = backing_file.as_ref() {
+            // Keep construction metadata for VMA creation, but install no
+            // leaf. ELF p_offset/p_vaddr congruence makes this aligned file
+            // window include any leading partial-page bytes.
+            let file_offset = seg
+                .p_offset
+                .checked_sub(seg.head_pad)
+                .ok_or(LoaderError::AlignmentBad)?;
+            let file_len = seg
+                .head_pad
+                .checked_add(seg.p_filesz)
+                .ok_or(LoaderError::SegmentOverflow)?;
+            let mapped_len = seg.page_count * 0x1000;
+            image.record_mapping_with_perms(VirtAddr::new(seg.page_va), seg.page_count, perms);
+            image.record_elf_backing(
+                seg.page_va,
+                file.clone(),
+                file_offset,
+                file_len,
+                mapped_len.saturating_sub(file_len),
+            );
+            continue;
+        }
+
         // Map the segment's pages.
         crate::mm::memory::with_memory_mapper(|m| {
             m.map_user_region(VirtAddr::new(seg.page_va), seg.page_count, perms)
@@ -387,7 +452,7 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
         .map_err(LoaderError::from)?;
 
         // Record before copy so a failure between map and copy still frees.
-        image.record_mapping(VirtAddr::new(seg.page_va), seg.page_count);
+        image.record_mapping_with_perms(VirtAddr::new(seg.page_va), seg.page_count, perms);
 
         // Copy file-backed bytes. `p_offset + p_filesz` was bounds-checked
         // in `parse_pt_load`. Writes go through the user-VA leaf even when
@@ -421,8 +486,8 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
     .map_err(LoaderError::from)?;
 
     // ---- Phase 2b: TLS image + TCB (when PT_TLS present) ----
-    if let Some(tls) = pt_tls {
-        install_tls(&mut image, &tls, bytes)?;
+    if let (Some(tls), Some((tls_image_va, tcb_va, _))) = (pt_tls, tls_layout) {
+        install_tls(&mut image, &tls, bytes, tls_image_va, tcb_va)?;
     }
 
     // ---- Phase 3: relocate ----
@@ -434,9 +499,18 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
 // ---------- PT_TLS parse + install ----------
 
 fn parse_pt_tls(ph: &Elf64Phdr, bytes: &[u8]) -> Result<ParsedPtTls, LoaderError> {
-    let p_offset = { let v = ph.p_offset; v };
-    let p_filesz = { let v = ph.p_filesz; v };
-    let p_memsz = { let v = ph.p_memsz; v };
+    let p_offset = {
+        let v = ph.p_offset;
+        v
+    };
+    let p_filesz = {
+        let v = ph.p_filesz;
+        v
+    };
+    let p_memsz = {
+        let v = ph.p_memsz;
+        v
+    };
 
     if p_memsz == 0 {
         return Err(LoaderError::TlsUnsupported);
@@ -456,7 +530,11 @@ fn parse_pt_tls(ph: &Elf64Phdr, bytes: &[u8]) -> Result<ParsedPtTls, LoaderError
     if end > bytes.len() as u64 {
         return Err(LoaderError::Truncated);
     }
-    Ok(ParsedPtTls { p_offset, p_filesz, p_memsz })
+    Ok(ParsedPtTls {
+        p_offset,
+        p_filesz,
+        p_memsz,
+    })
 }
 
 /// Allocate the per-process TLS image page and TCB page, copy tdata bytes,
@@ -465,38 +543,40 @@ fn parse_pt_tls(ph: &Elf64Phdr, bytes: &[u8]) -> Result<ParsedPtTls, LoaderError
 ///
 /// Layout (TLS variant II — x86-64 / TLS_BELOW_TP):
 /// ```text
-/// USER_TLS_IMAGE_VA              [tdata + tbss; bss zero-filled by map]
-/// USER_TCB_VA                    [TCB.self = USER_TCB_VA]
-/// USER_TCB_VA + 8                [TCB.dtv  = 0]
+/// tls_image_va                   [tdata + tbss; bss zero-filled by map]
+/// tcb_va                         [TCB.self = tcb_va]
+/// tcb_va + 8                     [TCB.dtv  = 0]
 /// ...                            zero-fill
 /// ```
 ///
-/// `FS_BASE = USER_TCB_VA`. `%fs:0` returns the TCB self-pointer; libstdc++
+/// `FS_BASE = tcb_va`. `%fs:0` returns the TCB self-pointer; libstdc++
 /// static binaries that don't traverse the dtv (the local-exec TLS model)
 /// run cleanly with a NULL dtv — see plan Key Technical Decisions.
 fn install_tls(
     image: &mut UserImage,
     tls: &ParsedPtTls,
     bytes: &[u8],
+    tls_image_va: u64,
+    tcb_va: u64,
 ) -> Result<(), LoaderError> {
     use crate::mm::memory;
 
     // Map TLS image page (R+W; tdata bytes get copied in via the kernel
     // alias of the freshly mapped frame).
     memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(USER_TLS_IMAGE_VA), 1, UserPerms::ReadWrite)
+        m.map_user_region(VirtAddr::new(tls_image_va), 1, UserPerms::ReadWrite)
     })
     .ok_or(LoaderError::OutOfFrames)?
     .map_err(LoaderError::from)?;
-    image.record_mapping(VirtAddr::new(USER_TLS_IMAGE_VA), 1);
+    image.record_mapping(VirtAddr::new(tls_image_va), 1);
 
     // Map TCB page.
     memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(USER_TCB_VA), 1, UserPerms::ReadWrite)
+        m.map_user_region(VirtAddr::new(tcb_va), 1, UserPerms::ReadWrite)
     })
     .ok_or(LoaderError::OutOfFrames)?
     .map_err(LoaderError::from)?;
-    image.record_mapping(VirtAddr::new(USER_TCB_VA), 1);
+    image.record_mapping(VirtAddr::new(tcb_va), 1);
 
     // Copy tdata bytes into the TLS image. tbss is already zero (fresh
     // mapping is zero-filled by `map_user_region`).
@@ -505,10 +585,8 @@ fn install_tls(
         // write goes through the user VA; bounds for the copy were
         // validated in parse_pt_tls. Source is `bytes[p_offset..]`.
         unsafe {
-            let src = bytes
-                .as_ptr()
-                .wrapping_add(tls.p_offset as usize);
-            let dst = USER_TLS_IMAGE_VA as *mut u8;
+            let src = bytes.as_ptr().wrapping_add(tls.p_offset as usize);
+            let dst = tls_image_va as *mut u8;
             core::ptr::copy_nonoverlapping(src, dst, tls.p_filesz as usize);
         }
     }
@@ -518,14 +596,14 @@ fn install_tls(
     // it). Stack canary at offset 0x28 is populated when AT_RANDOM lands
     // in U8 — for now zero is fine; nothing reads it before that.
     unsafe {
-        let tcb = USER_TCB_VA as *mut u64;
-        // Offset 0: self-pointer = USER_TCB_VA.
-        core::ptr::write_unaligned(tcb, USER_TCB_VA);
+        let tcb = tcb_va as *mut u64;
+        // Offset 0: self-pointer = FS_BASE.
+        core::ptr::write_unaligned(tcb, tcb_va);
         // Offset 8: dtv = NULL.
         core::ptr::write_unaligned(tcb.add(1), 0);
     }
 
-    image.set_tls_fs_base(VirtAddr::new(USER_TCB_VA));
+    image.set_tls_fs_base(VirtAddr::new(tcb_va));
     Ok(())
 }
 
@@ -535,13 +613,19 @@ fn validate_ehdr(ehdr: &Elf64Ehdr) -> Result<(), LoaderError> {
     if ehdr.e_ident[..4] != ELF_MAGIC {
         return Err(LoaderError::BadMagic);
     }
-    if ehdr.e_ident[EI_CLASS] != ELFCLASS64
-        || ehdr.e_ident[EI_DATA] != ELFDATA2LSB
-        || { let m = ehdr.e_machine; m } != EM_X86_64
+    if ehdr.e_ident[EI_CLASS] != ELFCLASS64 || ehdr.e_ident[EI_DATA] != ELFDATA2LSB || {
+        let m = ehdr.e_machine;
+        m
+    }
+        != EM_X86_64
     {
         return Err(LoaderError::WrongArch);
     }
-    if { let t = ehdr.e_type; t } != ET_EXEC {
+    if {
+        let t = ehdr.e_type;
+        t
+    } != ET_EXEC
+    {
         return Err(LoaderError::WrongType);
     }
     Ok(())
@@ -564,11 +648,15 @@ fn parse_pt_load(ph: &Elf64Phdr, bytes: &[u8]) -> Result<ParsedPtLoad, LoaderErr
     }
 
     // S5: file-extent and memory-extent overflow.
-    let file_end = p_offset.checked_add(p_filesz).ok_or(LoaderError::SegmentOverflow)?;
+    let file_end = p_offset
+        .checked_add(p_filesz)
+        .ok_or(LoaderError::SegmentOverflow)?;
     if file_end > bytes.len() as u64 {
         return Err(LoaderError::Truncated);
     }
-    let mem_end = p_vaddr.checked_add(p_memsz).ok_or(LoaderError::SegmentOverflow)?;
+    let mem_end = p_vaddr
+        .checked_add(p_memsz)
+        .ok_or(LoaderError::SegmentOverflow)?;
     if p_filesz > p_memsz {
         return Err(LoaderError::SegmentOverflow);
     }
@@ -585,7 +673,11 @@ fn parse_pt_load(ph: &Elf64Phdr, bytes: &[u8]) -> Result<ParsedPtLoad, LoaderErr
     // Range must lie inside the user VA window. The mapping API will
     // re-check, but bailing early here gives a more precise error.
     let region_end = page_va
-        .checked_add(page_count.checked_mul(0x1000).ok_or(LoaderError::SegmentOverflow)?)
+        .checked_add(
+            page_count
+                .checked_mul(0x1000)
+                .ok_or(LoaderError::SegmentOverflow)?,
+        )
         .ok_or(LoaderError::SegmentOverflow)?;
     if page_va < USER_VA_RANGE_START || region_end > USER_VA_RANGE_END {
         return Err(LoaderError::VaOutOfRange);
@@ -643,8 +735,8 @@ fn copy_segment_into_user_va(seg: &ParsedPtLoad, bytes: &[u8]) -> Result<(), Loa
     let p_filesz = seg.p_filesz as usize;
     let p_memsz = seg.p_memsz as usize;
 
-    let phys_offset = crate::mm::memory::get_physical_memory_offset()
-        .ok_or(LoaderError::OutOfFrames)?;
+    let phys_offset =
+        crate::mm::memory::get_physical_memory_offset().ok_or(LoaderError::OutOfFrames)?;
 
     // Iterate over each page in the segment's range, mapping through the
     // kernel's offset-based physical alias to stage bytes.
@@ -653,11 +745,10 @@ fn copy_segment_into_user_va(seg: &ParsedPtLoad, bytes: &[u8]) -> Result<(), Loa
     while consumed < total {
         let user_va = seg.p_vaddr + consumed as u64;
         // Translate user VA -> phys -> kernel alias.
-        let phys = crate::mm::memory::with_memory_mapper(|m| {
-            m.translate_addr(VirtAddr::new(user_va))
-        })
-        .flatten()
-        .ok_or(LoaderError::OutOfFrames)?;
+        let phys =
+            crate::mm::memory::with_memory_mapper(|m| m.translate_addr(VirtAddr::new(user_va)))
+                .flatten()
+                .ok_or(LoaderError::OutOfFrames)?;
         let kalias = phys_offset + phys.as_u64();
 
         // Bytes available in this page from `user_va` to its page end.
@@ -679,11 +770,7 @@ fn copy_segment_into_user_va(seg: &ParsedPtLoad, bytes: &[u8]) -> Result<(), Loa
                 );
             }
             if zero_len > 0 {
-                core::ptr::write_bytes(
-                    (kalias + copy_len as u64) as *mut u8,
-                    0u8,
-                    zero_len,
-                );
+                core::ptr::write_bytes((kalias + copy_len as u64) as *mut u8, 0u8, zero_len);
             }
         }
         consumed += take;
@@ -794,10 +881,7 @@ fn apply_relocations(
     Ok(())
 }
 
-fn slice_section<'a>(
-    bytes: &'a [u8],
-    sh: &Elf64Shdr,
-) -> Result<&'a [u8], LoaderError> {
+fn slice_section<'a>(bytes: &'a [u8], sh: &Elf64Shdr) -> Result<&'a [u8], LoaderError> {
     let start = sh.sh_offset as usize;
     let len = sh.sh_size as usize;
     let end = start.checked_add(len).ok_or(LoaderError::Truncated)?;
@@ -825,13 +909,11 @@ fn validate_reloc_offset(r_off: u64, loads: &[ParsedPtLoad]) -> Result<(), Loade
 }
 
 fn patch_user_qword(user_va: u64, value: u64) -> Result<(), LoaderError> {
-    let phys = crate::mm::memory::with_memory_mapper(|m| {
-        m.translate_addr(VirtAddr::new(user_va))
-    })
-    .flatten()
-    .ok_or(LoaderError::BadRelocOffset)?;
-    let phys_offset = crate::mm::memory::get_physical_memory_offset()
-        .ok_or(LoaderError::OutOfFrames)?;
+    let phys = crate::mm::memory::with_memory_mapper(|m| m.translate_addr(VirtAddr::new(user_va)))
+        .flatten()
+        .ok_or(LoaderError::BadRelocOffset)?;
+    let phys_offset =
+        crate::mm::memory::get_physical_memory_offset().ok_or(LoaderError::OutOfFrames)?;
     let kalias = phys_offset + phys.as_u64();
     unsafe {
         core::ptr::write_unaligned(kalias as *mut u64, value);

@@ -353,6 +353,91 @@ impl<'a> FatFilesystem<'a> {
         
         Ok(file.size as usize)
     }
+
+    /// Read a bounded window without materializing the entire file. This is
+    /// the path used by demand-paged executable VMAs, where each page fault
+    /// requests only one 4 KiB window from a much larger ELF.
+    pub fn read_file_at(
+        &self,
+        file: &FileHandle,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> Result<usize, FatError> {
+        if file.is_directory {
+            return Err(FatError::InvalidPath);
+        }
+        if buffer.is_empty() || offset >= file.size as u64 {
+            return Ok(0);
+        }
+        if file.first_cluster.0 == 0 {
+            return Err(FatError::InvalidCluster);
+        }
+
+        let sector_size = self.bytes_per_sector as usize;
+        if sector_size == 0 || sector_size > 4096 {
+            return Err(FatError::InvalidBootSector);
+        }
+        let cluster_size = self.sectors_per_cluster as usize * sector_size;
+        let bytes_to_read = core::cmp::min(buffer.len(), file.size as usize - offset as usize);
+        let cluster_index = offset as usize / cluster_size;
+        let mut cluster_offset = offset as usize % cluster_size;
+
+        let mut boot_sector_data = [0u8; 512];
+        self.device
+            .read_blocks(0, 1, &mut boot_sector_data)
+            .map_err(|_| FatError::BlockDeviceError)?;
+        let boot_sector = BootSector::from_bytes(&boot_sector_data)?;
+        let fat_table = FatTable::new(self.device, boot_sector, self.fat_type);
+
+        let mut current = file.first_cluster;
+        for _ in 0..cluster_index {
+            if !current.is_valid(self.fat_type) || current.is_bad(self.fat_type) {
+                return Err(FatError::InvalidCluster);
+            }
+            current = fat_table.read_entry(current)?;
+            if current.is_end_of_chain(self.fat_type) {
+                return Err(FatError::EndOfChain);
+            }
+        }
+
+        let mut sector_buffer = [0u8; 4096];
+        let mut bytes_read = 0usize;
+        while bytes_read < bytes_to_read {
+            if !current.is_valid(self.fat_type) || current.is_bad(self.fat_type) {
+                return Err(FatError::InvalidCluster);
+            }
+
+            while cluster_offset < cluster_size && bytes_read < bytes_to_read {
+                let sector_in_cluster = cluster_offset / sector_size;
+                let offset_in_sector = cluster_offset % sector_size;
+                let sector = self.cluster_to_sector(current) + sector_in_cluster as u32;
+                self.device
+                    .read_blocks(sector as u64, 1, &mut sector_buffer[..sector_size])
+                    .map_err(|_| FatError::BlockDeviceError)?;
+
+                let take = core::cmp::min(
+                    sector_size - offset_in_sector,
+                    bytes_to_read - bytes_read,
+                );
+                buffer[bytes_read..bytes_read + take].copy_from_slice(
+                    &sector_buffer[offset_in_sector..offset_in_sector + take],
+                );
+                bytes_read += take;
+                cluster_offset += take;
+            }
+
+            if bytes_read == bytes_to_read {
+                break;
+            }
+            current = fat_table.read_entry(current)?;
+            if current.is_end_of_chain(self.fat_type) {
+                return Err(FatError::EndOfChain);
+            }
+            cluster_offset = 0;
+        }
+
+        Ok(bytes_read)
+    }
     
     /// Walk an absolute path, descending into subdirectories component by
     /// component. Each intermediate component must resolve to a directory;

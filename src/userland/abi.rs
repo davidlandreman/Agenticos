@@ -58,6 +58,7 @@ pub const EBUSY: i64 = -16;
 pub const EXDEV: i64 = -18;
 pub const EFBIG: i64 = -27;
 pub const ENOTEMPTY: i64 = -39;
+pub const ENOMEM: i64 = -12;
 
 /// Active user-VA bounds (inclusive lower, exclusive upper). Populated by
 /// `enter_user_mode` before `iretq`-to-ring-3, cleared on exit. Pointer
@@ -149,12 +150,25 @@ pub fn validate_user_slice(ptr: u64, len: u64) -> Result<(), i64> {
     if len == 0 {
         return Ok(());
     }
-    let bounds = user_va_bounds().ok_or(EFAULT)?;
     let end = ptr.checked_add(len).ok_or(EFAULT)?;
-    if ptr < bounds.start || end > bounds.end {
+    if VirtAddr::try_new(ptr).is_err() || VirtAddr::try_new(end).is_err() {
         return Err(EFAULT);
     }
-    if VirtAddr::try_new(ptr).is_err() || VirtAddr::try_new(end).is_err() {
+    let vma_result = crate::userland::lifecycle::with_current_process(|process| {
+        process.address_space.as_ref().map(|space| {
+            space
+                .vmas()
+                .covers(ptr, len, crate::userland::vm::VmProt::READ)
+        })
+    });
+    if let Some(covered) = vma_result {
+        if !covered {
+            return Err(EFAULT);
+        }
+        return crate::userland::usercopy::ensure_user_range(ptr, len, false);
+    }
+    let bounds = user_va_bounds().ok_or(EFAULT)?;
+    if ptr < bounds.start || end > bounds.end {
         return Err(EFAULT);
     }
     Ok(())
@@ -400,13 +414,22 @@ fn unhandled_syscall(args: &SyscallArgs) -> i64 {
         if !already_seen {
             crate::debug_info!(
                 "[strace] first unknown nr={} args=({:#x},{:#x},{:#x},{:#x},{:#x},{:#x})",
-                nr, args.rdi, args.rsi, args.rdx, args.r10, args.r8, args.r9
+                nr,
+                args.rdi,
+                args.rsi,
+                args.rdx,
+                args.r10,
+                args.r8,
+                args.r9
             );
         } else {
             crate::debug_trace!("[strace] nr={}", nr);
         }
         return ENOSYS;
     }
-    crate::debug_warn!("syscall_dispatch: unimplemented nr={}; returning -ENOSYS", nr);
+    crate::debug_warn!(
+        "syscall_dispatch: unimplemented nr={}; returning -ENOSYS",
+        nr
+    );
     ENOSYS
 }

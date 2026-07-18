@@ -21,6 +21,8 @@ pub mod switch;
 pub mod syscalls;
 pub mod tty;
 pub mod user_state;
+pub mod usercopy;
+pub mod vm;
 
 use core::arch::naked_asm;
 
@@ -46,8 +48,7 @@ const ELF64_PHDR_SIZE: u64 = 56;
 /// per the milestone scope ("quality AT_RANDOM entropy is out of scope");
 /// real entropy is a follow-up swap.
 const AT_RANDOM_BYTES: [u8; 16] = [
-    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
-    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
 ];
 
 /// Default argv[0] when the caller doesn't supply one. Tests and the
@@ -61,6 +62,8 @@ const DEFAULT_ARGV0: &str = "agenticos-app";
 pub enum EnterError {
     /// A user app is already active. Single-app-synchronous (D5).
     AlreadyActive,
+    /// The loader-produced mappings could not be represented as VMAs.
+    InvalidVmLayout,
 }
 
 /// Enter ring 3 with `image` as the live user binary.
@@ -137,11 +140,20 @@ pub fn enter_user_mode_with_aspace(
 /// through CR3. `launch_user_binary` enforces this via
 /// `BINARY_SETUP_MUTEX`.
 pub fn setup_user_process(
-    image: UserImage,
+    mut image: UserImage,
     argv: &[&str],
     envp: &[&str],
-    address_space: Option<crate::userland::address_space::AddressSpace>,
+    mut address_space: Option<crate::userland::address_space::AddressSpace>,
 ) -> Result<u32, EnterError> {
+    // This is the single authoritative VMA initialization point for every
+    // entry path. Building it exactly once avoids cloning and then dropping
+    // every ELF-backed Arc during the CR3-sensitive setup transaction.
+    if let Some(space) = address_space.as_mut() {
+        space
+            .initialize_vmas_from_image(&image)
+            .map_err(|_| EnterError::InvalidVmLayout)?;
+        image.transfer_mapping_ownership();
+    }
     // Capture the bits the initial-stack builder needs before the image
     // moves into the new Process slot.
     let entry = image.entry.as_u64();
@@ -166,9 +178,10 @@ pub fn setup_user_process(
 
     // Install the new Process. U8: don't make it current — just insert
     // and mark ready. The scheduler picks it up.
+    let brk_base = image.brk_base;
     let new_pid = crate::userland::lifecycle::install_new_process_opt(
         image,
-        crate::mm::paging::USER_BRK_BASE,
+        brk_base,
         crate::mm::paging::USER_MMAP_BASE,
         address_space,
     );
@@ -184,7 +197,8 @@ pub fn setup_user_process(
     // Read from SCHEDULER.current()'s PCB.
     let launcher_terminal_id = {
         let sched = crate::process::scheduler::SCHEDULER.lock();
-        sched.current()
+        sched
+            .current()
             .and_then(|pid| sched.get_process(pid))
             .and_then(|pcb| pcb.terminal_id)
     };
@@ -303,8 +317,13 @@ pub(crate) fn build_initial_stack(
     // The argv/envp arrays may have an odd number of pointers, which
     // breaks 16-alignment of argc. Insert a one-qword pad after auxv
     // when needed so RSP at argc is 16-aligned.
-    let unaligned_top: u64 =
-        argc_size + argv_array_size + envp_array_size + auxv_size + phdr_size + random_size + strings_size;
+    let unaligned_top: u64 = argc_size
+        + argv_array_size
+        + envp_array_size
+        + auxv_size
+        + phdr_size
+        + random_size
+        + strings_size;
     let head_pad: u64 = if unaligned_top % 16 == 0 { 0 } else { 8 };
     let frame_size: u64 = unaligned_top + head_pad;
     debug_assert!(frame_size % 16 == 0, "frame_size must be 16-aligned");
@@ -313,14 +332,22 @@ pub(crate) fn build_initial_stack(
 
     // Compute addresses (low to high).
     let mut p = frame_base;
-    let argc_at = p; p += argc_size;
-    let argv_at = p; p += argv_array_size;
-    let envp_at = p; p += envp_array_size;
-    let _pad_at = p; p += head_pad;
-    let auxv_at = p; p += auxv_size;
-    let phdr_at = p; p += phdr_size;
-    let random_at = p; p += random_size;
-    let strings_at = p; p += strings_size;
+    let argc_at = p;
+    p += argc_size;
+    let argv_at = p;
+    p += argv_array_size;
+    let envp_at = p;
+    p += envp_array_size;
+    let _pad_at = p;
+    p += head_pad;
+    let auxv_at = p;
+    p += auxv_size;
+    let phdr_at = p;
+    p += phdr_size;
+    let random_at = p;
+    p += random_size;
+    let strings_at = p;
+    p += strings_size;
     debug_assert_eq!(p, stack_top, "stack frame layout drift");
 
     // SAFETY: the user stack pages [stack_top - 8*0x1000, stack_top) are
@@ -358,18 +385,30 @@ pub(crate) fn build_initial_stack(
         // auxv pairs (low-to-high in declared order — order doesn't
         // matter to musl as long as AT_NULL terminates the list).
         let mut a = auxv_at;
-        write_u64_at(a, AT_PHDR);    a += 8;
-        write_u64_at(a, phdr_at);    a += 8;
-        write_u64_at(a, AT_PHENT);   a += 8;
-        write_u64_at(a, ELF64_PHDR_SIZE); a += 8;
-        write_u64_at(a, AT_PHNUM);   a += 8;
-        write_u64_at(a, e_phnum as u64); a += 8;
-        write_u64_at(a, AT_PAGESZ);  a += 8;
-        write_u64_at(a, 0x1000);     a += 8;
-        write_u64_at(a, AT_RANDOM);  a += 8;
-        write_u64_at(a, random_at);  a += 8;
-        write_u64_at(a, AT_NULL);    a += 8;
-        write_u64_at(a, 0);          let _ = a;
+        write_u64_at(a, AT_PHDR);
+        a += 8;
+        write_u64_at(a, phdr_at);
+        a += 8;
+        write_u64_at(a, AT_PHENT);
+        a += 8;
+        write_u64_at(a, ELF64_PHDR_SIZE);
+        a += 8;
+        write_u64_at(a, AT_PHNUM);
+        a += 8;
+        write_u64_at(a, e_phnum as u64);
+        a += 8;
+        write_u64_at(a, AT_PAGESZ);
+        a += 8;
+        write_u64_at(a, 0x1000);
+        a += 8;
+        write_u64_at(a, AT_RANDOM);
+        a += 8;
+        write_u64_at(a, random_at);
+        a += 8;
+        write_u64_at(a, AT_NULL);
+        a += 8;
+        write_u64_at(a, 0);
+        let _ = a;
 
         // Copy phdr bytes onto the stack.
         let dst = phdr_at as *mut u8;
@@ -417,22 +456,21 @@ unsafe fn write_u64_at(addr: u64, value: u64) {
 #[no_mangle]
 pub unsafe extern "C" fn iretq_to_user_with_regs(
     _state: *const crate::userland::user_state::UserState, // RDI
-    _user_cs: u64,                                          // RSI
-    _user_ss: u64,                                          // RDX
+    _user_cs: u64,                                         // RSI
+    _user_ss: u64,                                         // RDX
 ) -> ! {
     naked_asm!(
         // Build IRETQ frame (low → high after pushes: RIP, CS, RFLAGS, RSP, SS).
-        "push rdx",                  // SS
+        "push rdx", // SS
         "mov rax, [rdi + 72]",
-        "push rax",                  // user RSP
+        "push rax", // user RSP
         "mov rax, [rdi + 120]",
-        "push rax",                  // RFLAGS
-        "push rsi",                  // CS
+        "push rax", // RFLAGS
+        "push rsi", // CS
         "mov rax, [rdi + 112]",
-        "push rax",                  // RIP
-
+        "push rax", // RIP
         // Load user GP regs from UserState.
-        "mov r11, rdi",              // r11 = state ptr
+        "mov r11, rdi", // r11 = state ptr
         "mov rax, [r11 + 0]",
         "mov rbx, [r11 + 56]",
         "mov rbp, [r11 + 64]",
@@ -445,13 +483,12 @@ pub unsafe extern "C" fn iretq_to_user_with_regs(
         "mov r9,  [r11 + 48]",
         "mov rdx, [r11 + 24]",
         "mov rsi, [r11 + 16]",
-        "mov rdi, [r11 + 8]",        // load rdi LAST (we used it as state ptr)
+        "mov rdi, [r11 + 8]", // load rdi LAST (we used it as state ptr)
         // SYSCALL ABI clobbers rcx/r11; zero them for cleanliness so a
         // ring-3 program that incorrectly assumes them preserved gets
         // a deterministic value rather than kernel data.
         "xor r11, r11",
         "xor rcx, rcx",
-
         "iretq",
     );
 }
@@ -463,7 +500,10 @@ pub unsafe extern "C" fn iretq_to_user_with_regs(
 /// from `PROCESS_TABLE.by_pid` entirely rather than zeroing it in place
 /// — the next `with_current_process` from a kernel-only path then sees
 /// the sentinel naturally because `current_user_pid` is `None`.
-pub fn release_active_image() -> (Option<UserImage>, Option<crate::userland::address_space::AddressSpace>) {
+pub fn release_active_image() -> (
+    Option<UserImage>,
+    Option<crate::userland::address_space::AddressSpace>,
+) {
     let pair = match crate::userland::lifecycle::current_user_pid() {
         Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID => {
             let mut process = crate::userland::lifecycle::remove_process(pid)

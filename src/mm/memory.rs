@@ -1,6 +1,6 @@
-use bootloader_api::info::{MemoryRegions, MemoryRegion, MemoryRegionKind};
+use crate::{debug_debug, debug_info};
+use bootloader_api::info::{MemoryRegion, MemoryRegionKind, MemoryRegions};
 use x86_64::VirtAddr;
-use crate::{debug_info, debug_debug};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryStats {
@@ -34,19 +34,19 @@ impl MemoryManager {
 
     pub fn init(&mut self, memory_regions: &MemoryRegions, phys_mem_offset: Option<u64>) {
         debug_info!("=== Initializing Memory Manager ===");
-        
+
         self.physical_memory_offset = phys_mem_offset;
         self.region_count = 0;
-        
+
         // Store regions and calculate statistics
         for region in memory_regions.iter() {
             if self.region_count < self.regions.len() {
                 self.regions[self.region_count] = Some(region.clone());
                 self.region_count += 1;
-                
+
                 let size = region.end - region.start;
                 self.stats.total_memory += size;
-                
+
                 // Print each region for debugging
                 let kind_str = match region.kind {
                     MemoryRegionKind::Usable => "Usable",
@@ -55,10 +55,16 @@ impl MemoryManager {
                     MemoryRegionKind::UnknownUefi(_) => "Unknown UEFI",
                     _ => "Unknown",
                 };
-                
-                debug_info!("Region {}: 0x{:016x} - 0x{:016x} ({} bytes, {})",
-                    self.region_count - 1, region.start, region.end, size, kind_str);
-                
+
+                debug_info!(
+                    "Region {}: 0x{:016x} - 0x{:016x} ({} bytes, {})",
+                    self.region_count - 1,
+                    region.start,
+                    region.end,
+                    size,
+                    kind_str
+                );
+
                 match region.kind {
                     MemoryRegionKind::Usable => self.stats.usable_memory += size,
                     MemoryRegionKind::Bootloader => self.stats.bootloader_memory += size,
@@ -66,24 +72,33 @@ impl MemoryManager {
                 }
             }
         }
-        
-        debug_info!("Memory manager initialized with {} regions", self.region_count);
+
+        debug_info!(
+            "Memory manager initialized with {} regions",
+            self.region_count
+        );
         debug_info!("Physical memory offset: {:?}", phys_mem_offset);
     }
 
     pub fn print_memory_map(&self) {
         debug_info!("=== Memory Map ===");
         debug_info!("Total memory regions: {}", self.region_count);
-        
+
         for i in 0..self.region_count {
             if let Some(region) = &self.regions[i] {
                 let start = region.start;
                 let end = region.end;
                 let size = end - start;
-                
-                debug_debug!("Region {}: 0x{:016x} - 0x{:016x} ({} bytes, {} MB)",
-                    i, start, end, size, size / (1024 * 1024));
-                
+
+                debug_debug!(
+                    "Region {}: 0x{:016x} - 0x{:016x} ({} bytes, {} MB)",
+                    i,
+                    start,
+                    end,
+                    size,
+                    size / (1024 * 1024)
+                );
+
                 let kind_str = match region.kind {
                     MemoryRegionKind::Usable => "Usable",
                     MemoryRegionKind::Bootloader => "Bootloader",
@@ -94,21 +109,33 @@ impl MemoryManager {
                 debug_debug!("  Type: {}", kind_str);
             }
         }
-        
+
         self.print_summary();
     }
 
     pub fn print_summary(&self) {
         debug_info!("=== Memory Summary ===");
-        debug_info!("Total memory: {} MB ({} bytes)", 
-            self.stats.total_memory / (1024 * 1024), self.stats.total_memory);
-        debug_info!("Usable memory: {} MB ({} bytes)", 
-            self.stats.usable_memory / (1024 * 1024), self.stats.usable_memory);
-        debug_info!("Bootloader memory: {} MB ({} bytes)", 
-            self.stats.bootloader_memory / (1024 * 1024), self.stats.bootloader_memory);
-        debug_info!("Reserved memory: {} MB ({} bytes)", 
-            self.stats.reserved_memory / (1024 * 1024), self.stats.reserved_memory);
-        
+        debug_info!(
+            "Total memory: {} MB ({} bytes)",
+            self.stats.total_memory / (1024 * 1024),
+            self.stats.total_memory
+        );
+        debug_info!(
+            "Usable memory: {} MB ({} bytes)",
+            self.stats.usable_memory / (1024 * 1024),
+            self.stats.usable_memory
+        );
+        debug_info!(
+            "Bootloader memory: {} MB ({} bytes)",
+            self.stats.bootloader_memory / (1024 * 1024),
+            self.stats.bootloader_memory
+        );
+        debug_info!(
+            "Reserved memory: {} MB ({} bytes)",
+            self.stats.reserved_memory / (1024 * 1024),
+            self.stats.reserved_memory
+        );
+
         if let Some(offset) = self.physical_memory_offset {
             debug_debug!("Physical memory offset: 0x{:016x}", offset);
         }
@@ -135,7 +162,7 @@ impl MemoryManager {
     pub fn get_largest_usable_region(&self) -> Option<(u64, u64)> {
         let mut largest_size = 0u64;
         let mut largest_region = None;
-        
+
         for i in 0..self.region_count {
             if let Some(region) = &self.regions[i] {
                 if matches!(region.kind, MemoryRegionKind::Usable) {
@@ -147,7 +174,7 @@ impl MemoryManager {
                 }
             }
         }
-        
+
         largest_region
     }
 }
@@ -170,22 +197,20 @@ static mut STATIC_MAPPER: Option<crate::mm::paging::MemoryMapper> = None;
 
 pub fn init_heap(phys_mem_offset: u64) {
     unsafe {
-        let memory_regions = STATIC_MEMORY_REGIONS
-            .expect("Memory regions not initialized");
-            
+        let memory_regions = STATIC_MEMORY_REGIONS.expect("Memory regions not initialized");
+
         // Create mapper in static storage
         STATIC_MAPPER = Some(crate::mm::paging::MemoryMapper::new(
             VirtAddr::new(phys_mem_offset),
-            memory_regions
+            memory_regions,
         ));
-        
+
         // Store pointer globally for page fault handling
         if let Some(mapper) = &mut *(&raw mut STATIC_MAPPER) {
             crate::mm::paging::MAPPER = Some(mapper as *mut _);
 
             // Initialize heap
-            crate::mm::heap::init_heap(mapper)
-                .expect("Failed to initialize heap");
+            crate::mm::heap::init_heap(mapper).expect("Failed to initialize heap");
         }
 
         // Phase 4 PR-B: capture the bootloader's CR3 as the kernel L4
@@ -201,23 +226,17 @@ pub fn print_memory_info() {
 }
 
 pub fn get_memory_stats() -> MemoryStats {
-    unsafe {
-        (*&raw const MEMORY_MANAGER).get_stats()
-    }
+    unsafe { (*&raw const MEMORY_MANAGER).get_stats() }
 }
 
 /// Get the physical memory offset for virtual address translation
 pub fn get_physical_memory_offset() -> Option<u64> {
-    unsafe {
-        (*&raw const MEMORY_MANAGER).get_physical_memory_offset()
-    }
+    unsafe { (*&raw const MEMORY_MANAGER).get_physical_memory_offset() }
 }
 
 /// Convert a physical address to a virtual address using the bootloader's mapping
 pub fn phys_to_virt(phys_addr: u64) -> Option<u64> {
-    unsafe {
-        (*&raw const MEMORY_MANAGER).phys_to_virt(phys_addr)
-    }
+    unsafe { (*&raw const MEMORY_MANAGER).phys_to_virt(phys_addr) }
 }
 
 /// Convert a virtual address (in the physical memory region) back to a physical address

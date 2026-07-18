@@ -88,13 +88,13 @@ pub struct Process {
     pub image: Option<UserImage>,
     pub exit_kind: ExitKind,
     pub exit_code: i64,
-    /// Current `brk` high-water mark. Initialized to `USER_BRK_BASE` on
-    /// `enter_user_mode`; grown by the `brk(addr)` syscall and never shrunk.
-    /// `brk(0)` returns this value.
+    /// Byte-granular current program break. Growth is VMA-only until touch;
+    /// shrink releases complete pages. `brk(0)` returns this value.
     pub brk_current: u64,
-    /// Next free address in the per-process mmap arena. Starts at
-    /// `USER_MMAP_BASE` and bumps upward by the page-rounded length of each
-    /// successful anonymous `mmap`. No coalescing or reuse for this milestone.
+    /// Immutable lower bound for `brk`, derived from this image's PT_LOADs.
+    pub brk_base: u64,
+    /// Legacy mmap cursor retained for ABI/test compatibility. Allocation is
+    /// authoritative in `AddressSpace::vmas()` and uses reusable gap search.
     pub mmap_next: u64,
     /// Phase 2: file-descriptor table. Slots 0/1/2 are pinned to the
     /// standard streams; slots 3..N hold `Arc<File>` opened via `openat`.
@@ -148,8 +148,8 @@ pub struct Process {
     pub stack_max_growth_floor: u64,
     /// Demand-grown stack — remaining per-process growth budget. Starts
     /// at `USER_STACK_MAX_GROWTH_PAGES`; decremented on each successful
-    /// growth. Guards against a fault-storm attack pattern exhausting
-    /// the bump-only frame allocator.
+    /// growth. Guards against a fault-storm attack pattern consuming
+    /// the process's stack reservation and reusable physical frames.
     pub growth_faults_remaining: u64,
     /// U2: per-process FS_BASE MSR value. The SYSCALL fast path does
     /// NOT save/restore this on every syscall (would cost two MSR ops
@@ -210,7 +210,11 @@ pub enum ExitKind {
     /// Cooperative `exit(code)` syscall.
     Cooperative,
     /// Ring-3 fault — see `AbnormalExit` for vector / fault address.
-    Abnormal { vector: u8, fault_rip: u64, fault_addr: Option<u64> },
+    Abnormal {
+        vector: u8,
+        fault_rip: u64,
+        fault_addr: Option<u64>,
+    },
 }
 
 /// Reserved PID for "no current process." Real PIDs start at 1.
@@ -321,6 +325,7 @@ impl Process {
             exit_kind: ExitKind::None,
             exit_code: 0,
             brk_current: 0,
+            brk_base: 0,
             mmap_next: 0,
             fd_table: FdTable::new(),
             cwd: String::new(),
@@ -433,28 +438,8 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     // U3: a removed process must not linger in the scheduler queues.
     g.ring3_ready.retain(|p| *p != pid);
     g.ring3_blocked.remove(&pid);
-    let mut removed = g.by_pid.remove(&pid)?;
+    let removed = g.by_pid.remove(&pid)?;
     drop(g);
-
-    // Critical: when a production Process is removed, its image is going
-    // away along with its owned AddressSpace. `UserImage::Drop` would call
-    // `unmap_user_region` against the currently active CR3, which is generally
-    // another process by this point. Abandon those mappings and let the owned
-    // AddressSpace drop as a unit instead. Kernel-test processes deliberately
-    // have no AddressSpace and map into the shared kernel L4; their images must
-    // retain normal drop-unmapping so consecutive booted fixtures are isolated.
-    //
-    // execve's in-place image swap does NOT go through this function —
-    // it uses `with_current_process(|p| p.image.take())` and drops the
-    // image while its own L4 is still active, which is the only path
-    // where the unmap-on-drop is correct. All other paths funnel
-    // through `remove_process`, so abandoning the image here is the
-    // single, correct chokepoint.
-    if removed.address_space.is_some() {
-        if let Some(img) = removed.image.as_mut() {
-            img.abandon();
-        }
-    }
     Some(removed)
 }
 
@@ -670,7 +655,10 @@ where
 /// children but none zombie yet → block or EAGAIN".
 pub fn has_children(parent_pid: u32) -> bool {
     let g = PROCESS_TABLE.lock();
-    let live = g.by_pid.values().any(|p| p.parent_pid == parent_pid && p.pid != KERNEL_PID);
+    let live = g
+        .by_pid
+        .values()
+        .any(|p| p.parent_pid == parent_pid && p.pid != KERNEL_PID);
     drop(g);
     let zombie = ZOMBIES.lock().values().any(|z| z.parent_pid == parent_pid);
     live || zombie
@@ -828,6 +816,7 @@ pub fn install_new_process_opt(
         exit_kind: ExitKind::None,
         exit_code: 0,
         brk_current: brk_base,
+        brk_base,
         mmap_next: mmap_base,
         fd_table,
         cwd: String::from("/host"),
@@ -924,8 +913,7 @@ pub enum GrowOutcome {
 /// Test-visible cell holding the most recent `GrowOutcome` from the
 /// fault handler. Tests assert on this rather than parsing serial.
 #[cfg(feature = "test")]
-pub static LAST_GROW_OUTCOME: spin::Mutex<Option<GrowOutcome>> =
-    spin::Mutex::new(None);
+pub static LAST_GROW_OUTCOME: spin::Mutex<Option<GrowOutcome>> = spin::Mutex::new(None);
 
 /// Ring-3 page-fault hook: if `fault_addr` falls in the active
 /// process's stack-grow window and the per-process budget allows,
@@ -971,7 +959,10 @@ pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
         // the normal fault path. The sentinel is also where test
         // helpers (stage_stack_window) stage synthetic stack windows.
         let cur_pid = guard.current_user_pid.unwrap_or(KERNEL_PID);
-        let p = guard.by_pid.get_mut(&cur_pid).expect("sentinel invariant violated");
+        let p = guard
+            .by_pid
+            .get_mut(&cur_pid)
+            .expect("sentinel invariant violated");
 
         let addr = fault_addr.as_u64();
         // No active process (sentinel slot) — stack fields are zero
@@ -1207,7 +1198,11 @@ static ZOMBIES: Mutex<BTreeMap<u32, ZombieRecord>> = Mutex::new(BTreeMap::new())
 pub fn record_zombie(pid: u32, parent_pid: u32, exit_code: i64) {
     ZOMBIES.lock().insert(
         pid,
-        ZombieRecord { exit_code, parent_pid, signal_termination: None },
+        ZombieRecord {
+            exit_code,
+            parent_pid,
+            signal_termination: None,
+        },
     );
 }
 
@@ -1219,7 +1214,11 @@ pub fn record_zombie(pid: u32, parent_pid: u32, exit_code: i64) {
 pub fn record_zombie_signaled(pid: u32, parent_pid: u32, signum: i32, exit_code: i64) {
     ZOMBIES.lock().insert(
         pid,
-        ZombieRecord { exit_code, parent_pid, signal_termination: Some(signum) },
+        ZombieRecord {
+            exit_code,
+            parent_pid,
+            signal_termination: Some(signum),
+        },
     );
 }
 
@@ -1263,21 +1262,19 @@ pub fn reap_zombie(target_pid: i32, reaper: u32) -> Option<(u32, i64, Option<i32
     Some((pid, z.exit_code, z.signal_termination))
 }
 
-/// Counts the number of active "loading-or-running a user binary" calls. The
+/// Counts the number of active user-binary load/setup transactions. The
 /// kernel main loop reads this to skip GUI/render work while the run command
-/// is reading the ELF, mapping pages, or executing the binary in ring 3 —
-/// the long-running phases that pre-date the active-user slot being filled.
+/// is reading the ELF, mapping pages, initializing VMAs, and installing the
+/// process — the phases that pre-date the active-user slot being filled.
 ///
 /// Use `BinaryLoadGuard` to bracket the run path; it increments the counter
 /// on construction and decrements on drop so early-return / panic paths still
 /// release the guard.
-static BINARY_LOAD_DEPTH: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static BINARY_LOAD_DEPTH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-/// Returns true while a binary is being loaded or executed by the run command.
-/// Covers the entire `read_to_vec → load_elf → enter_user_mode → ring-3 →
-/// exit_group → release_active_image` window — `user_active()` only spans the
-/// inner ring-3 portion.
+/// Returns true while a binary is being loaded and installed. The guard drops
+/// before the new process runs so compositor rendering continues normally for
+/// interactive programs.
 pub fn binary_load_in_progress() -> bool {
     BINARY_LOAD_DEPTH.load(core::sync::atomic::Ordering::Acquire) > 0
 }
@@ -1353,8 +1350,11 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
     // resume_ring3 / current_user_pid bookkeeping race.
     if let Some(pid) = cur_pid {
         let expected_l4 = with_process(pid, |p| {
-            p.address_space.as_ref().map(|a| a.l4_frame().start_address().as_u64())
-        }).flatten();
+            p.address_space
+                .as_ref()
+                .map(|a| a.l4_frame().start_address().as_u64())
+        })
+        .flatten();
         match expected_l4 {
             Some(exp) if exp != live_cr3.start_address().as_u64() => {
                 debug_error!(
@@ -1436,7 +1436,12 @@ pub fn log_page_table_walk(cr3_pa: u64, va: VirtAddr) {
 
     debug_error!(
         "USERLAND: page walk for VA={:#x} (pml4={}, pdpt={}, pd={}, pt={}), CR3={:#x}",
-        va_u, pml4_idx, pdpt_idx, pd_idx, pt_idx, cr3_pa,
+        va_u,
+        pml4_idx,
+        pdpt_idx,
+        pd_idx,
+        pt_idx,
+        cr3_pa,
     );
 
     // SAFETY: cr3_pa is the live CR3 frame; the bootloader maps all
@@ -1445,48 +1450,66 @@ pub fn log_page_table_walk(cr3_pa: u64, va: VirtAddr) {
     unsafe {
         let pml4 = (phys_offset + cr3_pa) as *const u64;
         let pml4e = core::ptr::read(pml4.add(pml4_idx));
-        debug_error!("  PML4[{}] = {:#018x} (present={}, us={}, rw={}, nx={})",
-            pml4_idx, pml4e,
+        debug_error!(
+            "  PML4[{}] = {:#018x} (present={}, us={}, rw={}, nx={})",
+            pml4_idx,
+            pml4e,
             pml4e & 1 != 0,
             pml4e & (1 << 2) != 0,
             pml4e & (1 << 1) != 0,
             pml4e & (1 << 63) != 0,
         );
-        if pml4e & 1 == 0 { return; }
+        if pml4e & 1 == 0 {
+            return;
+        }
         let pdpt_pa = pml4e & 0x000F_FFFF_FFFF_F000;
 
         let pdpt = (phys_offset + pdpt_pa) as *const u64;
         let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
-        debug_error!("  PDPT[{}] = {:#018x} (present={}, us={}, rw={}, nx={}, huge={})",
-            pdpt_idx, pdpte,
+        debug_error!(
+            "  PDPT[{}] = {:#018x} (present={}, us={}, rw={}, nx={}, huge={})",
+            pdpt_idx,
+            pdpte,
             pdpte & 1 != 0,
             pdpte & (1 << 2) != 0,
             pdpte & (1 << 1) != 0,
             pdpte & (1 << 63) != 0,
             pdpte & (1 << 7) != 0,
         );
-        if pdpte & 1 == 0 { return; }
-        if pdpte & (1 << 7) != 0 { return; } // 1 GiB page
+        if pdpte & 1 == 0 {
+            return;
+        }
+        if pdpte & (1 << 7) != 0 {
+            return;
+        } // 1 GiB page
         let pd_pa = pdpte & 0x000F_FFFF_FFFF_F000;
 
         let pd = (phys_offset + pd_pa) as *const u64;
         let pde = core::ptr::read(pd.add(pd_idx));
-        debug_error!("  PD[{}]   = {:#018x} (present={}, us={}, rw={}, nx={}, huge={})",
-            pd_idx, pde,
+        debug_error!(
+            "  PD[{}]   = {:#018x} (present={}, us={}, rw={}, nx={}, huge={})",
+            pd_idx,
+            pde,
             pde & 1 != 0,
             pde & (1 << 2) != 0,
             pde & (1 << 1) != 0,
             pde & (1 << 63) != 0,
             pde & (1 << 7) != 0,
         );
-        if pde & 1 == 0 { return; }
-        if pde & (1 << 7) != 0 { return; } // 2 MiB page
+        if pde & 1 == 0 {
+            return;
+        }
+        if pde & (1 << 7) != 0 {
+            return;
+        } // 2 MiB page
         let pt_pa = pde & 0x000F_FFFF_FFFF_F000;
 
         let pt = (phys_offset + pt_pa) as *const u64;
         let pte = core::ptr::read(pt.add(pt_idx));
-        debug_error!("  PT[{}]   = {:#018x} (present={}, us={}, rw={}, nx={})",
-            pt_idx, pte,
+        debug_error!(
+            "  PT[{}]   = {:#018x} (present={}, us={}, rw={}, nx={})",
+            pt_idx,
+            pte,
             pte & 1 != 0,
             pte & (1 << 2) != 0,
             pte & (1 << 1) != 0,
@@ -1501,11 +1524,11 @@ pub fn log_page_table_walk(cr3_pa: u64, va: VirtAddr) {
 fn signum_for_vector(vector: u8) -> i32 {
     use crate::userland::signal::{SIGBUS, SIGFPE, SIGILL, SIGSEGV};
     match vector {
-        0 | 16 | 19 => SIGFPE,    // #DE divide-by-zero, #MF x87, #XM SIMD
-        6 => SIGILL,              // #UD invalid opcode
-        17 => SIGBUS,             // #AC alignment check
-        13 | 14 => SIGSEGV,       // #GP general protection, #PF page fault
-        _ => SIGSEGV,             // conservative default
+        0 | 16 | 19 => SIGFPE, // #DE divide-by-zero, #MF x87, #XM SIMD
+        6 => SIGILL,           // #UD invalid opcode
+        17 => SIGBUS,          // #AC alignment check
+        13 | 14 => SIGSEGV,    // #GP general protection, #PF page fault
+        _ => SIGSEGV,          // conservative default
     }
 }
 

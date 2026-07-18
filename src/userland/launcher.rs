@@ -25,14 +25,14 @@
 //! setup phase is.
 
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::userland::lifecycle::ExitKind;
 
-/// U8 serialization: protects the `aspace.activate() → load_elf →
-/// setup_user_process` window from concurrent launchers. Without it,
+/// U8 serialization: protects address-space setup and teardown from concurrent
+/// launchers. Without it,
 /// thread A's `aspace.activate()` makes CR3 point at A's L4; if
 /// thread B preempts and activates B's L4, A's subsequent
 /// `map_user_region` calls (inside `load_elf`) write mappings into
@@ -43,12 +43,6 @@ use crate::userland::lifecycle::ExitKind;
 /// serialize only their fast setup phase, not their entire ring-3
 /// lifetime.
 static BINARY_SETUP_MUTEX: Mutex<()> = Mutex::new(());
-
-/// Largest user binary the loader will accept. Mirrors the cap in the
-/// old `run` command (16 MiB) — enough headroom for a static
-/// `libstdc++` C++ binary plus zsh, fails loudly before the heap
-/// allocator panics on an oversized read.
-const MAX_USER_BINARY_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Load `path` from the FAT mount and enter ring 3. `argv` becomes the
 /// user process's `argv` (typically `[path]`); `envp` becomes its
@@ -83,23 +77,25 @@ pub fn launch_user_binary(
     let pid = {
         let _setup_guard = BINARY_SETUP_MUTEX.lock();
 
+        // Pause compositor allocation/render work for the complete load and
+        // setup transaction. Disk I/O remains preemptible, but it happens
+        // before changing CR3 so another kernel thread cannot resume under a
+        // partially-built user address space.
+        let _load_guard = crate::userland::lifecycle::BinaryLoadGuard::enter();
+        let (file, bytes) = read_file_bytes(path)?;
+
         let aspace = crate::userland::address_space::AddressSpace::new()
             .map_err(|e| format!("AddressSpace::new: {:?}", e))?;
         // SAFETY: AddressSpace::new copies the kernel half from the
         // kernel L4, so kernel code after the CR3 write is still
         // mapped. Holding `_setup_guard` guarantees no other launcher
         // will swap CR3 until we drop it.
-        unsafe { aspace.activate(); }
+        unsafe {
+            aspace.activate();
+        }
 
-        // The BinaryLoadGuard pauses the compositor's input + render
-        // during the long PIO load (see
-        // `docs/solutions/learnings/2026-05-09-multi-mib-user-binary-load.md`).
-        let image = {
-            let _load_guard = crate::userland::lifecycle::BinaryLoadGuard::enter();
-            let bytes = read_file_bytes(path)?;
-            crate::userland::loader::load_elf(&bytes)
-                .map_err(|e| format!("loader error: {:?}", e))?
-        };
+        let image = crate::userland::loader::load_elf_file(&bytes, file)
+            .map_err(|e| format!("loader error: {:?}", e))?;
 
         crate::userland::setup_user_process(image, argv, envp, Some(aspace))
             .map_err(|e| format!("setup_user_process: {:?}", e))?
@@ -110,28 +106,34 @@ pub fn launch_user_binary(
 
     let result = crate::userland::wait_for_ring3_exit(pid);
 
-    // Drop the active image (unmaps + frees user VA) and the address
-    // space it ran on. `release_active_image` returns the AddressSpace
-    // the process slot owned; its Drop impl restores CR3 to the kernel
-    // L4 if it was still active.
-    let (_img, _aspace) = crate::userland::release_active_image();
+    // Teardown also mutates the global mapper and may restore CR3. Serialize
+    // it against another launch transaction, and ask the compositor to skip
+    // allocation/render work while the ownership objects are dropped. Do not
+    // suppress kernel-thread preemption here: destroying a sparse address
+    // space can take long enough to make the desktop appear frozen.
+    {
+        let _setup_guard = BINARY_SETUP_MUTEX.lock();
+        let _load_guard = crate::userland::lifecycle::BinaryLoadGuard::enter();
+        // `wait_for_ring3_exit` sets this too, but it is global scheduler
+        // state and another ring-3 slice may have changed it before this
+        // launcher reacquired the setup mutex. Reassert the exact child before
+        // cleanup so it cannot remove another process.
+        crate::userland::lifecycle::set_current_user_pid(Some(pid));
+        let (image, address_space) = crate::userland::release_active_image();
+        drop(image);
+        drop(address_space);
+    }
 
     Ok(result)
 }
 
-fn read_file_bytes(path: &str) -> Result<Vec<u8>, String> {
+fn read_file_bytes(
+    path: &str,
+) -> Result<(crate::lib::arc::Arc<crate::fs::File>, Vec<u8>), String> {
     use crate::fs::File;
     let file = File::open_read(path).map_err(|e| format!("open '{}': {}", path, e))?;
-    let size = file.size();
-    if size > MAX_USER_BINARY_BYTES {
-        return Err(format!(
-            "binary '{}' is {} bytes; max {} bytes ({} MiB)",
-            path,
-            size,
-            MAX_USER_BINARY_BYTES,
-            MAX_USER_BINARY_BYTES / (1024 * 1024)
-        ));
-    }
-    file.read_to_vec()
-        .map_err(|e| format!("read '{}': {}", path, e))
+    let bytes = file
+        .read_to_vec()
+        .map_err(|e| format!("read '{}': {}", path, e))?;
+    Ok((file, bytes))
 }

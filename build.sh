@@ -52,6 +52,8 @@ if [ "$HELP" = true ]; then
     echo "                          (default: copy from userland/prebuilt/ when present)"
     echo "                          Equivalent: REBUILD_USERLAND=1 env. Per-app:"
     echo "                          REBUILD_ZSH=1."
+    echo "                          QEMU RAM defaults to 2G; override with"
+    echo "                          AGENTICOS_QEMU_MEMORY (for example 4G)."
     echo "  -h, --help              Show this help message"
     echo ""
     echo "Default: Build in release mode, create images, and run in QEMU"
@@ -221,6 +223,8 @@ if [ "$RUN_QEMU" = true ]; then
     echo "🚀 Launching QEMU with image: $BIOS_IMAGE"
     echo "📂 Mounting host folder: $HOST_SHARE -> /host (read-only)"
     echo "🔌 MCP RPC chardev socket: $RPC_SOCK (chmod 0600 once QEMU creates it)"
+    QEMU_MEMORY="${AGENTICOS_QEMU_MEMORY:-2G}"
+    echo "🧠 QEMU memory: $QEMU_MEMORY (override with AGENTICOS_QEMU_MEMORY)"
     # Restrict the socket to the launching user as soon as QEMU creates it.
     # Backgrounded so it races QEMU startup; if the socket isn't there yet,
     # chmod will fail silently — that's fine, we retry until QEMU is up.
@@ -244,5 +248,5 @@ if [ "$RUN_QEMU" = true ]; then
         -no-reboot -no-shutdown \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -device virtio-tablet-pci \
-        -m 128M
+        -m "$QEMU_MEMORY"
 fi

@@ -46,6 +46,10 @@ Flags:
                       host_share/. Equivalent: REBUILD_USERLAND=1 env.
   -l, --list          Print available modules and exit (no build/QEMU).
   -h, --help          Show this help.
+
+Environment:
+  AGENTICOS_TEST_MEMORY  QEMU RAM for tests (default: 256M; use 128M for
+                         reclamation stress runs).
 EOF
 }
 
@@ -212,6 +216,7 @@ QEMU_ARGS=(
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
     -display none
     -no-reboot
+    -m "${AGENTICOS_TEST_MEMORY:-256M}"
 )
 if [ -n "$FILTER" ]; then
     ESCAPED_FILTER=${FILTER//,/,,}
