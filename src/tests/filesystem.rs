@@ -145,25 +145,44 @@ fn test_file_read_full_arial() {
 fn test_virtio_block_wakes_kernel_thread() {
     use core::sync::atomic::{AtomicU8, Ordering};
     static STATE: AtomicU8 = AtomicU8::new(0);
+    static PROGRESS: AtomicU8 = AtomicU8::new(0);
 
     STATE.store(0, Ordering::Release);
-    crate::process::spawn_process(alloc::string::String::from("block-io-test"), None, || {
-        let file = crate::fs::File::open_read("/system.ttf").expect("open from kernel thread");
-        let mut header = [0u8; 16];
-        let count = file.read(&mut header).expect("DMA read from kernel thread");
-        assert_eq!(count, header.len());
-        assert_eq!(&header[..4], &[0, 1, 0, 0]);
-        STATE.store(1, Ordering::Release);
-    });
+    PROGRESS.store(0, Ordering::Release);
+    let pid =
+        crate::process::spawn_process(alloc::string::String::from("block-io-test"), None, || {
+            PROGRESS.store(1, Ordering::Release);
+            let file = crate::fs::File::open_read("/system.ttf").expect("open from kernel thread");
+            PROGRESS.store(2, Ordering::Release);
+            let mut header = [0u8; 16];
+            let count = file.read(&mut header).expect("DMA read from kernel thread");
+            PROGRESS.store(3, Ordering::Release);
+            assert_eq!(count, header.len());
+            assert_eq!(&header[..4], &[0, 1, 0, 0]);
+            STATE.store(1, Ordering::Release);
+        });
 
     let deadline = crate::arch::x86_64::interrupts::get_timer_ticks().saturating_add(500);
     while STATE.load(Ordering::Acquire) == 0 {
         let _ = crate::process::drain_kernel_io_wakes();
         crate::process::try_run_scheduled_processes();
-        assert!(
-            crate::arch::x86_64::interrupts::get_timer_ticks() < deadline,
-            "kernel thread did not resume from VirtIO block completion"
-        );
+        if crate::arch::x86_64::interrupts::get_timer_ticks() >= deadline {
+            let scheduler = crate::process::scheduler::SCHEDULER.lock();
+            let requests = crate::drivers::virtio::block::request_diagnostics();
+            crate::debug_error!(
+                "block wake timeout: pid={} progress={} entity={:?} current={:?} ready={} pending_wakes={} requests={:?}",
+                pid,
+                PROGRESS.load(Ordering::Acquire),
+                scheduler.entity_diagnostics_for_test(
+                    crate::process::entity::EntityId::KernelThread(pid)
+                ),
+                scheduler.current_entity(),
+                scheduler.ready_entity_count(),
+                crate::process::pending_kernel_io_wakes_for_test(),
+                requests,
+            );
+            panic!("kernel thread did not resume from VirtIO block completion");
+        }
         x86_64::instructions::hlt();
     }
 }
@@ -757,8 +776,10 @@ fn test_u11_flush_then_restore_on_live_data() {
     use crate::fs::tmpfs::Tmpfs;
 
     // Get the live overlay's upper layer.
-    let vfs = crate::fs::vfs::get_vfs();
-    let root = vfs.find_filesystem("/").expect("/ resolvable").0;
+    let root = crate::fs::vfs::get_vfs()
+        .find_filesystem("/")
+        .expect("/ resolvable")
+        .0;
     if root.name() != "overlay" {
         debug_info!("  / is not overlay; skipping");
         return;
@@ -799,8 +820,10 @@ fn test_u11_pointer_flip_is_atomic() {
     use crate::fs::overlay::sync::flush_upper_to_disk;
     use crate::fs::tmpfs::Tmpfs;
 
-    let vfs = crate::fs::vfs::get_vfs();
-    let root = vfs.find_filesystem("/").expect("/ resolvable").0;
+    let root = crate::fs::vfs::get_vfs()
+        .find_filesystem("/")
+        .expect("/ resolvable")
+        .0;
     if root.name() != "overlay" {
         return;
     }

@@ -31,7 +31,7 @@ not implemented.
   it is held. Every `NETWORK` and deferred-close-queue critical section must
   hold an `InterruptGuard`: kernel threads are timer-preemptible, while the
   syscall path runs with interrupts masked, so an unguarded spinlock can
-  deadlock the single CPU if its holder is preempted by ring 3. The network
+  deadlock the local CPU if its holder is preempted by ring 3. The network
   worker's post-poll process-table wake follows the same rule, after dropping
   `NETWORK`.
 - Stage IDs, sockaddrs, iovecs, and payloads in bounded kernel memory before

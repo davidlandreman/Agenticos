@@ -6,13 +6,10 @@
 //! housekeeping and kernel-thread context switches until the critical section
 //! ends.
 //!
-//! The depth is global because AgenticOS currently has one CPU. An SMP port
-//! must move it into per-CPU state before using this primitive on more than one
-//! processor.
+//! The nesting depth lives in per-CPU state so independent processors can
+//! enter protected regions concurrently.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
-
-static PREEMPTION_DISABLE_DEPTH: AtomicUsize = AtomicUsize::new(0);
+use core::sync::atomic::Ordering;
 
 /// RAII guard that prevents timer-driven kernel scheduler work.
 ///
@@ -25,7 +22,8 @@ pub struct PreemptionGuard {
 impl PreemptionGuard {
     #[inline]
     pub fn disable() -> Self {
-        let previous = PREEMPTION_DISABLE_DEPTH.fetch_add(1, Ordering::AcqRel);
+        let previous =
+            crate::arch::x86_64::percpu::preemption_depth().fetch_add(1, Ordering::AcqRel);
         debug_assert_ne!(previous, usize::MAX, "preemption guard depth overflow");
         Self { _private: () }
     }
@@ -34,7 +32,8 @@ impl PreemptionGuard {
 impl Drop for PreemptionGuard {
     #[inline]
     fn drop(&mut self) {
-        let previous = PREEMPTION_DISABLE_DEPTH.fetch_sub(1, Ordering::AcqRel);
+        let previous =
+            crate::arch::x86_64::percpu::preemption_depth().fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "unbalanced preemption guard drop");
     }
 }
@@ -42,7 +41,7 @@ impl Drop for PreemptionGuard {
 /// Whether the current CPU is inside a preemption-disabled critical section.
 #[inline]
 pub fn preemption_disabled() -> bool {
-    PREEMPTION_DISABLE_DEPTH.load(Ordering::Acquire) != 0
+    crate::arch::x86_64::percpu::preemption_depth().load(Ordering::Acquire) != 0
 }
 
 /// Whether the timer handler may run scheduler work for the current kernel thread.
@@ -54,9 +53,9 @@ pub fn kernel_preemption_allowed() -> bool {
 /// A spin mutex that prevents scheduler preemption without masking IRQs.
 ///
 /// This is appropriate only for thread-context state that interrupt handlers
-/// never acquire directly. On the single CPU, acquiring the preemption guard
-/// before attempting the spin lock prevents another kernel thread from being
-/// scheduled while the lock is held.
+/// never acquire directly. Acquiring the per-CPU preemption guard before
+/// attempting the spin lock prevents the owning kernel thread from being
+/// switched out while the lock is held.
 pub struct PreemptionMutex<T> {
     inner: spin::Mutex<T>,
 }

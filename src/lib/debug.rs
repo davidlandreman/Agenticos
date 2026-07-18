@@ -8,22 +8,51 @@ pub enum DebugLevel {
     Trace = 4,
 }
 
-static mut DEBUG_LEVEL: DebugLevel = DebugLevel::Info;
+use core::fmt;
+use core::sync::atomic::{AtomicU8, Ordering};
+
+use crate::arch::x86_64::interrupt_guard::InterruptMutex;
+
+static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(DebugLevel::Info as u8);
+static SERIAL_OUTPUT: InterruptMutex<()> = InterruptMutex::new(());
 
 pub fn set_debug_level(level: DebugLevel) {
-    unsafe { DEBUG_LEVEL = level };
+    DEBUG_LEVEL.store(level as u8, Ordering::Release);
 }
 
 pub fn get_debug_level() -> DebugLevel {
-    unsafe { DEBUG_LEVEL }
+    match DEBUG_LEVEL.load(Ordering::Acquire) {
+        0 => DebugLevel::Error,
+        1 => DebugLevel::Warn,
+        2 => DebugLevel::Info,
+        3 => DebugLevel::Debug,
+        _ => DebugLevel::Trace,
+    }
+}
+
+pub fn write_line(prefix: &str, args: fmt::Arguments<'_>) {
+    let _guard = SERIAL_OUTPUT.lock();
+    qemu_print::qemu_print!("{}", prefix);
+    qemu_print::qemu_println!("{}", args);
+}
+
+/// Panic-safe serial output. If another CPU died while owning the lock, emit
+/// anyway instead of deadlocking the panic path.
+pub fn write_panic_line(prefix: &str, args: fmt::Arguments<'_>) {
+    if let Some(_guard) = SERIAL_OUTPUT.try_lock() {
+        qemu_print::qemu_print!("{}", prefix);
+        qemu_print::qemu_println!("{}", args);
+    } else {
+        qemu_print::qemu_print!("{}", prefix);
+        qemu_print::qemu_println!("{}", args);
+    }
 }
 
 #[macro_export]
 macro_rules! debug_error {
     ($($arg:tt)*) => {
         if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Error {
-            qemu_print::qemu_print!("[ERROR] ");
-            qemu_print::qemu_println!($($arg)*);
+            $crate::lib::debug::write_line("[ERROR] ", format_args!($($arg)*));
         }
     };
 }
@@ -32,8 +61,7 @@ macro_rules! debug_error {
 macro_rules! debug_warn {
     ($($arg:tt)*) => {
         if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Warn {
-            qemu_print::qemu_print!("[WARN ] ");
-            qemu_print::qemu_println!($($arg)*);
+            $crate::lib::debug::write_line("[WARN ] ", format_args!($($arg)*));
         }
     };
 }
@@ -42,8 +70,7 @@ macro_rules! debug_warn {
 macro_rules! debug_info {
     ($($arg:tt)*) => {
         if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Info {
-            qemu_print::qemu_print!("[INFO ] ");
-            qemu_print::qemu_println!($($arg)*);
+            $crate::lib::debug::write_line("[INFO ] ", format_args!($($arg)*));
         }
     };
 }
@@ -52,8 +79,7 @@ macro_rules! debug_info {
 macro_rules! debug_debug {
     ($($arg:tt)*) => {
         if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Debug {
-            qemu_print::qemu_print!("[DEBUG] ");
-            qemu_print::qemu_println!($($arg)*);
+            $crate::lib::debug::write_line("[DEBUG] ", format_args!($($arg)*));
         }
     };
 }
@@ -62,8 +88,7 @@ macro_rules! debug_debug {
 macro_rules! debug_trace {
     ($($arg:tt)*) => {
         if $crate::lib::debug::get_debug_level() >= $crate::lib::debug::DebugLevel::Trace {
-            qemu_print::qemu_print!("[TRACE] ");
-            qemu_print::qemu_println!($($arg)*);
+            $crate::lib::debug::write_line("[TRACE] ", format_args!($($arg)*));
         }
     };
 }

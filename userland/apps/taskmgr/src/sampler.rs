@@ -34,12 +34,21 @@ pub struct SocketRow {
     pub remote: String,
 }
 
+/// Monotonic USER_HZ counters from one `/proc/stat` CPU row.
+#[derive(Clone, Copy, Default)]
+pub struct CpuTimes {
+    pub id: u32,
+    pub user: u64,
+    pub system: u64,
+    pub idle: u64,
+}
+
 #[derive(Default)]
 pub struct Snapshot {
     /// Monotonic 100 Hz ticks since boot.
     pub uptime_ticks: u64,
-    pub cpu_user: u64,
-    pub cpu_system: u64,
+    pub cpu_total: CpuTimes,
+    pub cpus: Vec<CpuTimes>,
     pub mem_total_kb: u64,
     pub mem_free_kb: u64,
     pub heap_total_kb: u64,
@@ -175,18 +184,66 @@ fn parse_net_dev(snap: &mut Snapshot, text: &str) {
     }
 }
 
+fn parse_cpu_stat(snap: &mut Snapshot, text: &str) {
+    let mut aggregate_seen = false;
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(label) = fields.next() else {
+            continue;
+        };
+        if label != "cpu"
+            && !label
+                .strip_prefix("cpu")
+                .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+        {
+            continue;
+        }
+
+        let user = fields.next().map(parse_u64).unwrap_or(0);
+        let nice = fields.next().map(parse_u64).unwrap_or(0);
+        let system = fields.next().map(parse_u64).unwrap_or(0);
+        let idle = fields.next().map(parse_u64).unwrap_or(0);
+        let mut times = CpuTimes {
+            id: 0,
+            user: user.saturating_add(nice),
+            system,
+            idle,
+        };
+        if label == "cpu" {
+            snap.cpu_total = times;
+            aggregate_seen = true;
+        } else {
+            times.id = parse_u64(label.trim_start_matches("cpu")) as u32;
+            snap.cpus.push(times);
+        }
+    }
+
+    // Older kernels exposed only the aggregate row. Keep a useful one-graph
+    // fallback instead of leaving the Performance tab empty.
+    if !aggregate_seen && !snap.cpus.is_empty() {
+        snap.cpu_total = snap
+            .cpus
+            .iter()
+            .fold(CpuTimes::default(), |total, cpu| CpuTimes {
+                id: 0,
+                user: total.user.saturating_add(cpu.user),
+                system: total.system.saturating_add(cpu.system),
+                idle: total.idle.saturating_add(cpu.idle),
+            });
+    } else if snap.cpus.is_empty() && aggregate_seen {
+        snap.cpus.push(snap.cpu_total);
+    }
+}
+
 /// Take one full snapshot of every /proc source the UI consumes.
 pub fn sample() -> Snapshot {
-    let mut snap = Snapshot::default();
-
-    snap.uptime_ticks = parse_uptime(&read_text("/proc/uptime"));
+    let mut snap = Snapshot {
+        uptime_ticks: parse_uptime(&read_text("/proc/uptime")),
+        ..Snapshot::default()
+    };
 
     let stat = read_text("/proc/stat");
-    if let Some(cpu) = stat.lines().find(|l| l.starts_with("cpu ")) {
-        let f: Vec<&str> = cpu.split_whitespace().collect();
-        snap.cpu_user = f.get(1).map(|s| parse_u64(s)).unwrap_or(0);
-        snap.cpu_system = f.get(3).map(|s| parse_u64(s)).unwrap_or(0);
-    }
+    parse_cpu_stat(&mut snap, &stat);
 
     let meminfo = read_text("/proc/meminfo");
     snap.mem_total_kb = keyed_value(&meminfo, "MemTotal:");

@@ -196,12 +196,48 @@ fn test_proc_meminfo_shape() {
     assert!(text.contains("KernelHeapUsed:"));
 }
 
-/// `/proc/stat` has the aggregate cpu line and a processes count.
+/// `/proc/stat` has one row per online CPU and an exact aggregate.
 fn test_proc_stat_shape() {
     let content = read_proc_file(b"/proc/stat\0");
     let text = core::str::from_utf8(&content).expect("stat is ASCII");
     assert!(text.starts_with("cpu  "), "got: {}", text);
     assert!(text.contains("\nprocesses "));
+
+    let mut aggregate = None;
+    let mut per_cpu = Vec::new();
+    for line in text.lines().filter(|line| line.starts_with("cpu")) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields.len(), 11, "unexpected /proc/stat row: {}", line);
+        let times = (
+            fields[1].parse::<u64>().expect("user ticks"),
+            fields[3].parse::<u64>().expect("system ticks"),
+            fields[4].parse::<u64>().expect("idle ticks"),
+        );
+        if fields[0] == "cpu" {
+            aggregate = Some(times);
+        } else {
+            let expected_name = alloc::format!("cpu{}", per_cpu.len());
+            assert_eq!(fields[0], expected_name);
+            per_cpu.push(times);
+        }
+    }
+
+    assert_eq!(
+        per_cpu.len(),
+        crate::arch::x86_64::smp::online_cpu_count(),
+        "one cpuN row per online logical CPU"
+    );
+    let sum = per_cpu.iter().fold(
+        (0u64, 0u64, 0u64),
+        |(user, system, idle), &(cpu_user, cpu_system, cpu_idle)| {
+            (
+                user.saturating_add(cpu_user),
+                system.saturating_add(cpu_system),
+                idle.saturating_add(cpu_idle),
+            )
+        },
+    );
+    assert_eq!(aggregate.expect("aggregate cpu row"), sum);
 }
 
 /// getdents64 on /proc enumerates the static files, subdirs, and live

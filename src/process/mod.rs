@@ -16,16 +16,13 @@ use crate::window::WindowId;
 use alloc::boxed::Box;
 use alloc::string::String;
 
-/// Flag indicating whether we're currently running a spawned process
-static IN_SPAWNED_PROCESS: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
 const IO_WAKE_SLOTS: usize = 64;
 static PENDING_IO_WAKES: [core::sync::atomic::AtomicU32; IO_WAKE_SLOTS] =
     [const { core::sync::atomic::AtomicU32::new(0) }; IO_WAKE_SLOTS];
 
 /// Check if we're currently running a spawned process
 pub fn is_in_spawned_process() -> bool {
-    IN_SPAWNED_PROCESS.load(core::sync::atomic::Ordering::Acquire)
+    crate::arch::x86_64::percpu::in_spawned_process()
 }
 
 /// U8: set the "in spawned process" flag. Used by the ring-3 → kernel
@@ -33,7 +30,7 @@ pub fn is_in_spawned_process() -> bool {
 /// before switching to `KERNEL_CONTEXT` so the kernel main loop
 /// observes the correct state on resume.
 pub fn set_in_spawned_process(value: bool) {
-    IN_SPAWNED_PROCESS.store(value, core::sync::atomic::Ordering::Release);
+    crate::arch::x86_64::percpu::set_in_spawned_process(value);
 }
 
 /// Initialize the scheduler
@@ -68,18 +65,32 @@ pub fn queue_kernel_io_wake(pid: ProcessId) {
 
 pub fn drain_kernel_io_wakes() -> bool {
     use core::sync::atomic::Ordering;
-    let Some(mut scheduler) = scheduler::SCHEDULER.try_lock() else {
-        return false;
-    };
-    let mut woke = false;
-    for slot in &PENDING_IO_WAKES {
-        let pid = slot.swap(0, Ordering::AcqRel);
-        if pid != 0 {
-            scheduler.wake(pid);
-            woke = true;
+    let mut woke = if let Some(mut scheduler) = scheduler::SCHEDULER.try_lock() {
+        let mut woke = false;
+        for slot in &PENDING_IO_WAKES {
+            let pid = slot.swap(0, Ordering::AcqRel);
+            if pid != 0 {
+                scheduler.wake(pid);
+                woke = true;
+            }
         }
+        woke
+    } else {
+        false
+    };
+    if crate::userland::lifecycle::drain_ring3_io_wakes() {
+        woke = true;
     }
     woke
+}
+
+#[cfg(feature = "test")]
+pub fn pending_kernel_io_wakes_for_test() -> usize {
+    use core::sync::atomic::Ordering;
+    PENDING_IO_WAKES
+        .iter()
+        .filter(|slot| slot.load(Ordering::Acquire) != 0)
+        .count()
 }
 
 /// Preserve and park the current kernel thread on asynchronous block I/O.
@@ -103,7 +114,7 @@ pub fn block_current_kernel_thread_on_io(token: u64) {
     unsafe {
         switch_context(
             old_context,
-            &raw const crate::arch::x86_64::preemption::KERNEL_CONTEXT,
+            crate::arch::x86_64::percpu::kernel_context_ptr(),
         );
     }
     set_in_spawned_process(true);
@@ -174,9 +185,13 @@ where
 /// dispatch either privilege class directly.
 pub fn yield_current() {
     use crate::arch::x86_64::context_switch::switch_context;
+    use crate::arch::x86_64::interrupt_guard::InterruptGuard;
     use crate::arch::x86_64::interrupts::get_timer_ticks;
-    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
-    use core::sync::atomic::Ordering;
+
+    // Keep the claim made by schedule_entity atomic with the architecture
+    // handoff. Otherwise a local timer can save the still-running dispatcher
+    // stack into the newly claimed process before switch_context executes.
+    let _handoff_guard = InterruptGuard::disable();
 
     enum YieldTarget {
         Process(CpuContext),
@@ -251,12 +266,12 @@ pub fn yield_current() {
             // pending ring-3 process and eventually re-pick us via
             // try_run_scheduled_processes. Mirrors the pattern
             // sleep_ticks uses for SwitchTarget::Kernel.
-            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
-            let kernel_ctx = unsafe { KERNEL_CONTEXT };
+            set_in_spawned_process(false);
+            let kernel_ctx = unsafe { *crate::arch::x86_64::percpu::kernel_context_ptr() };
             unsafe {
                 switch_context(old_ctx_ptr, &kernel_ctx);
             }
-            IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+            set_in_spawned_process(true);
         }
     }
 }
@@ -284,34 +299,32 @@ pub fn yield_if_needed() {
 
 /// Terminate the current process
 pub fn terminate_current() {
-    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
-    use core::sync::atomic::Ordering;
-
+    let _handoff_guard = crate::arch::x86_64::interrupt_guard::InterruptGuard::disable();
     crate::debug_trace!("terminate_current: starting");
 
-    let (terminated, target) = {
+    let (terminated, retired_stack) = {
         let mut sched = scheduler::SCHEDULER.lock();
         let terminated = sched.current().map(entity::EntityId::KernelThread);
-        sched.terminate_current();
-        (terminated, next_switch_target(&mut sched))
+        let retired_stack = sched.terminate_current();
+        (terminated, retired_stack)
     };
     if let Some(entity) = terminated {
         timer::cancel_entity(entity);
     }
 
-    match target {
-        SwitchTarget::Process(context) => unsafe {
-            crate::arch::x86_64::context_switch::switch_to_context(&context);
-        },
-        SwitchTarget::User(pid) => unsafe {
-            crate::userland::switch::resume_ring3(pid);
-        },
-        SwitchTarget::Kernel => {
-            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
-            let kernel_ctx = unsafe { KERNEL_CONTEXT };
-            unsafe {
-                crate::arch::x86_64::context_switch::switch_to_context(&kernel_ctx);
-            }
+    if let Some(stack_base) = retired_stack {
+        // A stack cannot become allocator-visible while this CPU is still
+        // executing the termination path on it: another CPU could reuse and
+        // overwrite it before the handoff completes. Return to this CPU's
+        // main-loop context first; the assembly helper retires the old stack
+        // only after installing the main-loop stack.
+        set_in_spawned_process(false);
+        let kernel_ctx = unsafe { *crate::arch::x86_64::percpu::kernel_context_ptr() };
+        unsafe {
+            crate::arch::x86_64::context_switch::switch_to_context_and_retire_stack(
+                &kernel_ctx,
+                stack_base,
+            );
         }
     }
 
@@ -338,8 +351,8 @@ pub fn terminate_current() {
 /// call below.
 pub fn block_kernel_thread_for_ring3_exit(pid: u32) {
     use crate::arch::x86_64::context_switch::switch_context;
-    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
-    use core::sync::atomic::Ordering;
+
+    let _handoff_guard = crate::arch::x86_64::interrupt_guard::InterruptGuard::disable();
 
     // Real kernel-thread path: block on the scheduler.
     let block_outcome = {
@@ -367,10 +380,10 @@ pub fn block_kernel_thread_for_ring3_exit(pid: u32) {
                 crate::userland::switch::save_kernel_and_resume_ring3(next_pid, old_ctx_ptr);
             },
             SwitchTarget::Kernel => {
-                IN_SPAWNED_PROCESS.store(false, Ordering::Release);
-                let kernel = unsafe { KERNEL_CONTEXT };
+                set_in_spawned_process(false);
+                let kernel = unsafe { *crate::arch::x86_64::percpu::kernel_context_ptr() };
                 unsafe { switch_context(old_ctx_ptr, &kernel) };
-                IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+                set_in_spawned_process(true);
             }
         }
         return;
@@ -397,8 +410,8 @@ pub fn park_current(reason: BlockReason) {
 /// scheduler state.
 pub fn park_current_if(reason: BlockReason, should_park: impl FnOnce() -> bool) -> bool {
     use crate::arch::x86_64::context_switch::switch_context;
-    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
-    use core::sync::atomic::Ordering;
+
+    let _handoff_guard = crate::arch::x86_64::interrupt_guard::InterruptGuard::disable();
 
     let outcome = {
         let mut sched = scheduler::SCHEDULER.lock();
@@ -426,12 +439,12 @@ pub fn park_current_if(reason: BlockReason, should_park: impl FnOnce() -> bool) 
             crate::userland::switch::save_kernel_and_resume_ring3(pid, outcome.0);
         },
         SwitchTarget::Kernel => {
-            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
-            let kernel = unsafe { KERNEL_CONTEXT };
+            set_in_spawned_process(false);
+            let kernel = unsafe { *crate::arch::x86_64::percpu::kernel_context_ptr() };
             unsafe {
                 switch_context(outcome.0, &kernel);
             }
-            IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+            set_in_spawned_process(true);
         }
     }
     true
@@ -473,7 +486,7 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
             unsafe {
                 crate::userland::switch::save_kernel_and_resume_ring3(
                     next,
-                    &raw mut crate::arch::x86_64::preemption::KERNEL_CONTEXT,
+                    crate::arch::x86_64::percpu::kernel_context_ptr(),
                 );
             }
             // Resumed via KERNEL_CONTEXT — continue polling.
@@ -497,8 +510,8 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
 ///
 pub fn try_run_scheduled_processes() {
     use crate::arch::x86_64::context_switch::switch_context_full_restore;
-    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
-    use core::sync::atomic::Ordering;
+
+    let _handoff_guard = crate::arch::x86_64::interrupt_guard::InterruptGuard::disable();
 
     // Only try if scheduler is initialized
     let mut sched = match scheduler::SCHEDULER.try_lock() {
@@ -515,14 +528,20 @@ pub fn try_run_scheduled_processes() {
 
     match target {
         SwitchTarget::Process(context) => {
-            IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+            set_in_spawned_process(true);
             unsafe {
-                switch_context_full_restore(&raw mut KERNEL_CONTEXT, &context);
+                switch_context_full_restore(
+                    crate::arch::x86_64::percpu::kernel_context_ptr(),
+                    &context,
+                );
             }
-            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
+            set_in_spawned_process(false);
         }
         SwitchTarget::User(pid) => unsafe {
-            crate::userland::switch::save_kernel_and_resume_ring3(pid, &raw mut KERNEL_CONTEXT);
+            crate::userland::switch::save_kernel_and_resume_ring3(
+                pid,
+                crate::arch::x86_64::percpu::kernel_context_ptr(),
+            );
         },
         SwitchTarget::Kernel => {}
     }
@@ -546,7 +565,17 @@ pub fn get_process_list() -> alloc::vec::Vec<ProcessInfo> {
 /// from the scheduler.
 pub fn terminate_process(pid: ProcessId) {
     timer::cancel_entity(entity::EntityId::KernelThread(pid));
-    scheduler::SCHEDULER.lock().terminate(pid);
+    let running_cpu = scheduler::SCHEDULER.lock().terminate(pid);
+    if let Some(cpu) = running_cpu {
+        let topology = crate::arch::x86_64::acpi::topology();
+        if cpu != crate::arch::x86_64::percpu::cpu_id() && cpu < topology.cpu_count {
+            crate::arch::x86_64::lapic::send_fixed(
+                topology.cpus[cpu].lapic_id,
+                crate::arch::x86_64::lapic::RESCHEDULE_VECTOR,
+            );
+            crate::arch::x86_64::percpu::record_reschedule_ipi(cpu);
+        }
+    }
 }
 
 // =============================================================================
@@ -569,9 +598,10 @@ pub fn sleep_ticks_with_contract(
     latency: Option<crate::process::entity::LatencyContract>,
 ) {
     use crate::arch::x86_64::context_switch::switch_context;
+    use crate::arch::x86_64::interrupt_guard::InterruptGuard;
     use crate::arch::x86_64::interrupts::get_timer_ticks;
-    use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
-    use core::sync::atomic::Ordering;
+
+    let _handoff_guard = InterruptGuard::disable();
 
     let ticks = ticks.max(1);
 
@@ -644,12 +674,12 @@ pub fn sleep_ticks_with_contract(
         },
         SwitchTarget::Kernel => {
             // Return to kernel context - save our state and switch to kernel
-            IN_SPAWNED_PROCESS.store(false, Ordering::Release);
-            let kernel_ctx = unsafe { KERNEL_CONTEXT };
+            set_in_spawned_process(false);
+            let kernel_ctx = unsafe { *crate::arch::x86_64::percpu::kernel_context_ptr() };
             unsafe {
                 switch_context(old_ctx_ptr, &kernel_ctx);
             }
-            IN_SPAWNED_PROCESS.store(true, Ordering::Release);
+            set_in_spawned_process(true);
         }
     }
 }
@@ -666,7 +696,10 @@ fn next_switch_target(sched: &mut scheduler::Scheduler) -> SwitchTarget {
         Some(entity::EntityId::KernelThread(pid)) => sched
             .get_context(pid)
             .copied()
-            .map(SwitchTarget::Process)
+            .map(|context| {
+                crate::arch::x86_64::context_switch::validate_kernel_context(pid, &context);
+                SwitchTarget::Process(context)
+            })
             .unwrap_or(SwitchTarget::Kernel),
         Some(entity::EntityId::UserProcess(pid)) => SwitchTarget::User(pid),
         None => SwitchTarget::Kernel,

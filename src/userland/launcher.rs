@@ -27,6 +27,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+#[cfg(feature = "test")]
+static TEST_CR3_SETUP_DELAY_TICKS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "test")]
+static TEST_SETUP_READS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "test")]
+static TEST_SETUP_ACTIVATIONS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "test")]
+static TEST_SETUP_RESTORES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 use crate::userland::lifecycle::ExitKind;
 
 /// U8 serialization: protects address-space setup and teardown from concurrent
@@ -107,21 +118,79 @@ pub(crate) fn prepare_user_binary_unstarted(
     // active CR3, so do the potentially long read before entering the
     // address-space setup transaction.
     let (file, bytes) = read_file_bytes(path)?;
+    #[cfg(feature = "test")]
+    TEST_SETUP_READS.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
     let _setup_guard = BINARY_SETUP_MUTEX.lock();
 
     let aspace = crate::userland::address_space::AddressSpace::new()
         .map_err(|e| format!("AddressSpace::new: {:?}", e))?;
     // SAFETY: AddressSpace::new copies the kernel half from the kernel L4,
-    // and BINARY_SETUP_MUTEX excludes competing CR3-sensitive loaders.
+    // and BINARY_SETUP_MUTEX excludes competing CR3-sensitive loaders. The
+    // local preemption guard is equally load-bearing on SMP: while this CPU
+    // has the not-yet-runnable process's CR3 installed, no scheduler handoff
+    // may replace it before the ELF mappings and initial stack are complete.
+    let _preemption_guard = crate::arch::x86_64::preemption_guard::PreemptionGuard::disable();
     unsafe {
         aspace.activate();
     }
+    #[cfg(feature = "test")]
+    TEST_SETUP_ACTIVATIONS.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
 
-    let image = crate::userland::loader::load_elf_file(&bytes, file)
-        .map_err(|e| format!("loader error: {:?}", e))?;
+    #[cfg(feature = "test")]
+    {
+        use core::sync::atomic::Ordering;
+        let delay = TEST_CR3_SETUP_DELAY_TICKS.load(Ordering::Acquire);
+        if delay != 0 {
+            let deadline = crate::arch::x86_64::interrupts::get_timer_ticks().saturating_add(delay);
+            while crate::arch::x86_64::interrupts::get_timer_ticks() < deadline {
+                core::hint::spin_loop();
+            }
+        }
+    }
 
-    crate::userland::setup_user_process_unstarted(image, argv, envp, Some(aspace), terminal_id)
-        .map_err(|e| format!("setup_user_process: {:?}", e))
+    let result = crate::userland::loader::load_elf_file(&bytes, file)
+        .map_err(|e| format!("loader error: {:?}", e))
+        .and_then(|image| {
+            crate::userland::setup_user_process_unstarted(
+                image,
+                argv,
+                envp,
+                Some(aspace),
+                terminal_id,
+            )
+            .map_err(|e| format!("setup_user_process: {:?}", e))
+        });
+
+    // The prepared process is not current yet and may be dispatched on any
+    // CPU as soon as its scheduler entity is published. Never let this
+    // kernel thread continue (or migrate) with that process's CR3 installed.
+    unsafe {
+        crate::mm::paging::activate_kernel_l4();
+    }
+    #[cfg(feature = "test")]
+    TEST_SETUP_RESTORES.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    result
+}
+
+#[cfg(feature = "test")]
+pub(crate) fn set_test_cr3_setup_delay(ticks: u64) {
+    use core::sync::atomic::Ordering;
+    if ticks != 0 {
+        TEST_SETUP_READS.store(0, Ordering::Release);
+        TEST_SETUP_ACTIVATIONS.store(0, Ordering::Release);
+        TEST_SETUP_RESTORES.store(0, Ordering::Release);
+    }
+    TEST_CR3_SETUP_DELAY_TICKS.store(ticks, Ordering::Release);
+}
+
+#[cfg(feature = "test")]
+pub(crate) fn test_setup_progress() -> (u64, u64, u64) {
+    use core::sync::atomic::Ordering;
+    (
+        TEST_SETUP_READS.load(Ordering::Acquire),
+        TEST_SETUP_ACTIVATIONS.load(Ordering::Acquire),
+        TEST_SETUP_RESTORES.load(Ordering::Acquire),
+    )
 }
 
 fn read_file_bytes(path: &str) -> Result<(crate::lib::arc::Arc<crate::fs::File>, Vec<u8>), String> {

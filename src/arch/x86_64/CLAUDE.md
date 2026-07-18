@@ -1,19 +1,24 @@
 # `src/arch/x86_64/` — x86_64 Architecture
 
-Low-level x86_64 plumbing: GDT/TSS, IDT, naked-asm context switching, preemption, interrupt-disable guard.
+Low-level x86_64 plumbing: SMP/AP bring-up, ACPI/APIC interrupt routing,
+per-CPU GDT/TSS state, naked-asm context switching, and preemption.
 
 ## Key files
 
-- `gdt.rs` — GDT layout, TSS, IST stacks. Loaded once at boot via `gdt::init()`.
+- `acpi.rs` — allocation-free RSDP/RSDT/XSDT/MADT discovery, capped at `MAX_CPUS = 8` with a BSP-only fallback.
+- `smp.rs` — INIT-SIPI AP startup through the `0x8000` trampoline, LAPIC-timer calibration, AP idle/dispatch loop, and work/panic IPIs.
+- `percpu.rs` — fixed per-CPU state and the GS ABI (`gs:[0]` kernel stack, `gs:[8]` user RSP scratch, `gs:[16]` logical CPU id), plus lock-free monotonic user/system/idle timer accounting consumed by `/proc/stat`.
+- `lapic.rs` / `ioapic.rs` — local APIC timers/EOI/IPIs and BSP-affine external IRQ routing.
+- `gdt.rs` — identical-selector per-CPU GDTs, TSSes, rsp0 stacks, and double-fault IST stacks.
 - `fpu.rs` — `enable_sse()` configures CR0/CR4 for SSE/SSE2 execution. Required before any ring-3 transition; musl + libstdc++ binaries emit SSE2 in `__init_tls` before reaching `main` and would `#UD` without it. The kernel target spec uses `+soft-float`, so the kernel itself never needs SSE — but ring 3 does.
-- `interrupts.rs` — IDT setup, all exception handlers, PIC/PIT configuration, hardware-IRQ entry points.
+- `interrupts.rs` — shared IDT setup, exceptions, PIT, APIC/IOAPIC cutover with legacy-PIC fallback, and hardware-IRQ entry points.
 - `rtc.rs` — bounded, stable PC CMOS RTC snapshots with BCD/binary and
   12/24-hour decoding. Sampled once by `crate::time` after PIT initialization;
   it must always restore NMI-enabled state and degrade to an error rather than
   stalling boot.
 - `context_switch.rs` — naked-asm `switch_*` functions used by the cooperative scheduler.
-- `preemption.rs` — naked-asm `timer_interrupt_handler_preemptive` and Rust-side `timer_handler_inner`. Round-robin preemptive scheduler. Each tick first wakes due ring-3 `nanosleep` sleepers (`lifecycle::process_expired_sleeps`, bounded `try_lock` scan — the kernel main loop is not a reliable periodic context). The CPL=3 branch (U5) charges one tick to the current ring-3 process's `utime_ticks` (PROCESS_TABLE `try_lock`; a contended tick is dropped — sampling accounting for `/proc`), then calls `lifecycle::try_preempt_ring3` and, if another ring-3 process is runnable, diverges via `switch::resume_ring3`; otherwise it iretq's back to the same process. CPL=0 branch handles kernel-thread preemption via the existing `CpuContext` / `KERNEL_CONTEXT` switch path.
-- `preemption_guard.rs` — nesting-safe `PreemptionGuard` and `PreemptionMutex`. They leave hardware IRQs enabled so PIT time and device input continue, while the CPL=0 timer path takes a minimal tick/EOI fast path and defers scheduler housekeeping and context switches until the outermost protected critical section ends. The nesting counter is global only because the kernel is single-CPU.
+- `preemption.rs` — naked timer entry plus the privilege-neutral scheduler handoff. The BSP PIT advances global time and timer work; AP LAPIC timers only record local ticks and preempt. CPL=3 saves `UserState`; CPL=0 saves the complete `CpuContext`, including the IA-32e hardware SS:RSP fields.
+- `preemption_guard.rs` — nesting-safe `PreemptionGuard` and `PreemptionMutex`. They leave hardware IRQs enabled while deferring local kernel-thread preemption; nesting depth is per-CPU and cross-CPU exclusion comes only from the inner spin lock.
 - `interrupt_guard.rs` — RAII guard for `cli`/`sti` regions plus `InterruptMutex`, the required mutex wrapper for state shared by timer-preemptible kernel threads and IF-cleared interrupt/SYSCALL paths. The VirtIO block registry uses it so PCI completion cannot interrupt a queue mutation (see `src/drivers/CLAUDE.md`).
 
 ## GDT layout (load-bearing)
@@ -28,11 +33,32 @@ slot   selector   descriptor               DPL
  5,6   0x28       TSS (16-byte system desc)   —
 ```
 
-The kernel CS=0x08 / SS=0x10 selectors are hard-coded as literal pushes inside the naked asm in `preemption.rs` (lines around the `iretq` frame construction) and `context_switch.rs`. **Do not reorder slots 1 or 2.** The user_data-before-user_code order is also load-bearing: it keeps the door open for `syscall`/`sysret` later, which derives `user_cs = STAR[63:48] + 16` and `user_ss = STAR[63:48] + 8` by formula. Adding new descriptors should append after the TSS, not insert before it.
+Kernel `CpuContext` values use CS=0x08 / SS=0x10 and user transitions derive
+their selectors from this fixed ordering. **Do not reorder slots 1 or 2.**
+The user_data-before-user_code order is also load-bearing: `syscall`/`sysret`
+derives `user_cs = STAR[63:48] + 16` and `user_ss = STAR[63:48] + 8` by
+formula. Adding descriptors must append after the TSS.
+
+PCI INTx IOAPIC routes are active-low/level-triggered. VirtIO interrupt
+handlers use `try_lock`; an unacknowledged interrupt must remain asserted and
+retrigger after EOI rather than being lost as an edge.
+
+Every completed kernel context save is published to the scheduler before the
+target entity runs, including direct kernel→ring3 handoffs. Ring3→kernel
+transfers restore the permanent kernel CR3 so address-space teardown on a
+different CPU cannot invalidate a page table still active in kernel mode.
+
+Every local scheduling-timer edge charges exactly one `CpuLocal` time bucket
+before the interrupt path can return: CPL=3 is user, spawned kernel-thread
+execution is system, and an idle loop inside its published `sti; hlt` window
+is idle. BSP/AP main-loop housekeeping outside that window is system. The
+counters are monotonic and never require the scheduler or process-table lock.
 
 ## TSS
 
-Single static instance. `privilege_stack_table[0]` (`rsp0`) holds the kernel stack to which the CPU switches on a ring 3 → ring 0 transition (interrupt or exception). U5 (multi-ring-3 scheduling) updates `rsp0` to point at the currently-loaded process's per-process kernel stack on every ring-3 switch via `gdt::set_kernel_rsp0` — historically (single-app-synchronous) it was set once per `run`. `interrupt_stack_table[0]` is the dedicated `#DF` stack — kernel-stack overflow during user-mode work would otherwise triple-fault.
+Each CPU owns a TSS. `privilege_stack_table[0]` (`rsp0`) points at that CPU's
+current ring-3 process kernel stack and is updated on migration.
+`interrupt_stack_table[0]` points at a private double-fault stack.
 
 ## Boot ordering
 

@@ -25,6 +25,13 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // before display/window-manager initialization and defaults to legacy.
     crate::window::renderer::init_boot_policy();
 
+    // Capture bootloader handoff values before subsystem initialization.
+    let physical_memory_offset = boot_info
+        .physical_memory_offset
+        .into_option()
+        .unwrap_or(0x10000000000);
+    let rsdp_addr = boot_info.rsdp_addr.into_option();
+
     // Enable SSE/SSE2 in CR0/CR4 before any code path that could end up in
     // ring 3 (loader → enter_user_mode). musl + libstdc++ binaries emit SSE2
     // in `__init_tls` before reaching `main`; without this the first SSE
@@ -45,17 +52,9 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // the right selectors) and after init_percpu() (so the first swapgs
     // hits a valid kernel GS).
     crate::arch::x86_64::syscall::init_syscall_msrs();
+    // Load exception gates before initializing the demand-backed heap. The
+    // first allocator metadata write faults in the first heap page.
     interrupts::init_idt();
-    crate::time::init();
-    ps2_controller::init();
-
-    // Extract what we need from boot_info before borrowing it
-    // Use a default offset if not provided by bootloader
-    let physical_memory_offset = boot_info
-        .physical_memory_offset
-        .into_option()
-        .unwrap_or(0x10000000000); // Default offset for identity mapping
-    let rsdp_addr = boot_info.rsdp_addr.into_option();
 
     debug_info!("[boot] heap");
     unsafe {
@@ -64,6 +63,12 @@ pub fn init(boot_info: &'static mut BootInfo) {
         memory::init(memory_regions_ref, Some(physical_memory_offset));
         memory::init_heap(physical_memory_offset);
     }
+
+    crate::arch::x86_64::acpi::init(rsdp_addr);
+    // APIC MMIO mapping requires the live memory mapper and MADT topology.
+    interrupts::init_interrupt_controllers();
+    crate::time::init();
+    ps2_controller::init();
 
     // Parse and install the system font. Must run after heap init (the TTF
     // rasterizer allocates) and before any window or TTY is constructed (the
@@ -75,6 +80,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     crate::process::init_scheduler();
     crate::process::timer::init();
     crate::process::timer::start_service();
+    crate::arch::x86_64::smp::init();
 
     // Linux ABI syscall surface (write/exit_group, plus the broader set in
     // U9) is dispatched directly from `userland::abi::syscall_dispatch` —
@@ -159,6 +165,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     }
 
     debug_info!("[boot] init complete");
+    crate::arch::x86_64::smp::release_aps();
 }
 
 #[cfg(not(feature = "test"))]
@@ -224,7 +231,10 @@ fn init_display(boot_info: &'static mut BootInfo) -> Option<(u32, u32)> {
     Some((width, height))
 }
 
-// Static storage for VirtIO block devices and partition devices.
+// Static storage for VirtIO block devices and partition devices. The BSP
+// populates these slots before AP dispatch is enabled; afterwards their
+// structure is immutable and runtime device access is serialized by the
+// driver/filesystem locks.
 static mut ROOT_DISK: Option<crate::drivers::virtio::block::VirtioBlockDevice> = None;
 static mut PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] =
     [None, None, None, None];
@@ -691,10 +701,15 @@ fn restore_overlay_upper_from_data() {
     }
 
     // Find the overlay at /.
-    let root_mount = get_vfs()
-        .list_mounts()
-        .find(|m| m.path == "/" && m.filesystem.name() == "overlay");
-    let Some(mount) = root_mount else {
+    let overlay_ptr = {
+        let vfs = get_vfs();
+        let result = vfs
+            .list_mounts()
+            .find(|m| m.path == "/" && m.filesystem.name() == "overlay")
+            .map(|mount| mount.filesystem as *const dyn Filesystem as *const Overlay);
+        result
+    };
+    let Some(overlay_ptr) = overlay_ptr else {
         debug_info!("overlay restore: / is not an overlay; skipping");
         return;
     };
@@ -702,7 +717,6 @@ fn restore_overlay_upper_from_data() {
     // Narrow the trait object to a concrete Overlay reference. We
     // built this mount ourselves in vfs::mount_overlay_root, so the
     // name-based guard + downcast is sound.
-    let overlay_ptr = mount.filesystem as *const dyn Filesystem as *const Overlay;
     let overlay: &Overlay = unsafe { &*overlay_ptr };
     let upper_dyn = overlay.upper();
     if upper_dyn.name() != "tmpfs" {
@@ -831,6 +845,22 @@ pub fn run() -> ! {
             x86_64::instructions::interrupts::enable();
             continue;
         }
+
+        // Publish the idle state before the final queue recheck. A remote
+        // enqueue either observes this flag and sends an IPI, or is observed
+        // by the recheck before STI+HLT. The timer accounting path also uses
+        // the flag to distinguish real idle time from kernel housekeeping.
+        crate::arch::x86_64::percpu::set_idle_interruptible(true);
+        if crate::process::scheduler::SCHEDULER
+            .lock()
+            .ready_entity_count()
+            != 0
+        {
+            crate::arch::x86_64::percpu::set_idle_interruptible(false);
+            x86_64::instructions::interrupts::enable();
+            continue;
+        }
         x86_64::instructions::interrupts::enable_and_hlt();
+        crate::arch::x86_64::percpu::set_idle_interruptible(false);
     }
 }

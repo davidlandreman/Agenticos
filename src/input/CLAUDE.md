@@ -31,7 +31,10 @@ window::render_frame();            // render any changes
 
 The SPSC queue exists because earlier code used `try_lock` from interrupt context, which caused stalls when the lock was held by the consumer. **Do not add a `Mutex` here.** The interrupt-handler producer must never block. The atomic `compare_exchange` in `push()` returns `false` on full rather than blocking; dropping the rare overflow event is correct behavior, blocking the interrupt handler is not.
 
-Producer count: exactly one (the interrupt handler). Consumer count: exactly one (the idle-loop processor). Multi-producer or multi-consumer use is a redesign, not a parameter tweak.
+Producer count: exactly one logical producer on the BSP. IOAPIC routing pins
+PS/2/device IRQs to CPU 0, and `InputQueue::push` debug-asserts that affinity.
+Consumer count remains exactly one (the BSP idle-loop processor).
+Multi-producer or multi-consumer use is a redesign, not a parameter tweak.
 
 ## Cross-references
 

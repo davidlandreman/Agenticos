@@ -1944,6 +1944,19 @@ pub fn maybe_deliver_signal(args: &SyscallArgs, syscall_ret: i64) -> Option<i64>
     // take the divergent exit path (same guard as exit_group_handler
     // — synthetic dispatcher tests have no scheduler context to yield
     // from).
+    maybe_terminate_pending_fatal_signal();
+    if let Some((sig, action, restore_mask)) = prepare_deliverable_signal() {
+        unsafe {
+            deliver_signal(sig, action, args, syscall_ret, restore_mask);
+        }
+    }
+    None
+}
+
+/// Terminate the current ring-3 process if it has an unblocked fatal-default
+/// signal pending. Called both at the syscall tail and from timer/reschedule
+/// interrupt paths so a CPU-bound process cannot outrun SIGKILL/SIGTERM.
+pub fn maybe_terminate_pending_fatal_signal() {
     if matches!(
         crate::userland::lifecycle::current_user_pid(),
         Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID
@@ -1965,12 +1978,6 @@ pub fn maybe_deliver_signal(args: &SyscallArgs, syscall_ret: i64) -> Option<i64>
             crate::userland::lifecycle::cooperative_exit(code);
         }
     }
-    if let Some((sig, action, restore_mask)) = prepare_deliverable_signal() {
-        unsafe {
-            deliver_signal(sig, action, args, syscall_ret, restore_mask);
-        }
-    }
-    None
 }
 
 // ---------- Phase 5 PR-A: pipes ----------

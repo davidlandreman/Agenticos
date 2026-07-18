@@ -103,10 +103,22 @@ pub unsafe extern "C" fn save_kernel_and_resume_ring3(
         // was running on when save_kernel_and_resume_ring3 was called.
         "mov qword ptr [rsi + 144], 0x08",
         "mov qword ptr [rsi + 152], 0x10",
-        // Tail-call resume_ring3(pid). RDI is already pid; jmp (not
-        // call) so the stack stays in the shape we just saved.
-        "jmp {dispatch}",
+        // Leave the entity stack before publishing it. The per-CPU idle/main
+        // stack is inactive while an entity is running and provides a safe
+        // bridge into the ring-3 dispatcher.
+        "mov r12, rdi",
+        "mov r13, rsi",
+        "cli",
+        "mov rsp, gs:[{kernel_context_rsp_offset}]",
+        "and rsp, -16",
+        "mov rdi, r13",
+        "call {publish}",
+        "mov edi, r12d",
+        "call {dispatch}",
+        "ud2",
+        publish = sym crate::arch::x86_64::context_switch::publish_handoff_context,
         dispatch = sym dispatch_resume_ring3_diverging,
+        kernel_context_rsp_offset = const crate::arch::x86_64::percpu::KERNEL_CONTEXT_RSP_OFFSET,
     );
 }
 
@@ -144,8 +156,9 @@ pub unsafe fn yield_to_kernel_main_loop() -> ! {
     // No ring-3 process is loaded on this CPU after the switch.
     crate::userland::lifecycle::set_current_user_pid(None);
     crate::process::set_in_spawned_process(false);
+    crate::mm::paging::activate_kernel_l4();
     crate::arch::x86_64::context_switch::switch_to_context(
-        &raw const crate::arch::x86_64::preemption::KERNEL_CONTEXT,
+        crate::arch::x86_64::percpu::kernel_context_ptr(),
     );
     // switch_to_context diverges — unreachable.
     let _ = Ordering::Release;
@@ -241,6 +254,34 @@ pub fn save_ring3(p: &mut Process, frame: &InterruptStackFrame) {
 /// handler with interrupts disabled; the iretq itself re-enables
 /// them via the saved RFLAGS.
 pub unsafe fn resume_ring3(pid: u32) -> ! {
+    // Timer preemption saves an entity while still on its kernel stack. Move
+    // to this CPU's idle/main stack before publishing that entity to the
+    // shared run queue, otherwise another CPU can reuse the live stack.
+    if crate::arch::x86_64::percpu::has_pending_context_publish() {
+        resume_ring3_after_stack_handoff(pid)
+    }
+    resume_ring3_inner(pid)
+}
+
+#[unsafe(naked)]
+unsafe extern "C" fn resume_ring3_after_stack_handoff(_pid: u32) -> ! {
+    core::arch::naked_asm!(
+        "cli",
+        "mov rsp, gs:[{kernel_context_rsp_offset}]",
+        "and rsp, -16",
+        "call {dispatch}",
+        "ud2",
+        dispatch = sym publish_and_resume_ring3,
+        kernel_context_rsp_offset = const crate::arch::x86_64::percpu::KERNEL_CONTEXT_RSP_OFFSET,
+    );
+}
+
+extern "C" fn publish_and_resume_ring3(pid: u32) -> ! {
+    crate::arch::x86_64::context_switch::publish_pending_context();
+    unsafe { resume_ring3_inner(pid) }
+}
+
+unsafe fn resume_ring3_inner(pid: u32) -> ! {
     use crate::arch::x86_64::gdt::{set_kernel_rsp0, user_selectors};
     use crate::arch::x86_64::syscall::set_percpu_kernel_rsp_top;
 
@@ -323,18 +364,23 @@ pub fn block_current_ring3_on_io(token: u64) {
         table
             .ring3_blocked
             .insert(pid, Ring3BlockReason::WaitingForBlockIo { token });
-        table.current_user_pid = None;
         pointer
     };
+    crate::process::scheduler::SCHEDULER
+        .lock()
+        .mark_context_saving(crate::process::entity::EntityId::UserProcess(pid));
+    crate::arch::x86_64::percpu::set_pending_user_context_publish(pid);
+    crate::arch::x86_64::percpu::set_current_user_pid(None);
     crate::process::scheduler::SCHEDULER
         .lock()
         .block_entity(crate::process::entity::EntityId::UserProcess(pid));
 
     crate::process::set_in_spawned_process(false);
     unsafe {
+        crate::mm::paging::activate_kernel_l4();
         switch_context(
             old_context,
-            &raw const crate::arch::x86_64::preemption::KERNEL_CONTEXT,
+            crate::arch::x86_64::percpu::kernel_context_ptr(),
         );
     }
 }

@@ -85,7 +85,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   user reads and each open sees one consistent snapshot. Also home to
   the `sysinfo(2)` snapshot helper. Per-process RSS is a read-only
   page-table walk (`MemoryMapper::count_user_resident_pages`), not a
-  maintained counter.
+  maintained counter. `/proc/stat` exposes one `cpuN` row per online logical
+  processor plus an exact aggregate from monotonic per-CPU user/system/idle
+  timer counters; `/proc/uptime` reports the Linux-style sum of CPU idle time.
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
 - `error.rs` — loader-side error enum.
@@ -152,8 +154,9 @@ Unhandled fatal-default signals (SIGKILL, SIGTERM-without-trap, …) terminate
 the process at the dispatcher tail (`maybe_deliver_signal`'s fatal check →
 `notify_parent_of_signaled_exit` + `cooperative_exit(128+sig)`). Ignored
 signals (SIGCHLD & co.) stay pending as a notification record but are never
-fatal. Known gap: a CPU-bound ring-3 process that never syscalls can outrun a
-pending fatal signal — the timer ISR does not yet run the fatal check.
+fatal. CPU-bound processes are covered too: a remote signal sends a reschedule
+IPI to the owning CPU, and both that handler and the local timer fallback run
+the fatal-default check before returning to ring 3.
 
 Socket slots hold `Arc<net::socket::SocketHandle>`. The handle is a shared
 open-file description: dup/fork share `O_NONBLOCK` and protocol state, while
@@ -167,15 +170,14 @@ watchdogs remain based on the 100 Hz PIT. `CLOCK_REALTIME` and `gettimeofday`
 use the boot CMOS RTC snapshot advanced by PIT ticks through `crate::time`;
 when RTC validation fails they retain the prior uptime-from-zero fallback.
 
-Processes live in `lifecycle::PROCESS_TABLE`, indexed by PID. The
-single field `current_user_pid: Option<u32>` names which process's
-CR3 / FS_BASE / FPU / kernel-stack are loaded right now. Today only
-one real ring-3 process is ever current; U5 wires the time-slicing
-that makes the "current" field meaningful as a per-instant pointer.
+Processes live in `lifecycle::PROCESS_TABLE`, indexed by PID.
+`CpuLocal.current_user_pid` names the process whose CR3 / FS_BASE / FPU /
+kernel stack is loaded on each CPU. The scheduler's per-CPU current slot owns
+the same tagged entity, so one process cannot be restored on two CPUs.
 `PROCESS_TABLE` uses `InterruptMutex`, not a plain `spin::Mutex`. This is
-load-bearing on the single CPU: timer-preemptible launcher/compositor threads
-and IF-cleared page-fault/SYSCALL paths share the table, so every acquisition
-must mask timer preemption until its guard releases the spinlock.
+load-bearing under SMP: local IF masking prevents same-CPU preemption while
+the spin lock provides exclusion from other CPUs and IF-cleared fault/SYSCALL
+paths.
 
 ## Ring-3 GUI ABI
 
@@ -226,14 +228,18 @@ cannot starve the compositor or network worker when zsh polls for a child.
    calls `launcher::prepare_user_binary_unstarted`. ELF bytes are read through
    asynchronous VirtIO block I/O before `BINARY_SETUP_MUTEX` serializes the
    CR3-sensitive `AddressSpace::new → activate → load/map ELF → initialize
-   VMAs → build stack/install Process` transaction.
+   VMAs → build stack/install Process` transaction. A per-CPU preemption guard
+   covers the interval where the new CR3 is active, and setup restores the
+   permanent kernel CR3 before publishing the process to another CPU.
 3. Setup installs a complete but unschedulable Process. The service publishes
    the LaunchId→PID record, checks cancellation, then marks the user entity
    Ready. Explicit `terminal_id`, cwd, argv, and env replace wrapper-thread
    inference.
 4. Ring 3 runs on the unified scheduler. On exit it records status, destroys
    GUI ownership, unregisters its entity, marks process-service work pending,
-   and dispatches away without dropping its live kernel stack.
+   and dispatches away without dropping its live kernel stack. Every
+   ring3→kernel handoff installs the permanent kernel CR3 before a remote CPU
+   may reap the old address space.
 5. `process-service` later removes the Process from its own kernel stack,
    freeing the address space, kernel stack, fds, and timers before invoking a
    completion handler outside all locks. Fork children remain parent-owned
