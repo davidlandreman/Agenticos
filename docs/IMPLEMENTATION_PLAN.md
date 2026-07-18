@@ -161,6 +161,14 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - Hermetic restricted-QEMU static-musl resolver fixture plus BusyBox IPv4 `ping`, `nc`, `nslookup`, and HTTP `wget`
 - Poll-driven single interface; IPv6, TLS, offloads, and NIC IRQs remain future work
 
+#### Cryptographic Randomness and Linux Random Interfaces ✓
+- **Status**: Complete
+- Host-`/dev/urandom`-backed modern VirtIO RNG for QEMU, with x86-64 RDRAND fallback
+- One fail-closed kernel broker for process `AT_RANDOM`, `getrandom(2)`, and read-only `/dev/urandom`
+- Cryptographic smoltcp seed and randomized ephemeral-port starting point
+- Finite VirtIO completion waits with failed queues quarantined and DMA retained
+- Entropy is a TLS prerequisite only; TLS/HTTPS remains deferred and browser/network tools stay HTTP-only
+
 ### 🔄 Recent Architectural Improvements
 
 #### Code Organization Refactor (Completed)

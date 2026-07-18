@@ -155,6 +155,10 @@ if [ "$RUN_QEMU" = true ]; then
         echo "❌ QEMU binary is missing or not executable: ${QEMU_BIN:-<unset>}" >&2
         exit 1
     fi
+    if [ ! -r /dev/urandom ]; then
+        echo "❌ Host entropy source /dev/urandom is missing or unreadable" >&2
+        exit 1
+    fi
     # Freeze Homebrew's `opt` symlink (or any PATH result) to one executable
     # before capability probing. The exact same resolved file is launched.
     if command -v realpath >/dev/null 2>&1; then
@@ -234,6 +238,8 @@ if [ "$RUN_QEMU" = true ]; then
         -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-host,serial=agenticos-host"
         -drive "format=raw,file=$DATA_IMAGE,if=none,id=agenticos-data"
         -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-data,serial=agenticos-data"
+        -object "rng-random,id=agenticos-rng,filename=/dev/urandom"
+        -device "virtio-rng-pci,disable-legacy=on,rng=agenticos-rng"
         -fw_cfg "name=opt/agenticos/force_dirty_mount,string=$FORCE_DIRTY_MOUNT"
         -serial stdio
         -chardev "socket,id=rpc,path=$RPC_SOCK,server=on,wait=off"

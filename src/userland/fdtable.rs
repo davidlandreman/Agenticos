@@ -85,6 +85,15 @@ pub enum FdSlot {
         cursor: usize,
         cloexec: bool,
     },
+    /// Synthetic `/dev` directory. Its only entry is `urandom`.
+    VirtualDevDir {
+        cursor: usize,
+        cloexec: bool,
+    },
+    /// Dynamic cryptographic random character device.
+    Urandom {
+        cloexec: bool,
+    },
 }
 
 impl FdSlot {}
@@ -199,6 +208,8 @@ impl FdTable {
             FdSlot::Socket { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::VirtualFile { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::VirtualDir { cloexec: ce, .. } => *ce = cloexec,
+            FdSlot::VirtualDevDir { cloexec: ce, .. } => *ce = cloexec,
+            FdSlot::Urandom { cloexec: ce } => *ce = cloexec,
             _ => {}
         }
         Ok(())
@@ -214,6 +225,8 @@ impl FdTable {
             FdSlot::Socket { cloexec, .. } => *cloexec,
             FdSlot::VirtualFile { cloexec, .. } => *cloexec,
             FdSlot::VirtualDir { cloexec, .. } => *cloexec,
+            FdSlot::VirtualDevDir { cloexec, .. } => *cloexec,
+            FdSlot::Urandom { cloexec } => *cloexec,
             _ => false,
         })
     }

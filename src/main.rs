@@ -24,6 +24,7 @@ mod lib;
 mod mm;
 mod net;
 mod process;
+mod random;
 mod terminal;
 mod tests;
 mod time;

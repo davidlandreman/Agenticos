@@ -26,6 +26,8 @@ This folder holds in-kernel test modules that run under QEMU when the kernel is 
   numeric IPv4 `ping`, `nc`, and HTTP-only `wget` smokes, including
   zsh→fork/execve regressions for `ping` and `wget`. `test.sh` supplies
   restricted QEMU networking and repository-owned guest-forwarded services.
+- `entropy.rs` — asserts the default QEMU selects modern VirtIO RNG, requests
+  distinct broker output, and covers the RDRAND CPUID decoder.
 
 ## Adding a test
 

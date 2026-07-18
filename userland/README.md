@@ -14,6 +14,20 @@ The userland speaks Linux x86-64 ABI — the kernel's `syscall` fast-path
 handler accepts Linux numbers directly. See `src/userland/abi.rs` for
 the dispatcher and the `nr` constants.
 
+Cryptographic random bytes are available through `getrandom(2)` and the
+read-only `/dev/urandom` character device. The kernel also supplies a fresh
+16-byte `AT_RANDOM` payload on every launch and `execve`. QEMU boots use an
+explicit modern VirtIO RNG backed by the host's `/dev/urandom`; physical
+x86-64 boots may fall back to CPUID-gated, carry-checked RDRAND. There is no
+timer/input fallback, entropy pool, or kernel DRBG: if neither trusted source
+works, random calls and new process/network setup fail closed.
+
+This solves one TLS prerequisite only. BusyBox `wget` and the first browser
+remain HTTP-only until a separate milestone supplies a reviewed TLS stack,
+CA roots, hostname verification, and trusted-time policy. A hostile VMM can
+control both the virtual entropy device and virtual CPU and is outside the
+guest threat model.
+
 See the userland app platform plan at
 `docs/plans/2026-05-08-004-feat-userland-app-platform-plan.md` for the
 historical design and `docs/plans/2026-05-09-001-feat-userland-linux-abi-cpp-hello-plan.md`

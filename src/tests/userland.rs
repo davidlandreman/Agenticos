@@ -2455,8 +2455,144 @@ fn test_dispatch_getrandom_fills_buffer() {
     args.rdi = ptr;
     args.rsi = 32;
     assert_eq!(syscall_dispatch(&mut args), 32);
-    // At least one byte should be non-zero (deterministic for the seed).
     assert!(buf.iter().any(|&b| b != 0), "getrandom returned all zeros");
+    let first = buf;
+    assert_eq!(syscall_dispatch(&mut args), 32);
+    assert_ne!(buf, first, "consecutive getrandom calls repeated");
+
+    args.rdx = 0x4;
+    assert_eq!(syscall_dispatch(&mut args), abi::EINVAL);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_dev_urandom_read_stat_and_seek() {
+    setup_phase2_active_user();
+    let path = b"/dev/urandom\0";
+    let path_ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: path_ptr,
+        end: path_ptr + path.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = path_ptr;
+    let fd = syscall_dispatch(&mut args);
+    assert!(fd >= 3, "open(/dev/urandom) failed: {}", fd);
+
+    let bytes = [0u8; 32];
+    let bytes_ptr = bytes.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: bytes_ptr,
+        end: bytes_ptr + bytes.len() as u64,
+    });
+    args = SyscallArgs::default();
+    args.rax = nr::READ;
+    args.rdi = fd as u64;
+    args.rsi = bytes_ptr;
+    args.rdx = bytes.len() as u64;
+    assert_eq!(syscall_dispatch(&mut args), bytes.len() as i64);
+    let first = bytes;
+    assert_eq!(syscall_dispatch(&mut args), bytes.len() as i64);
+    assert_ne!(bytes, first, "/dev/urandom repeated consecutive reads");
+
+    args = SyscallArgs::default();
+    args.rax = nr::LSEEK;
+    args.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut args), abi::ESPIPE);
+
+    let stat = [0u8; 144];
+    let stat_ptr = stat.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: stat_ptr,
+        end: stat_ptr + stat.len() as u64,
+    });
+    args = SyscallArgs::default();
+    args.rax = nr::FSTAT;
+    args.rdi = fd as u64;
+    args.rsi = stat_ptr;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    assert_eq!(
+        u32::from_ne_bytes(stat[24..28].try_into().unwrap()) & 0o170000,
+        0o020000
+    );
+    assert_eq!(u64::from_ne_bytes(stat[40..48].try_into().unwrap()), 0x109);
+
+    abi::set_user_va_bounds(UserVaBounds {
+        start: path_ptr,
+        end: path_ptr + path.len() as u64,
+    });
+    args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = path_ptr;
+    args.rsi = 1; // O_WRONLY
+    assert_eq!(syscall_dispatch(&mut args), abi::EACCES);
+    args.rax = nr::ACCESS;
+    args.rsi = 2; // W_OK
+    assert_eq!(syscall_dispatch(&mut args), abi::EACCES);
+    args.rsi = 4; // R_OK
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    args.rax = nr::UNLINK;
+    args.rsi = 0;
+    assert_eq!(syscall_dispatch(&mut args), abi::EPERM);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_dev_directory_lists_urandom() {
+    setup_phase2_active_user();
+    let path = b"/dev\0";
+    let path_ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: path_ptr,
+        end: path_ptr + path.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = path_ptr;
+    let fd = syscall_dispatch(&mut args);
+    assert!(fd >= 3, "open(/dev) failed: {}", fd);
+
+    let entries = [0u8; 256];
+    let entries_ptr = entries.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: entries_ptr,
+        end: entries_ptr + entries.len() as u64,
+    });
+    args = SyscallArgs::default();
+    args.rax = nr::GETDENTS64;
+    args.rdi = fd as u64;
+    args.rsi = entries_ptr;
+    args.rdx = entries.len() as u64;
+    let written = syscall_dispatch(&mut args);
+    assert!(written > 0);
+    assert!(
+        entries[..written as usize]
+            .windows(b"urandom\0".len())
+            .any(|window| window == b"urandom\0"),
+        "/dev listing omitted urandom"
+    );
+
+    // The exact synthetic classifier must not shadow `/dev/null`, which zsh
+    // creates in the writable overlay for stderr redirection.
+    let null_path = b"/dev/null\0";
+    let null_ptr = null_path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: null_ptr,
+        end: null_ptr + null_path.len() as u64,
+    });
+    args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = null_ptr;
+    args.rsi = 1 | 0o100; // O_WRONLY | O_CREAT
+    let null_fd = syscall_dispatch(&mut args);
+    assert!(
+        null_fd >= 3,
+        "synthetic devfs shadowed /dev/null: {}",
+        null_fd
+    );
 
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
@@ -5126,6 +5262,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_clock_gettime_invalid_clock_einval,
         &test_dispatch_clock_realtime_uses_rtc_epoch,
         &test_dispatch_getrandom_fills_buffer,
+        &test_dispatch_dev_urandom_read_stat_and_seek,
+        &test_dispatch_dev_directory_lists_urandom,
         &test_dispatch_uname_writes_sysname_linux,
         &test_dispatch_fcntl_getfd_setfd_roundtrip,
         &test_write_handler_non_utf8_returns_full_len,

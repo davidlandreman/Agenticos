@@ -107,6 +107,9 @@ pub(crate) fn prepare_user_binary_unstarted(
     // active CR3, so do the potentially long read before entering the
     // address-space setup transaction.
     let (file, bytes) = read_file_bytes(path)?;
+    let mut at_random = [0u8; 16];
+    crate::random::fill_bytes(&mut at_random)
+        .map_err(|e| format!("entropy unavailable: {:?}", e))?;
     let _setup_guard = BINARY_SETUP_MUTEX.lock();
 
     let aspace = crate::userland::address_space::AddressSpace::new()
@@ -120,8 +123,15 @@ pub(crate) fn prepare_user_binary_unstarted(
     let image = crate::userland::loader::load_elf_file(&bytes, file)
         .map_err(|e| format!("loader error: {:?}", e))?;
 
-    crate::userland::setup_user_process_unstarted(image, argv, envp, Some(aspace), terminal_id)
-        .map_err(|e| format!("setup_user_process: {:?}", e))
+    crate::userland::setup_user_process_unstarted(
+        image,
+        argv,
+        envp,
+        Some(aspace),
+        terminal_id,
+        &at_random,
+    )
+    .map_err(|e| format!("setup_user_process: {:?}", e))
 }
 
 fn read_file_bytes(path: &str) -> Result<(crate::lib::arc::Arc<crate::fs::File>, Vec<u8>), String> {

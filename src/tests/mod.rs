@@ -20,7 +20,7 @@ pub mod desktop_window;
 #[cfg(feature = "test")]
 pub mod display;
 #[cfg(feature = "test")]
-#[cfg(feature = "test")]
+pub mod entropy;
 #[cfg(feature = "test")]
 pub mod fat_write;
 #[cfg(feature = "test")]
@@ -120,6 +120,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("network", network::get_tests),
     ("resolver", crate::net::resolver_tests),
     ("network_userland", network_userland::get_tests),
+    ("entropy", entropy::get_tests),
     ("display", display::get_tests),
     ("interrupts", interrupts::get_tests),
     ("heap", heap::get_tests),
