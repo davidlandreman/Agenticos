@@ -62,6 +62,7 @@ pub const ENFILE: i64 = -23;
 pub const EAFNOSUPPORT: i64 = -97;
 pub const EPROTONOSUPPORT: i64 = -93;
 pub const ENOTCONN: i64 = -107;
+pub const ENOTSUP: i64 = -95;
 pub const EISCONN: i64 = -106;
 pub const EINPROGRESS: i64 = -115;
 pub const EALREADY: i64 = -114;
@@ -312,6 +313,10 @@ pub mod nr {
     pub const GUI_NEXT_EVENT: u64 = 5003;
     pub const GUI_WIN_DESTROY: u64 = 5004;
     pub const GUI_WIN_SET_TITLE: u64 = 5005;
+    pub const GUI_GL_CONTEXT_CREATE: u64 = 5006;
+    pub const GUI_GL_SUBMIT_FRAME: u64 = 5007;
+    pub const GUI_GL_GET_INFO: u64 = 5008;
+    pub const GUI_GL_CONTEXT_DESTROY: u64 = 5009;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -436,6 +441,10 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GUI_NEXT_EVENT => crate::userland::gui_syscalls::gui_next_event_handler(args),
         nr::GUI_WIN_DESTROY => crate::userland::gui_syscalls::gui_win_destroy_handler(args),
         nr::GUI_WIN_SET_TITLE => crate::userland::gui_syscalls::gui_win_set_title_handler(args),
+        nr::GUI_GL_CONTEXT_CREATE => crate::userland::gui_gl::context_create_handler(args),
+        nr::GUI_GL_SUBMIT_FRAME => crate::userland::gui_gl::submit_frame_handler(args),
+        nr::GUI_GL_GET_INFO => crate::userland::gui_gl::get_info_handler(args),
+        nr::GUI_GL_CONTEXT_DESTROY => crate::userland::gui_gl::context_destroy_handler(args),
         // Phase B: namespace mutations
         nr::MKDIR => syscalls::mkdir_handler(args),
         nr::MKDIRAT => syscalls::mkdirat_handler(args),

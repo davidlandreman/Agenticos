@@ -162,6 +162,7 @@ fn wake_ring3_blocked_on_gui_event(pid: u32) {
 /// Drain GUI state before taking the window-manager lock, keeping lock order
 /// one-way even when cleanup follows a fault.
 pub fn cleanup_process(pid: u32) {
+    crate::userland::gui_gl::cleanup_process(pid);
     let records: Vec<GuiWindowRecord> = GUI_STATES
         .lock()
         .remove(&pid)
@@ -500,6 +501,7 @@ fn key_char(key: KeyCode, shift: bool) -> char {
 #[cfg(feature = "test")]
 pub fn reset_for_test() {
     GUI_STATES.lock().clear();
+    super::gui_gl::reset_for_test();
 }
 
 #[cfg(feature = "test")]

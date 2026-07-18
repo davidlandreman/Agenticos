@@ -3,6 +3,7 @@
 use bootloader_api::info::PixelFormat;
 
 use crate::graphics::color::Color;
+use crate::graphics::composition::ClientGlId;
 use crate::userland::gui;
 use crate::window::event::{Event, EventResult, FocusEvent, ResizeEvent};
 use crate::window::{GraphicsDevice, Rect, Window, WindowBuffer, WindowId};
@@ -14,6 +15,7 @@ pub struct RemoteSurface {
     owner_pid: u32,
     handle: u32,
     buffer: WindowBuffer,
+    gl_client: Option<ClientGlId>,
 }
 
 impl RemoteSurface {
@@ -31,10 +33,32 @@ impl RemoteSurface {
                 PixelFormat::Bgr,
                 4,
             ),
+            gl_client: None,
         }
     }
 
+    pub fn attach_gl_client(&mut self, id: ClientGlId) -> bool {
+        if self.gl_client.is_some() {
+            return false;
+        }
+        self.gl_client = Some(id);
+        self.base.invalidate();
+        true
+    }
+
+    pub fn detach_gl_client(&mut self, id: ClientGlId) -> bool {
+        if self.gl_client != Some(id) {
+            return false;
+        }
+        self.gl_client = None;
+        self.base.invalidate();
+        true
+    }
+
     pub fn present(&mut self, pixels: &[u8], width: u32, height: u32, stride: usize) -> bool {
+        if self.gl_client.is_some() {
+            return false;
+        }
         let bounds = self.base.bounds();
         if width != bounds.width || height != bounds.height || stride < width as usize * 4 {
             return false;
@@ -119,5 +143,9 @@ impl Window for RemoteSurface {
 
     fn as_remote_surface_mut(&mut self) -> Option<&mut RemoteSurface> {
         Some(self)
+    }
+
+    fn external_gl_client(&self) -> Option<ClientGlId> {
+        self.gl_client
     }
 }

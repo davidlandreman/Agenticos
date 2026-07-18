@@ -47,13 +47,16 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   queue and process-death teardown.
 - `gui_syscalls.rs` — syscalls 5001-5005: create, copy-present, next-event,
   destroy, and update a window title.
+- `gui_gl.rs` — validated GL syscalls 5006-5009, per-PID logical-context
+  ownership, bounded packet parsing, mailbox publication, and teardown.
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility
   pointer bounds for synthetic tests, and errno constants. Real processes
   use VMA-aware user-copy validation. Unknown syscall numbers always return
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
   to BusyBox, the remaining kernel-side GUI app through `GLAUNCH.ELF`, or
-  standalone ELFs such as `/host/FILEMAN.ELF` and `/host/NOTEPAD.ELF`.
+  standalone ELFs such as `/host/FILEMAN.ELF`, `/host/GLGAME.ELF`, and
+  `/host/NOTEPAD.ELF`.
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
 - `error.rs` — loader-side error enum.
@@ -127,13 +130,17 @@ must mask timer preemption until its guard releases the spinlock.
 
 ## Ring-3 GUI ABI
 
-The AgenticOS-private range extends syscall 5000 with five calls:
+The AgenticOS-private range extends syscall 5000 with nine GUI calls:
 
 - 5001 `gui_win_create(width, height, title, title_len, flags)`
 - 5002 `gui_win_present(handle, pixels, width, height, stride)`
 - 5003 `gui_next_event(event, len, flags)`
 - 5004 `gui_win_destroy(handle)`
 - 5005 `gui_win_set_title(handle, title, title_len)`
+- 5006 `gui_gl_context_create(window, flags)`
+- 5007 `gui_gl_submit_frame(context, packet, len, flags)`
+- 5008 `gui_gl_get_info(context, info, len)`
+- 5009 `gui_gl_context_destroy(context)`
 
 Pixels are little-endian XRGB8888 (`u32` value `0x00RRGGBB`). Presents copy a
 full client surface into kernel memory. Events use a fixed 32-byte
@@ -144,6 +151,13 @@ the oldest entry. Mouse button events carry a 64-bit PIT tick in payload slots
 4 and 5; mouse modifier bits occupy payload slot 2 above the button-state byte.
 Title updates and destruction are ownership-checked. Removing a process
 destroys every frame it owns.
+
+GL packets are versioned, self-contained colored-triangle frames capped at
+192 KiB, 1,024 draws, and 4,096 vertices. The kernel validates every offset,
+range, float, viewport, and flag before publishing a one-slot mailbox to the
+single VirGL owner. A GL-backed `RemoteSurface` rejects XRGB presents. Hardware
+depth is advertised only when the VirGL capset supplies a depth format; the
+userland GL library uses bounded painter sorting otherwise.
 
 The ring-3 timer hands control back to `KERNEL_CONTEXT` every second tick,
 saving and requeueing the current user process first. Direct ring3-to-ring3

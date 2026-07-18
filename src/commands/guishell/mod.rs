@@ -49,6 +49,7 @@ pub enum PendingAction {
     SpawnTerminal,
     SpawnPainting,
     SpawnCalc,
+    SpawnGlGame,
     SpawnNotepad,
     SpawnFileManager,
     OpenRunDialog,
@@ -262,6 +263,7 @@ fn show_start_menu() {
             StartMenuAction::Notepad => queue_action(PendingAction::SpawnNotepad),
             StartMenuAction::Painting => queue_action(PendingAction::SpawnPainting),
             StartMenuAction::Calc => queue_action(PendingAction::SpawnCalc),
+            StartMenuAction::GlGame => queue_action(PendingAction::SpawnGlGame),
             StartMenuAction::Run => queue_action(PendingAction::OpenRunDialog),
             StartMenuAction::ShutDown => queue_action(PendingAction::ShowShutdownNotice),
         });
@@ -346,6 +348,14 @@ fn spawn_calc() {
     crate::window::terminal_factory::spawn_gui_user_app(
         "/host/CALC.ELF",
         alloc::vec![alloc::string::String::from("calc")],
+    );
+}
+
+fn spawn_glgame() {
+    crate::debug_info!("GUIShell: Spawning GL Arena...");
+    crate::window::terminal_factory::spawn_gui_user_app(
+        "/host/GLGAME.ELF",
+        alloc::vec![alloc::string::String::from("glgame")],
     );
 }
 
@@ -655,6 +665,10 @@ fn process_pending_actions() {
             PendingAction::SpawnCalc => {
                 close_start_menu();
                 spawn_calc();
+            }
+            PendingAction::SpawnGlGame => {
+                close_start_menu();
+                spawn_glgame();
             }
             PendingAction::SpawnNotepad => {
                 close_start_menu();

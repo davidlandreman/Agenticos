@@ -32,6 +32,7 @@ userland/
 ├── runtime/            # syscall ABI, startup parsing, brk allocator, GUI events
 ├── libs/
 │   ├── gui/            # Window, Canvas, bitmap text, menus, widgets, dir listing
+│   ├── gl/             # bounded fixed-function OpenGL-style VirGL frontend
 │   └── dialogs/        # FileDialog, MessageBox, ColorPicker modal compositions
 └── apps/
     ├── hello/          # rust app — prints "hello\n", exits 0
@@ -41,6 +42,7 @@ userland/
     ├── notepad/        # standalone editor with userland dialogs + working Save
     ├── calc/           # standalone four-operation calculator
     ├── painting/       # standalone bouncing-shapes GUI demo (self-driven frame loop)
+    ├── glgame/         # GL Arena — windowed real-time colored-geometry 3D game
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
@@ -75,8 +77,8 @@ resolve into multicall or direct binaries staged under `host_share/`:
   and HTTP-only `wget`; IPv6 and TLS are not available).
 - **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`tasks`).
 - **Direct standalone ring-3 applications** — `CALC.ELF`, `FILEMAN.ELF`,
-  `NOTEPAD.ELF`, and `PAINTING.ELF` (`calc`, compatibility command `explorer`,
-  `notepad`, and `painting`).
+  `GLGAME.ELF`, `NOTEPAD.ELF`, and `PAINTING.ELF` (`calc`, compatibility
+  command `explorer`, `glgame`, `notepad`, and `painting`).
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
@@ -87,9 +89,9 @@ issues the AgenticOS-internal `sys_gui_launch("tasks")` syscall. No symlinks or
 per-applet ELF copies are needed; the namespace is pure kernel synthesis.
 
 `execve("/bin/explorer", ...)`, `execve("/bin/notepad", ...)`,
-`execve("/bin/calc", ...)`, and `execve("/bin/painting", ...)` instead rewrite
-directly to their staged ELFs. There is no `GLAUNCH` round trip or kernel-side
-application process for them.
+`execve("/bin/calc", ...)`, `execve("/bin/glgame", ...)`, and
+`execve("/bin/painting", ...)` instead rewrite directly to their staged ELFs.
+There is no `GLAUNCH` round trip or kernel-side application process for them.
 
 `stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
 directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
@@ -259,6 +261,12 @@ polling, and `Window::present()` performs a full-surface copy. Resize events
 must resize the canvas before the next present; Close remains an application
 decision. Add a direct `/bin` rewrite only when the app should be discoverable
 through `PATH`.
+
+`apps/glgame` is the reference for a self-driven 3D app. `libs/gl` transforms
+fixed-function vertices in userland, triangulates quads, batches validated
+frame packets, and attaches the resulting VirGL texture to the normal GUI
+window. Context creation requires the strict qualified GPU compositor; the app
+shows a CPU-canvas launch hint when that prerequisite is absent.
 
 `libs/gui` also ships retained-mode widgets — `Button`, `TextField`,
 `ListView`, and `MenuBar` — as manually-positioned structs (no layout engine).

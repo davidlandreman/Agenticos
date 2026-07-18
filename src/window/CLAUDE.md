@@ -33,7 +33,9 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `windows/remote_surface.rs` — server-decorated client surface for ring-3
   apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
   events to the owning PID's GUI queue. Its enclosing frame title can be
-  updated through the ownership-checked ring-3 GUI ABI.
+  updated through the ownership-checked ring-3 GUI ABI. Under strict VirGL it
+  may instead own a logical GL client ID whose front texture is inserted as an
+  external retained layer clipped to the content well.
 - `adapters/` — `GraphicsDevice` implementations: `direct_framebuffer.rs` (fast, used for cursor) and `double_buffered.rs` (smooth).
 - `dialogs/` — kernel dialog-window scaffolding, including the non-blocking Run dialog. Run keeps input state outside the manager registry and launches submitted text through zsh `-c`.
 
@@ -48,7 +50,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | `ContainerWindow` | Generic parent | For grouping children. |
 | `StartMenuWindow` | GUIShell Start popup | Windows 95/98 ButtonFace panels, blue rotated `AgenticOS` banner, typed disabled/separator/action rows, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
 | `TaskbarTrayWindow` | Right-side notification tray | Recessed classic panel with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
-| `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer; close requests are delivered to the client. |
+| `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer or one attached VirGL client texture; close requests are delivered to the client. |
 
 All windows derive from `WindowBase` for consistent parent-child tracking.
 
@@ -61,7 +63,7 @@ Boot lands in GUI mode:
 - `TerminalWindow` inside the frame.
 - Bottom taskbar with a Start button, dynamically-sized frame buttons, and a
   recessed right-side UTC date/time tray. Start opens the classic menu;
-  Programs launches the five pinned apps, Run opens a modal command field, and
+  Programs launches the six pinned apps (including GL Arena), Run opens a modal command field, and
   Shut Down is an explicit safe placeholder until a clean power-off path
   exists. Task-button layout reserves the tray span and never overlaps it.
 

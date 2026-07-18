@@ -6,6 +6,7 @@ app_row guilaunch        apps/guilaunch         cargo GLAUNCH.ELF  built-every-r
 app_row guidemo          apps/guidemo           cargo GUIDEMO.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/guidemo          -
 app_row notepad          apps/notepad           cargo NOTEPAD.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/notepad          -
 app_row calc             apps/calc              cargo CALC.ELF     built-every-run rust-nightly target/x86_64-unknown-none/release/calc             -
+app_row glgame           apps/glgame            cargo GLGAME.ELF   built-every-run rust-nightly target/x86_64-unknown-none/release/glgame           -
 app_row painting         apps/painting          cargo PAINTING.ELF built-every-run rust-nightly target/x86_64-unknown-none/release/painting         -
 app_row fileman          apps/fileman           cargo FILEMAN.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/fileman          -
 app_row hello-cpp        apps/hello-cpp         make  HELLOCPP.ELF built-every-run musl-cxx      apps/hello-cpp/build/hello-cpp                    -
