@@ -687,12 +687,44 @@ fn test_dispatch_setitimer_real_arms_queries_and_validates() {
     crate::userland::abi::clear_user_va_bounds();
 }
 
-fn test_dispatch_nanosleep_stub_returns_zero() {
+/// `nanosleep` request validation, plus the synthetic-dispatch
+/// short-circuit: with no ring-3 scheduler context to yield from, a
+/// valid request returns 0 immediately instead of blocking.
+fn test_dispatch_nanosleep_validation_and_synthetic_return() {
+    // NULL req → EFAULT.
     let mut args = SyscallArgs::default();
     args.rax = crate::userland::abi::nr::NANOSLEEP;
-    args.rdi = 0xdead_beef;
-    args.rsi = 0; // rem NULL
+    args.rdi = 0;
+    args.rsi = 0;
+    assert_eq!(syscall_dispatch(&mut args), crate::userland::abi::EFAULT);
+
+    // Invalid tv_nsec → EINVAL.
+    let bad: [i64; 2] = [0, 1_000_000_000];
+    let bad_ptr = bad.as_ptr() as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: bad_ptr,
+        end: bad_ptr + 16,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::NANOSLEEP;
+    args.rdi = bad_ptr;
+    args.rsi = 0;
+    assert_eq!(syscall_dispatch(&mut args), crate::userland::abi::EINVAL);
+    crate::userland::abi::clear_user_va_bounds();
+
+    // Valid 50 ms request from synthetic context → immediate 0.
+    let req: [i64; 2] = [0, 50_000_000];
+    let req_ptr = req.as_ptr() as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: req_ptr,
+        end: req_ptr + 16,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::NANOSLEEP;
+    args.rdi = req_ptr;
+    args.rsi = 0;
     assert_eq!(syscall_dispatch(&mut args), 0);
+    crate::userland::abi::clear_user_va_bounds();
 }
 
 /// `write(1, valid_ptr, len)` succeeds and returns `len`. The active
@@ -2439,6 +2471,9 @@ fn test_dispatch_rt_sigsuspend_null_mask_efaults() {
 }
 
 /// `kill(self, SIGUSR1)` sets SIGUSR1 pending on the current process.
+/// The signal is blocked first: an unblocked SIGUSR1 with no handler
+/// now takes its fatal default action at the dispatcher tail, which
+/// would tear the process down mid-test.
 fn test_dispatch_kill_self_sets_pending() {
     use crate::userland::signal::SIGUSR1;
     reset_active_user();
@@ -2450,6 +2485,10 @@ fn test_dispatch_kill_self_sets_pending() {
         .expect("enter_user_mode_with");
     // Don't release yet — we want the Process slot populated for the
     // signal-state inspection.
+
+    crate::userland::lifecycle::with_current_process(|p| {
+        p.signal_state.blocked |= 1u64 << (SIGUSR1 - 1);
+    });
 
     let me = crate::userland::lifecycle::current_pid();
     let mut args = SyscallArgs::default();
@@ -2530,6 +2569,8 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4301,6 +4342,8 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4361,6 +4404,8 @@ fn test_has_children_sees_live_child() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4507,6 +4552,8 @@ fn test_remove_process_cleans_ring3_queues() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4535,6 +4582,8 @@ fn test_remove_process_cleans_ring3_queues() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4648,7 +4697,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_prlimit64_null_old_returns_zero,
         &test_dispatch_getrusage_self_zero_fills_and_rejects_unknown_who,
         &test_dispatch_setitimer_real_arms_queries_and_validates,
-        &test_dispatch_nanosleep_stub_returns_zero,
+        &test_dispatch_nanosleep_validation_and_synthetic_return,
         &test_write_handler_valid_slice,
         &test_write_handler_rejects_unknown_fd,
         &test_write_handler_rejects_kernel_pointer,

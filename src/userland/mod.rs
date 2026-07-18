@@ -19,6 +19,7 @@ pub mod loader;
 pub mod network_syscalls;
 pub mod path;
 pub mod pipe;
+pub mod procfs;
 pub mod signal;
 pub mod stdin;
 pub mod switch;
@@ -207,8 +208,10 @@ pub fn setup_user_process(
             .and_then(|pcb| pcb.terminal_id)
     };
     let exe_path = alloc::string::String::from(argv_slice[0]);
+    let cmdline = crate::userland::lifecycle::capped_cmdline(argv_slice);
     crate::userland::lifecycle::with_process(new_pid, |p| {
         p.exe_path = Some(exe_path);
+        p.cmdline = cmdline;
         p.terminal_id = launcher_terminal_id;
         p.saved_user_state = crate::userland::user_state::UserState {
             rip: entry,

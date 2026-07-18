@@ -38,6 +38,7 @@ userland/
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
     ├── guidemo/        # minimal ring-3 GUI reference client
     ├── notepad/        # standalone editor with userland dialogs + working Save
+    ├── taskmgr/        # tabbed task manager over /proc (graphs, End Task)
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
@@ -71,8 +72,9 @@ resolve into multicall or direct binaries staged under `host_share/`:
 - **`BB.ELF` — BusyBox** (core utilities plus IPv4 `ping`, `nc`, `nslookup`,
   and HTTP-only `wget`; IPv6 and TLS are not available).
 - **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`painting`, `calc`,
-  `tasks`, `explorer`).
-- **`NOTEPAD.ELF` — direct standalone ring-3 application** (`notepad`).
+  `explorer`).
+- **`NOTEPAD.ELF` / `TASKMGR.ELF` — direct standalone ring-3 applications**
+  (`notepad`; `taskmgr` with legacy alias `tasks`).
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
@@ -86,6 +88,8 @@ namespace is pure kernel synthesis.
 
 `execve("/bin/notepad", ...)` instead rewrites directly to
 `/host/NOTEPAD.ELF`; there is no `GLAUNCH` round trip or kernel notepad.
+`/bin/taskmgr` and `/bin/tasks` both rewrite to `/host/TASKMGR.ELF` the same
+way.
 
 `stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
 directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
@@ -255,8 +259,13 @@ decision. Add a direct `/bin` rewrite only when the app should be discoverable
 through `PATH`.
 
 `libs/gui` also ships retained-mode widgets — `Button`, `TextField`,
-`ListView`, and `MenuBar` — as manually-positioned structs (no layout engine).
-Each draws itself and exposes hit-testing / key routing helpers.
+`ListView`, `MenuBar`, `TabBar`, `ColumnListView` (multi-column, sortable
+headers, key-stable selection), and `TimeSeriesGraph` (ring-buffer area
+chart, fixed or autoscaling y-axis, dual series) — as manually-positioned
+structs (no layout engine). Each draws itself and exposes hit-testing / key
+routing helpers. `apps/taskmgr` is the reference client for the monitoring
+widgets and for the poll-and-sleep (`GUI_NONBLOCK` + `nanosleep`) loop an
+animating app needs instead of the blocking `next_event()`.
 
 ## Using dialogs (`libs/dialogs`)
 

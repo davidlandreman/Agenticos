@@ -130,6 +130,16 @@ pub struct Process {
     /// in-kernel test launches that bypass argv. `readlink` reads
     /// this for `/proc/self/exe` (see `readlink_handler`).
     pub exe_path: Option<String>,
+    /// Retained argv from launch or the most recent `execve`, capped at
+    /// [`CMDLINE_MAX_BYTES`] total. Read by `/proc/<pid>/cmdline` and
+    /// `/proc/<pid>/stat`'s comm field. Empty for synthetic test
+    /// launches that bypass argv.
+    pub cmdline: alloc::vec::Vec<String>,
+    /// CPU time in 100 Hz PIT ticks, charged by the timer ISR whenever
+    /// it observes this process running at CPL=3. Sampled — ticks
+    /// spent in short syscalls between timer fires are not attributed.
+    /// Read by `/proc/<pid>/stat` and `/proc/stat`.
+    pub utime_ticks: u64,
     /// Demand-grown stack — top of the user stack (exclusive). Constant
     /// per-process; mirrors `image.stack_top` for fast access from the
     /// ring-3 page-fault handler without dereferencing `image`. Zero for
@@ -289,8 +299,21 @@ pub enum Ring3BlockReason {
     WaitingForNetwork {
         deadline_tick: Option<u64>,
     },
+    /// `nanosleep(req, …)` until the absolute PIT tick `deadline_tick`.
+    /// Woken by [`wake_ring3_due_sleepers`] (kernel housekeeping) at or
+    /// after the deadline, or early by a signal via
+    /// [`wake_ring3_for_signal`] — the re-fired SYSCALL then observes
+    /// `pending_syscall_interrupt` and delivers `-EINTR`.
+    Sleeping {
+        deadline_tick: u64,
+    },
 }
 
+/// Restart-stable deadline state for a re-firing blocking syscall.
+/// Originally network-only (hence the name); `nanosleep` reuses it so a
+/// woken sleeper's re-fired SYSCALL resumes the ORIGINAL absolute
+/// deadline instead of restarting the full duration. Keyed by
+/// `(syscall_nr, identity)`; a mismatched re-entry clears the state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetworkWaitState {
     pub syscall_nr: u64,
@@ -333,6 +356,27 @@ fn ensure_sentinel(g: &mut ProcessTable) {
     }
 }
 
+/// Cap on the total bytes of argv retained in `Process::cmdline`.
+/// Keeps a pathological `execve` with a huge argv from pinning kernel
+/// heap; `/proc/<pid>/cmdline` output is truncated at this bound.
+pub const CMDLINE_MAX_BYTES: usize = 256;
+
+/// Build the retained-argv vector for `Process::cmdline`: copies argv
+/// strings in order until the running byte total would exceed
+/// [`CMDLINE_MAX_BYTES`].
+pub fn capped_cmdline(argv: &[&str]) -> alloc::vec::Vec<String> {
+    let mut out = alloc::vec::Vec::new();
+    let mut total = 0usize;
+    for arg in argv {
+        total += arg.len() + 1;
+        if total > CMDLINE_MAX_BYTES {
+            break;
+        }
+        out.push(String::from(*arg));
+    }
+    out
+}
+
 impl Process {
     /// Default "no current process" sentinel. Allocates nothing (every
     /// heap-backed field is empty). The table keeps one of these
@@ -358,6 +402,8 @@ impl Process {
             signal_state: SignalState::new(),
             kernel_stack: None,
             exe_path: None,
+            cmdline: alloc::vec::Vec::new(),
+            utime_ticks: 0,
             stack_top: 0,
             stack_bottom: 0,
             stack_mapped_bottom: 0,
@@ -538,6 +584,7 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
         | Some(Ring3BlockReason::WaitingForPipeRead)
         | Some(Ring3BlockReason::WaitingForPipeWrite)
         | Some(Ring3BlockReason::WaitingForNetwork { .. })
+        | Some(Ring3BlockReason::Sleeping { .. })
         | None => false,
     };
     if should_wake {
@@ -746,6 +793,58 @@ pub fn wake_ring3_blocked_on_network(state_changed: bool) {
     }
 }
 
+/// Wake every `Sleeping` process whose deadline has passed. Marks the
+/// sleeper's wait state expired so its re-fired `nanosleep` SYSCALL
+/// observes completion and returns 0.
+///
+/// Called from the PIT ISR every tick (same precedent as the
+/// kernel-thread `check_sleep_queue`) — the kernel *main loop* is NOT
+/// a reliable periodic context: kernel threads hop between each other
+/// via `sleep_ticks`' direct thread→thread switch and can starve it
+/// for seconds. Also called from main-loop / inline-launcher
+/// housekeeping as a redundant backstop. Bounded: one `try_lock`, one
+/// scan of the (small) blocked map; a contended tick retries next
+/// tick.
+pub fn wake_ring3_due_sleepers() {
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let waking: alloc::vec::Vec<u32> = g
+        .ring3_blocked
+        .iter()
+        .filter_map(|(pid, reason)| match reason {
+            Ring3BlockReason::Sleeping { deadline_tick } if now >= *deadline_tick => Some(*pid),
+            _ => None,
+        })
+        .collect();
+    for pid in waking {
+        if let Some(process) = g.by_pid.get_mut(&pid) {
+            if let Some(wait) = process.network_wait.as_mut() {
+                wait.expired = true;
+            }
+        }
+        g.ring3_blocked.remove(&pid);
+        if !g.ring3_ready.iter().any(|ready| *ready == pid) {
+            g.ring3_ready.push_back(pid);
+        }
+    }
+}
+
+/// Whether any ring-3 process is waiting in the ready queue. Used by
+/// `sleep_ticks`' switch-target decision: when ring-3 work is pending,
+/// a voluntarily-sleeping kernel thread bounces through the kernel
+/// main loop (whose dispatch gate runs `save_kernel_and_resume_ring3`)
+/// instead of hopping directly to the next kernel thread — direct
+/// hopping can otherwise starve ring-3 dispatch for seconds.
+/// `try_lock` so a contended check degrades to the old hop behavior.
+pub fn has_ready_ring3() -> bool {
+    PROCESS_TABLE
+        .try_lock()
+        .map(|g| !g.ring3_ready.is_empty())
+        .unwrap_or(false)
+}
+
 /// Queue expired ITIMER_REAL alarms and make signal-interruptible blocked
 /// processes runnable. This runs from kernel housekeeping rather than the PIT
 /// ISR: scanning the process table and growing the ready queue do not belong in
@@ -791,7 +890,10 @@ pub fn process_due_real_timers() {
             continue;
         };
         if let Some(process) = g.by_pid.get_mut(&pid) {
-            if matches!(reason, Ring3BlockReason::WaitingForNetwork { .. }) {
+            if matches!(
+                reason,
+                Ring3BlockReason::WaitingForNetwork { .. } | Ring3BlockReason::Sleeping { .. }
+            ) {
                 process.network_wait = None;
             }
             process.pending_syscall_interrupt = true;
@@ -850,6 +952,40 @@ pub fn clear_stale_network_wait(syscall_nr: u64) {
             process.network_wait = None;
         }
     });
+}
+
+/// Wake `pid` after a signal raise if it is parked in a blocking
+/// syscall and the raised signal would actually do something (user
+/// handler installed, or fatal default action). Mirrors the ITIMER
+/// expiry wake: remove from `ring3_blocked`, clear any network wait,
+/// set `pending_syscall_interrupt` so the re-fired syscall enters the
+/// dispatcher as `-EINTR`, and requeue as ready.
+pub fn wake_ring3_for_signal(pid: u32) {
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let actionable = g
+        .by_pid
+        .get(&pid)
+        .is_some_and(|p| p.signal_state.has_actionable_pending());
+    if !actionable {
+        return;
+    }
+    let Some(reason) = g.ring3_blocked.remove(&pid) else {
+        return;
+    };
+    if let Some(process) = g.by_pid.get_mut(&pid) {
+        if matches!(
+            reason,
+            Ring3BlockReason::WaitingForNetwork { .. } | Ring3BlockReason::Sleeping { .. }
+        ) {
+            process.network_wait = None;
+        }
+        process.pending_syscall_interrupt = true;
+    }
+    if !g.ring3_ready.iter().any(|ready| *ready == pid) {
+        g.ring3_ready.push_back(pid);
+    }
 }
 
 fn wake_ring3_blocked_by<F>(matcher: F)
@@ -1076,6 +1212,8 @@ pub fn install_new_process_opt(
         signal_state: SignalState::new(),
         kernel_stack: Some(KernelStack::new()),
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,

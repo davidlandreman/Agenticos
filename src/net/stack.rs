@@ -5,7 +5,6 @@ use smoltcp::socket::dhcpv4;
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpCidr};
 
-#[cfg(feature = "test")]
 use crate::drivers::virtio::net::NetDriverCounters;
 use crate::drivers::virtio::net::VirtioNet;
 use crate::net::socket::SocketRegistry;
@@ -127,9 +126,15 @@ impl NetworkStack {
         self.config
     }
 
-    #[cfg(feature = "test")]
     pub(super) fn counters(&self) -> NetDriverCounters {
         self.device.counters()
+    }
+
+    /// Owned per-socket snapshot for `/proc/agenticos/sockets`. Reads
+    /// live TCP state from the smoltcp socket set; no smoltcp type
+    /// escapes.
+    pub(super) fn socket_snapshot(&mut self) -> alloc::vec::Vec<super::socket::SocketSnapshot> {
+        super::socket::snapshot_registry(&self.registry, &mut self.sockets)
     }
 
     pub(super) fn next_poll_ticks(&mut self) -> u64 {

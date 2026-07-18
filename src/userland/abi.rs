@@ -52,6 +52,7 @@ pub const EAGAIN: i64 = -11;
 pub const EPIPE: i64 = -32;
 pub const EINTR: i64 = -4;
 pub const EPERM: i64 = -1;
+pub const ESRCH: i64 = -3;
 pub const ENOSPC: i64 = -28;
 pub const EBUSY: i64 = -16;
 pub const EXDEV: i64 = -18;
@@ -250,6 +251,7 @@ pub mod nr {
     pub const GETTIMEOFDAY: u64 = 96;
     pub const GETRLIMIT: u64 = 97;
     pub const GETRUSAGE: u64 = 98;
+    pub const SYSINFO: u64 = 99;
     pub const READLINK: u64 = 89;
     pub const SET_TID_ADDRESS: u64 = 218;
     pub const CLOCK_GETTIME: u64 = 228;
@@ -372,6 +374,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::READLINKAT => syscalls::readlinkat_handler(args),
         nr::GETRLIMIT => syscalls::getrlimit_handler(args),
         nr::GETRUSAGE => syscalls::getrusage_handler(args),
+        nr::SYSINFO => syscalls::sysinfo_handler(args),
         nr::PRLIMIT64 => syscalls::prlimit64_handler(args),
         nr::SETITIMER => syscalls::setitimer_handler(args),
         nr::NANOSLEEP => syscalls::nanosleep_handler(args),

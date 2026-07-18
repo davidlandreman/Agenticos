@@ -54,6 +54,8 @@ pub mod network_userland;
 #[cfg(feature = "test")]
 pub mod path_bar_tests;
 #[cfg(feature = "test")]
+pub mod procfs;
+#[cfg(feature = "test")]
 pub mod progress_bar_tests;
 #[cfg(feature = "test")]
 pub mod retained_scene;
@@ -119,6 +121,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("fat_write", fat_write::get_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
+    ("procfs", procfs::get_tests),
     ("gui_userland", gui_userland::get_tests),
     ("vm", vm::get_tests),
     ("compiler_compat", compiler_compat::get_tests),

@@ -5,9 +5,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use gui::{
-    Button, DirEntry, ListEvent, ListView, TextField, Window, COLOR_PANEL, COLOR_TEXT,
-};
+use gui::{Button, DirEntry, ListEvent, ListView, TextField, Window, COLOR_PANEL, COLOR_TEXT};
 
 use crate::path::{directory_for_input, join_path, parent_directory};
 use crate::DialogStatus;

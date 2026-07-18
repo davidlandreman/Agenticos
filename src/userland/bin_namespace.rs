@@ -5,8 +5,9 @@
 //! - **GUILAUNCH** (`GLAUNCH.ELF`) — one ring-3 launcher binary that
 //!   takes an applet name in `argv[0]` and issues the
 //!   `gui_launch` syscall, spawning the matching kernel-side GUI app
-//!   (`painting`, `calc`, `tasks`, `explorer`).
-//! - **Direct apps** — standalone native ELFs such as `NOTEPAD.ELF`.
+//!   (`painting`, `calc`, `explorer`).
+//! - **Direct apps** — standalone native ELFs such as `NOTEPAD.ELF` and
+//!   `TASKMGR.ELF` (aliased as both `taskmgr` and `tasks`).
 //!
 //! The kernel exposes a single virtual `/bin` directory whose entries
 //! resolve into either binary based on which list the name belongs to.
@@ -43,6 +44,8 @@ pub const GUILAUNCH_HOST_PATH: &str = "/host/GLAUNCH.ELF";
 
 pub const NOTEPAD_HOST_PATH: &str = "/host/NOTEPAD.ELF";
 
+pub const TASKMGR_HOST_PATH: &str = "/host/TASKMGR.ELF";
+
 /// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
 /// MUST stay in sync with the match arms in
 /// [`crate::commands::gui_launch_table::spawn_by_name`]; a test in
@@ -50,11 +53,13 @@ pub const NOTEPAD_HOST_PATH: &str = "/host/NOTEPAD.ELF";
 ///
 /// Names MUST NOT collide with [`APPLETS`] or [`DIRECT_APPLETS`]. The
 /// disjoint-list invariant is asserted at test time.
-pub const GUI_APPLETS: &[&str] = &["calc", "explorer", "painting", "tasks"];
+pub const GUI_APPLETS: &[&str] = &["calc", "explorer", "painting"];
 
 /// Sorted standalone executables synthesized into `/bin` without a multicall
 /// launcher. `apply_bin_rewrite` maps each name directly to its staged ELF.
-pub const DIRECT_APPLETS: &[&str] = &["notepad"];
+/// `taskmgr` and `tasks` are aliases for the ring-3 Task Manager —
+/// `tasks` preserves the retired kernel app's name.
+pub const DIRECT_APPLETS: &[&str] = &["notepad", "taskmgr", "tasks"];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
 /// `/bin/<name>`. Binary-searched on every lookup. MUST stay sorted —
@@ -338,6 +343,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
     let canonical = DIRECT_APPLETS[index];
     let path = match canonical {
         "notepad" => NOTEPAD_HOST_PATH,
+        "taskmgr" | "tasks" => TASKMGR_HOST_PATH,
         _ => return None,
     };
     Some((path, canonical))

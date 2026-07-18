@@ -5,6 +5,7 @@ app_row hello            apps/hello             cargo HELLO.ELF    built-every-r
 app_row guilaunch        apps/guilaunch         cargo GLAUNCH.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/guilaunch        -
 app_row guidemo          apps/guidemo           cargo GUIDEMO.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/guidemo          -
 app_row notepad          apps/notepad           cargo NOTEPAD.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/notepad          -
+app_row taskmgr          apps/taskmgr           cargo TASKMGR.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/taskmgr          -
 app_row hello-cpp        apps/hello-cpp         make  HELLOCPP.ELF built-every-run musl-cxx      apps/hello-cpp/build/hello-cpp                    -
 app_row zsh              apps/zsh               make  ZSH.ELF      prebuilt-managed musl-cc     apps/zsh/build/zsh                                prebuilt/ZSH.ELF
 app_row busybox          apps/busybox           make  BB.ELF       prebuilt-managed musl-cc     apps/busybox/build/busybox                        prebuilt/BB.ELF

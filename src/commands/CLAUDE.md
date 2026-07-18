@@ -1,24 +1,34 @@
 # `src/commands/` — Kernel-side GUI policy and legacy apps
 
-This directory now contains four kernel-side GUI applications (`painting`,
-`calc`, `tasks`, `explorer`) plus `guishell`, the desktop/taskbar policy layer.
-`notepad` was the first application migrated to the ring-3 GUI platform and
-lives at `userland/apps/notepad/`.
+This directory now contains three kernel-side GUI applications (`painting`,
+`calc`, `explorer`) plus `guishell`, the desktop/taskbar policy layer.
+`notepad` was the first application migrated to the ring-3 GUI platform
+(`userland/apps/notepad/`); the Task Manager followed as the second
+(`userland/apps/taskmgr/`, replacing the kernel-side `tasks` app — see
+`docs/plans/2026-07-18-003-feat-ring3-task-manager-and-procfs-plan.md`).
 
-`gui_launch_table` still dispatches the four legacy applications for
+`gui_launch_table` still dispatches the three legacy applications for
 `GLAUNCH.ELF` and syscall 5000. Its names must match `GUI_APPLETS` in
-`src/userland/bin_namespace.rs`. Notepad is deliberately absent: `/bin/notepad`
-rewrites directly to `/host/NOTEPAD.ELF`.
+`src/userland/bin_namespace.rs`. Notepad and taskmgr are deliberately absent:
+`/bin/notepad` rewrites directly to `/host/NOTEPAD.ELF`, and both
+`/bin/taskmgr` and the legacy alias `/bin/tasks` rewrite to
+`/host/TASKMGR.ELF`.
 
 ## Launch paths
 
-- Start → Notepad calls `terminal_factory::spawn_gui_user_app`, which launches
-  the standalone ELF on a blocking kernel wrapper thread.
-- zsh `notepad` resolves through the synthetic `/bin` namespace directly to
-  `NOTEPAD.ELF`.
-- Explorer launches the same ELF with the selected text path as `argv[1]`.
-- The four remaining kernel apps continue through `GLAUNCH.ELF` →
+- Start → Notepad / Start → Task Manager call
+  `terminal_factory::spawn_gui_user_app`, which launches the standalone ELF on
+  a blocking kernel wrapper thread.
+- zsh `notepad` / `taskmgr` / `tasks` resolve through the synthetic `/bin`
+  namespace directly to the staged ELFs.
+- Explorer launches `NOTEPAD.ELF` with the selected text path as `argv[1]`.
+- The three remaining kernel apps continue through `GLAUNCH.ELF` →
   `sys_gui_launch` → `gui_launch_table::spawn_by_name`.
+
+The old kernel `tasks` app could kill arbitrary kernel threads (including the
+compositor). That capability was deliberately dropped in the migration: the
+ring-3 Task Manager ends processes via `kill(2)` (ring-3 PIDs only) and shows
+kernel threads read-only via `/proc/agenticos/kthreads`.
 
 ## Adding GUI applications
 

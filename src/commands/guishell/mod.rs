@@ -46,6 +46,7 @@ pub enum PendingAction {
     SpawnPainting,
     SpawnCalc,
     SpawnNotepad,
+    SpawnTaskmgr,
     FocusWindow(WindowId),
 }
 
@@ -223,7 +224,7 @@ fn show_start_menu() {
             .unwrap_or(Rect::new(0, 0, 0, 0));
 
         // Calculate menu dimensions
-        let menu_items = 4; // Terminal, Notepad, Painting, Calc
+        let menu_items = 5; // Terminal, Notepad, Painting, Calc, Task Manager
         let menu_width = 120u32;
         let menu_height = (menu_items * MENU_ITEM_HEIGHT as usize + 4) as u32;
         let menu_x = BUTTON_GAP as i32;
@@ -240,6 +241,7 @@ fn show_start_menu() {
         menu.add_item("Notepad");
         menu.add_item("Painting");
         menu.add_item("Calc");
+        menu.add_item("Task Manager");
 
         // Set up callback for menu selection
         // Use deferred actions to avoid deadlock
@@ -248,6 +250,7 @@ fn show_start_menu() {
             1 => queue_action(PendingAction::SpawnNotepad),
             2 => queue_action(PendingAction::SpawnPainting),
             3 => queue_action(PendingAction::SpawnCalc),
+            4 => queue_action(PendingAction::SpawnTaskmgr),
             _ => {}
         });
 
@@ -338,6 +341,14 @@ fn spawn_notepad() {
     crate::window::terminal_factory::spawn_gui_user_app(
         "/host/NOTEPAD.ELF",
         alloc::vec![alloc::string::String::from("notepad")],
+    );
+}
+
+fn spawn_taskmgr() {
+    crate::debug_info!("GUIShell: Spawning task manager...");
+    crate::window::terminal_factory::spawn_gui_user_app(
+        "/host/TASKMGR.ELF",
+        alloc::vec![alloc::string::String::from("taskmgr")],
     );
 }
 
@@ -649,6 +660,10 @@ fn process_pending_actions() {
             PendingAction::SpawnNotepad => {
                 close_start_menu();
                 spawn_notepad();
+            }
+            PendingAction::SpawnTaskmgr => {
+                close_start_menu();
+                spawn_taskmgr();
             }
             PendingAction::FocusWindow(frame_id) => {
                 focus_window(frame_id);
