@@ -114,6 +114,7 @@ export REPO_ROOT HOST_SHARE_STAGE
 # shellcheck source=userland/stage-lib.sh
 . "$REPO_ROOT/userland/stage-lib.sh"
 stage_zsh_config || exit 1
+stage_ca_certificates || exit 1
 stage_userland build 0 || true
 
 # Determine build flags

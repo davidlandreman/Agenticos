@@ -116,6 +116,7 @@ export REPO_ROOT HOST_SHARE_STAGE
 # Stage the read-only zsh configuration source tree. The kernel imports it
 # into its managed runtime /etc after mounting the host share.
 stage_zsh_config || exit 1
+stage_ca_certificates || exit 1
 # Test fixtures remain mandatory even with --skip-userland; optional apps and
 # prebuilt-managed interactive programs retain soft-fail staging semantics.
 stage_userland test "$SKIP_USERLAND" || {
@@ -167,7 +168,7 @@ QEMU_ARGS=(
     -serial stdio
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
     -no-reboot
-    -rtc "base=utc"
+    -rtc "base=2026-07-19T12:00:00"
     -m "${AGENTICOS_TEST_MEMORY:-256M}"
 )
 QEMU_SMP="${AGENTICOS_QEMU_SMP:-4}"
@@ -206,7 +207,7 @@ if [ "${AGENTICOS_TEST_NETWORK:-on}" = "off" ]; then
     echo "Test networking disabled (AGENTICOS_TEST_NETWORK=off)"
 else
     QEMU_ARGS+=(
-        -netdev "user,id=agenticos-net,restrict=on,guestfwd=tcp:10.0.2.100:8080-cmd:$(pwd)/tools/net-test-echo.py,guestfwd=tcp:10.0.2.101:8081-cmd:$(pwd)/tools/net-test-http.py"
+        -netdev "user,id=agenticos-net,restrict=on,guestfwd=tcp:10.0.2.100:8080-cmd:$(pwd)/tools/net-test-echo.py,guestfwd=tcp:10.0.2.101:8081-cmd:$(pwd)/tools/net-test-http.py,guestfwd=tcp:10.0.2.102:8443-cmd:$(pwd)/tools/net-test-https.py"
         -device "virtio-net-pci,disable-legacy=on,netdev=agenticos-net,mac=02:41:47:4e:54:01"
     )
 fi
