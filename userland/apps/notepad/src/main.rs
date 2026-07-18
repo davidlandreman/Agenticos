@@ -174,17 +174,18 @@ impl Editor {
             if line >= self.first_line {
                 let visible_line = line - self.first_line;
                 let y = top as i32 + visible_line as i32 * LINE_HEIGHT as i32 + 1;
-                if y + 8 < bottom as i32 {
-                    let x = 4 + column as i32 * 8;
-                    if selected
-                        .map(|(start, end)| index >= start && index < end)
-                        .unwrap_or(false)
-                    {
-                        canvas.fill_rect(x, y - 1, 8, LINE_HEIGHT, COLOR_HIGHLIGHT);
-                        canvas.draw_char(x, y, character, COLOR_WHITE);
-                    } else {
-                        canvas.draw_char(x, y, character, COLOR_TEXT);
-                    }
+                if y + 8 >= bottom as i32 {
+                    break;
+                }
+                let x = 4 + column as i32 * 8;
+                if selected
+                    .map(|(start, end)| index >= start && index < end)
+                    .unwrap_or(false)
+                {
+                    canvas.fill_rect(x, y - 1, 8, LINE_HEIGHT, COLOR_HIGHLIGHT);
+                    canvas.draw_char(x, y, character, COLOR_WHITE);
+                } else {
+                    canvas.draw_char(x, y, character, COLOR_TEXT);
                 }
             }
             column += 1;
@@ -310,6 +311,12 @@ impl Notepad {
                 }
             }
             GUI_EVENT_MOUSE if self.modal.is_none() => {
+                // Pointer motion and button-up do not change notepad state.
+                // Avoid turning those high-frequency events into full-surface
+                // presents; clicks and scrolling still need a repaint.
+                if event.payload[3] != GUI_MOUSE_DOWN && event.payload[3] != GUI_MOUSE_SCROLL {
+                    return false;
+                }
                 if self.handle_mouse(event.payload) {
                     return true;
                 }
