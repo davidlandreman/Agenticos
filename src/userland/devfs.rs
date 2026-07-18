@@ -4,12 +4,17 @@
 pub enum DeviceNode {
     Directory,
     Urandom,
+    /// Discard sink / empty source. Required by git's `sanitize_stdfds`,
+    /// which opens `/dev/null` O_RDWR unconditionally at startup, and by
+    /// ordinary shell `> /dev/null` redirection.
+    Null,
 }
 
 pub fn classify(path: &str) -> Option<DeviceNode> {
     match path {
         "/dev" | "/dev/" => Some(DeviceNode::Directory),
         "/dev/urandom" => Some(DeviceNode::Urandom),
+        "/dev/null" => Some(DeviceNode::Null),
         _ => None,
     }
 }

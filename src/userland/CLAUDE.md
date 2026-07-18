@@ -91,7 +91,10 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   alias), plus `/host/LINKS.ELF` (Links 2.30; `links` and `links2`, with the
   Rust-backed `agenticos` graphics driver), `/host/CURL.ELF` (curl 8.21.0;
   static IPv4 HTTP/HTTPS transfer tool sharing Links' pinned OpenSSL profile
-  and `/etc/ssl/cert.pem` trust store), and GNU
+  and `/etc/ssl/cert.pem` trust store), `/host/GIT.ELF` (git 2.52.0; all
+  builtins in one binary, compiled-in exec path `/bin`) with
+  `/host/GITRHTTP.ELF` (`git-remote-http` + `git-remote-https`; one
+  libcurl/OpenSSL transport helper, scheme from `argv[0]`), and GNU
   binutils 2.46.0 (`addr2line`, `ar`, `as`, `c++filt`, `elfedit`, `ld`, `nm`,
   `objcopy`, `objdump`, `ranlib`, `readelf`, `size`, `strings`, `strip`). GNU
   `strings` owns that name; the conflicting BusyBox applet is disabled. Links

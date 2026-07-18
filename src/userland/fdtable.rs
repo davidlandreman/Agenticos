@@ -122,13 +122,17 @@ pub enum FdSlot {
         cursor: usize,
         cloexec: bool,
     },
-    /// Synthetic `/dev` directory. Its only entry is `urandom`.
+    /// Synthetic `/dev` directory. Its entries are `null` and `urandom`.
     VirtualDevDir {
         cursor: usize,
         cloexec: bool,
     },
     /// Dynamic cryptographic random character device.
     Urandom {
+        cloexec: bool,
+    },
+    /// `/dev/null`: reads return EOF, writes are discarded.
+    DevNull {
         cloexec: bool,
     },
     /// Selectable view of the owning process's fixed-size GUI event queue.
@@ -162,7 +166,8 @@ impl FdSlot {
             (Self::Stdin, Self::Stdin)
             | (Self::Stdout, Self::Stdout)
             | (Self::Stderr, Self::Stderr)
-            | (Self::Urandom { .. }, Self::Urandom { .. }) => true,
+            | (Self::Urandom { .. }, Self::Urandom { .. })
+            | (Self::DevNull { .. }, Self::DevNull { .. }) => true,
             (Self::File { handle: left, .. }, Self::File { handle: right, .. }) => {
                 Arc::ptr_eq(left, right)
             }
@@ -350,6 +355,7 @@ impl FdTable {
             FdSlot::VirtualDir { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::VirtualDevDir { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::Urandom { cloexec: ce } => *ce = cloexec,
+            FdSlot::DevNull { cloexec: ce } => *ce = cloexec,
             FdSlot::GuiEvents { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::EventFd { cloexec: ce, .. } | FdSlot::Epoll { cloexec: ce, .. } => {
                 *ce = cloexec
@@ -372,6 +378,7 @@ impl FdTable {
             FdSlot::VirtualDir { cloexec, .. } => *cloexec,
             FdSlot::VirtualDevDir { cloexec, .. } => *cloexec,
             FdSlot::Urandom { cloexec } => *cloexec,
+            FdSlot::DevNull { cloexec } => *cloexec,
             FdSlot::GuiEvents { cloexec, .. } => *cloexec,
             FdSlot::EventFd { cloexec, .. } | FdSlot::Epoll { cloexec, .. } => *cloexec,
             FdSlot::LocalStream { cloexec, .. } => *cloexec,

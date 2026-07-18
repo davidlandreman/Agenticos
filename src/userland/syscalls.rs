@@ -224,6 +224,13 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
         Some(FdSlot::EventFd { handle, .. }) => Target::EventFd(handle),
         Some(FdSlot::LocalStream { handle, .. }) => Target::LocalStream(handle),
+        // Discard sink: validate the buffer, report it fully written.
+        Some(FdSlot::DevNull { .. }) => {
+            if let Err(e) = crate::userland::usercopy::ensure_user_range(ptr, len, false) {
+                return e;
+            }
+            return len as i64;
+        }
         // /proc snapshots are read-only.
         Some(FdSlot::VirtualFile { .. })
         | Some(FdSlot::Urandom { .. })
@@ -325,6 +332,8 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         File(crate::lib::arc::Arc<crate::fs::file_handle::File>),
         Socket(u64),
         LocalStream(crate::lib::arc::Arc<crate::userland::local_stream::LocalStreamEndpoint>),
+        /// `/dev/null`: validated iovecs count as fully written.
+        Sink,
     }
     let target = match with_fd_slot(fd) {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Target::StdoutErr,
@@ -333,6 +342,7 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         | Some(FdSlot::VirtualBinDir { .. })
         | Some(FdSlot::VirtualDir { .. })
         | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
+        Some(FdSlot::DevNull { .. }) => Target::Sink,
         Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
@@ -393,6 +403,10 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
             continue;
         }
         match &target {
+            Target::Sink => {
+                let _ = base;
+                written += len;
+            }
             Target::StdoutErr => {
                 let mut emit = |s: &str| match dest_terminal {
                     Some(tid) => crate::window::terminal::write_to_terminal_id(tid, s),
@@ -584,6 +598,8 @@ fn read_fd_once(args: &SyscallArgs, fd: i32, ptr: u64, len: u64) -> i64 {
         | Some(FdSlot::VirtualBinDir { .. })
         | Some(FdSlot::VirtualDir { .. })
         | Some(FdSlot::VirtualDevDir { .. }) => EISDIR,
+        // Empty source: immediate EOF.
+        Some(FdSlot::DevNull { .. }) => 0,
         Some(FdSlot::Urandom { .. }) => {
             if let Err(e) = validate_user_slice(ptr, cap) {
                 return e;
@@ -2125,19 +2141,29 @@ unsafe fn deliver_signal(
     //    is aligned.
     const USER_STATE_SIZE: u64 = core::mem::size_of::<UserState>() as u64;
     const FRAME_SIZE: u64 = 8 + USER_STATE_SIZE + 8 + 8;
+    /// System V AMD64 red-zone size preserved below the interrupted RSP.
+    const RED_ZONE_BYTES: u64 = 128;
     let frame_total = (FRAME_SIZE + 15) & !15;
-    let frame_stack_top = if action.sa_flags & crate::userland::signal::SA_ONSTACK != 0 {
-        crate::userland::lifecycle::with_current_process(|process| {
+    // System V AMD64 §3.2.2 red zone: the 128 bytes below RSP belong to
+    // the interrupted function and may hold live temporaries it stored
+    // without adjusting RSP. The kernel MUST NOT place the signal frame
+    // there — Linux subtracts 128 before building the frame. Skipping
+    // this clobbers the interrupted function's red-zone data, so after
+    // `rt_sigreturn` it resumes with a corrupted saved pointer/return
+    // slot and jumps to garbage a few instructions later (observed as a
+    // `#PF` at RIP≈-4 on return from git's SIGALRM progress handler).
+    // A signal delivered onto a fresh sigaltstack has no red zone to
+    // preserve, so the skip applies only to the normal-stack path.
+    let on_alt_stack = action.sa_flags & crate::userland::signal::SA_ONSTACK != 0
+        && crate::userland::lifecycle::with_current_process(|process| {
             let alt = process.signal_alt_stack;
-            if alt.enabled && !alt.contains(user_rsp) {
-                alt.top()
-            } else {
-                None
-            }
-        })
-        .unwrap_or(user_rsp)
+            alt.enabled && !alt.contains(user_rsp)
+        });
+    let frame_stack_top = if on_alt_stack {
+        crate::userland::lifecycle::with_current_process(|process| process.signal_alt_stack.top())
+            .unwrap_or(user_rsp - RED_ZONE_BYTES)
     } else {
-        user_rsp
+        user_rsp - RED_ZONE_BYTES
     };
     let frame_addr = match frame_stack_top.checked_sub(frame_total) {
         Some(address) => address,
@@ -2715,18 +2741,25 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
     let cloexec = (flags & O_CLOEXEC) != 0;
     let want_write = (flags & O_WRITE_BITS) != 0 || (flags & O_ACCMODE) != O_RDONLY;
 
-    // Resolve the two synthetic nodes before mounted filesystems so no disk
-    // entry can shadow the random device. Other existing `/dev/*` paths (most
-    // importantly the boot image's `/dev/null`) retain their VFS behavior.
+    // Resolve the synthetic device nodes before mounted filesystems so no
+    // disk entry can shadow them. Any other `/dev/*` path retains its VFS
+    // behavior. `/dev/null` is the one writable node — git opens it O_RDWR
+    // at startup (`sanitize_stdfds`) and shells redirect into it.
     if let Some(node) = crate::userland::devfs::classify(&path) {
-        if want_write {
-            return EACCES;
-        }
         let slot = match node {
             crate::userland::devfs::DeviceNode::Directory => {
+                if want_write {
+                    return EACCES;
+                }
                 FdSlot::VirtualDevDir { cursor: 0, cloexec }
             }
-            crate::userland::devfs::DeviceNode::Urandom => FdSlot::Urandom { cloexec },
+            crate::userland::devfs::DeviceNode::Urandom => {
+                if want_write {
+                    return EACCES;
+                }
+                FdSlot::Urandom { cloexec }
+            }
+            crate::userland::devfs::DeviceNode::Null => FdSlot::DevNull { cloexec },
         };
         return with_fd_table_mut(|t| t.alloc(slot))
             .map(|fd| fd as i64)
@@ -3322,6 +3355,8 @@ pub fn pread64_handler(args: &mut SyscallArgs) -> i64 {
         | Some(FdSlot::VirtualDir { .. })
         | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(FdSlot::Urandom { .. }) => return ESPIPE,
+        // pread on /dev/null: EOF at every offset.
+        Some(FdSlot::DevNull { .. }) => return 0,
         Some(FdSlot::VirtualFile { data, .. }) => {
             // Positional read from the open-time snapshot; per-fd
             // cursor untouched, mirroring pread semantics.
@@ -3379,6 +3414,13 @@ pub fn pwrite64_handler(args: &mut SyscallArgs) -> i64 {
         | Some(FdSlot::VirtualBinDir { .. })
         | Some(FdSlot::VirtualDir { .. })
         | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
+        // Discard sink at every offset.
+        Some(FdSlot::DevNull { .. }) => {
+            if let Err(e) = crate::userland::usercopy::ensure_user_range(ptr, len, false) {
+                return e;
+            }
+            return len as i64;
+        }
         Some(_) | None => return EBADF,
     };
     if len == 0 {
@@ -3545,6 +3587,8 @@ pub fn lseek_handler(args: &mut SyscallArgs) -> i64 {
             return ESPIPE;
         }
         Some(FdSlot::PipeRead(_, _)) | Some(FdSlot::PipeWrite(_, _)) => return ESPIPE,
+        // /dev/null is seekable and always at offset 0, like Linux.
+        Some(FdSlot::DevNull { .. }) => return 0,
         Some(FdSlot::VirtualFile { data, cursor, .. }) => {
             // Snapshot-backed /proc file: seek within [0, len].
             let new_pos: i64 = match whence {
@@ -3859,6 +3903,12 @@ fn stat_virtual_dev(path: &str) -> Option<LinuxStat> {
             // Linux's /dev/urandom is character device major 1, minor 9.
             st.st_rdev = (1 << 8) | 9;
         }
+        crate::userland::devfs::DeviceNode::Null => {
+            st.st_mode = S_IFCHR | 0o666;
+            st.st_nlink = 1;
+            // Linux's /dev/null is character device major 1, minor 3.
+            st.st_rdev = (1 << 8) | 3;
+        }
     }
     st.st_blksize = 4096;
     Some(st)
@@ -3998,6 +4048,10 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
             let st = stat_virtual_dev("/dev/urandom").expect("urandom is always virtual");
             write_stat(out_ptr, &st)
         }
+        Some(FdSlot::DevNull { .. }) => {
+            let st = stat_virtual_dev("/dev/null").expect("null is always virtual");
+            write_stat(out_ptr, &st)
+        }
         Some(FdSlot::GuiEvents { .. }) => {
             let st = LinuxStat {
                 st_mode: S_IFCHR | 0o600,
@@ -4095,7 +4149,11 @@ fn access_common(path_ptr: u64, mode: u32) -> i64 {
             ENOENT
         };
     }
-    if crate::userland::devfs::classify(&path).is_some() {
+    if let Some(node) = crate::userland::devfs::classify(&path) {
+        // /dev/null is the one writable device node.
+        if matches!(node, crate::userland::devfs::DeviceNode::Null) {
+            return 0;
+        }
         return if mode & _W_OK != 0 { EACCES } else { 0 };
     }
     if crate::fs::exists(&path) {
@@ -4219,7 +4277,10 @@ fn chdir_to(path: alloc::string::String) -> i64 {
                 set_cwd(path);
                 0
             }
-            Some(crate::userland::devfs::DeviceNode::Urandom) => ENOTDIR,
+            Some(
+                crate::userland::devfs::DeviceNode::Urandom
+                | crate::userland::devfs::DeviceNode::Null,
+            ) => ENOTDIR,
             None => ENOENT,
         };
     }
@@ -4597,7 +4658,12 @@ fn getdents64_virtual_dev(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
         Some(FdSlot::VirtualDevDir { cursor, .. }) => Some(*cursor),
         _ => None,
     })?;
-    const RECORDS: [(&[u8], u8); 3] = [(b".", DT_DIR), (b"..", DT_DIR), (b"urandom", DT_CHR)];
+    const RECORDS: [(&[u8], u8); 4] = [
+        (b".", DT_DIR),
+        (b"..", DT_DIR),
+        (b"null", DT_CHR),
+        (b"urandom", DT_CHR),
+    ];
     if start >= RECORDS.len() {
         return Some(0);
     }
@@ -4835,6 +4901,11 @@ pub(crate) fn fd_slot_readiness(slot: &FdSlot) -> Result<FdReady, i64> {
         }),
         FdSlot::Urandom { .. } => Ok(FdReady {
             readable: true,
+            ..FdReady::default()
+        }),
+        FdSlot::DevNull { .. } => Ok(FdReady {
+            readable: true,
+            writable: true,
             ..FdReady::default()
         }),
         FdSlot::GuiEvents { handle, .. } => {
@@ -5611,6 +5682,7 @@ fn resolve_proc_self_fd(fd: i32) -> Option<String> {
         FdSlot::VirtualBinDir { .. } => String::from("/bin"),
         FdSlot::VirtualDevDir { .. } => String::from("/dev"),
         FdSlot::Urandom { .. } => String::from("/dev/urandom"),
+        FdSlot::DevNull { .. } => String::from("/dev/null"),
         FdSlot::Socket { handle, .. } => alloc::format!("socket:[{}]", handle.id()),
         FdSlot::GuiEvents { .. } => String::from("anon_inode:[agenticos-gui]"),
         FdSlot::EventFd { .. } => String::from("anon_inode:[eventfd]"),

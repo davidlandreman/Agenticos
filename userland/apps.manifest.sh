@@ -17,6 +17,8 @@ app_row busybox          apps/busybox           make  BB.ELF       prebuilt-mana
 app_row tcc              apps/tcc               make  TCC.ELF      prebuilt-managed musl-cc     apps/tcc/build/tcc                                prebuilt/TCC.ELF
 app_row links2           apps/links2            make  LINKS.ELF    prebuilt-managed musl-cc     apps/links2/build/links                           prebuilt/LINKS.ELF
 app_row curl             apps/curl              make  CURL.ELF     prebuilt-managed musl-cc     apps/curl/build/curl                              prebuilt/CURL.ELF
+app_row git              apps/git               make  GIT.ELF      prebuilt-managed musl-cc     apps/git/build/git                                prebuilt/GIT.ELF
+app_row git-remote-http  apps/git               make  GITRHTTP.ELF prebuilt-managed musl-cc     apps/git/build/git-remote-http                    prebuilt/GITRHTTP.ELF
 app_row binutils-addr2line apps/binutils         make  ADDRLINE.ELF prebuilt-managed musl-cc     apps/binutils/build/out/addr2line                 prebuilt/binutils/ADDRLINE.ELF
 app_row binutils-ar       apps/binutils          make  AR.ELF       prebuilt-managed musl-cc     apps/binutils/build/out/ar                        prebuilt/binutils/AR.ELF
 app_row binutils-as       apps/binutils          make  AS.ELF       prebuilt-managed musl-cc     apps/binutils/build/out/as                        prebuilt/binutils/AS.ELF

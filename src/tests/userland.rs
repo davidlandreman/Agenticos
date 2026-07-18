@@ -2781,6 +2781,81 @@ fn test_dispatch_getrandom_fills_buffer() {
     teardown_phase2_active_user();
 }
 
+fn test_dispatch_dev_null_rdwr_read_eof_write_sink() {
+    setup_phase2_active_user();
+    let path = b"/dev/null\0";
+    let path_ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: path_ptr,
+        end: path_ptr + path.len() as u64,
+    });
+    // git's sanitize_stdfds opens /dev/null O_RDWR — the write-capable
+    // open must succeed, unlike every other device node.
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = path_ptr;
+    args.rsi = 2; // O_RDWR
+    let fd = syscall_dispatch(&mut args);
+    assert!(fd >= 3, "open(/dev/null, O_RDWR) failed: {}", fd);
+
+    let bytes = [0xa5u8; 16];
+    let bytes_ptr = bytes.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: bytes_ptr,
+        end: bytes_ptr + bytes.len() as u64,
+    });
+    args = SyscallArgs::default();
+    args.rax = nr::WRITE;
+    args.rdi = fd as u64;
+    args.rsi = bytes_ptr;
+    args.rdx = bytes.len() as u64;
+    assert_eq!(
+        syscall_dispatch(&mut args),
+        bytes.len() as i64,
+        "write to /dev/null must report full length"
+    );
+
+    args.rax = nr::READ;
+    assert_eq!(syscall_dispatch(&mut args), 0, "/dev/null reads are EOF");
+    assert_eq!(bytes, [0xa5u8; 16], "read must not touch the buffer");
+
+    args = SyscallArgs::default();
+    args.rax = nr::LSEEK;
+    args.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut args), 0, "/dev/null is seekable");
+
+    let stat = [0u8; 144];
+    let stat_ptr = stat.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: stat_ptr,
+        end: stat_ptr + stat.len() as u64,
+    });
+    args = SyscallArgs::default();
+    args.rax = nr::FSTAT;
+    args.rdi = fd as u64;
+    args.rsi = stat_ptr;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    assert_eq!(
+        u32::from_ne_bytes(stat[24..28].try_into().unwrap()) & 0o170000,
+        0o020000,
+        "/dev/null is a character device"
+    );
+    assert_eq!(u64::from_ne_bytes(stat[40..48].try_into().unwrap()), 0x103);
+
+    abi::set_user_va_bounds(UserVaBounds {
+        start: path_ptr,
+        end: path_ptr + path.len() as u64,
+    });
+    args = SyscallArgs::default();
+    args.rax = nr::ACCESS;
+    args.rdi = path_ptr;
+    args.rsi = 2; // W_OK
+    assert_eq!(syscall_dispatch(&mut args), 0, "/dev/null is writable");
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
 fn test_dispatch_dev_urandom_read_stat_and_seek() {
     setup_phase2_active_user();
     let path = b"/dev/urandom\0";
@@ -6064,6 +6139,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_umask_roundtrip_and_masks_bits,
         &test_dispatch_utimensat_values_now_omit_and_errors,
         &test_dispatch_getrandom_fills_buffer,
+        &test_dispatch_dev_null_rdwr_read_eof_write_sink,
         &test_dispatch_dev_urandom_read_stat_and_seek,
         &test_dispatch_dev_directory_lists_urandom,
         &test_dispatch_uname_writes_sysname_linux,

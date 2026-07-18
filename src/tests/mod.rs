@@ -30,6 +30,8 @@ pub mod filesystem;
 #[cfg(feature = "test")]
 pub mod fonts;
 #[cfg(feature = "test")]
+pub mod git_userland;
+#[cfg(feature = "test")]
 pub mod graphics_device_image;
 #[cfg(feature = "test")]
 pub mod gui_userland;
@@ -131,6 +133,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("network", network::get_tests),
     ("resolver", crate::net::resolver_tests),
     ("network_userland", network_userland::get_tests),
+    ("git_userland", git_userland::get_tests),
     ("entropy", entropy::get_tests),
     ("display", display::get_tests),
     ("interrupts", interrupts::get_tests),

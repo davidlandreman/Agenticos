@@ -22,6 +22,8 @@ copies from the same pinned source tarball.
 | `TCC.ELF` | `apps/tcc/` | prebuilt-managed | static-musl TinyCC (compiler+assembler+linker, ~0.4 MiB) |
 | `LINKS.ELF` | `apps/links2/` | prebuilt-managed | static-musl Links 2.30 + OpenSSL, text + native GUI IPv4 HTTP(S) (~10 MiB) |
 | `CURL.ELF` | `apps/curl/` | prebuilt-managed | static-musl curl 8.21.0 + OpenSSL, IPv4 HTTP(S) only (~4 MiB) |
+| `GIT.ELF` | `apps/git/` | prebuilt-managed | static-musl git 2.52.0, all builtins in one binary, no curl linkage (~3.7 MiB) |
+| `GITRHTTP.ELF` | `apps/git/` | prebuilt-managed | git HTTP(S) transport helper (`git-remote-http{,s}`) + libcurl/OpenSSL (~7.5 MiB) |
 | `binutils/*.ELF` | `apps/binutils/` | prebuilt-managed | GNU binutils 2.46.0, 14 stripped static native tools (~15.5 MiB total) |
 | `tcc-sysroot.tar.gz` | `apps/tcc/` | prebuilt-managed (tree) | musl headers + crt/libc + libtcc1 + examples; extracted to `host_share/sysroot/` by `stage_tcc_sysroot` (~1.9 MiB) |
 | `compiler-compat/CCCRT.ELF` | `apps/compiler-compat/` | test-fixture | CRT startup rung |
@@ -63,6 +65,7 @@ REBUILD_ZSH=1 ./build.sh            # rebuild just zsh this run
 REBUILD_TCC=1 ./build.sh            # rebuild tcc + its sysroot tarball
 REBUILD_LINKS2=1 ./build.sh         # rebuild the Links text + GUI browser
 REBUILD_BINUTILS=1 ./build.sh       # rebuild all fourteen GNU binutils tools
+REBUILD_GIT=1 ./build.sh            # rebuild git + its HTTP(S) transport helper
 ```
 
 The same flag / env vars work on `test.sh`. With no flag and a prebuilt

@@ -35,6 +35,30 @@ const ZSH_FUNCTIONS_MANIFEST_PATH: &str = "/host/etc/zsh/functions.manifest";
 const PASSWD_CONTENT: &[u8] = b"root:x:0:0::/root:/bin/zsh\n";
 const GROUP_CONTENT: &[u8] = b"root:x:0:\n";
 
+const GITCONFIG_PATH: &str = "/etc/gitconfig";
+/// System git defaults. Everything runs as uid 0 with no per-user
+/// identity, so ship a deterministic committer and disable the
+/// dubious-ownership refusals; `fileMode = false` because the overlay's
+/// FAT lower layer cannot persist the executable bit; `pager = cat`
+/// keeps scripted output sane (interactive users can opt back into
+/// `less` per-repo or via ~/.gitconfig).
+const GITCONFIG_CONTENT: &[u8] = b"[user]\n\
+\tname = root\n\
+\temail = root@agenticos.local\n\
+[init]\n\
+\tdefaultBranch = main\n\
+[safe]\n\
+\tdirectory = *\n\
+[core]\n\
+\tfileMode = false\n\
+\tpager = cat\n\
+[gc]\n\
+\tauto = 0\n\
+[maintenance]\n\
+\tauto = false\n\
+[advice]\n\
+\tdetachedHead = false\n";
+
 #[cfg(not(feature = "test"))]
 const HOSTS_CONTENT: &[u8] = b"127.0.0.1 localhost\n";
 
@@ -65,6 +89,7 @@ pub fn init() {
     write_file(PASSWD_PATH, PASSWD_CONTENT);
     write_file(GROUP_PATH, GROUP_CONTENT);
     write_file(HOSTS_PATH, HOSTS_CONTENT);
+    write_file(GITCONFIG_PATH, GITCONFIG_CONTENT);
     seed_zsh_config();
     seed_ca_certificates();
 }

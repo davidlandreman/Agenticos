@@ -36,6 +36,24 @@ curl 8.21.0 ships as `CURL.ELF` (`/bin/curl`): a fully static musl transfer
 tool scoped to IPv4 HTTP/HTTPS, built against the same pinned OpenSSL 3.5.7
 profile and `/etc/ssl/cert.pem` trust store as Links, with strict certificate
 verification by default and `-k` as the explicit user-typed override.
+git 2.52.0 ships as `GIT.ELF` (`/bin/git`, every builtin in one binary; the
+server builtins `git-upload-pack`/`git-receive-pack`/`git-upload-archive`
+resolve to it via `argv[0]` dispatch) plus `GITRHTTP.ELF`
+(`/bin/git-remote-http{,s}`), the HTTP(S) transport helper linked against the
+same pinned libcurl/OpenSSL profile and trust store. All in-process porcelain
+works — init, add, commit, branch, checkout, merge, log, diff, status,
+cat-file, rev-parse, config. The kernel seeds `/etc/gitconfig` (root identity,
+`init.defaultBranch=main`, `safe.directory=*`, `core.fileMode=false`,
+`core.pager=cat`, `gc.auto=0`, `maintenance.auto=false`); repos belong on
+`/work` or `/data`. **Pack-protocol transports (`clone`/`fetch`/`push`) do not
+yet complete** — they hold a bidirectional pipe conversation across a spawned
+helper and hit a pre-existing multi-process pipe/poll scheduler lost-wake (the
+same family as the links2-HTTPS hang), a separate kernel project; ssh and
+`git://` are also out of scope. Bringing git up fixed three real kernel bugs:
+the missing `/dev/null`, a signal-frame red-zone clobber in `deliver_signal`
+(async-signal handlers now return without corrupting the interrupted context),
+and a fork→pipe→wait deadlock where a child's fds stayed open until reap (fds
+now close at exit).
 Kernel-requested programs use one persistent `process-service`: Start, Run, and Terminal enqueue requests and return immediately, and the service later reaps detached exits from its own stack.
 
 The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.
