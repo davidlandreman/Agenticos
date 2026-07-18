@@ -10,6 +10,7 @@ use alloc::boxed::Box;
 use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::{get_caption_font, get_default_font};
+use crate::graphics::images::SvgImage;
 use crate::window::event::MouseEventType;
 use crate::window::theme::controls;
 use crate::window::{Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId};
@@ -23,6 +24,37 @@ pub const START_MENU_BANNER_WIDTH: u32 = 28;
 pub const START_MENU_ROOT_WIDTH: u32 = 196;
 pub const START_MENU_PROGRAMS_WIDTH: u32 = 144;
 const PANEL_BORDER: u32 = 2;
+const ROOT_ICON_SIZE: u32 = 24;
+const PROGRAM_ICON_SIZE: u32 = 18;
+
+lazy_static::lazy_static! {
+    static ref START_MENU_ICONS: [SvgImage<'static>; 12] = [
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/programs.svg"))
+            .expect("embedded Programs SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/documents.svg"))
+            .expect("embedded Documents SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/settings.svg"))
+            .expect("embedded Settings SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/run.svg"))
+            .expect("embedded Run SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/shutdown.svg"))
+            .expect("embedded Shut Down SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/file-manager.svg"))
+            .expect("embedded File Manager SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/terminal.svg"))
+            .expect("embedded Terminal SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/notepad.svg"))
+            .expect("embedded Notepad SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/painting.svg"))
+            .expect("embedded Painting SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/calc.svg"))
+            .expect("embedded Calc SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/gl-arena.svg"))
+            .expect("embedded GL Arena SVG must be valid"),
+        SvgImage::from_bytes(include_bytes!("../../../assets/icons/start/task-manager.svg"))
+            .expect("embedded Task Manager SVG must be valid"),
+    ];
+}
 
 /// Typed actions emitted by enabled Start-menu leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,6 +346,27 @@ impl StartMenuWindow {
         }
     }
 
+    fn icon_for_item(item: &StartMenuItem) -> &'static SvgImage<'static> {
+        let index = match item {
+            StartMenuItem::Submenu { .. } => 0,
+            StartMenuItem::Disabled { .. } => 1,
+            StartMenuItem::Action { action, .. } => match action {
+                StartMenuAction::Settings => 2,
+                StartMenuAction::Run => 3,
+                StartMenuAction::ShutDown => 4,
+                StartMenuAction::FileManager => 5,
+                StartMenuAction::Terminal => 6,
+                StartMenuAction::Notepad => 7,
+                StartMenuAction::Painting => 8,
+                StartMenuAction::Calc => 9,
+                StartMenuAction::GlGame => 10,
+                StartMenuAction::TaskManager => 11,
+            },
+            StartMenuItem::Separator => 0,
+        };
+        &START_MENU_ICONS[index]
+    }
+
     fn paint_items(
         &self,
         device: &mut dyn GraphicsDevice,
@@ -329,11 +382,17 @@ impl StartMenuWindow {
             START_MENU_PROGRAM_ROW_HEIGHT
         };
         let mut item_y = panel.y + PANEL_BORDER as i32;
-        let text_left = if root {
-            panel.x + START_MENU_BANNER_WIDTH as i32 + 12
+        let icon_size = if root {
+            ROOT_ICON_SIZE
         } else {
-            panel.x + 8
+            PROGRAM_ICON_SIZE
         };
+        let icon_left = if root {
+            panel.x + START_MENU_BANNER_WIDTH as i32 + 5
+        } else {
+            panel.x + 5
+        };
+        let text_left = icon_left + icon_size as i32 + 5;
         let content_left = if root {
             panel.x + START_MENU_BANNER_WIDTH as i32 + 2
         } else {
@@ -374,6 +433,14 @@ impl StartMenuWindow {
                             ),
                         );
                     }
+                    let icon_top = item_y + (row_height.saturating_sub(icon_size) / 2) as i32;
+                    device.draw_image_scaled(
+                        icon_left,
+                        icon_top,
+                        icon_size,
+                        icon_size,
+                        Self::icon_for_item(item),
+                    );
                     let text_y =
                         item_y + (row_height.saturating_sub(font.line_height()) / 2) as i32;
                     if matches!(item, StartMenuItem::Disabled { .. }) {

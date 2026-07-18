@@ -70,6 +70,8 @@ pub mod start_menu_tests;
 #[cfg(feature = "test")]
 pub mod surface_alpha;
 #[cfg(feature = "test")]
+pub mod svg_image;
+#[cfg(feature = "test")]
 pub mod taskbar_tests;
 #[cfg(feature = "test")]
 pub mod tcc;
@@ -187,6 +189,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("window_buffer", window_buffer::get_tests),
     ("desktop_backing_store", desktop_backing_store::get_tests),
     ("surface_alpha", surface_alpha::get_tests),
+    ("svg_image", svg_image::get_tests),
     ("retained_scene", retained_scene::get_tests),
     ("scheduler", scheduler::get_tests),
     ("composition_cpu", composition_cpu::get_tests),

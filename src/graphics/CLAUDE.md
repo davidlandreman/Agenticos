@@ -41,7 +41,14 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
 - `present/` — scanout boundary. The boot-framebuffer presenter converts only
   damaged pixels; VirtIO-GPU 2D presentation is owned by `src/drivers/`.
 - `fonts/` — font support. `core_font.rs` defines the glyph-centric `Font` trait + `Glyph<'a>` struct (8bpp coverage). `ttf.rs` is the TTF/OTF backend (parses via `ttf-parser`, rasterizes via `ab_glyph_rasterizer`, ASCII pre-rendered into per-glyph `Box<[u8]>` slots, non-ASCII lazy via `BTreeMap`). `embedded_font.rs` is the 8x8 bitmap fallback used only on TTF parse failure. `font_data.rs` holds the embedded font's bit-packed source. The system TTF lives at `assets/system.ttf` and is `include_bytes!`-baked into the kernel; `init_fonts()` parses it once during boot, after heap init.
-- `images/` — `bmp.rs` supports full Windows BMP (1/4/8/16/24/32-bit). Parsed images implement the `Image` trait and can be drawn through `GraphicsDevice::draw_image` / `draw_image_scaled` (defined in `src/window/graphics.rs`); both have per-pixel default implementations that respect the device's clip rect, so any adapter gets image rendering for free without an override.
+- `images/` — `bmp.rs` supports full Windows BMP (1/4/8/16/24/32-bit), while
+  `svg.rs` provides the no_std vector-icon subset (`viewBox`, basic shapes,
+  straight-line paths, fill/stroke). Parsed images implement the `Image` trait
+  and can be drawn through `GraphicsDevice::draw_image` /
+  `draw_image_scaled` (defined in `src/window/graphics.rs`). The scaled-sampling
+  hook preserves nearest-neighbor behavior for raster images while SVGs
+  rasterize at the requested destination size. Per-pixel defaults respect the
+  device clip rect, so adapters inherit correct rendering for free.
 
 ## Double buffering
 
@@ -81,7 +88,9 @@ The intended next refactor establishes clear layers:
 1. Raw framebuffer access.
 2. Drawing primitives.
 3. Text/font rendering.
-4. Image loading/display. (BMP parsing + `GraphicsDevice` rendering landed; additional formats and per-adapter bulk-row blits remain.)
+4. Image loading/display. (BMP and the OS-artwork SVG subset plus
+   `GraphicsDevice` rendering have landed; additional raster formats and
+   per-adapter bulk-row blits remain.)
 5. Composite operations (windows, widgets).
 
 This is a known-pain marker — when touching this folder, prefer additions that move toward this layering rather than entrenching the current shape.
