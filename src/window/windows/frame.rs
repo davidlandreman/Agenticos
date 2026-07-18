@@ -1,7 +1,6 @@
 use alloc::string::{String, ToString};
 
-use crate::graphics::scene::LayerEffect;
-use crate::window::theme::{self, FrameChrome, ThemeKind};
+use crate::window::theme::{self, FrameChrome};
 use crate::window::{
     CompositorProperties, Event, EventResult, GraphicsDevice, Insets, Rect, Window, WindowId,
 };
@@ -19,9 +18,10 @@ pub struct FrameWindow {
 impl FrameWindow {
     pub fn new(id: WindowId, title: &str) -> Self {
         let mut base = WindowBase::new_with_id(id, Rect::new(0, 0, 800, 600));
-        if theme::active() == ThemeKind::Aero {
+        let effect = theme::frame_effect();
+        if effect != crate::graphics::scene::LayerEffect::None {
             base.set_compositor_properties(CompositorProperties {
-                effect: LayerEffect::BackdropSample { radius: 4 },
+                effect,
                 ..CompositorProperties::OPAQUE
             });
         }

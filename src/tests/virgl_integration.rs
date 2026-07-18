@@ -25,6 +25,10 @@ fn gate_enabled(path: &str) -> bool {
 }
 
 fn assert_outputs_close(expected: &Surface, actual: &Surface, label: &str) {
+    assert_outputs_with_tolerance(expected, actual, label, 1);
+}
+
+fn assert_outputs_with_tolerance(expected: &Surface, actual: &Surface, label: &str, tolerance: u8) {
     for (index, (expected, actual)) in expected.pixels().iter().zip(actual.pixels()).enumerate() {
         for (cpu_channel, gpu_channel) in [
             (expected.a(), actual.a()),
@@ -33,7 +37,7 @@ fn assert_outputs_close(expected: &Surface, actual: &Surface, label: &str) {
             (expected.b(), actual.b()),
         ] {
             assert!(
-                cpu_channel.abs_diff(gpu_channel) <= 1,
+                cpu_channel.abs_diff(gpu_channel) <= tolerance,
                 "{} mismatch pixel={} cpu={:?} gpu={:?}",
                 label,
                 index,
@@ -42,6 +46,92 @@ fn assert_outputs_close(expected: &Surface, actual: &Surface, label: &str) {
             );
         }
     }
+}
+
+fn run_backdrop_effect_oracles(virgl: &mut VirglCompositionEngine) {
+    let backdrop_id = SurfaceId(10);
+    let glass_id = SurfaceId(11);
+    let upper_glass_id = SurfaceId(12);
+    let mut backdrop = Surface::new(SurfaceDesc::new(8, 8)).unwrap();
+    for y in 0..8 {
+        for x in 0..8 {
+            backdrop.set_pixel(
+                x,
+                y,
+                PremulArgb::from_rgba((x * 31) as u8, (y * 27) as u8, 40, 255),
+            );
+        }
+    }
+    backdrop.set_pixel(1, 3, PremulArgb::from_rgba(255, 255, 255, 255));
+
+    let mut glass = Surface::new(SurfaceDesc::new(8, 8)).unwrap();
+    glass.clear(Rect::new(0, 0, 8, 8), PremulArgb::TRANSPARENT);
+    glass.set_pixel(3, 3, PremulArgb::from_rgba(180, 220, 250, 128));
+    glass.set_pixel(4, 3, PremulArgb::from_rgba(12, 34, 56, 255));
+
+    let mut upper_glass = Surface::new(SurfaceDesc::new(2, 2)).unwrap();
+    upper_glass.clear(
+        Rect::new(0, 0, 2, 2),
+        PremulArgb::from_rgba(240, 200, 160, 96),
+    );
+
+    let mut surfaces = BTreeMap::new();
+    surfaces.insert(backdrop_id, backdrop);
+    surfaces.insert(glass_id, glass);
+    surfaces.insert(upper_glass_id, upper_glass);
+
+    let mut scene = SceneFrame::new(8, 8);
+    scene.push(Layer::opaque(backdrop_id, Rect::new(0, 0, 8, 8)));
+    let mut glass_layer = Layer::opaque(glass_id, Rect::new(0, 0, 8, 8));
+    glass_layer.effect = crate::graphics::scene::LayerEffect::BackdropSample { radius: 4 };
+    scene.push(glass_layer);
+    let damage = [Rect::new(0, 0, 8, 8)];
+    let mut cpu = CpuCompositionEngine::new(8, 8).unwrap();
+    cpu.compose(&scene, &surfaces, &damage).unwrap();
+    let stats = virgl.compose(&scene, &surfaces, &damage).unwrap();
+    assert_eq!(stats.backdrop_copies, 1);
+    assert_eq!(stats.backdrop_blur_passes, 6);
+    virgl.readback_output().unwrap();
+    assert_outputs_with_tolerance(cpu.output(), virgl.output(), "masked backdrop blur", 4);
+    assert_eq!(
+        virgl.output().pixel(4, 3),
+        Some(PremulArgb::from_rgba(12, 34, 56, 255)),
+        "opaque client pixel must replace the blurred backdrop"
+    );
+    let transparent_expected = cpu.output().pixel(0, 0).unwrap();
+    let transparent_actual = virgl.output().pixel(0, 0).unwrap();
+    assert_eq!(
+        transparent_actual, transparent_expected,
+        "transparent glass must leave the unblurred backdrop untouched"
+    );
+
+    let mut upper = Layer::opaque(upper_glass_id, Rect::new(2, 2, 2, 2));
+    upper.effect = crate::graphics::scene::LayerEffect::BackdropSample { radius: 2 };
+    scene.push(upper);
+    cpu.compose(&scene, &surfaces, &damage).unwrap();
+    let stacked = virgl.compose(&scene, &surfaces, &damage).unwrap();
+    assert_eq!(stacked.backdrop_copies, 2);
+    assert_eq!(stacked.backdrop_blur_passes, 8);
+    virgl.readback_output().unwrap();
+    assert_outputs_with_tolerance(cpu.output(), virgl.output(), "stacked backdrop blur", 8);
+
+    scene.layers.pop();
+    surfaces
+        .get_mut(&backdrop_id)
+        .unwrap()
+        .set_pixel(1, 3, PremulArgb::from_rgba(255, 0, 0, 255));
+    let partial = [Rect::new(1, 3, 3, 1)];
+    cpu.compose(&scene, &surfaces, &partial).unwrap();
+    let partial_stats = virgl.compose(&scene, &surfaces, &partial).unwrap();
+    assert_eq!(partial_stats.backdrop_copies, 1);
+    virgl.readback_output().unwrap();
+    assert_outputs_with_tolerance(cpu.output(), virgl.output(), "partial backdrop damage", 4);
+
+    scene.layers[1].effect = crate::graphics::scene::LayerEffect::BackdropSample { radius: 5 };
+    assert_eq!(
+        virgl.compose(&scene, &surfaces, &damage),
+        Err(crate::graphics::composition::CompositionError::UnsupportedEffect)
+    );
 }
 
 fn test_clear_and_readback() {
@@ -117,14 +207,16 @@ fn test_clear_and_readback() {
     cpu.compose(&scene, &surfaces, &damage).unwrap();
     let mut virgl = VirglCompositionEngine::new(8, 8).unwrap();
     let production_stats = virgl.compose(&scene, &surfaces, &damage).unwrap();
-    assert_eq!(production_stats.pipeline_objects_created, 10);
+    // Engine construction qualifies and retains the full fixed pipeline.
+    assert_eq!(production_stats.pipeline_objects_created, 0);
     assert_eq!(production_stats.sampler_views_created, 3);
     assert_eq!(production_stats.sampler_views_destroyed, 0);
-    assert_eq!(production_stats.vertex_resources_created, 1);
+    assert_eq!(production_stats.vertex_resources_created, 0);
     assert_eq!(production_stats.vertex_resources_destroyed, 0);
     assert!(production_stats.vertex_buffer_capacity >= 2 * 6 * 32);
     assert_eq!(production_stats.gpu_readback_bytes, 0);
     assert_eq!(production_stats.gpu_readback_cycles, 0);
+    assert_eq!(production_stats.backdrop_scratch_bytes, 8 * 8 * 4 * 2);
     let readback_bytes = virgl
         .readback_output()
         .expect("explicit VirGL diagnostic readback failed");
@@ -168,6 +260,28 @@ fn test_clear_and_readback() {
         }
     }
     crate::debug_info!("VirGL production scene matches CPU reference within one channel value");
+
+    for surface in surfaces.values_mut() {
+        surface.clear_damage();
+    }
+    scene.layers[1].effect = crate::graphics::scene::LayerEffect::BackdropSample { radius: 4 };
+    cpu.compose(&scene, &surfaces, &damage).unwrap();
+    let blur_stats = virgl.compose(&scene, &surfaces, &damage).unwrap();
+    assert_eq!(blur_stats.texture_bytes_uploaded, 0);
+    assert_eq!(blur_stats.backdrop_copies, 1);
+    assert_eq!(blur_stats.backdrop_copy_pixels, 8 * 8);
+    assert_eq!(blur_stats.backdrop_blur_passes, 6);
+    assert_eq!(blur_stats.backdrop_blur_pixels, 8 * 8 * 6);
+    assert_eq!(blur_stats.gpu_readback_bytes, 0);
+    virgl
+        .readback_output()
+        .expect("VirGL backdrop blur readback failed");
+    assert_outputs_with_tolerance(cpu.output(), virgl.output(), "VirGL backdrop blur", 4);
+    crate::debug_info!("VirGL backdrop blur matches CPU reference within four channel values");
+
+    scene.layers[1].effect = crate::graphics::scene::LayerEffect::None;
+    cpu.compose(&scene, &surfaces, &damage).unwrap();
+    virgl.compose(&scene, &surfaces, &damage).unwrap();
 
     for surface in surfaces.values_mut() {
         surface.clear_damage();
@@ -330,6 +444,8 @@ fn test_clear_and_readback() {
     crate::debug_info!(
         "VirGL damage-scissored persistent state passed move/skip/opacity/upload/resize/eviction/growth/clear sequence"
     );
+    run_backdrop_effect_oracles(&mut virgl);
+    crate::debug_info!("VirGL transparent/opaque/stacked/partial backdrop effect oracles passed");
 
     if gate_enabled(SCANOUT_GATE_PATH) {
         drop(virgl);
