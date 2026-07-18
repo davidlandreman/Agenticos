@@ -280,6 +280,8 @@ pub const VIRTIO_DEVICE_NET: u16 = 0x1041;
 pub const VIRTIO_DEVICE_BLOCK: u16 = 0x1042;
 /// Modern VirtIO entropy device (0x1040 + device type 4).
 pub const VIRTIO_DEVICE_ENTROPY: u16 = 0x1044;
+/// Modern VirtIO 9P transport device (0x1040 + device type 9).
+pub const VIRTIO_DEVICE_9P: u16 = 0x1049;
 
 /// Find VirtIO input devices
 pub fn find_virtio_input_devices() -> Vec<PciDevice> {
@@ -321,5 +323,12 @@ pub fn find_virtio_entropy_devices() -> Vec<PciDevice> {
     enumerate_devices_cached()
         .into_iter()
         .filter(|d| d.vendor_id == VIRTIO_VENDOR_ID && d.device_id == VIRTIO_DEVICE_ENTROPY)
+        .collect()
+}
+
+pub fn find_virtio_9p_devices() -> Vec<PciDevice> {
+    enumerate_devices_cached()
+        .into_iter()
+        .filter(|d| d.vendor_id == VIRTIO_VENDOR_ID && d.device_id == VIRTIO_DEVICE_9P)
         .collect()
 }

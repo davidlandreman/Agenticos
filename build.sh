@@ -206,6 +206,23 @@ if [ "$RUN_QEMU" = true ]; then
         )
         echo "📦 Legacy FAT data disk: $AGENTICOS_LEGACY_DATA_IMAGE -> /legacy-data (read-only)"
     fi
+    # Worktree-independent host share exported over virtio-9p and mounted at
+    # /shared in the guest. Concurrent instances may point at the same
+    # directory: the host kernel owns the real filesystem, so this is safe.
+    SHARED_ARGS=()
+    if [ "${AGENTICOS_SHARED:-on}" = "off" ]; then
+        echo "📁 Host share disabled (AGENTICOS_SHARED=off)"
+    elif "$QEMU_BIN" -device help 2>/dev/null | grep -q virtio-9p-pci; then
+        SHARED_DIR="${AGENTICOS_SHARED_DIR:-$HOME/.agenticos/shared}"
+        mkdir -p "$SHARED_DIR"
+        SHARED_ARGS=(
+            -fsdev "local,id=agenticos-shared-fsdev,path=$SHARED_DIR,security_model=none"
+            -device "virtio-9p-pci,disable-legacy=on,fsdev=agenticos-shared-fsdev,mount_tag=agenticos-shared"
+        )
+        echo "📁 Host share: $SHARED_DIR -> /shared (override with AGENTICOS_SHARED_DIR)"
+    else
+        echo "📁 Host share unavailable: $QEMU_BIN lacks virtio-9p-pci; /shared not mounted"
+    fi
     if [ "${AGENTICOS_NETWORK:-on}" = "off" ]; then
         NETWORK_ARGS=(-nic none)
         echo "🌐 Networking disabled (AGENTICOS_NETWORK=off)"
@@ -258,6 +275,7 @@ if [ "$RUN_QEMU" = true ]; then
     )
     QEMU_ARGS+=("${NETWORK_ARGS[@]}")
     QEMU_ARGS+=("${LEGACY_DATA_ARGS[@]}")
+    QEMU_ARGS+=("${SHARED_ARGS[@]}")
     # On macOS the cocoa backend has no initial-scale flag, so open the window
     # then enlarge it to AGENTICOS_QEMU_SCALE (default 4x) via a backgrounded
     # AppleScript helper. zoom-to-fit=on (set by qemu-compositor.sh) scales the

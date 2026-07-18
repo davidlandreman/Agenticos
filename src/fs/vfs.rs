@@ -26,6 +26,10 @@ static mut MOUNTED_TMPFS: [Option<crate::fs::tmpfs::Tmpfs>; 2] = [None, None];
 /// (tmpfs over FAT) view that gets mounted at `/`.
 static mut MOUNTED_OVERLAY: [Option<crate::fs::overlay::Overlay>; 2] = [None, None];
 
+/// Static slot for the 9p-backed host share mounted at `/shared`. One
+/// device/tag today; widen alongside a second `-fsdev` if one ever lands.
+static mut MOUNTED_P9: [Option<crate::fs::p9::P9Filesystem>; 1] = [None];
+
 /// A sentinel block device for filesystems with no underlying disk
 /// (tmpfs, overlay). The VFS mount table requires a `&'static dyn
 /// BlockDevice`; for non-disk-backed FSes we point at this no-op
@@ -382,6 +386,26 @@ pub fn mount_overlay_root(device: &'static dyn BlockDevice) -> Result<(), Filesy
     vfs.mount("/", overlay_ref, &NULL_BLOCK_DEVICE)?;
     debug_info!("Mounted overlay(tmpfs over FAT) at /");
     Ok(())
+}
+
+/// Mount a 9p share (no backing block device) at `mount_path`. The
+/// filesystem must arrive with its version/attach handshake already done.
+pub fn mount_p9(
+    filesystem: crate::fs::p9::P9Filesystem,
+    mount_path: &'static str,
+) -> Result<(), FilesystemError> {
+    unsafe {
+        let slot_ptr = &raw mut MOUNTED_P9;
+        if (*slot_ptr)[0].is_some() {
+            return Err(FilesystemError::AlreadyExists);
+        }
+        (*slot_ptr)[0] = Some(filesystem);
+        let fs_ref = (*&raw const MOUNTED_P9)[0]
+            .as_ref()
+            .ok_or(FilesystemError::InvalidFilesystem)?;
+        let mut vfs = get_vfs();
+        vfs.mount(mount_path, fs_ref as &dyn Filesystem, &NULL_BLOCK_DEVICE)
+    }
 }
 
 /// Convenience functions that operate on the global VFS

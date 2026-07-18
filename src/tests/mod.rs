@@ -52,6 +52,8 @@ pub mod network;
 #[cfg(feature = "test")]
 pub mod network_userland;
 #[cfg(feature = "test")]
+pub mod p9;
+#[cfg(feature = "test")]
 pub mod path_bar_tests;
 #[cfg(feature = "test")]
 pub mod procfs;
@@ -139,6 +141,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("tmpfs", crate::fs::tmpfs::filesystem::tmpfs_tests),
     ("overlay", crate::fs::overlay::filesystem::overlay_tests),
     ("fat_write", fat_write::get_tests),
+    ("p9", p9::get_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
     ("procfs", procfs::get_tests),

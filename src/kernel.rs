@@ -97,6 +97,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     try_mount_host_disk();
     try_mount_data_disk();
     try_mount_legacy_data_disk();
+    try_mount_shared();
     // Phase D U11: now that /data is mounted (if present), restore
     // the overlay's upper-layer tmpfs from any persistent state.
     // No-op when /data is missing or has no prior sync.
@@ -650,6 +651,25 @@ fn try_mount_data_disk() {
         Err(_) => {
             debug_info!("Data disk: filesystem detection failed (uninitialized?)");
         }
+    }
+}
+
+/// Probe the `agenticos-shared` virtio-9p device and mount the host share at
+/// `/shared`. Absence is normal (share disabled, or QEMU without the
+/// device); every failure path leaves boot identical to today.
+fn try_mount_shared() {
+    use crate::drivers::virtio::p9::P9Transport;
+
+    let Some(transport) = P9Transport::discover_by_tag("agenticos-shared") else {
+        debug_info!("shared: no virtio-9p device; /shared not mounted");
+        return;
+    };
+    match crate::fs::p9::P9Filesystem::new(transport) {
+        Ok(filesystem) => match crate::fs::vfs::mount_p9(filesystem, "/shared") {
+            Ok(()) => debug_info!("Mounted 9p host share at /shared"),
+            Err(error) => debug_warn!("shared: mount failed: {:?}", error),
+        },
+        Err(error) => debug_warn!("shared: 9p handshake failed: {:?}", error),
     }
 }
 
