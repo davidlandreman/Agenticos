@@ -16,7 +16,9 @@ use super::{
     Screen, ScreenId, ScreenMode, Window, WindowId,
 };
 use crate::drivers::mouse;
-use crate::graphics::composition::{timestamp_cycles, RenderStats};
+use crate::graphics::composition::{
+    timestamp_cycles, ClientGlFrame, ClientGlId, ClientGlInfo, RenderStats,
+};
 use crate::graphics::compositor::Compositor;
 use crate::graphics::present::{BootFramebufferPresenter, Presenter};
 use alloc::boxed::Box;
@@ -169,6 +171,60 @@ impl WindowManager {
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const fn render_stats(&self) -> RenderStats {
         self.last_render_stats
+    }
+
+    pub fn create_gl_client(&mut self, width: u32, height: u32) -> Result<ClientGlId, i64> {
+        if self.renderer_selection.selected != RendererKind::Virgl
+            || !self.renderer_selection.strict
+        {
+            return Err(crate::userland::abi::ENOTSUP);
+        }
+        let RendererState::Retained(renderer) = &mut self.renderer else {
+            return Err(crate::userland::abi::ENOTSUP);
+        };
+        renderer
+            .create_gl_client(width, height)
+            .map_err(|_| crate::userland::abi::EIO)
+    }
+
+    pub fn submit_gl_client_frame(
+        &mut self,
+        surface_id: WindowId,
+        id: ClientGlId,
+        frame: ClientGlFrame,
+    ) -> Result<(), i64> {
+        let RendererState::Retained(renderer) = &mut self.renderer else {
+            return Err(crate::userland::abi::ENOTSUP);
+        };
+        renderer
+            .submit_gl_client_frame(id, frame)
+            .map_err(|_| crate::userland::abi::EIO)?;
+        if let Some((_, bounds)) = self
+            .collect_render_order()
+            .into_iter()
+            .find(|(window_id, _)| *window_id == surface_id)
+        {
+            self.compositor.dirty.mark_dirty(bounds);
+        } else {
+            self.compositor.dirty.mark_full_repaint();
+        }
+        Ok(())
+    }
+
+    pub fn gl_client_info(&self, id: ClientGlId) -> Option<ClientGlInfo> {
+        let RendererState::Retained(renderer) = &self.renderer else {
+            return None;
+        };
+        renderer.gl_client_info(id)
+    }
+
+    pub fn destroy_gl_client(&mut self, id: ClientGlId) -> Result<(), i64> {
+        let RendererState::Retained(renderer) = &mut self.renderer else {
+            return Err(crate::userland::abi::ENOTSUP);
+        };
+        renderer
+            .destroy_gl_client(id)
+            .map_err(|_| crate::userland::abi::EIO)
     }
 
     #[expect(dead_code, reason = "intentional kernel API surface")]
@@ -1116,13 +1172,51 @@ impl WindowManager {
             }
         }
 
-        let mut scene = retained.build_scene(&decorated_roots);
-        for (layer, (root, _)) in scene.layers.iter_mut().zip(roots.iter()) {
+        let canonical_scene = retained.build_scene(&decorated_roots);
+        let mut scene = crate::graphics::scene::SceneFrame::new(
+            canonical_scene.output_size.0,
+            canonical_scene.output_size.1,
+        );
+        let mut next_z = 0i32;
+        for ((root, absolute_bounds), mut layer) in
+            roots.iter().zip(canonical_scene.layers.into_iter())
+        {
             if let Some(window) = self.window_registry.get(root) {
                 let properties = window.compositor_properties();
                 layer.opacity = properties.opacity;
                 layer.transform = properties.transform;
                 layer.effect = properties.effect;
+            }
+            layer.z_index = next_z;
+            next_z = next_z.saturating_add(1);
+            scene.push(layer);
+
+            let mut external = Vec::new();
+            let local = self
+                .window_registry
+                .get(root)
+                .map(|window| window.bounds())
+                .unwrap_or(*absolute_bounds);
+            self.collect_external_gl_layers_recursive(
+                *root,
+                absolute_bounds.x.saturating_sub(local.x),
+                absolute_bounds.y.saturating_sub(local.y),
+                &root_ids,
+                &mut external,
+            );
+            for (client_id, destination) in external {
+                let Some(info) = retained.gl_client_info(client_id) else {
+                    continue;
+                };
+                let mut client_layer = crate::graphics::scene::Layer::virgl_client(
+                    client_id,
+                    info.width,
+                    info.height,
+                    destination,
+                );
+                client_layer.z_index = next_z;
+                next_z = next_z.saturating_add(1);
+                scene.push(client_layer);
             }
         }
         compose_regions = Self::expand_backdrop_damage(&scene, &compose_regions);
@@ -1264,6 +1358,44 @@ impl WindowManager {
             ));
         }
         roots
+    }
+
+    fn collect_external_gl_layers_recursive(
+        &self,
+        window_id: WindowId,
+        parent_x: i32,
+        parent_y: i32,
+        layer_roots: &[WindowId],
+        output: &mut Vec<(ClientGlId, Rect)>,
+    ) {
+        let Some(window) = self.window_registry.get(&window_id) else {
+            return;
+        };
+        if !window.visible() {
+            return;
+        }
+        let local = window.bounds();
+        let absolute = Rect::new(
+            parent_x.saturating_add(local.x),
+            parent_y.saturating_add(local.y),
+            local.width,
+            local.height,
+        );
+        if let Some(client_id) = window.external_gl_client() {
+            output.push((client_id, absolute));
+        }
+        for child in window.children() {
+            if layer_roots.contains(child) {
+                continue;
+            }
+            self.collect_external_gl_layers_recursive(
+                *child,
+                absolute.x,
+                absolute.y,
+                layer_roots,
+                output,
+            );
+        }
     }
 
     fn subtree_needs_repaint(&self, id: WindowId, layer_roots: &[WindowId]) -> bool {

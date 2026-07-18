@@ -15,6 +15,7 @@ pub const CTRL_FLAG_FENCE: u32 = 1 << 0;
 // Classic VirGL bind flags from virglrenderer src/virgl_hw.h at pinned
 // commit 960bd6674a25a438da2aac8a0af8c6d6e2b3a77e.
 pub const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
+pub const VIRGL_BIND_DEPTH_STENCIL: u32 = 1 << 0;
 pub const VIRGL_BIND_SAMPLER_VIEW: u32 = 1 << 3;
 pub const VIRGL_BIND_VERTEX_BUFFER: u32 = 1 << 4;
 pub const VIRGL_BIND_SCANOUT: u32 = 1 << 18;
@@ -50,6 +51,10 @@ pub const CAPSET_VIRGL: u32 = 1;
 pub const CAPSET_VIRGL2: u32 = 2;
 
 pub const FORMAT_B8G8R8A8_UNORM: u32 = 1;
+pub const FORMAT_Z16_UNORM: u32 = 16;
+pub const FORMAT_Z32_FLOAT: u32 = 18;
+pub const FORMAT_Z24_UNORM_S8_UINT: u32 = 19;
+pub const FORMAT_Z24X8_UNORM: u32 = 21;
 pub const MAX_SCANOUTS: usize = 16;
 
 #[repr(C)]

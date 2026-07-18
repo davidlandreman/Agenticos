@@ -6,7 +6,8 @@ use alloc::collections::BTreeMap;
 
 use crate::drivers::{fw_cfg, virtio::gpu::VirtioGpu};
 use crate::graphics::composition::{
-    CompositionEngine, CpuCompositionEngine, VirglCompositionEngine,
+    ClientGlDraw, ClientGlFrame, ClientGlVertex, CompositionEngine, CpuCompositionEngine,
+    VirglCompositionEngine, CLIENT_GL_DRAW_DEPTH_TEST,
 };
 use crate::graphics::scene::{Layer, SceneFrame};
 use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
@@ -168,6 +169,145 @@ fn test_clear_and_readback() {
         }
     }
     crate::debug_info!("VirGL production scene matches CPU reference within one channel value");
+
+    // Exercise the ring-3 GL backend boundary itself. Hosts advertising a
+    // depth format get a far/near/far sequence whose last draw must fail the
+    // LESS test. GLES hosts without one use painter order, matching the GL
+    // frontend's bounded triangle-sort fallback. Then sample the target
+    // through a deliberately narrower scene clip.
+    let client_id = virgl
+        .create_gl_client(4, 4)
+        .expect("VirGL client target creation failed");
+    let client_info = virgl
+        .gl_client_info(client_id)
+        .expect("live VirGL client info missing");
+    let hardware_depth = client_info.supported_draw_flags & CLIENT_GL_DRAW_DEPTH_TEST != 0;
+    let quad_positions = [
+        [-1.0, -1.0, 0.0, 1.0],
+        [1.0, -1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+        [-1.0, -1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+        [-1.0, 1.0, 0.0, 1.0],
+    ];
+    let mut client_vertices = alloc::vec::Vec::new();
+    let mut client_draws = alloc::vec::Vec::new();
+    let passes: &[(f32, [f32; 4])] = if hardware_depth {
+        &[
+            (0.5, [1.0, 0.0, 0.0, 1.0]),
+            (-0.5, [0.0, 1.0, 0.0, 1.0]),
+            (0.5, [0.0, 0.0, 1.0, 1.0]),
+        ]
+    } else {
+        &[(0.5, [1.0, 0.0, 0.0, 1.0]), (-0.5, [0.0, 1.0, 0.0, 1.0])]
+    };
+    for &(depth, color) in passes {
+        let first_vertex = client_vertices.len() as u32;
+        for mut position in quad_positions {
+            position[2] = depth;
+            client_vertices.push(ClientGlVertex { position, color });
+        }
+        client_draws.push(ClientGlDraw {
+            first_vertex,
+            vertex_count: 6,
+            flags: if hardware_depth {
+                CLIENT_GL_DRAW_DEPTH_TEST
+            } else {
+                0
+            },
+            reserved: 0,
+        });
+    }
+    let first_vertex = client_vertices.len() as u32;
+    for position in [
+        [-1.0, 0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+        [-1.0, 1.0, 0.0, 1.0],
+    ] {
+        client_vertices.push(ClientGlVertex {
+            position,
+            color: [0.0, 0.0, 1.0, 1.0],
+        });
+    }
+    client_draws.push(ClientGlDraw {
+        first_vertex,
+        vertex_count: 6,
+        flags: 0,
+        reserved: 0,
+    });
+    virgl
+        .submit_gl_client_frame(
+            client_id,
+            ClientGlFrame {
+                serial: 1,
+                width: 4,
+                height: 4,
+                viewport: Rect::new(0, 0, 4, 4),
+                clear_color: [0.0, 0.0, 0.0, 1.0],
+                clear_depth: 1.0,
+                draws: client_draws,
+                vertices: client_vertices,
+            },
+        )
+        .expect("VirGL client frame publication failed");
+    let mut client_scene = SceneFrame::new(8, 8);
+    for layer in &scene.layers {
+        client_scene.push(*layer);
+    }
+    let mut client_layer = Layer::virgl_client(client_id, 4, 4, Rect::new(2, 2, 4, 4));
+    client_layer.clip_rect = Rect::new(3, 2, 2, 4);
+    client_scene.push(client_layer);
+    let client_stats = virgl
+        .compose(&client_scene, &surfaces, &damage)
+        .expect("VirGL client composition failed");
+    assert_eq!(client_stats.gpu_readback_bytes, 0);
+    let client_info = virgl
+        .gl_client_info(client_id)
+        .expect("live VirGL client info missing");
+    assert_eq!(client_info.last_completed_serial, 1);
+    assert_eq!(client_info.last_error, 0);
+    virgl
+        .readback_output()
+        .expect("VirGL client diagnostic readback failed");
+    let center = virgl.output().pixel(3, 4).expect("client center pixel");
+    assert!(
+        center.g() >= 254 && center.r() <= 1 && center.b() <= 1,
+        "client depth ordering produced {:?}, expected near green",
+        center
+    );
+    let top = virgl.output().pixel(3, 2).expect("client top pixel");
+    assert!(
+        top.b() >= 254 && top.r() <= 1 && top.g() <= 1,
+        "OpenGL viewport orientation produced {:?} at the top, expected blue",
+        top
+    );
+    let clipped = virgl.output().pixel(2, 3).expect("clipped output pixel");
+    let expected = cpu.output().pixel(2, 3).expect("CPU output pixel");
+    for (actual, expected) in [
+        (clipped.a(), expected.a()),
+        (clipped.r(), expected.r()),
+        (clipped.g(), expected.g()),
+        (clipped.b(), expected.b()),
+    ] {
+        assert!(
+            actual.abs_diff(expected) <= 1,
+            "client layer escaped its content clip: gpu={:?} cpu={:?}",
+            clipped,
+            expected
+        );
+    }
+    virgl
+        .destroy_gl_client(client_id)
+        .expect("VirGL client teardown failed");
+    virgl
+        .compose(&scene, &surfaces, &damage)
+        .expect("VirGL scene restore after client teardown failed");
+    crate::debug_info!(
+        "VirGL client target passed colored geometry/depth/clip/composition/teardown fixture"
+    );
 
     for surface in surfaces.values_mut() {
         surface.clear_damage();

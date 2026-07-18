@@ -27,6 +27,11 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
   so movement/focus/opacity-only frames reuse textures without upload or GPU
   object churn. Explicit Aero chrome is supported with sharp translucency; GPU
   backdrop blur remains intentionally unsupported.
+  The same physical VirGL context owns logical GL client targets: two color
+  buffers, an optional capset-qualified depth attachment, bounded vertex
+  storage, and a one-frame mailbox. `LayerSource::VirglClient` samples the
+  completed front target directly inside the server-owned content clip; ring 3
+  never sees a VirGL handle or submits a raw command.
 - `present/` — scanout boundary. The boot-framebuffer presenter converts only
   damaged pixels; VirtIO-GPU 2D presentation is owned by `src/drivers/`.
 - `fonts/` — font support. `core_font.rs` defines the glyph-centric `Font` trait + `Glyph<'a>` struct (8bpp coverage). `ttf.rs` is the TTF/OTF backend (parses via `ttf-parser`, rasterizes via `ab_glyph_rasterizer`, ASCII pre-rendered into per-glyph `Box<[u8]>` slots, non-ASCII lazy via `BTreeMap`). `embedded_font.rs` is the 8x8 bitmap fallback used only on TTF parse failure. `font_data.rs` holds the embedded font's bit-packed source. The system TTF lives at `assets/system.ttf` and is `include_bytes!`-baked into the kernel; `init_fonts()` parses it once during boot, after heap init.
