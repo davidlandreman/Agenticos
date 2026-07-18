@@ -208,6 +208,8 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
         Pipe(crate::userland::pipe::PipeWriteHandle),
         File(crate::lib::arc::Arc<crate::fs::file_handle::File>),
         Socket(u64),
+        EventFd(crate::lib::arc::Arc<crate::userland::eventfd::EventFd>),
+        LocalStream(crate::lib::arc::Arc<crate::userland::local_stream::LocalStreamEndpoint>),
     }
     let slot = with_fd_slot(fd);
     let target = match slot {
@@ -220,10 +222,13 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
+        Some(FdSlot::EventFd { handle, .. }) => Target::EventFd(handle),
+        Some(FdSlot::LocalStream { handle, .. }) => Target::LocalStream(handle),
         // /proc snapshots are read-only.
         Some(FdSlot::VirtualFile { .. })
         | Some(FdSlot::Urandom { .. })
-        | Some(FdSlot::GuiEvents { .. }) => return EBADF,
+        | Some(FdSlot::GuiEvents { .. })
+        | Some(FdSlot::Epoll { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
 
@@ -284,6 +289,10 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
             }
             crate::userland::network_syscalls::write_connected(args, id, &staging)
         }
+        Target::EventFd(handle) => crate::userland::eventfd::write(args, &handle, ptr, len),
+        Target::LocalStream(handle) => {
+            crate::userland::local_stream::LocalStreamEndpoint::write(args, &handle, ptr, len)
+        }
         Target::StdoutErr => {
             // U8/bugfix: route to THIS process's terminal_id, not the
             // global CURRENT_OUTPUT_TERMINAL. With multiple ring-3
@@ -315,6 +324,7 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         Pipe(crate::userland::pipe::PipeWriteHandle),
         File(crate::lib::arc::Arc<crate::fs::file_handle::File>),
         Socket(u64),
+        LocalStream(crate::lib::arc::Arc<crate::userland::local_stream::LocalStreamEndpoint>),
     }
     let target = match with_fd_slot(fd) {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Target::StdoutErr,
@@ -326,10 +336,13 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
+        Some(FdSlot::LocalStream { handle, .. }) => Target::LocalStream(handle),
         // /proc snapshots are read-only.
         Some(FdSlot::VirtualFile { .. })
         | Some(FdSlot::Urandom { .. })
-        | Some(FdSlot::GuiEvents { .. }) => return EBADF,
+        | Some(FdSlot::GuiEvents { .. })
+        | Some(FdSlot::EventFd { .. })
+        | Some(FdSlot::Epoll { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
     if iovcnt < 0 || iovcnt as usize > WRITEV_MAX_IOV {
@@ -453,6 +466,18 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                     return if written > 0 { written as i64 } else { e };
                 }
                 let result = crate::userland::network_syscalls::write_connected(args, *id, &bytes);
+                if result < 0 {
+                    return if written > 0 { written as i64 } else { result };
+                }
+                written += result as u64;
+                if result as u64 != len {
+                    break;
+                }
+            }
+            Target::LocalStream(handle) => {
+                let result = crate::userland::local_stream::LocalStreamEndpoint::write(
+                    args, handle, base, len,
+                );
                 if result < 0 {
                     return if written > 0 { written as i64 } else { result };
                 }
@@ -659,6 +684,13 @@ fn read_fd_once(args: &SyscallArgs, fd: i32, ptr: u64, len: u64) -> i64 {
         Some(FdSlot::Socket { handle, .. }) => {
             crate::userland::network_syscalls::read_connected(args, handle.id(), ptr, cap as usize)
         }
+        Some(FdSlot::EventFd { handle, .. }) => {
+            crate::userland::eventfd::read(args, &handle, ptr, len)
+        }
+        Some(FdSlot::LocalStream { handle, .. }) => {
+            crate::userland::local_stream::LocalStreamEndpoint::read(args, &handle, ptr, len)
+        }
+        Some(FdSlot::Epoll { .. }) => EBADF,
         Some(FdSlot::File { handle, .. }) => {
             // Stage the read inside a kernel buffer so the FAT/block path
             // never sees a user pointer (which could be unmapped, span a
@@ -1467,6 +1499,8 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         // and blocked mask. Pending mask resets to empty (POSIX:
         // pending signals are not inherited across fork).
         signal_state: parent.signal_state.fork_clone(),
+        signal_alt_stack: parent.signal_alt_stack,
+        membarrier_private_registered: false,
         // Phase 5 PR-C1: child gets its own freshly-allocated kernel
         // stack so its SYSCALL handlers don't share rsp0 with the
         // parent's syscall handlers when both are alive concurrently.
@@ -1610,6 +1644,9 @@ pub fn clone_handler(args: &mut SyscallArgs) -> i64 {
         cwd: String::new(),
         address_space: None,
         signal_state: parent.signal_state.fork_clone(),
+        // Linux clears an alternate stack for CLONE_VM without CLONE_VFORK.
+        signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
+        membarrier_private_registered: false,
         kernel_stack: Some(crate::userland::kernel_stack::KernelStack::new()),
         exe_path: None,
         cmdline: alloc::vec::Vec::new(),
@@ -1836,6 +1873,8 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         p.signal_state = crate::userland::signal::SignalState::new();
         p.signal_state.blocked = preserved_blocked;
         p.signal_state.pending = preserved_pending;
+        p.signal_alt_stack = crate::userland::signal::SignalAltStack::default();
+        p.membarrier_private_registered = false;
         // Demand-grown stack (U3): replace the stack window with the
         // new image's. exec resets the full growth budget.
         p.set_stack_window(
@@ -2087,7 +2126,32 @@ unsafe fn deliver_signal(
     const USER_STATE_SIZE: u64 = core::mem::size_of::<UserState>() as u64;
     const FRAME_SIZE: u64 = 8 + USER_STATE_SIZE + 8 + 8;
     let frame_total = (FRAME_SIZE + 15) & !15;
-    let frame_addr = user_rsp - frame_total;
+    let frame_stack_top = if action.sa_flags & crate::userland::signal::SA_ONSTACK != 0 {
+        crate::userland::lifecycle::with_current_process(|process| {
+            let alt = process.signal_alt_stack;
+            if alt.enabled && !alt.contains(user_rsp) {
+                alt.top()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(user_rsp)
+    } else {
+        user_rsp
+    };
+    let frame_addr = match frame_stack_top.checked_sub(frame_total) {
+        Some(address) => address,
+        None => {
+            crate::userland::lifecycle::cleanup_user_process(
+                crate::userland::lifecycle::AbnormalExit {
+                    vector: 14,
+                    error_code: Some(0x6),
+                    fault_addr: Some(VirtAddr::new(0)),
+                    fault_rip: VirtAddr::new(user_rip),
+                },
+            );
+        }
+    };
 
     // 3. Write the frame contents. We're running with CR3 = the user
     //    process's L4, so user-VA writes from kernel mode go to the
@@ -2541,11 +2605,15 @@ const PERM_RX_ALL: u32 = 0o555;
 /// Acquire a clone of the FD slot at `fd`. Releases the `ActiveUser`
 /// mutex before returning so subsequent FS calls don't risk lock-order
 /// inversion with the FAT layer.
-fn with_fd_slot(fd: i32) -> Option<FdSlot> {
+pub(crate) fn fd_slot(fd: i32) -> Option<FdSlot> {
     if fd < 0 || (fd as usize) >= FD_TABLE_SIZE {
         return None;
     }
     crate::userland::lifecycle::with_active_user(|au| au.fd_table.get(fd).cloned())
+}
+
+fn with_fd_slot(fd: i32) -> Option<FdSlot> {
+    fd_slot(fd)
 }
 
 /// Run `f` against the live FD table. `f` must not call into anything
@@ -2821,9 +2889,24 @@ pub fn close_handler(args: &mut SyscallArgs) -> i64 {
         return 0;
     }
     let result = with_fd_table_mut(|t| t.close(fd)).err().unwrap_or(0);
+    let prune_from = slot.as_ref().filter(|description| {
+        result == 0
+            && !crate::userland::lifecycle::with_current_group(|process| {
+                process.fd_table.contains_open_description(description)
+            })
+    });
+    if let Some(description) = prune_from {
+        let epolls = crate::userland::lifecycle::with_current_group(|process| {
+            process.fd_table.epoll_instances()
+        });
+        for epoll in epolls {
+            epoll.prune_open_description(description);
+        }
+    }
     drop(slot);
     crate::net::drain_deferred_closes();
     crate::userland::lifecycle::wake_ring3_blocked_on_network(true);
+    crate::userland::readiness::notify_changed();
     result
 }
 
@@ -3597,6 +3680,13 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
             Some(FdSlot::GuiEvents { handle, .. }) => {
                 (O_RDONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
             }
+            Some(FdSlot::EventFd { handle, .. }) => {
+                (O_RDWR | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+            }
+            Some(FdSlot::Epoll { .. }) => O_RDONLY as i64,
+            Some(FdSlot::LocalStream { handle, .. }) => {
+                (O_RDWR | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+            }
             Some(_) => O_RDONLY as i64,
             None => EBADF,
         },
@@ -3622,6 +3712,15 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
                 0
             }),
             Some(FdSlot::GuiEvents { handle, .. }) => {
+                handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
+                0
+            }
+            Some(FdSlot::EventFd { handle, .. }) => {
+                handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
+                0
+            }
+            Some(FdSlot::Epoll { .. }) => 0,
+            Some(FdSlot::LocalStream { handle, .. }) => {
                 handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
                 0
             }
@@ -3842,6 +3941,13 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
             st.st_blksize = 4096;
             write_stat(out_ptr, &st)
         }
+        Some(FdSlot::LocalStream { .. }) => {
+            const S_IFSOCK: u32 = 0o140000;
+            let mut st = LinuxStat::default();
+            st.st_mode = S_IFSOCK | 0o600;
+            st.st_blksize = 4096;
+            write_stat(out_ptr, &st)
+        }
         Some(FdSlot::Directory { handle, .. }) => {
             let path = handle.path();
             // Synthesize directory stat: metadata("/") may fail because
@@ -3898,6 +4004,13 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
                 st_blksize: core::mem::size_of::<crate::userland::gui::GuiEvent>() as i64,
                 ..LinuxStat::default()
             };
+            write_stat(out_ptr, &st)
+        }
+        Some(FdSlot::EventFd { .. }) | Some(FdSlot::Epoll { .. }) => {
+            let mut st = LinuxStat::default();
+            st.st_mode = S_IFREG | 0o600;
+            st.st_nlink = 1;
+            st.st_blksize = 4096;
             write_stat(out_ptr, &st)
         }
         None => EBADF,
@@ -4695,18 +4808,23 @@ struct PollFd {
 const POLL_MAX_NFDS: u64 = 64;
 
 #[derive(Clone, Copy, Default)]
-struct FdReady {
-    readable: bool,
-    writable: bool,
-    error: bool,
-    hangup: bool,
+pub(crate) struct FdReady {
+    pub(crate) readable: bool,
+    pub(crate) writable: bool,
+    pub(crate) error: bool,
+    pub(crate) hangup: bool,
 }
 
 /// Snapshot readiness without consuming data. `with_fd_slot` clones the
 /// handle while holding the process table and releases that lock before a
 /// socket readiness query takes the network lock.
 fn fd_readiness(fd: i32) -> Result<FdReady, i64> {
-    match with_fd_slot(fd).ok_or(EBADF)? {
+    let slot = with_fd_slot(fd).ok_or(EBADF)?;
+    fd_slot_readiness(&slot)
+}
+
+pub(crate) fn fd_slot_readiness(slot: &FdSlot) -> Result<FdReady, i64> {
+    match slot {
         FdSlot::Stdin => Ok(FdReady {
             readable: crate::userland::stdin::queued_len_for_current_process() != 0,
             ..FdReady::default()
@@ -4762,6 +4880,27 @@ fn fd_readiness(fd: i32) -> Result<FdReady, i64> {
                 hangup: state.hangup,
             })
             .map_err(crate::userland::network_syscalls::map_socket_error),
+        FdSlot::EventFd { handle, .. } => {
+            let (readable, writable) = handle.readiness();
+            Ok(FdReady {
+                readable,
+                writable,
+                ..FdReady::default()
+            })
+        }
+        FdSlot::Epoll { handle, .. } => Ok(FdReady {
+            readable: handle.is_ready(),
+            ..FdReady::default()
+        }),
+        FdSlot::LocalStream { handle, .. } => {
+            let (readable, writable, error, hangup) = handle.readiness();
+            Ok(FdReady {
+                readable,
+                writable,
+                error,
+                hangup,
+            })
+        }
     }
 }
 
@@ -4827,6 +4966,10 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
     }
     let mut ready = 0i64;
     crate::net::poll_once();
+    // poll_once may itself publish network progress. Sample after it so the
+    // lost-wake guard covers only changes concurrent with the descriptor scan,
+    // rather than forcing a spurious immediate restart for work scanned below.
+    let observed_sequence = crate::userland::readiness::sequence();
     for index in 0..nfds {
         let address = fds_ptr + index * core::mem::size_of::<PollFd>() as u64;
         let mut entry = match crate::userland::usercopy::read_unaligned::<PollFd>(address) {
@@ -4873,7 +5016,7 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
         return ready;
     }
     let identity = fds_ptr ^ nfds.rotate_left(17);
-    crate::userland::network_syscalls::block_poll(args, identity, timeout_ticks)
+    crate::userland::readiness::block(args, identity, timeout_ticks, observed_sequence)
 }
 
 #[repr(C)]
@@ -4941,6 +5084,7 @@ pub fn select_handler(args: &mut SyscallArgs) -> i64 {
     };
 
     crate::net::poll_once();
+    let observed_sequence = crate::userland::readiness::sequence();
     let requested = read_in | write_in | except_in;
     let mut read_out = 0u64;
     let mut write_out = 0u64;
@@ -4973,7 +5117,7 @@ pub fn select_handler(args: &mut SyscallArgs) -> i64 {
             ^ (nfds as u64).rotate_left(37);
         // Diverges while blocked; returns only when the restart-stable
         // absolute deadline has expired.
-        let _ = crate::userland::network_syscalls::block_poll(args, identity, timeout_ticks);
+        let _ = crate::userland::readiness::block(args, identity, timeout_ticks, observed_sequence);
     } else {
         crate::userland::lifecycle::clear_network_wait();
     }
@@ -4997,6 +5141,378 @@ pub fn select_handler(args: &mut SyscallArgs) -> i64 {
 /// covers ZLE's needs in the common configuration).
 pub fn pselect6_handler(_args: &mut SyscallArgs) -> i64 {
     ENOSYS
+}
+
+/// Linux `sched_yield(2)`. The full voluntary ring-3 handoff is wired after
+/// the descriptor primitives; returning success is sufficient for synthetic
+/// dispatch tests and is replaced by the switch helper in this feature.
+pub fn sched_yield_handler(args: &mut SyscallArgs) -> i64 {
+    if crate::arch::x86_64::percpu::current_user_pid().is_none() {
+        return 0;
+    }
+    unsafe { crate::userland::switch::yield_current_ring3(args) }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct LinuxStackT {
+    ss_sp: u64,
+    ss_flags: i32,
+    _padding: u32,
+    ss_size: u64,
+}
+
+pub fn sigaltstack_handler(args: &mut SyscallArgs) -> i64 {
+    const SS_ONSTACK: i32 = 1;
+    const SS_DISABLE: i32 = 2;
+    const MINSIGSTKSZ: u64 = 2048;
+
+    let user_rsp = if crate::arch::x86_64::percpu::current_user_pid().is_some() {
+        unsafe {
+            crate::userland::user_state::read_user_callee_saved(args as *const SyscallArgs)
+                .r12_register
+        }
+    } else {
+        0
+    };
+    let current =
+        crate::userland::lifecycle::with_current_process(|process| process.signal_alt_stack);
+
+    if args.rsi != 0 {
+        let old = LinuxStackT {
+            ss_sp: current.sp,
+            ss_flags: if !current.enabled {
+                SS_DISABLE
+            } else if current.contains(user_rsp) {
+                SS_ONSTACK
+            } else {
+                0
+            },
+            _padding: 0,
+            ss_size: current.size,
+        };
+        if let Err(error) = crate::userland::usercopy::write_unaligned(args.rsi, &old) {
+            return error;
+        }
+    }
+    if args.rdi == 0 {
+        return 0;
+    }
+    if current.contains(user_rsp) {
+        return EPERM;
+    }
+    let new: LinuxStackT = match crate::userland::usercopy::read_unaligned(args.rdi) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    if new.ss_flags == SS_DISABLE {
+        crate::userland::lifecycle::with_current_process(|process| {
+            process.signal_alt_stack = crate::userland::signal::SignalAltStack::default();
+        });
+        return 0;
+    }
+    if new.ss_flags != 0 {
+        return EINVAL;
+    }
+    if new.ss_size < MINSIGSTKSZ {
+        return ENOMEM;
+    }
+    let Some(end) = new.ss_sp.checked_add(new.ss_size) else {
+        return ENOMEM;
+    };
+    if VirtAddr::try_new(new.ss_sp).is_err() || VirtAddr::try_new(end).is_err() {
+        return ENOMEM;
+    }
+    let writable = crate::userland::lifecycle::with_current_group(|process| {
+        process.address_space.as_ref().map(|space| {
+            space
+                .vmas()
+                .covers(new.ss_sp, new.ss_size, crate::userland::vm::VmProt::WRITE)
+        })
+    });
+    let writable = writable.unwrap_or_else(|| {
+        crate::userland::abi::user_va_bounds()
+            .is_some_and(|bounds| new.ss_sp >= bounds.start && end <= bounds.end)
+    });
+    if !writable {
+        return ENOMEM;
+    }
+    crate::userland::lifecycle::with_current_process(|process| {
+        process.signal_alt_stack = crate::userland::signal::SignalAltStack {
+            sp: new.ss_sp,
+            size: new.ss_size,
+            enabled: true,
+        };
+    });
+    0
+}
+
+pub fn membarrier_handler(args: &mut SyscallArgs) -> i64 {
+    const MEMBARRIER_CMD_QUERY: u64 = 0;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: u64 = 1 << 3;
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: u64 = 1 << 4;
+    if args.rsi != 0 {
+        return EINVAL;
+    }
+    match args.rdi {
+        MEMBARRIER_CMD_QUERY => {
+            (MEMBARRIER_CMD_PRIVATE_EXPEDITED | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) as i64
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            if !crate::userland::lifecycle::current_group_has_single_cpu_execution() {
+                return ENOSYS;
+            }
+            crate::userland::lifecycle::with_current_group(|process| {
+                process.membarrier_private_registered = true;
+            });
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            0
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
+            if !crate::userland::lifecycle::current_group_has_single_cpu_execution() {
+                return ENOSYS;
+            }
+            let registered = crate::userland::lifecycle::with_current_group(|process| {
+                process.membarrier_private_registered
+            });
+            if !registered {
+                return EPERM;
+            }
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            0
+        }
+        _ => EINVAL,
+    }
+}
+
+pub fn madvise_handler(args: &mut SyscallArgs) -> i64 {
+    use crate::userland::vm::{VmProt, VmaBacking};
+    const MADV_NORMAL: u64 = 0;
+    const MADV_RANDOM: u64 = 1;
+    const MADV_SEQUENTIAL: u64 = 2;
+    const MADV_WILLNEED: u64 = 3;
+    const MADV_DONTNEED: u64 = 4;
+    const MADV_FREE: u64 = 8;
+
+    let address = args.rdi;
+    let length = args.rsi;
+    let advice = args.rdx;
+    if address & 0xfff != 0 {
+        return EINVAL;
+    }
+    if length == 0 {
+        return 0;
+    }
+    let Some(rounded) = length.checked_add(0xfff).map(|value| value & !0xfff) else {
+        return EINVAL;
+    };
+    let Some(end) = address.checked_add(rounded) else {
+        return EINVAL;
+    };
+    if !matches!(
+        advice,
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_DONTNEED | MADV_FREE
+    ) {
+        return EINVAL;
+    }
+    let discard = advice == MADV_DONTNEED || advice == MADV_FREE;
+    let l4 = crate::userland::lifecycle::with_current_group(|process| {
+        let space = process.address_space.as_ref()?;
+        if !space.vmas().covers(address, rounded, VmProt::NONE) {
+            return None;
+        }
+        if discard {
+            let mut cursor = address;
+            while cursor < end {
+                let vma = space.vmas().find(cursor)?;
+                if !matches!(
+                    vma.backing,
+                    VmaBacking::Anonymous | VmaBacking::FilePrivate { .. }
+                ) {
+                    return None;
+                }
+                cursor = vma.end.min(end);
+            }
+        }
+        Some(space.l4_frame())
+    });
+    let Some(l4) = l4 else {
+        return ENOMEM;
+    };
+    if discard {
+        crate::mm::memory::with_memory_mapper(|mapper| {
+            let mut page = address;
+            while page < end {
+                if mapper.leaf_info(l4, VirtAddr::new(page)).is_some() {
+                    let _ = mapper.unmap_page_from(l4, VirtAddr::new(page));
+                }
+                page += 0x1000;
+            }
+        });
+    }
+    0
+}
+
+pub fn mremap_handler(args: &mut SyscallArgs) -> i64 {
+    const MREMAP_MAYMOVE: u64 = 1;
+    let old_address = args.rdi;
+    let old_length = args.rsi;
+    let new_length = args.rdx;
+    let flags = args.r10;
+    if old_address & 0xfff != 0
+        || old_length == 0
+        || new_length == 0
+        || flags & !MREMAP_MAYMOVE != 0
+        || old_length > MMAP_MAX_LEN
+        || new_length > MMAP_MAX_LEN
+    {
+        return EINVAL;
+    }
+    let Some(old_size) = old_length.checked_add(0xfff).map(|value| value & !0xfff) else {
+        return EINVAL;
+    };
+    let Some(new_size) = new_length.checked_add(0xfff).map(|value| value & !0xfff) else {
+        return EINVAL;
+    };
+    let Some(old_end) = old_address.checked_add(old_size) else {
+        return EINVAL;
+    };
+    let allocation = crate::userland::lifecycle::with_current_group(|process| {
+        process
+            .address_space
+            .as_ref()?
+            .vmas()
+            .anonymous_allocation(old_address, old_end)
+    });
+    let Some(allocation) = allocation else {
+        return EINVAL;
+    };
+    if old_size == new_size {
+        return old_address as i64;
+    }
+
+    if new_size < old_size {
+        let new_end = old_address + new_size;
+        let l4 = crate::userland::lifecycle::with_current_group(|process| {
+            let space = process.address_space.as_mut()?;
+            space
+                .vmas_mut()
+                .replace_anonymous_allocation(old_address, old_end, old_address, new_end)
+                .ok()?;
+            Some(space.l4_frame())
+        });
+        let Some(l4) = l4 else {
+            return ENOMEM;
+        };
+        crate::mm::memory::with_memory_mapper(|mapper| {
+            let mut page = new_end;
+            while page < old_end {
+                if mapper.leaf_info(l4, VirtAddr::new(page)).is_some() {
+                    let _ = mapper.unmap_page_from(l4, VirtAddr::new(page));
+                }
+                page += 0x1000;
+            }
+        });
+        return old_address as i64;
+    }
+
+    let new_end = match old_address.checked_add(new_size) {
+        Some(end) => end,
+        None => return ENOMEM,
+    };
+    let grew_in_place = crate::userland::lifecycle::with_current_group(|process| {
+        let Some(space) = process.address_space.as_mut() else {
+            return false;
+        };
+        if !space.vmas().is_free(old_end, new_end) {
+            return false;
+        }
+        space
+            .vmas_mut()
+            .replace_anonymous_allocation(old_address, old_end, old_address, new_end)
+            .is_ok()
+    });
+    if grew_in_place {
+        return old_address as i64;
+    }
+    if flags & MREMAP_MAYMOVE == 0 {
+        return ENOMEM;
+    }
+
+    // Reserve a destination VMA before touching page tables. The syscall is
+    // non-preemptible, but this ordering also gives rollback a precise piece
+    // of metadata to remove if page-table allocation runs out of frames.
+    let destination = crate::userland::lifecycle::with_current_group(|process| {
+        let space = process.address_space.as_mut()?;
+        let stack_floor = space
+            .vmas()
+            .as_slice()
+            .iter()
+            .find_map(|vma| {
+                matches!(vma.backing, crate::userland::vm::VmaBacking::Stack { .. })
+                    .then_some(vma.start)
+            })
+            .unwrap_or(crate::mm::paging::USER_STACK_TOP);
+        let destination = space
+            .vmas()
+            .find_gap_top_down(new_size, stack_floor.saturating_sub(1024 * 1024))
+            .ok()?;
+        let moved = crate::userland::vm::Vma::new(
+            destination,
+            destination + new_size,
+            allocation.prot,
+            crate::userland::vm::VmaBacking::Anonymous,
+        )
+        .ok()?;
+        space.vmas_mut().insert(moved).ok()?;
+        Some((destination, space.l4_frame()))
+    });
+    let Some((destination, l4)) = destination else {
+        return ENOMEM;
+    };
+
+    let mut moved_offsets = alloc::vec::Vec::new();
+    let move_result = crate::mm::memory::with_memory_mapper(|mapper| {
+        let mut offset = 0;
+        while offset < old_size {
+            match mapper.move_user_page(
+                l4,
+                VirtAddr::new(old_address + offset),
+                VirtAddr::new(destination + offset),
+            ) {
+                Ok(true) => moved_offsets.push(offset),
+                Ok(false) => {}
+                Err(_) => {
+                    for rollback in moved_offsets.iter().rev().copied() {
+                        let _ = mapper.move_user_page(
+                            l4,
+                            VirtAddr::new(destination + rollback),
+                            VirtAddr::new(old_address + rollback),
+                        );
+                    }
+                    return false;
+                }
+            }
+            offset += 0x1000;
+        }
+        true
+    })
+    .unwrap_or(false);
+    if !move_result {
+        crate::userland::lifecycle::with_current_group(|process| {
+            if let Some(space) = process.address_space.as_mut() {
+                let _ = space.vmas_mut().remove(destination, destination + new_size);
+            }
+        });
+        return ENOMEM;
+    }
+
+    crate::userland::lifecycle::with_current_group(|process| {
+        if let Some(space) = process.address_space.as_mut() {
+            let _ = space.vmas_mut().remove(old_address, old_end);
+        }
+    });
+    destination as i64
 }
 
 /// Maximum bytes we'll write into a user readlink buffer.
@@ -5097,6 +5613,9 @@ fn resolve_proc_self_fd(fd: i32) -> Option<String> {
         FdSlot::Urandom { .. } => String::from("/dev/urandom"),
         FdSlot::Socket { handle, .. } => alloc::format!("socket:[{}]", handle.id()),
         FdSlot::GuiEvents { .. } => String::from("anon_inode:[agenticos-gui]"),
+        FdSlot::EventFd { .. } => String::from("anon_inode:[eventfd]"),
+        FdSlot::Epoll { .. } => String::from("anon_inode:[eventpoll]"),
+        FdSlot::LocalStream { handle, .. } => alloc::format!("socket:[{}]", handle.id()),
         FdSlot::VirtualFile { path, .. } | FdSlot::VirtualDir { path, .. } => String::clone(&path),
     })
 }

@@ -61,6 +61,37 @@ pub const SIG_BLOCK: i32 = 0;
 pub const SIG_UNBLOCK: i32 = 1;
 pub const SIG_SETMASK: i32 = 2;
 
+/// Deliver a handler on the task's alternate signal stack when one is
+/// installed and the interrupted context is not already using it.
+pub const SA_ONSTACK: u64 = 0x0800_0000;
+
+/// Task-local alternate signal stack. Signal dispositions belong to the
+/// process model, but Linux alt stacks are per task and pthread clone starts
+/// with this record disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SignalAltStack {
+    pub sp: u64,
+    pub size: u64,
+    pub enabled: bool,
+}
+
+impl SignalAltStack {
+    pub fn contains(&self, pointer: u64) -> bool {
+        self.enabled
+            && pointer >= self.sp
+            && self
+                .sp
+                .checked_add(self.size)
+                .is_some_and(|end| pointer < end)
+    }
+
+    pub fn top(&self) -> Option<u64> {
+        self.enabled
+            .then(|| self.sp.checked_add(self.size))
+            .flatten()
+    }
+}
+
 /// Linux x86-64 `struct sigaction` layout. 32 bytes.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]

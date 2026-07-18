@@ -2,12 +2,14 @@
 
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fs::File;
 use crate::lib::arc::Arc;
 use crate::mm::paging::{is_kernel_reserved_slot, USER_CANONICAL_END, USER_LOAD_BASE};
 
 pub const PAGE_SIZE: u64 = 0x1000;
+static NEXT_ANONYMOUS_MAPPING_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct VmProt(u8);
@@ -115,11 +117,20 @@ pub struct Vma {
     pub private: bool,
     pub grow_down: bool,
     pub backing: VmaBacking,
+    /// Stable identity of one mmap-created anonymous allocation. Splits keep
+    /// the value, while independently-created adjacent mappings remain
+    /// distinguishable for mremap.
+    pub mapping_id: u64,
 }
 
 impl Vma {
     pub fn new(start: u64, end: u64, prot: VmProt, backing: VmaBacking) -> Result<Self, VmError> {
         validate_range(start, end)?;
+        let mapping_id = if matches!(backing, VmaBacking::Anonymous) {
+            NEXT_ANONYMOUS_MAPPING_ID.fetch_add(1, Ordering::Relaxed)
+        } else {
+            0
+        };
         Ok(Self {
             start,
             end,
@@ -127,6 +138,7 @@ impl Vma {
             private: true,
             grow_down: matches!(backing, VmaBacking::Stack { .. }),
             backing,
+            mapping_id,
         })
     }
 
@@ -172,6 +184,75 @@ impl VmaSet {
         self.entries
             .get(index)
             .filter(|vma| vma.start <= address && address < vma.end)
+    }
+
+    /// Return one complete, uniform anonymous mmap allocation. This accepts
+    /// VMA fragments produced by mprotect only when their protections still
+    /// match, and rejects a subrange of a larger allocation.
+    pub fn anonymous_allocation(&self, start: u64, end: u64) -> Option<Vma> {
+        let first_index = self.entries.partition_point(|vma| vma.end <= start);
+        let first = self.entries.get(first_index)?;
+        if first.start != start
+            || first.mapping_id == 0
+            || !matches!(first.backing, VmaBacking::Anonymous)
+        {
+            return None;
+        }
+        let mapping_id = first.mapping_id;
+        let prot = first.prot;
+        let mut cursor = start;
+        let mut index = first_index;
+        while cursor < end {
+            let vma = self.entries.get(index)?;
+            if vma.start != cursor
+                || vma.end > end
+                || vma.mapping_id != mapping_id
+                || vma.prot != prot
+                || !matches!(vma.backing, VmaBacking::Anonymous)
+            {
+                return None;
+            }
+            cursor = vma.end;
+            index += 1;
+        }
+        if cursor != end
+            || self
+                .entries
+                .get(index)
+                .is_some_and(|vma| vma.mapping_id == mapping_id)
+            || first_index
+                .checked_sub(1)
+                .and_then(|previous| self.entries.get(previous))
+                .is_some_and(|vma| vma.mapping_id == mapping_id)
+        {
+            return None;
+        }
+        let mut allocation = first.clone();
+        allocation.end = end;
+        Some(allocation)
+    }
+
+    /// Replace a complete anonymous allocation with a new extent while
+    /// retaining its stable mapping identity and protection.
+    pub fn replace_anonymous_allocation(
+        &mut self,
+        old_start: u64,
+        old_end: u64,
+        new_start: u64,
+        new_end: u64,
+    ) -> Result<(), VmError> {
+        let mut allocation = self
+            .anonymous_allocation(old_start, old_end)
+            .ok_or(VmError::NotCovered)?;
+        let original = self.clone();
+        self.remove(old_start, old_end)?;
+        allocation.start = new_start;
+        allocation.end = new_end;
+        if validate_range(new_start, new_end).is_err() || self.insert(allocation).is_err() {
+            *self = original;
+            return Err(VmError::Overlap);
+        }
+        Ok(())
     }
 
     pub fn is_free(&self, start: u64, end: u64) -> bool {
@@ -333,8 +414,8 @@ fn mergeable(left: &Vma, right: &Vma) -> bool {
     match (&left.backing, &right.backing) {
         (VmaBacking::Tls, VmaBacking::Tls)
         | (VmaBacking::ElfResident, VmaBacking::ElfResident)
-        | (VmaBacking::Heap, VmaBacking::Heap)
-        | (VmaBacking::Anonymous, VmaBacking::Anonymous) => true,
+        | (VmaBacking::Heap, VmaBacking::Heap) => true,
+        (VmaBacking::Anonymous, VmaBacking::Anonymous) => left.mapping_id == right.mapping_id,
         (
             VmaBacking::FilePrivate {
                 file: left_file,

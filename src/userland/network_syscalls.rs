@@ -190,22 +190,6 @@ fn block_for_socket(
     }
 }
 
-pub fn block_poll(args: &SyscallArgs, identity: u64, timeout_ticks: Option<u64>) -> i64 {
-    let deadline =
-        match crate::userland::lifecycle::prepare_network_wait(args.rax, identity, timeout_ticks) {
-            Ok(deadline) => deadline,
-            Err(()) => return 0,
-        };
-    unsafe {
-        crate::userland::switch::block_current_ring3_and_yield(
-            args,
-            crate::userland::lifecycle::Ring3BlockReason::WaitingForNetwork {
-                deadline_tick: deadline,
-            },
-        )
-    }
-}
-
 pub fn socket_handler(args: &mut SyscallArgs) -> i64 {
     let domain = args.rdi as i32;
     let raw_type = args.rsi as i32;

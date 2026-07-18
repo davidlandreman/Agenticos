@@ -5,14 +5,29 @@ fn anon(start: u64, end: u64, prot: VmProt) -> Vma {
     Vma::new(start, end, prot, VmaBacking::Anonymous).expect("valid anonymous VMA")
 }
 
-fn test_adjacent_compatible_vmas_merge() {
+fn test_adjacent_anonymous_allocations_keep_distinct_ids() {
     let rw = VmProt::READ.union(VmProt::WRITE);
     let mut set = VmaSet::new();
     set.insert(anon(0x400000, 0x402000, rw)).unwrap();
     set.insert(anon(0x402000, 0x404000, rw)).unwrap();
-    assert_eq!(set.as_slice().len(), 1);
+    assert_eq!(set.as_slice().len(), 2);
     assert_eq!(set.as_slice()[0].start, 0x400000);
-    assert_eq!(set.as_slice()[0].end, 0x404000);
+    assert_ne!(set.as_slice()[0].mapping_id, set.as_slice()[1].mapping_id);
+}
+
+fn test_anonymous_allocation_resize_preserves_identity() {
+    let rw = VmProt::READ.union(VmProt::WRITE);
+    let mut set = VmaSet::new();
+    set.insert(anon(0x500000, 0x504000, rw)).unwrap();
+    let mapping_id = set.as_slice()[0].mapping_id;
+    let allocation = set
+        .anonymous_allocation(0x500000, 0x504000)
+        .expect("complete allocation");
+    assert_eq!(allocation.mapping_id, mapping_id);
+    set.replace_anonymous_allocation(0x500000, 0x504000, 0x600000, 0x608000)
+        .unwrap();
+    assert!(set.find(0x501000).is_none());
+    assert_eq!(set.find(0x607000).unwrap().mapping_id, mapping_id);
 }
 
 fn test_remove_middle_splits_and_reuses_gap() {
@@ -67,7 +82,8 @@ fn test_reserved_kernel_slots_and_wrap_are_rejected() {
 
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
-        &test_adjacent_compatible_vmas_merge,
+        &test_adjacent_anonymous_allocations_keep_distinct_ids,
+        &test_anonymous_allocation_resize_preserves_identity,
         &test_remove_middle_splits_and_reuses_gap,
         &test_protect_splits_and_requires_full_coverage,
         &test_top_down_gap_search_and_overlap_rejection,

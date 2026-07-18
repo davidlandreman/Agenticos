@@ -28,6 +28,7 @@ copies from the same pinned source tarball.
 | `compiler-compat/CCLIBC.ELF` | `apps/compiler-compat/` | test-fixture | libc/heap rung |
 | `compiler-compat/CCPROBE.ELF` | `apps/compiler-compat/` | test-fixture | fallback/filesystem rung |
 | `network/NETTEST.ELF` | `apps/network-test/` | test-fixture | static-musl socket smoke |
+| `libuv/UVPLUMB.ELF` | `apps/libuv-plumbing-test/` | test-fixture | static-musl libuv syscall profile |
 
 (Add a row when a new prebuilt-managed app lands. Keep size approximate
 — the reviewer uses it to gut-check binary diffs, not for exactness.)
@@ -87,6 +88,10 @@ The `network/` subdirectory is likewise a mandatory test-input category.
 `NETTEST.ELF` is a self-checking static-musl socket fixture; `test.sh` stages
 it even with `--skip-userland`. Its source and refresh recipe live in
 `userland/apps/network-test/`.
+
+The `libuv/` fixture is a self-checking syscall-profile executable. It covers
+the event loop, local wakeup channel, signal-stack, VM, scheduler, and barrier
+primitives used by libuv's Linux backend.
 
 The rule of thumb: an app belongs here if (a) its build fetches an
 upstream tarball, or (b) its compile takes long enough that running

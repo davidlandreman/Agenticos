@@ -92,6 +92,7 @@ impl Pipe {
         };
         if take > 0 {
             crate::userland::lifecycle::wake_ring3_blocked_on_pipe_readable();
+            crate::userland::readiness::notify_changed();
         }
         take
     }
@@ -113,6 +114,7 @@ impl Pipe {
         };
         if n > 0 {
             crate::userland::lifecycle::wake_ring3_blocked_on_pipe_writable();
+            crate::userland::readiness::notify_changed();
         }
         n
     }
@@ -157,6 +159,10 @@ impl PipeReadHandle {
     pub fn set_nonblocking(&self, value: bool) {
         self.status.nonblocking.store(value, Ordering::Release);
     }
+
+    pub fn same_open_description(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.status, &other.status)
+    }
 }
 
 impl Clone for PipeReadHandle {
@@ -177,6 +183,7 @@ impl Drop for PipeReadHandle {
             // buffer must re-fire so it can observe `readers() == 0` and
             // return `EPIPE` instead of waiting forever.
             crate::userland::lifecycle::wake_ring3_blocked_on_pipe_writable();
+            crate::userland::readiness::notify_changed();
         }
     }
 }
@@ -207,6 +214,10 @@ impl PipeWriteHandle {
     pub fn set_nonblocking(&self, value: bool) {
         self.status.nonblocking.store(value, Ordering::Release);
     }
+
+    pub fn same_open_description(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.status, &other.status)
+    }
 }
 
 impl Clone for PipeWriteHandle {
@@ -227,6 +238,7 @@ impl Drop for PipeWriteHandle {
             // empty buffer must re-fire so it can observe EOF (the
             // `writers() == 0` branch in `read_handler`).
             crate::userland::lifecycle::wake_ring3_blocked_on_pipe_readable();
+            crate::userland::readiness::notify_changed();
         }
     }
 }

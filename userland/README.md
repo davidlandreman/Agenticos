@@ -67,6 +67,7 @@ userland/
     ├── links2/         # prebuilt-managed Links text + native GUI browser
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
     ├── network-test/   # static-musl socket test fixture
+    ├── libuv-plumbing-test/ # static-musl libuv syscall-profile fixture
     └── hello-cpp/      # C++ app — std::cout, exits 0
         ├── Makefile    # invokes x86_64-linux-musl-g++ -static -no-pie
         └── src/main.cpp

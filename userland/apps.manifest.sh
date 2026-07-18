@@ -35,3 +35,4 @@ app_row compiler-crt     apps/compiler-compat   make  CCCRT.ELF    test-fixture 
 app_row compiler-libc    apps/compiler-compat   make  CCLIBC.ELF   test-fixture    musl-cc       apps/compiler-compat/build/CCLIBC.ELF             prebuilt/compiler-compat/CCLIBC.ELF
 app_row compiler-probe   apps/compiler-compat   make  CCPROBE.ELF  test-fixture    musl-cc       apps/compiler-compat/build/CCPROBE.ELF            prebuilt/compiler-compat/CCPROBE.ELF
 app_row network-test     apps/network-test      make  NETTEST.ELF  test-fixture    musl-cc       apps/network-test/build/NETTEST.ELF               prebuilt/network/NETTEST.ELF
+app_row libuv-plumbing-test apps/libuv-plumbing-test make UVPLUMB.ELF test-fixture musl-cc       apps/libuv-plumbing-test/build/UVPLUMB.ELF         prebuilt/libuv/UVPLUMB.ELF

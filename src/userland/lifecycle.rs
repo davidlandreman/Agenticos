@@ -126,6 +126,10 @@ pub struct Process {
     /// children (shallow copy is fine — there are no shared
     /// references inside SignalState).
     pub signal_state: SignalState,
+    /// Per-task alternate signal stack used for SA_ONSTACK delivery.
+    pub signal_alt_stack: crate::userland::signal::SignalAltStack,
+    /// Group-owner registration for the private-expedited membarrier profile.
+    pub membarrier_private_registered: bool,
     /// Phase 5 PR-C1: per-process kernel stack. The SYSCALL stub
     /// reads the rsp top from `gs:[0]`, which we update to point at
     /// this stack's `top()` whenever the process is the active one.
@@ -324,6 +328,12 @@ pub enum Ring3BlockReason {
     WaitingForNetwork {
         deadline_tick: Option<u64>,
     },
+    /// General descriptor readiness wait (poll/select/epoll/eventfd/local
+    /// streams). `observed_sequence` closes the scan-to-park lost-wake race.
+    WaitingForReadiness {
+        deadline_tick: Option<u64>,
+        observed_sequence: u64,
+    },
     /// `nanosleep` with a not-yet-elapsed absolute PIT deadline. The shared
     /// timer service calls [`expire_user_sleep`] once `now >= deadline_tick`;
     /// the re-fired SYSCALL then sees its `sleep_deadline` elapsed and returns
@@ -437,6 +447,8 @@ impl Process {
             cwd: String::new(),
             address_space: None,
             signal_state: SignalState::new(),
+            signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
+            membarrier_private_registered: false,
             kernel_stack: None,
             exe_path: None,
             cmdline: alloc::vec::Vec::new(),
@@ -500,6 +512,35 @@ pub fn with_current_group<R>(f: impl FnOnce(&mut Process) -> R) -> R {
         .get_mut(&tgid)
         .expect("thread-group leader invariant violated");
     f(group)
+}
+
+/// Confirm that the current thread group is either single-task or that every
+/// member is pinned to the group's recorded home CPU. This is the execution
+/// invariant that makes private-expedited membarrier a local full fence until
+/// remote user-address-space execution and TLB shootdown are implemented.
+pub fn current_group_has_single_cpu_execution() -> bool {
+    let (members, home) = {
+        let mut table = PROCESS_TABLE.lock();
+        ensure_sentinel(&mut table);
+        let tid = crate::arch::x86_64::percpu::current_user_pid().unwrap_or(KERNEL_PID);
+        let tgid = tgid_locked(&table, tid);
+        let members = table
+            .thread_groups
+            .iter()
+            .filter_map(|(&member, &group)| (group == tgid).then_some(member))
+            .collect::<alloc::vec::Vec<_>>();
+        (members, table.group_home_cpu.get(&tgid).copied())
+    };
+    if members.len() <= 1 {
+        return true;
+    }
+    let Some(home) = home else {
+        return false;
+    };
+    let scheduler = crate::process::scheduler::SCHEDULER.lock();
+    members.into_iter().all(|member| {
+        scheduler.cpu_affinity(crate::process::entity::EntityId::UserProcess(member)) == Some(home)
+    })
 }
 
 /// Operate on the shared owner for `tgid`.
@@ -797,6 +838,10 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
         }
         Ring3BlockReason::WaitingForNetwork {
             deadline_tick: Some(deadline_tick),
+        }
+        | Ring3BlockReason::WaitingForReadiness {
+            deadline_tick: Some(deadline_tick),
+            ..
         } => {
             crate::process::timer::arm(
                 crate::process::timer::TimerKey {
@@ -835,6 +880,10 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
         }
         | Ring3BlockReason::WaitingForNetwork {
             deadline_tick: None,
+        }
+        | Ring3BlockReason::WaitingForReadiness {
+            deadline_tick: None,
+            ..
         } => {}
     }
 }
@@ -974,6 +1023,7 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
             | Some(Ring3BlockReason::WaitingForPipeRead)
             | Some(Ring3BlockReason::WaitingForPipeWrite)
             | Some(Ring3BlockReason::WaitingForNetwork { .. })
+            | Some(Ring3BlockReason::WaitingForReadiness { .. })
             | Some(Ring3BlockReason::Sleeping { .. })
             | Some(Ring3BlockReason::WaitingForFutex { .. })
             | Some(Ring3BlockReason::WaitingForBlockIo { .. })
@@ -1006,6 +1056,7 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
 /// Walks the blocked map once per call. The set is small (one entry
 /// per terminal-bound ring-3 process); the walk cost is negligible.
 pub fn wake_ring3_blocked_on_input(terminal_id: Option<crate::window::WindowId>) {
+    crate::userland::readiness::notify_changed();
     let Some(mut g) = PROCESS_TABLE.try_lock() else {
         return;
     };
@@ -1150,7 +1201,9 @@ pub fn wake_ring3_blocked_on_pipe_readable() {
     wake_ring3_blocked_by(|r| {
         matches!(
             r,
-            Ring3BlockReason::WaitingForPipeRead | Ring3BlockReason::WaitingForNetwork { .. }
+            Ring3BlockReason::WaitingForPipeRead
+                | Ring3BlockReason::WaitingForNetwork { .. }
+                | Ring3BlockReason::WaitingForReadiness { .. }
         )
     });
 }
@@ -1164,7 +1217,9 @@ pub fn wake_ring3_blocked_on_pipe_writable() {
     wake_ring3_blocked_by(|r| {
         matches!(
             r,
-            Ring3BlockReason::WaitingForPipeWrite | Ring3BlockReason::WaitingForNetwork { .. }
+            Ring3BlockReason::WaitingForPipeWrite
+                | Ring3BlockReason::WaitingForNetwork { .. }
+                | Ring3BlockReason::WaitingForReadiness { .. }
         )
     });
 }
@@ -1176,12 +1231,17 @@ pub fn wake_ring3_blocked_on_gui_event(pid: u32) {
     if pid == KERNEL_PID {
         return;
     }
+    crate::userland::readiness::notify_changed();
     let Some(mut table) = PROCESS_TABLE.try_lock() else {
         return;
     };
     let should_wake = matches!(
         table.ring3_blocked.get(&pid),
-        Some(Ring3BlockReason::WaitingForGuiEvent | Ring3BlockReason::WaitingForNetwork { .. })
+        Some(
+            Ring3BlockReason::WaitingForGuiEvent
+                | Ring3BlockReason::WaitingForNetwork { .. }
+                | Ring3BlockReason::WaitingForReadiness { .. },
+        )
     );
     if should_wake {
         table.ring3_blocked.remove(&pid);
@@ -1200,6 +1260,7 @@ pub fn wake_ring3_blocked_on_network(state_changed: bool) {
     if !state_changed {
         return;
     }
+    crate::userland::readiness::notify_changed();
     let Some(mut g) = PROCESS_TABLE.try_lock() else {
         return;
     };
@@ -1207,7 +1268,8 @@ pub fn wake_ring3_blocked_on_network(state_changed: bool) {
         .ring3_blocked
         .iter()
         .filter_map(|(pid, reason)| match reason {
-            Ring3BlockReason::WaitingForNetwork { .. } => Some(*pid),
+            Ring3BlockReason::WaitingForNetwork { .. }
+            | Ring3BlockReason::WaitingForReadiness { .. } => Some(*pid),
             _ => None,
         })
         .collect();
@@ -1218,6 +1280,13 @@ pub fn wake_ring3_blocked_on_network(state_changed: bool) {
     for pid in waking {
         mark_ring3_ready(pid);
     }
+}
+
+/// Wake all descriptor-readiness waiters after the producer increments the
+/// global readiness sequence. Conservative wakeups are cheap at the bounded
+/// process-table size; every waiter re-scans its own descriptors.
+pub fn wake_ring3_blocked_on_readiness() -> bool {
+    wake_ring3_blocked_by(|reason| matches!(reason, Ring3BlockReason::WaitingForReadiness { .. }))
 }
 
 /// Deliver one exact `ITIMER_REAL` expiry from the shared timer heap.
@@ -1260,7 +1329,11 @@ pub fn expire_real_timer(pid: u32, now: u64) {
         };
         if let Some(reason) = reason {
             let process = g.by_pid.get_mut(&pid).expect("timer process disappeared");
-            if matches!(reason, Ring3BlockReason::WaitingForNetwork { .. }) {
+            if matches!(
+                reason,
+                Ring3BlockReason::WaitingForNetwork { .. }
+                    | Ring3BlockReason::WaitingForReadiness { .. }
+            ) {
                 process.network_wait = None;
             }
             // A signal-interrupted nanosleep returns via the dispatcher's
@@ -1333,6 +1406,9 @@ pub fn expire_network_wait(pid: u32, now: u64) {
             g.ring3_blocked.get(&pid),
             Some(Ring3BlockReason::WaitingForNetwork {
                 deadline_tick: Some(deadline)
+            }) | Some(Ring3BlockReason::WaitingForReadiness {
+                deadline_tick: Some(deadline),
+                ..
             }) if now >= *deadline
         );
         if expired {
@@ -1502,7 +1578,11 @@ pub fn wake_ring3_for_signal(pid: u32) {
         return;
     };
     if let Some(process) = g.by_pid.get_mut(&pid) {
-        if matches!(reason, Ring3BlockReason::WaitingForNetwork { .. }) {
+        if matches!(
+            reason,
+            Ring3BlockReason::WaitingForNetwork { .. }
+                | Ring3BlockReason::WaitingForReadiness { .. }
+        ) {
             process.network_wait = None;
         }
         // Signal-interrupted sleep: drop the restart-stable deadline so
@@ -1520,7 +1600,7 @@ pub fn wake_ring3_for_signal(pid: u32) {
     mark_ring3_ready(pid);
 }
 
-fn wake_ring3_blocked_by<F>(matcher: F)
+fn wake_ring3_blocked_by<F>(matcher: F) -> bool
 where
     F: Fn(&Ring3BlockReason) -> bool,
 {
@@ -1529,7 +1609,7 @@ where
     // Callers that mutate the FD table under the lock issue explicit
     // wake calls after release so a skipped wake here is recovered.
     let Some(mut g) = PROCESS_TABLE.try_lock() else {
-        return;
+        return false;
     };
     let waking: alloc::vec::Vec<u32> = g
         .ring3_blocked
@@ -1543,6 +1623,7 @@ where
     for pid in waking {
         mark_ring3_ready(pid);
     }
+    true
 }
 
 /// Returns true if `pid` has any child currently tracked in
@@ -1755,6 +1836,8 @@ pub fn install_new_process_opt(
         cwd: String::from("/host"),
         address_space,
         signal_state: SignalState::new(),
+        signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
+        membarrier_private_registered: false,
         kernel_stack: Some(KernelStack::new()),
         exe_path: None,
         cmdline: alloc::vec::Vec::new(),

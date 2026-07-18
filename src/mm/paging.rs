@@ -531,6 +531,69 @@ impl MemoryMapper {
         Ok(leaf_frame)
     }
 
+    /// Move one resident user leaf without changing the referenced frame's
+    /// ownership count. Lazy holes remain holes. The destination must be
+    /// unmapped. Page-table allocation failure leaves the source intact.
+    pub fn move_user_page(
+        &mut self,
+        l4_frame: PhysFrame<Size4KiB>,
+        source: VirtAddr,
+        destination: VirtAddr,
+    ) -> Result<bool, UserMapError> {
+        let source = VirtAddr::new(source.as_u64() & !0xfff);
+        let destination = VirtAddr::new(destination.as_u64() & !0xfff);
+        if source == destination {
+            return Ok(self.leaf_info(l4_frame, source).is_some());
+        }
+        let Some((frame, flags)) = self.leaf_info(l4_frame, source) else {
+            return Ok(false);
+        };
+        if self.leaf_info(l4_frame, destination).is_some() {
+            return Err(UserMapError::PageAlreadyMapped);
+        }
+
+        let l4 = unsafe { &mut *self.table_ptr(l4_frame) };
+        let mut target = unsafe { OffsetPageTable::new(l4, self.physical_memory_offset) };
+        let destination_page = Page::<Size4KiB>::containing_address(destination);
+        let parent_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let mapping = unsafe {
+            target.map_to_with_table_flags(
+                destination_page,
+                frame,
+                flags,
+                parent_flags,
+                &mut self.frame_allocator,
+            )
+        };
+        let flush = match mapping {
+            Ok(flush) => flush,
+            Err(error) => {
+                self.prune_empty_path(l4_frame, destination);
+                return Err(UserMapError::from(error));
+            }
+        };
+        if self.active_l4_frame() == l4_frame {
+            flush.flush();
+        } else {
+            flush.ignore();
+        }
+
+        // Detach the old leaf directly: unmap_page_from would release the
+        // frame even though its single ownership reference moved above.
+        let source_leaf = unsafe {
+            &mut *self
+                .leaf_entry_ptr(l4_frame, source)
+                .expect("source leaf disappeared during move")
+        };
+        source_leaf.set_unused();
+        self.prune_empty_path(l4_frame, source);
+        if self.active_l4_frame() == l4_frame {
+            x86_64::instructions::tlb::flush(source);
+        }
+        Ok(true)
+    }
+
     fn prune_empty_path(&mut self, l4_frame: PhysFrame<Size4KiB>, addr: VirtAddr) {
         let indices = page_indices(addr);
         let mut tables = [l4_frame; 4];
