@@ -5,7 +5,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use dialogs::{Buttons, ColorPicker, DialogStatus, MessageBox, MessageChoice, Modal, ModalOutcome};
+use dialogs::{
+    Buttons, ColorPicker, DialogStatus, FileDialog, MessageBox, MessageChoice, Modal, ModalOutcome,
+};
 use gui::{
     theme, Button, ButtonState, ListView, TextField, Window, GUI_EVENT_CLOSE, GUI_EVENT_KEY,
     GUI_EVENT_MOUSE, GUI_EVENT_RESIZE, GUI_MOUSE_DOWN, GUI_MOUSE_SCROLL,
@@ -16,6 +18,7 @@ use gui::{
 enum ModalPurpose {
     Color,
     Confirm,
+    Open,
 }
 
 /// Reference client: renders every toolkit widget in every state under the
@@ -82,7 +85,7 @@ impl Demo {
             canvas.draw_text(
                 16,
                 32,
-                "c: color picker    m: message box",
+                "c: color    m: message    o: open file",
                 palette.disabled_text,
             );
 
@@ -145,6 +148,12 @@ impl Demo {
                             self.modal = Some(Modal::Message(dialog));
                         }
                     }
+                    'o' if !self.field_focused => {
+                        if let Ok(dialog) = FileDialog::open("/host/") {
+                            self.purpose = ModalPurpose::Open;
+                            self.modal = Some(Modal::File(dialog));
+                        }
+                    }
                     _ if self.field_focused => {
                         self.field.key(key, character);
                         self.render();
@@ -194,6 +203,9 @@ impl Demo {
                 (ModalPurpose::Color, Some(ModalOutcome::Color(color))) => self.swatch = color,
                 (ModalPurpose::Confirm, Some(ModalOutcome::Choice(MessageChoice::Yes))) => {
                     return true
+                }
+                (ModalPurpose::Open, Some(ModalOutcome::Path(path))) => {
+                    self.field.set_text(&path);
                 }
                 _ => {}
             }

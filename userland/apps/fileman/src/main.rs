@@ -13,7 +13,13 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 use dialogs::{DialogStatus, MessageBox, MessageChoice, Modal, ModalOutcome};
-use gui::{Canvas, TextField, Window, FONT_CELL_WIDTH};
+use gui::file_ui::{
+    capabilities, component_prefix, draw_clipped, draw_file_icon as shared_draw_file_icon,
+    format_modified, format_size, BreadcrumbBar, FileIconKind as EntryKind, FilePlace,
+    FileUiColors, IconButton, MountCapabilities as Capabilities, NavIcon, PlaceIcon, PlacesSidebar,
+    UiRect,
+};
+use gui::{Canvas, TextField, Window};
 
 const INITIAL_W: u32 = 920;
 const INITIAL_H: u32 = 580;
@@ -36,33 +42,17 @@ const FOLDER: u32 = 0xE9B949;
 const DANGER: u32 = 0xC83A3A;
 const READ_ONLY: u32 = 0xA15B20;
 
-#[derive(Clone, Copy)]
-struct UiRect {
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-}
-
-impl UiRect {
-    const fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
-        Self { x, y, w, h }
-    }
-
-    fn hit(self, x: i32, y: i32) -> bool {
-        x >= self.x && x < self.x + self.w as i32 && y >= self.y && y < self.y + self.h as i32
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EntryKind {
-    Folder,
-    Text,
-    Executable,
-    Image,
-    Archive,
-    File,
-}
+const FILE_COLORS: FileUiColors = FileUiColors {
+    background: BG,
+    surface: SURFACE,
+    text: TEXT,
+    muted: MUTED,
+    border: BORDER,
+    accent: ACCENT,
+    selection: SELECTION,
+    folder: FOLDER,
+    read_only: READ_ONLY,
+};
 
 #[derive(Clone)]
 struct Entry {
@@ -80,14 +70,7 @@ impl Entry {
     }
 
     fn type_name(&self) -> &'static str {
-        match self.kind {
-            EntryKind::Folder => "Folder",
-            EntryKind::Text => "Text document",
-            EntryKind::Executable => "Application",
-            EntryKind::Image => "Image",
-            EntryKind::Archive => "Archive",
-            EntryKind::File => "File",
-        }
+        self.kind.type_name()
     }
 }
 
@@ -156,16 +139,6 @@ struct LastClick {
     y: i32,
 }
 
-#[derive(Clone, Copy)]
-struct Capabilities {
-    create_files: bool,
-    delete_files: bool,
-    directories: bool,
-    rename: bool,
-    read_only: bool,
-    sync_backed: bool,
-}
-
 struct FileManager {
     window: Window,
     current: String,
@@ -190,7 +163,8 @@ struct FileManager {
     modal: Option<ActiveModal>,
     context: Option<ContextMenu>,
     last_click: Option<LastClick>,
-    breadcrumbs: Vec<(UiRect, String)>,
+    breadcrumbs: BreadcrumbBar,
+    places: PlacesSidebar,
     status: String,
     focused: bool,
 }
@@ -198,6 +172,15 @@ struct FileManager {
 impl FileManager {
     fn new(initial: Option<String>, home: String, envp: Vec<*const u8>) -> Result<Self, i64> {
         let current = initial.unwrap_or_else(|| home.clone());
+        let places = PlacesSidebar::new(
+            UiRect::new(0, 0, 0, 0),
+            vec![
+                FilePlace::new("Home", &home, PlaceIcon::Home),
+                FilePlace::new("Root", "/", PlaceIcon::Root),
+                FilePlace::new("Data", "/data", PlaceIcon::Data),
+                FilePlace::new("Host", "/host", PlaceIcon::Host),
+            ],
+        );
         let mut app = Self {
             window: Window::new(INITIAL_W, INITIAL_H, "File Manager")?,
             current: normalize_path(&current),
@@ -222,7 +205,8 @@ impl FileManager {
             modal: None,
             context: None,
             last_click: None,
-            breadcrumbs: Vec::new(),
+            breadcrumbs: BreadcrumbBar::new(),
+            places,
             status: String::new(),
             focused: true,
         };
@@ -394,6 +378,12 @@ impl FileManager {
         let width = self.window.canvas().width() as i32;
         let height = self.window.canvas().height() as i32;
         let content_bottom = height - STATUS_H;
+        self.places.bounds = UiRect::new(
+            0,
+            TOOLBAR_H,
+            SIDEBAR_W as u32,
+            (content_bottom - TOOLBAR_H).max(1) as u32,
+        );
         let mut canvas = core::mem::replace(self.window.canvas_mut(), Canvas::new(1, 1));
         canvas.clear(BG);
 
@@ -408,11 +398,7 @@ impl FileManager {
         if self.focus == FocusTarget::Location {
             self.location.draw(&mut canvas, true);
         } else {
-            for (rect, label) in &self.breadcrumbs {
-                canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, SURFACE);
-                canvas.rect(rect.x, rect.y, rect.w, rect.h, BORDER);
-                canvas.draw_text(rect.x + 7, rect.y + 9, label, TEXT);
-            }
+            self.breadcrumbs.draw(&mut canvas, FILE_COLORS);
         }
         if self.filter.text.is_empty() && self.focus != FocusTarget::Filter {
             canvas.fill_rect(
@@ -440,7 +426,7 @@ impl FileManager {
                 .draw(&mut canvas, self.focus == FocusTarget::Filter);
         }
 
-        draw_sidebar(&mut canvas, content_bottom, &self.current, &self.home);
+        self.places.draw(&mut canvas, &self.current, FILE_COLORS);
         match self.view {
             ViewMode::Details => self.draw_details(&mut canvas, width, content_bottom),
             ViewMode::Grid => self.draw_grid(&mut canvas, width, content_bottom),
@@ -486,33 +472,11 @@ impl FileManager {
     }
 
     fn build_breadcrumbs(&mut self) {
-        self.breadcrumbs.clear();
         let right = self.filter.x - 10;
-        let mut x = 226;
-        let mut prefix = String::from("/");
-        let root = UiRect::new(x, 10, 46, 28);
-        self.breadcrumbs.push((root, String::from("Root")));
-        x += 50;
-        for component in self.current.trim_matches('/').split('/') {
-            if component.is_empty() {
-                continue;
-            }
-            if prefix != "/" {
-                prefix.push('/');
-            }
-            prefix.push_str(component);
-            let width = (component.chars().count() as i32 * FONT_CELL_WIDTH + 22).clamp(54, 150);
-            if x + width > right {
-                break;
-            }
-            self.breadcrumbs
-                .push((UiRect::new(x, 10, width as u32, 28), component.to_string()));
-            if let Some(last) = self.breadcrumbs.last_mut() {
-                last.1 = component.to_string();
-            }
-            x += width + 4;
-            // Store path in a parallel convention: the click handler rebuilds it.
-        }
+        self.breadcrumbs.rebuild(
+            &self.current,
+            UiRect::new(226, 10, (right - 226).max(46) as u32, 28),
+        );
     }
 
     fn draw_details(&self, canvas: &mut Canvas, width: i32, bottom: i32) {
@@ -586,11 +550,7 @@ impl FileManager {
                 MUTED,
             );
             if content_w > 650 {
-                let modified = if entry.modified == 0 {
-                    String::from("--")
-                } else {
-                    format!("{}", entry.modified)
-                };
+                let modified = format_modified(entry.modified);
                 draw_clipped(
                     canvas,
                     left + content_w - 124,
@@ -836,8 +796,7 @@ impl FileManager {
             self.focus = FocusTarget::Filter;
             return;
         }
-        let breadcrumb_target = self.breadcrumb_target_at(x, y);
-        if let Some(target) = breadcrumb_target {
+        if let Some(target) = self.breadcrumbs.hit(x, y).map(ToString::to_string) {
             self.navigate(&target, true);
             return;
         }
@@ -847,7 +806,7 @@ impl FileManager {
             self.focus = FocusTarget::Location;
             return;
         }
-        if let Some(place) = sidebar_target(x, y, &self.home) {
+        if let Some(place) = self.places.hit(x, y).map(ToString::to_string) {
             self.navigate(&place, true);
             return;
         }
@@ -903,23 +862,6 @@ impl FileManager {
             self.activate_selected();
             self.last_click = None;
         }
-    }
-
-    fn breadcrumb_target_at(&self, x: i32, y: i32) -> Option<String> {
-        let mut prefix = String::from("/");
-        for (index, (rect, _)) in self.breadcrumbs.iter().enumerate() {
-            if index > 0 {
-                let component = self.current.trim_matches('/').split('/').nth(index - 1)?;
-                if prefix != "/" {
-                    prefix.push('/');
-                }
-                prefix.push_str(component);
-            }
-            if rect.hit(x, y) {
-                return Some(prefix);
-            }
-        }
-        None
     }
 
     fn header_click(&mut self, x: i32) {
@@ -1455,145 +1397,12 @@ fn draw_toolbar(
     draw_nav_button(canvas, UiRect::new(190, 10, 30, 28), NavIcon::Refresh, true);
 }
 
-enum NavIcon {
-    Back,
-    Forward,
-    Up,
-    Home,
-    NewFolder,
-    Refresh,
-}
-
 fn draw_nav_button(canvas: &mut Canvas, rect: UiRect, icon: NavIcon, enabled: bool) {
-    canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, SURFACE);
-    canvas.rect(rect.x, rect.y, rect.w, rect.h, BORDER);
-    let color = if enabled { TEXT } else { BORDER };
-    let cx = rect.x + rect.w as i32 / 2;
-    let cy = rect.y + rect.h as i32 / 2;
-    match icon {
-        NavIcon::Back => {
-            for i in 0..6 {
-                canvas.pixel(cx - 4 + i, cy - i, color);
-                canvas.pixel(cx - 4 + i, cy + i, color);
-            }
-            canvas.horizontal_line(cx - 3, cy, 11, color);
-        }
-        NavIcon::Forward => {
-            for i in 0..6 {
-                canvas.pixel(cx + 4 - i, cy - i, color);
-                canvas.pixel(cx + 4 - i, cy + i, color);
-            }
-            canvas.horizontal_line(cx - 7, cy, 11, color);
-        }
-        NavIcon::Up => {
-            for i in 0..6 {
-                canvas.pixel(cx - i, cy - 3 + i, color);
-                canvas.pixel(cx + i, cy - 3 + i, color);
-            }
-            canvas.vertical_line(cx, cy - 2, 11, color);
-        }
-        NavIcon::Home => {
-            for i in 0..7 {
-                canvas.pixel(cx - 7 + i, cy - 1 - i, color);
-                canvas.pixel(cx + i, cy - 7 + i, color);
-            }
-            canvas.rect(cx - 6, cy - 1, 13, 9, color);
-        }
-        NavIcon::NewFolder => {
-            canvas.rect(cx - 8, cy - 5, 16, 12, color);
-            canvas.horizontal_line(cx - 7, cy - 7, 7, color);
-            canvas.horizontal_line(cx - 2, cy, 9, color);
-            canvas.vertical_line(cx + 2, cy - 4, 9, color);
-        }
-        NavIcon::Refresh => {
-            for i in 0..7 {
-                canvas.pixel(cx - 7 + i, cy - 5 - i / 2, color);
-                canvas.pixel(cx + 7 - i, cy + 5 + i / 2, color);
-            }
-            canvas.vertical_line(cx - 7, cy - 5, 8, color);
-            canvas.vertical_line(cx + 7, cy - 2, 8, color);
-            canvas.horizontal_line(cx - 9, cy - 5, 5, color);
-            canvas.horizontal_line(cx + 5, cy + 5, 5, color);
-        }
-    }
-}
-
-fn draw_sidebar(canvas: &mut Canvas, bottom: i32, current: &str, home: &str) {
-    canvas.fill_rect(
-        0,
-        TOOLBAR_H,
-        SIDEBAR_W as u32,
-        (bottom - TOOLBAR_H) as u32,
-        BG,
-    );
-    canvas.vertical_line(
-        SIDEBAR_W - 1,
-        TOOLBAR_H,
-        (bottom - TOOLBAR_H) as u32,
-        BORDER,
-    );
-    canvas.draw_text(14, TOOLBAR_H + 14, "PLACES", MUTED);
-    let places = [
-        ("Home", home),
-        ("Root", "/"),
-        ("Data", "/data"),
-        ("Host", "/host"),
-    ];
-    for (index, (label, path)) in places.iter().enumerate() {
-        let y = TOOLBAR_H + 34 + index as i32 * 36;
-        let active = current == *path || (current.starts_with(path) && *path != "/");
-        if active {
-            canvas.fill_rect(8, y, (SIDEBAR_W - 17) as u32, 30, SELECTION);
-            canvas.rect(8, y, (SIDEBAR_W - 17) as u32, 30, ACCENT);
-        }
-        draw_place_icon(canvas, 18, y + 8, index);
-        canvas.draw_text(42, y + 11, label, if active { ACCENT } else { TEXT });
-    }
-}
-
-fn draw_place_icon(canvas: &mut Canvas, x: i32, y: i32, index: usize) {
-    match index {
-        0 => {
-            canvas.rect(x, y + 5, 14, 10, ACCENT);
-            for i in 0..8 {
-                canvas.pixel(x + i, y + 7 - i, ACCENT);
-                canvas.pixel(x + 7 + i, y + i, ACCENT);
-            }
-        }
-        1 => canvas.rect(x, y + 1, 15, 15, MUTED),
-        2 => {
-            canvas.rect(x, y + 2, 16, 13, ACCENT);
-            canvas.horizontal_line(x + 3, y + 11, 10, ACCENT);
-        }
-        _ => {
-            canvas.rect(x, y + 2, 16, 13, READ_ONLY);
-            canvas.vertical_line(x + 8, y + 5, 7, READ_ONLY);
-        }
-    }
+    IconButton::new(rect, icon, enabled).draw(canvas, FILE_COLORS);
 }
 
 fn draw_entry_icon(canvas: &mut Canvas, x: i32, y: i32, kind: EntryKind, size: u32) {
-    let s = size as i32;
-    match kind {
-        EntryKind::Folder => {
-            canvas.fill_rect(x, y + s / 4, size, (s * 3 / 4) as u32, FOLDER);
-            canvas.fill_rect(x + 2, y, (s / 2) as u32, (s / 3) as u32, 0xF4CE72);
-            canvas.rect(x, y + s / 4, size, (s * 3 / 4) as u32, 0xB98520);
-        }
-        _ => {
-            let color = match kind {
-                EntryKind::Text => 0x4F8DD6,
-                EntryKind::Executable => 0x5C6BC0,
-                EntryKind::Image => 0x4E9F66,
-                EntryKind::Archive => 0xA66B3D,
-                _ => 0x8A94A6,
-            };
-            canvas.fill_rect(x, y, size, size, 0xFDFEFF);
-            canvas.rect(x, y, size, size, color);
-            canvas.fill_rect(x + 3, y + 4, size.saturating_sub(6), 3, color);
-            canvas.fill_rect(x + 3, y + 10, size.saturating_sub(8), 2, color);
-        }
-    }
+    shared_draw_file_icon(canvas, x, y, kind, size, FILE_COLORS);
 }
 
 fn draw_status(
@@ -1715,36 +1524,11 @@ fn context_hit(menu_x: i32, menu_y: i32, x: i32, y: i32) -> Option<usize> {
     Some(((y - menu_y) / 24) as usize)
 }
 
-fn draw_clipped(canvas: &mut Canvas, x: i32, y: i32, text: &str, width: i32, color: u32) {
-    let chars = (width / FONT_CELL_WIDTH).max(1) as usize;
-    if text.chars().count() <= chars {
-        canvas.draw_text(x, y, text, color);
-    } else if chars > 3 {
-        let mut clipped: String = text.chars().take(chars - 3).collect();
-        clipped.push_str("...");
-        canvas.draw_text(x, y, &clipped, color);
-    }
-}
-
 fn sort_label(label: &str, active: bool, descending: bool) -> String {
     if !active {
         return label.to_string();
     }
     format!("{} {}", label, if descending { "v" } else { "^" })
-}
-
-fn sidebar_target(x: i32, y: i32, home: &str) -> Option<String> {
-    if x < 0 || x >= SIDEBAR_W || y < TOOLBAR_H + 34 {
-        return None;
-    }
-    let index = ((y - TOOLBAR_H - 34) / 36) as usize;
-    match index {
-        0 => Some(home.to_string()),
-        1 => Some(String::from("/")),
-        2 => path_exists("/data").then(|| String::from("/data")),
-        3 => path_exists("/host").then(|| String::from("/host")),
-        _ => None,
-    }
 }
 
 fn classify(name: &str, is_dir: bool, mode: u32) -> EntryKind {
@@ -1779,44 +1563,6 @@ fn compare_name(a: &str, b: &str) -> Ordering {
     a.to_ascii_lowercase()
         .cmp(&b.to_ascii_lowercase())
         .then_with(|| a.cmp(b))
-}
-
-fn capabilities(path: &str) -> Capabilities {
-    if component_prefix(path, "/host") || component_prefix(path, "/bin") {
-        Capabilities {
-            create_files: false,
-            delete_files: false,
-            directories: false,
-            rename: false,
-            read_only: true,
-            sync_backed: false,
-        }
-    } else if component_prefix(path, "/data") {
-        Capabilities {
-            create_files: true,
-            delete_files: true,
-            directories: false,
-            rename: false,
-            read_only: false,
-            sync_backed: false,
-        }
-    } else {
-        Capabilities {
-            create_files: true,
-            delete_files: true,
-            directories: true,
-            rename: true,
-            read_only: false,
-            sync_backed: true,
-        }
-    }
-}
-
-fn component_prefix(path: &str, prefix: &str) -> bool {
-    path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn same_mount(a: &str, b: &str) -> bool {
@@ -1997,16 +1743,6 @@ fn copy_file(source: &str, destination: &str) -> i64 {
         let _ = runtime::unlink(&gui::c_path(destination));
     }
     result
-}
-
-fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{} KB", (bytes + 512) / 1024)
-    } else {
-        format!("{} MB", (bytes + 512 * 1024) / (1024 * 1024))
-    }
 }
 
 fn item_count(count: usize) -> String {

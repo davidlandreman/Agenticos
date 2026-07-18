@@ -46,6 +46,7 @@ pub use layout::{HBox, Padding, SizeHint, Spacer, VBox};
 #[allow(unused_imports)]
 pub use menu_bar::{MenuBar, MenuItemDef, PendingPopup, MENU_BAR_HEIGHT};
 pub use menu_bar_popup::MenuBarPopup;
+#[allow(unused_imports)]
 pub use multi_column_list::{Column, MultiColumnList};
 #[allow(unused_imports)]
 pub use path_bar::PathBar;

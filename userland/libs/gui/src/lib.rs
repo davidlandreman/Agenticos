@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+pub mod file_ui;
 mod font;
 pub mod theme;
 

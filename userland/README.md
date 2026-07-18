@@ -289,10 +289,16 @@ animating app needs instead of the blocking `next_event()`.
 
 ## Using dialogs (`libs/dialogs`)
 
-`libs/dialogs` composes the widgets into four modal dialogs: `FileDialog`
-(Open/Save), `MessageBox` (Ok / OkCancel / YesNo), and `ColorPicker`. Each
-dialog owns its own `gui::Window` (created in its constructor, destroyed on
-drop) and is driven by the retained-mode pattern:
+`libs/dialogs` composes the widgets into four modal dialogs: the modern
+`FileDialog` (Open/Save), `MessageBox` (Ok / OkCancel / YesNo), and
+`ColorPicker`. `FileDialog` provides Places, history, breadcrumbs/location
+entry, current-folder and file-type filtering, metadata-backed details and grid
+views, true double-click, keyboard focus traversal, mode-aware validation,
+overwrite confirmation, and capability-aware New Folder. The simple
+`open`/`save` constructors remain available; `FileDialogOptions` and
+`FileFilter` configure richer callers. Each dialog owns its own `gui::Window`
+(created in its constructor, destroyed on drop) and is driven by the
+retained-mode pattern:
 
 ```rust
 let mut modal = Some(dialogs::Modal::File(FileDialog::open("/host/")?));
@@ -315,8 +321,11 @@ kernel modality — the host must ignore input to its own main window while a
 modal is open (it may still service Resize/Close/Focus). `Modal` is the
 four-way convenience wrapper for single-modal apps; hold an `Option<Modal>`
 and keep a small app-side enum for *why* the dialog is open so you can route
-its outcome. `apps/notepad` (file dialogs + message boxes) and `apps/guidemo`
-(color picker + message box) are the reference clients.
+its outcome. `apps/notepad` (filtered Open/Save + message boxes) and
+`apps/guidemo` (all common dialogs) are the reference clients. Shared
+file-browser presentation primitives used by both the chooser and File Manager
+live in `gui::file_ui`; selection and operation policy remains with each
+caller.
 
 To add a new dialog, add a module under `libs/dialogs/src/`, follow the
 `window_handle()` + `handle_event() -> DialogStatus<T>` shape, and extend the
