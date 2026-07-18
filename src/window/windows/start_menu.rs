@@ -11,6 +11,7 @@ use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::{get_caption_font, get_default_font};
 use crate::window::event::MouseEventType;
+use crate::window::theme::controls;
 use crate::window::{Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId};
 
 /// Root rows are deliberately taller than ordinary popup-menu rows, matching
@@ -22,13 +23,6 @@ pub const START_MENU_BANNER_WIDTH: u32 = 28;
 pub const START_MENU_ROOT_WIDTH: u32 = 196;
 pub const START_MENU_PROGRAMS_WIDTH: u32 = 144;
 const PANEL_BORDER: u32 = 2;
-
-const FACE: Color = Color::new(192, 192, 192);
-const LIGHT: Color = Color::WHITE;
-const SHADOW: Color = Color::new(128, 128, 128);
-const DARK: Color = Color::BLACK;
-const HIGHLIGHT: Color = Color::new(0, 0, 128);
-const BANNER: Color = Color::new(0, 0, 128);
 
 /// Typed actions emitted by enabled Start-menu leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,21 +262,7 @@ impl StartMenuWindow {
         }
     }
 
-    fn draw_panel(device: &mut dyn GraphicsDevice, rect: Rect) {
-        device.fill_rect(rect.x, rect.y, rect.width, rect.height, FACE);
-        let right = rect.right() - 1;
-        let bottom = rect.bottom() - 1;
-        device.draw_line(rect.x, rect.y, right, rect.y, LIGHT);
-        device.draw_line(rect.x, rect.y, rect.x, bottom, LIGHT);
-        device.draw_line(rect.x, bottom, right, bottom, DARK);
-        device.draw_line(right, rect.y, right, bottom, DARK);
-        device.draw_line(rect.x + 1, rect.y + 1, right - 1, rect.y + 1, FACE);
-        device.draw_line(rect.x + 1, rect.y + 1, rect.x + 1, bottom - 1, FACE);
-        device.draw_line(rect.x + 1, bottom - 1, right - 1, bottom - 1, SHADOW);
-        device.draw_line(right - 1, rect.y + 1, right - 1, bottom - 1, SHADOW);
-    }
-
-    fn draw_rotated_banner_text(device: &mut dyn GraphicsDevice, banner: Rect) {
+    fn draw_rotated_banner_text(device: &mut dyn GraphicsDevice, banner: Rect, color: Color) {
         let font = get_caption_font();
         let total_advance: i32 = "AgenticOS"
             .chars()
@@ -312,10 +292,10 @@ impl StartMenuWindow {
                         continue;
                     }
                     if alpha == u8::MAX {
-                        device.draw_pixel(dst_x, dst_y, Color::WHITE);
+                        device.draw_pixel(dst_x, dst_y, color);
                     } else {
                         let bg = device.read_pixel(dst_x, dst_y);
-                        device.draw_pixel(dst_x, dst_y, bg.blend(&Color::WHITE, alpha));
+                        device.draw_pixel(dst_x, dst_y, bg.blend(&color, alpha));
                     }
                 }
             }
@@ -338,6 +318,7 @@ impl StartMenuWindow {
         root: bool,
     ) {
         let font = get_default_font();
+        let palette = controls::palette();
         let row_height = if root {
             START_MENU_ROOT_ROW_HEIGHT
         } else {
@@ -360,13 +341,11 @@ impl StartMenuWindow {
             match item {
                 StartMenuItem::Separator => {
                     let line_y = item_y + START_MENU_SEPARATOR_HEIGHT as i32 / 2 - 1;
-                    device.draw_line(content_left + 4, line_y, content_right - 4, line_y, SHADOW);
-                    device.draw_line(
+                    controls::draw_menu_separator(
+                        device,
                         content_left + 4,
-                        line_y + 1,
-                        content_right - 4,
-                        line_y + 1,
-                        LIGHT,
+                        line_y,
+                        (content_right - content_left - 7).max(0) as u32,
                     );
                     item_y += START_MENU_SEPARATOR_HEIGHT as i32;
                 }
@@ -381,24 +360,31 @@ impl StartMenuWindow {
                     let highlighted = self.hover == Some(target)
                         && !matches!(item, StartMenuItem::Disabled { .. });
                     if highlighted {
-                        device.fill_rect(
-                            content_left,
-                            item_y,
-                            (content_right - content_left + 1) as u32,
-                            row_height,
-                            HIGHLIGHT,
+                        controls::draw_selection(
+                            device,
+                            Rect::new(
+                                content_left,
+                                item_y,
+                                (content_right - content_left + 1) as u32,
+                                row_height,
+                            ),
                         );
                     }
                     let text_y =
                         item_y + (row_height.saturating_sub(font.line_height()) / 2) as i32;
                     if matches!(item, StartMenuItem::Disabled { .. }) {
-                        device.draw_text(text_left + 1, text_y + 1, label, font.as_font(), LIGHT);
-                        device.draw_text(text_left, text_y, label, font.as_font(), SHADOW);
+                        device.draw_text(
+                            text_left,
+                            text_y,
+                            label,
+                            font.as_font(),
+                            palette.disabled_text,
+                        );
                     } else {
                         let color = if highlighted {
-                            Color::WHITE
+                            palette.selection_text
                         } else {
-                            Color::BLACK
+                            palette.text
                         };
                         device.draw_text(text_left, text_y, label, font.as_font(), color);
                         if matches!(item, StartMenuItem::Submenu { .. }) {
@@ -437,15 +423,22 @@ impl Window for StartMenuWindow {
             START_MENU_ROOT_WIDTH,
             Self::root_height(),
         );
-        Self::draw_panel(device, root);
+        controls::draw_menu_surface(device, root);
+        let palette = controls::palette();
         let banner = Rect::new(
             root.x + 2,
             root.y + 2,
             START_MENU_BANNER_WIDTH - 2,
             root.height - 4,
         );
-        device.fill_rect(banner.x, banner.y, banner.width, banner.height, BANNER);
-        Self::draw_rotated_banner_text(device, banner);
+        device.fill_rect(
+            banner.x,
+            banner.y,
+            banner.width,
+            banner.height,
+            palette.selection_bg,
+        );
+        Self::draw_rotated_banner_text(device, banner, palette.selection_text);
         self.paint_items(device, START_MENU_ROOT_ITEMS, root, true);
 
         if self.programs_open {
@@ -455,7 +448,7 @@ impl Window for StartMenuWindow {
                 START_MENU_PROGRAMS_WIDTH,
                 root.height,
             );
-            Self::draw_panel(device, programs);
+            controls::draw_menu_surface(device, programs);
             self.paint_items(device, START_MENU_PROGRAM_ITEMS, programs, false);
         }
         self.base.clear_needs_repaint();

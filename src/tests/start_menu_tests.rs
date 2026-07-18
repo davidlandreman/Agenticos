@@ -6,6 +6,7 @@ use crate::window::event::{
     Event, KeyCode, KeyModifiers, KeyboardEvent, MouseButtons, MouseEvent, MouseEventType,
 };
 use crate::window::renderer::SurfaceCanvas;
+use crate::window::theme::{self, ThemeKind};
 use crate::window::windows::start_menu::{
     StartMenuAction, StartMenuItem, StartMenuWindow, START_MENU_BANNER_WIDTH,
     START_MENU_PROGRAMS_WIDTH, START_MENU_PROGRAM_ITEMS, START_MENU_PROGRAM_ROW_HEIGHT,
@@ -148,6 +149,8 @@ fn test_enabled_and_disabled_dispatch() {
 }
 
 fn test_classic_start_menu_key_pixels() {
+    let previous_theme = theme::active();
+    theme::activate(ThemeKind::Classic);
     let mut menu = StartMenuWindow::new_with_id(WindowId(8102), Point::new(0, 0));
     let height = StartMenuWindow::root_height();
     let mut surface = Surface::new(SurfaceDesc::new(START_MENU_ROOT_WIDTH, height)).unwrap();
@@ -210,6 +213,49 @@ fn test_classic_start_menu_key_pixels() {
         hover_surface.pixel(31, 3).unwrap().to_rgba(),
         (0, 0, 128, 255)
     );
+    theme::activate(previous_theme);
+}
+
+fn test_aero_start_menu_uses_control_palette() {
+    let previous_theme = theme::active();
+    theme::activate(ThemeKind::Aero);
+    let mut menu = StartMenuWindow::new_with_id(WindowId(8104), Point::new(0, 0));
+    let height = StartMenuWindow::root_height();
+    let mut surface = Surface::new(SurfaceDesc::new(START_MENU_ROOT_WIDTH, height)).unwrap();
+    {
+        let mut canvas = SurfaceCanvas::new(
+            &mut surface,
+            (0, 0),
+            (START_MENU_ROOT_WIDTH as usize, height as usize),
+        );
+        menu.paint(&mut canvas);
+    }
+
+    menu.handle_event(mouse(MouseEventType::Move, root_row_center(0)));
+    let mut hover_surface =
+        Surface::new(SurfaceDesc::new(StartMenuWindow::maximum_width(), height)).unwrap();
+    let hover_width = hover_surface.width();
+    let hover_height = hover_surface.height();
+    {
+        let mut canvas = SurfaceCanvas::new(
+            &mut hover_surface,
+            (0, 0),
+            (hover_width as usize, hover_height as usize),
+        );
+        menu.paint(&mut canvas);
+    }
+    theme::activate(previous_theme);
+
+    assert_eq!(surface.pixel(0, 0).unwrap().to_rgba(), (151, 151, 151, 255));
+    assert_eq!(
+        surface.pixel(30, 3).unwrap().to_rgba(),
+        (240, 240, 240, 255)
+    );
+    assert_eq!(surface.pixel(3, 3).unwrap().to_rgba(), (203, 232, 246, 255));
+    assert_eq!(
+        hover_surface.pixel(31, 3).unwrap().to_rgba(),
+        (203, 232, 246, 255)
+    );
 }
 
 fn test_text_input_callbacks_and_utf8_limit() {
@@ -245,6 +291,7 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_programs_flyout_hover_and_bounds,
         &test_enabled_and_disabled_dispatch,
         &test_classic_start_menu_key_pixels,
+        &test_aero_start_menu_uses_control_palette,
         &test_text_input_callbacks_and_utf8_limit,
         &test_run_command_is_one_zsh_argument,
     ]

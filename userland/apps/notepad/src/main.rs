@@ -12,7 +12,7 @@ use dialogs::{DialogStatus, FileDialog, MessageBox, MessageChoice, Modal, ModalO
 use gui::{
     next_boundary, previous_boundary, theme, Canvas, MenuBar, Window, FONT_CELL_WIDTH,
     FONT_LINE_HEIGHT, GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
-    GUI_MOUSE_DOWN, GUI_MOUSE_SCROLL,
+    GUI_MOUSE_DOWN, GUI_MOUSE_MOVE, GUI_MOUSE_SCROLL,
 };
 
 const FILE_ITEMS: &[&str] = &["New", "Open...", "Save", "Save As...", "Exit"];
@@ -240,11 +240,7 @@ impl Notepad {
         let mut app = Self {
             window: Window::new(720, 480, "Notepad")?,
             editor: Editor::new(),
-            menu: MenuBar {
-                label: "File",
-                items: FILE_ITEMS,
-                open: false,
-            },
+            menu: MenuBar::new("File", FILE_ITEMS),
             path: None,
             dirty: false,
             focused: true,
@@ -323,17 +319,22 @@ impl Notepad {
                     return true;
                 }
             }
-            GUI_EVENT_MOUSE if self.modal.is_none() => {
-                // Pointer motion and button-up do not change notepad state.
-                // Avoid turning those high-frequency events into full-surface
-                // presents; clicks and scrolling still need a repaint.
-                if event.payload[3] != GUI_MOUSE_DOWN && event.payload[3] != GUI_MOUSE_SCROLL {
-                    return false;
+            GUI_EVENT_MOUSE if self.modal.is_none() => match event.payload[3] {
+                GUI_MOUSE_MOVE => {
+                    if !self
+                        .menu
+                        .pointer_move(event.payload[0] as i32, event.payload[1] as i32)
+                    {
+                        return false;
+                    }
                 }
-                if self.handle_mouse(event.payload) {
-                    return true;
+                GUI_MOUSE_DOWN | GUI_MOUSE_SCROLL => {
+                    if self.handle_mouse(event.payload) {
+                        return true;
+                    }
                 }
-            }
+                _ => return false,
+            },
             _ => return false,
         }
         self.render();
