@@ -3213,6 +3213,40 @@ fn access_common(path_ptr: u64) -> i64 {
     }
 }
 
+/// `chmod(path, mode) -> int`. Validated success no-op: FAT and tmpfs
+/// carry no permission bits and `execve` performs no +x check, so the
+/// only observable POSIX behavior is the existence check. TinyCC (and
+/// other toolchains) chmod their output executable after writing it.
+pub fn chmod_handler(args: &mut SyscallArgs) -> i64 {
+    let path_ptr = args.rdi;
+    let _mode = args.rsi as u32;
+    let path = match resolve_user_path(path_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if crate::userland::bin_namespace::is_bin_dir(&path)
+        || crate::userland::bin_namespace::apply_bin_rewrite(&path).is_some()
+    {
+        return EPERM;
+    }
+    if crate::fs::exists(&path) {
+        0
+    } else {
+        ENOENT
+    }
+}
+
+/// `fchmod(fd, mode) -> int`. Same no-op semantics as `chmod`, keyed
+/// on descriptor validity instead of a path.
+pub fn fchmod_handler(args: &mut SyscallArgs) -> i64 {
+    let fd = args.rdi as i32;
+    let _mode = args.rsi as u32;
+    match with_fd_slot(fd) {
+        Some(_) => 0,
+        None => EBADF,
+    }
+}
+
 // ---------- cwd ----------
 
 /// `getcwd(buf, size) -> int`. Returns the byte length on success

@@ -1026,6 +1026,68 @@ fn test_pwrite_large_and_pread_short() {
     teardown_phase2_active_user();
 }
 
+/// `chmod`/`fchmod` are validated success no-ops: FAT and tmpfs carry no
+/// permission bits and execve performs no +x check. TinyCC chmods its
+/// output executable after writing it.
+fn test_dispatch_chmod_fchmod_noops() {
+    setup_phase2_active_user();
+
+    // chmod on an existing managed file succeeds.
+    let path = b"/etc/zshrc\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::CHMOD;
+    args.rdi = ptr;
+    args.rsi = 0o755;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    // chmod on a missing path reports ENOENT.
+    let missing = b"/no-such-file-for-chmod\0";
+    let missing_ptr = missing.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: missing_ptr,
+        end: missing_ptr + missing.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::CHMOD;
+    args.rdi = missing_ptr;
+    args.rsi = 0o755;
+    assert_eq!(syscall_dispatch(&mut args), ENOENT);
+
+    // chmod on the synthetic /bin namespace is rejected.
+    let bin = b"/bin/ls\0";
+    let bin_ptr = bin.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: bin_ptr,
+        end: bin_ptr + bin.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::CHMOD;
+    args.rdi = bin_ptr;
+    args.rsi = 0o755;
+    assert_eq!(syscall_dispatch(&mut args), EPERM);
+
+    // fchmod: any valid descriptor succeeds, unknown fd is EBADF.
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCHMOD;
+    args.rdi = 1; // stdout
+    args.rsi = 0o644;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCHMOD;
+    args.rdi = 99;
+    args.rsi = 0o644;
+    assert_eq!(syscall_dispatch(&mut args), EBADF);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
 /// Unit coverage for the UTF-8 seam guard used by chunked terminal
 /// writes: a chunk must never end partway through a multi-byte sequence.
 fn test_utf8_safe_chunk_len_boundaries() {
@@ -4894,6 +4956,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_write_file_large_chunked,
         &test_writev_file_large_iovs,
         &test_pwrite_large_and_pread_short,
+        &test_dispatch_chmod_fchmod_noops,
         &test_utf8_safe_chunk_len_boundaries,
         &test_exit_group_handler_records_code,
         &test_validate_user_slice_zero_len_ok,

@@ -273,6 +273,8 @@ pub mod nr {
     pub const RMDIR: u64 = 84;
     pub const CREAT: u64 = 85;
     pub const UNLINK: u64 = 87;
+    pub const CHMOD: u64 = 90;
+    pub const FCHMOD: u64 = 91;
     pub const FSYNC: u64 = 74;
     pub const FDATASYNC: u64 = 75;
     pub const SYNC: u64 = 162;
@@ -439,6 +441,8 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::MKDIRAT => syscalls::mkdirat_handler(args),
         nr::RMDIR => syscalls::rmdir_handler(args),
         nr::UNLINK => syscalls::unlink_handler(args),
+        nr::CHMOD => syscalls::chmod_handler(args),
+        nr::FCHMOD => syscalls::fchmod_handler(args),
         nr::UNLINKAT => syscalls::unlinkat_handler(args),
         nr::RENAME => syscalls::rename_handler(args),
         nr::RENAMEAT => syscalls::renameat_handler(args),

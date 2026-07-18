@@ -914,8 +914,31 @@ fn test_seek_past_eof_readonly_rejected() {
     assert_eq!(f.seek(0).expect("rewind"), 0);
 }
 
+/// /work is provisioned on the overlay tmpfs at every boot and is
+/// writable: the conventional scratch directory for compiler output
+/// (ring-3 processes start with cwd /host, which is read-only).
+fn test_work_directory_provisioned_and_writable() {
+    let meta = crate::fs::metadata("/work").expect("/work must exist after boot");
+    assert_eq!(
+        meta.file_type,
+        crate::fs::filesystem::FileType::Directory,
+        "/work must be a directory"
+    );
+
+    let f = crate::fs::File::create("/work/u3-probe.txt").expect("create in /work");
+    assert_eq!(f.write(b"scratch").expect("write in /work"), 7);
+    drop(f);
+    let content = crate::fs::File::open_read("/work/u3-probe.txt")
+        .expect("reopen")
+        .read_to_string()
+        .expect("read");
+    assert_eq!(content, "scratch");
+    crate::fs::vfs::vfs_unlink("/work/u3-probe.txt").expect("cleanup");
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
+        &test_work_directory_provisioned_and_writable,
         &test_seek_past_eof_tmpfs_zero_fill,
         &test_seek_past_eof_data_fat_zero_fill,
         &test_seek_past_eof_readonly_rejected,
