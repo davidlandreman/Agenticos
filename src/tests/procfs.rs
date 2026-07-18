@@ -47,6 +47,7 @@ fn synthetic_process(pid: u32) -> Process {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: crate::userland::user_state::UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     }
 }

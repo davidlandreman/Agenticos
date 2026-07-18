@@ -147,6 +147,7 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
 
     // Increment tick counter
     let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let _ = crate::process::drain_kernel_io_wakes();
     crate::process::timer::on_tick(ticks);
 
     // Ring-3 timer trap: save the user state, requeue the tagged entity, and

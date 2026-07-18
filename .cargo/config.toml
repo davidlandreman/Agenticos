@@ -5,7 +5,12 @@ target = "x86_64-unknown-none"
 kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
 
 [target.'cfg(target_os = "none")']
-runner = ["qemu-system-x86_64", "-drive", "format=raw,file=target/bootloader/bios.img","-serial","stdio"]
+runner = [
+    "qemu-system-x86_64",
+    "-drive", "format=raw,file=target/bootloader/bios.img,if=none,id=agenticos-root,readonly=on",
+    "-device", "virtio-blk-pci,disable-legacy=on,drive=agenticos-root,serial=agenticos-root,bootindex=1",
+    "-serial", "stdio",
+]
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]

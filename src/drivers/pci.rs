@@ -103,6 +103,14 @@ impl PciDevice {
         let command = self.read_config(0x04);
         self.write_config(0x04, command | 0x02);
     }
+
+    /// Suppress legacy INTx delivery for devices serviced by polling. This
+    /// prevents a polling VirtIO function that shares a PCI interrupt line
+    /// with an interrupt-driven block device from holding that line asserted.
+    pub fn disable_intx(&self) {
+        let command = self.read_config(0x04);
+        self.write_config(0x04, command | (1 << 10));
+    }
 }
 
 /// PCI Base Address Register types
@@ -268,6 +276,8 @@ pub const VIRTIO_DEVICE_GPU_MODERN: u16 = 0x1050;
 pub const VIRTIO_DEVICE_GPU_TRANSITIONAL: u16 = 0x1010;
 /// Modern VirtIO network device (0x1040 + device type 1).
 pub const VIRTIO_DEVICE_NET: u16 = 0x1041;
+/// Modern VirtIO block device (0x1040 + device type 2).
+pub const VIRTIO_DEVICE_BLOCK: u16 = 0x1042;
 
 /// Find VirtIO input devices
 pub fn find_virtio_input_devices() -> Vec<PciDevice> {
@@ -295,5 +305,12 @@ pub fn find_virtio_net_devices() -> Vec<PciDevice> {
     enumerate_devices_cached()
         .into_iter()
         .filter(|d| d.vendor_id == VIRTIO_VENDOR_ID && d.device_id == VIRTIO_DEVICE_NET)
+        .collect()
+}
+
+pub fn find_virtio_block_devices() -> Vec<PciDevice> {
+    enumerate_devices_cached()
+        .into_iter()
+        .filter(|d| d.vendor_id == VIRTIO_VENDOR_ID && d.device_id == VIRTIO_DEVICE_BLOCK)
         .collect()
 }

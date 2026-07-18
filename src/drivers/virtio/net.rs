@@ -105,6 +105,7 @@ impl VirtioNet {
         }
         net.rxq.notify();
         net.device.finish_init();
+        net.device.pci.disable_intx();
         debug_info!(
             "VirtIO net ready: mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rx={} tx={}",
             mac[0],

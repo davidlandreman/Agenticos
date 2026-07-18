@@ -80,8 +80,8 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // U9) is dispatched directly from `userland::abi::syscall_dispatch` —
     // no per-syscall registration needed.
 
-    debug_info!("[boot] ide+fs");
-    crate::drivers::ide::IDE_CONTROLLER.initialize();
+    debug_info!("[boot] virtio-blk+fs");
+    crate::drivers::virtio::block::init();
     init_filesystems();
     // Host-disk probe is small (one MBR read on the slave drive) and the
     // filesystem tests assert /host is mounted, so we keep it in test mode.
@@ -209,52 +209,43 @@ fn init_display(boot_info: &'static mut BootInfo) -> Option<(u32, u32)> {
     Some((width, height))
 }
 
-// Static storage for IDE block devices and partition devices
-static mut PRIMARY_MASTER_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
+// Static storage for VirtIO block devices and partition devices.
+static mut ROOT_DISK: Option<crate::drivers::virtio::block::VirtioBlockDevice> = None;
 static mut PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] =
     [None, None, None, None];
 
-// Static storage for the host-share disk on Primary Slave (vvfat-backed when
+// Static storage for the serial-identified host-share disk (vvfat-backed when
 // the user runs ./build.sh; absent otherwise). Kept in a separate slot/array
 // so the host disk's partitions don't alias the root disk's PARTITION_DEVICES.
-static mut PRIMARY_SLAVE_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
+static mut HOST_DISK: Option<crate::drivers::virtio::block::VirtioBlockDevice> = None;
 static mut HOST_PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] =
     [None, None, None, None];
 
-/// Secondary Master = the writable /data disk. Whole-disk FAT32 (no
-/// MBR/partition table); the BPB lives at sector 0.
-static mut SECONDARY_MASTER_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
+/// The `agenticos-data` device is the writable whole-disk /data filesystem.
+static mut DATA_DISK: Option<crate::drivers::virtio::block::VirtioBlockDevice> = None;
 /// Optional previous FAT data image, attached read-only for migration.
-static mut SECONDARY_SLAVE_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
+static mut LEGACY_DATA_DISK: Option<crate::drivers::virtio::block::VirtioBlockDevice> = None;
 
 fn init_filesystems() {
     use crate::drivers::block::BlockDevice;
-    use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
+    use crate::drivers::virtio::block::VirtioBlockDevice;
     use crate::fs::vfs::mount_overlay_root;
     use crate::fs::{detect_filesystem, read_partitions, PartitionBlockDevice};
 
     debug_info!("Detecting and mounting filesystems...");
 
-    // Check primary master disk
-    if let Some((model_bytes, sectors)) =
-        IDE_CONTROLLER.get_disk_info(IdeChannel::Primary, IdeDrive::Master)
+    if let Some(root) =
+        VirtioBlockDevice::by_id("agenticos-root").or_else(|| VirtioBlockDevice::by_index(0))
     {
+        let sectors = root.total_blocks();
         let size_mb = (sectors * 512) / (1024 * 1024);
-
-        // Convert model bytes to string
-        let model_len = model_bytes.iter().position(|&c| c == 0).unwrap_or(40);
-        let model = core::str::from_utf8(&model_bytes[..model_len])
-            .unwrap_or("Unknown")
-            .trim();
-
-        debug_info!("Found IDE disk: {} ({} MB)", model, size_mb);
+        debug_info!("Found VirtIO root disk: {} ({} MB)", root.name(), size_mb);
 
         // Create block device for the disk and store it statically
         unsafe {
-            PRIMARY_MASTER_DISK = Some(IdeBlockDevice::new(IdeChannel::Primary, IdeDrive::Master));
+            ROOT_DISK = Some(root);
         }
-
-        let primary_master = unsafe { (*&raw const PRIMARY_MASTER_DISK).as_ref().unwrap() };
+        let primary_master = unsafe { (*&raw const ROOT_DISK).as_ref().unwrap() };
 
         // Try to read the boot sector
         let mut boot_sector = [0u8; 512];
@@ -432,13 +423,13 @@ fn init_filesystems() {
             }
         }
     } else {
-        debug_info!("No IDE disk found on primary master");
+        debug_info!("No VirtIO root disk found");
     }
 
     debug_info!("Filesystem initialization complete");
 }
 
-/// Probe Primary IDE Slave and mount the first FAT partition there at `/host`.
+/// Probe the `agenticos-host` VirtIO disk and mount its first FAT partition at `/host`.
 ///
 /// This is the partition-table flow: vvfat synthesizes a real MBR with a single
 /// FAT16 partition starting around LBA 63, so we read the boot sector, parse
@@ -446,32 +437,26 @@ fn init_filesystems() {
 /// signature, no FAT partition, mount error) logs and returns silently.
 fn try_mount_host_disk() {
     use crate::drivers::block::BlockDevice;
-    use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
+    use crate::drivers::virtio::block::VirtioBlockDevice;
     use crate::fs::vfs::auto_mount;
     use crate::fs::{detect_filesystem, read_partitions, FilesystemType, PartitionBlockDevice};
 
-    let Some((model_bytes, sectors)) =
-        IDE_CONTROLLER.get_disk_info(IdeChannel::Primary, IdeDrive::Slave)
+    let Some(host) =
+        VirtioBlockDevice::by_id("agenticos-host").or_else(|| VirtioBlockDevice::by_index(1))
     else {
-        debug_info!("No IDE disk found on primary slave (host folder not mounted)");
+        debug_info!("No VirtIO host disk found (host folder not mounted)");
         return;
     };
-
-    let size_mb = (sectors * 512) / (1024 * 1024);
-    let model_len = model_bytes.iter().position(|&c| c == 0).unwrap_or(40);
-    let model = core::str::from_utf8(&model_bytes[..model_len])
-        .unwrap_or("Unknown")
-        .trim();
     debug_info!(
-        "Found host IDE disk on primary slave: {} ({} MB)",
-        model,
-        size_mb
+        "Found VirtIO host disk: {} ({} MB)",
+        host.name(),
+        host.capacity() / 1024 / 1024
     );
 
     unsafe {
-        PRIMARY_SLAVE_DISK = Some(IdeBlockDevice::new(IdeChannel::Primary, IdeDrive::Slave));
+        HOST_DISK = Some(host);
     }
-    let host_disk = unsafe { (*&raw const PRIMARY_SLAVE_DISK).as_ref().unwrap() };
+    let host_disk = unsafe { (*&raw const HOST_DISK).as_ref().unwrap() };
 
     let mut boot_sector = [0u8; 512];
     if let Err(e) = host_disk.read_blocks(0, 1, &mut boot_sector) {
@@ -556,37 +541,32 @@ fn force_dirty_mount_requested() -> bool {
     matches!(core::str::from_utf8(&value[..length]), Ok("1"))
 }
 
-/// Probe Secondary IDE Master and mount the whole-disk ext2/FAT image at
+/// Probe the `agenticos-data` VirtIO device and mount its whole-disk ext2/FAT image at
 /// `/data`. Failures are non-fatal so the kernel can still boot without a
 /// persistent disk.
 fn try_mount_data_disk() {
-    use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
+    use crate::drivers::block::BlockDevice;
+    use crate::drivers::virtio::block::VirtioBlockDevice;
     use crate::fs::filesystem::FilesystemError;
     use crate::fs::vfs::{auto_mount, auto_mount_writable};
     use crate::fs::{detect_filesystem, FilesystemType};
 
-    let Some((model_bytes, sectors)) =
-        IDE_CONTROLLER.get_disk_info(IdeChannel::Secondary, IdeDrive::Master)
+    let Some(data) =
+        VirtioBlockDevice::by_id("agenticos-data").or_else(|| VirtioBlockDevice::by_index(2))
     else {
-        debug_info!("No IDE disk found on secondary master (no persistent /data)");
+        debug_info!("No VirtIO data disk found (no persistent /data)");
         return;
     };
-
-    let size_mb = (sectors * 512) / (1024 * 1024);
-    let model_len = model_bytes.iter().position(|&c| c == 0).unwrap_or(40);
-    let model = core::str::from_utf8(&model_bytes[..model_len])
-        .unwrap_or("Unknown")
-        .trim();
     debug_info!(
-        "Found data IDE disk on secondary master: {} ({} MB)",
-        model,
-        size_mb
+        "Found VirtIO data disk: {} ({} MB)",
+        data.name(),
+        data.capacity() / 1024 / 1024
     );
 
     unsafe {
-        SECONDARY_MASTER_DISK = Some(IdeBlockDevice::new(IdeChannel::Secondary, IdeDrive::Master));
+        DATA_DISK = Some(data);
     }
-    let data_disk = unsafe { (*&raw const SECONDARY_MASTER_DISK).as_ref().unwrap() };
+    let data_disk = unsafe { (*&raw const DATA_DISK).as_ref().unwrap() };
 
     // Whole-disk filesystem: no MBR or partition table.
     match detect_filesystem(data_disk) {
@@ -636,23 +616,25 @@ fn try_mount_data_disk() {
     }
 }
 
-/// Mount an explicitly supplied legacy FAT image from Secondary Slave at
+/// Mount an explicitly supplied legacy FAT VirtIO image at
 /// `/legacy-data`. `auto_mount` always creates a read-only FAT wrapper, making
 /// this a safe migration source for `cp -a /legacy-data/. /data/`.
 fn try_mount_legacy_data_disk() {
-    use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
+    use crate::drivers::block::BlockDevice;
+    use crate::drivers::virtio::block::VirtioBlockDevice;
     use crate::fs::vfs::auto_mount;
     use crate::fs::{detect_filesystem, FilesystemType};
 
-    let Some((_model, sectors)) =
-        IDE_CONTROLLER.get_disk_info(IdeChannel::Secondary, IdeDrive::Slave)
+    let Some(legacy) =
+        VirtioBlockDevice::by_id("agenticos-legacy").or_else(|| VirtioBlockDevice::by_index(3))
     else {
         return;
     };
+    let sectors = legacy.total_blocks();
     unsafe {
-        SECONDARY_SLAVE_DISK = Some(IdeBlockDevice::new(IdeChannel::Secondary, IdeDrive::Slave));
+        LEGACY_DATA_DISK = Some(legacy);
     }
-    let disk = unsafe { (*&raw const SECONDARY_SLAVE_DISK).as_ref().unwrap() };
+    let disk = unsafe { (*&raw const LEGACY_DATA_DISK).as_ref().unwrap() };
     match detect_filesystem(disk) {
         Ok(kind)
             if matches!(
@@ -803,6 +785,8 @@ pub fn run() -> ! {
             }
         }
 
+        let _ = crate::process::drain_kernel_io_wakes();
+
         // Dispatch one kernel-thread or user-process entity from the single
         // fair queue. Direct cross-privilege switches keep normal execution
         // out of this main-loop fallback after the first dispatch.
@@ -813,8 +797,20 @@ pub fn run() -> ! {
         // is now pure scheduler housekeeping + idle.
 
         // === IDLE ===
-        // Halt CPU until next interrupt (keyboard, mouse, timer).
-        // Timer fires at 100 Hz and only marks bounded deferred timer work.
-        x86_64::instructions::hlt();
+        // Close the completion-vs-halt race: with interrupts disabled, check
+        // once more for a block wake and any unified-scheduler work. If none
+        // exists, STI+HLT atomically waits for the PCI completion (or another
+        // interrupt) without imposing a 10 ms PIT tick on every request.
+        x86_64::instructions::interrupts::disable();
+        let io_woke = crate::process::drain_kernel_io_wakes();
+        let scheduler_ready = crate::process::scheduler::SCHEDULER
+            .try_lock()
+            .map(|scheduler| scheduler.ready_entity_count() != 0)
+            .unwrap_or(true);
+        if io_woke || scheduler_ready {
+            x86_64::instructions::interrupts::enable();
+            continue;
+        }
+        x86_64::instructions::interrupts::enable_and_hlt();
     }
 }

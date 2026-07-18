@@ -202,12 +202,12 @@ cannot starve the compositor or network worker when zsh polls for a child.
 1. Terminal opens → `spawn_zsh_for_terminal` (in `src/window/`)
    spawns a kernel thread that calls
    `launcher::launch_user_binary("/host/ZSH.ELF")`.
-2. `launch_user_binary` holds `BINARY_SETUP_MUTEX` and `BinaryLoadGuard`,
-   reads the ELF bytes while CR3 is still the kernel L4, then performs
+2. `launch_user_binary` reads ELF bytes through asynchronous VirtIO block I/O,
+   then holds `BINARY_SETUP_MUTEX` only while it performs
    `AddressSpace::new → activate → load/map ELF → initialize VMAs once →
    build stack/install Process`. The setup mutex also serializes teardown;
-   kernel-thread preemption remains enabled so FAT-backed page-in and sparse
-   address-space destruction cannot freeze the compositor.
+   kernel-thread preemption remains enabled; block completion wakes the exact
+   saved kernel continuation.
 3. `enter_user_mode_with_aspace` builds the initial user stack,
    inserts the Process into `PROCESS_TABLE` with `saved_user_state`
    populated to the binary's entry frame (rip=entry, rsp=user_rsp,
@@ -315,10 +315,8 @@ Unit status:
   kernel main loop is now pure scheduler housekeeping + `hlt`. A
   busy ring-3 process no longer freezes the desktop — U5's timer ISR
   splits ring-3 slices and the kernel-thread scheduler round-robins
-  the compositor in alongside terminal launchers. The
-  `BinaryLoadGuard` IDE-PIO atomicity gate is preserved (the
-  compositor checks `binary_load_in_progress()` and skips input +
-  render while a binary is loading).
+  the compositor in alongside terminal launchers. VirtIO DMA storage
+  allows input and rendering to continue throughout binary loading.
 - U9 — Signal/page-fault audit for cross-process correctness. **Done.**
   Audit confirmed: `maybe_deliver_signal` / `deliver_signal` /
   `consume_deliverable` all read via `with_current_process` (=

@@ -61,6 +61,7 @@ fn synthetic_process(pid: u32) -> Process {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     }
 }
@@ -313,6 +314,7 @@ fn insert_synthetic(pid: u32) {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     };
     insert_process(p);

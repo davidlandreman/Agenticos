@@ -26,16 +26,16 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
         return Err(EFAULT);
     }
 
-    crate::mm::memory::with_memory_mapper(|mapper| {
+    let mapped = crate::mm::memory::with_memory_mapper(|mapper| {
         if let Some((_frame, flags)) = mapper.leaf_info(l4, VirtAddr::new(page)) {
             if write && !flags.contains(PageTableFlags::WRITABLE) {
                 return match mapper.resolve_cow(l4, VirtAddr::new(page)) {
                     crate::mm::paging::CowOutcome::Copied
-                    | crate::mm::paging::CowOutcome::Upgraded => Ok(()),
+                    | crate::mm::paging::CowOutcome::Upgraded => Ok(None),
                     _ => Err(EFAULT),
                 };
             }
-            return Ok(());
+            return Ok(None);
         }
 
         let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
@@ -48,7 +48,19 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
         let frame = mapper
             .map_zeroed_page_into(l4, VirtAddr::new(page), flags)
             .map_err(|_| EFAULT)?;
-        let destination = mapper.frame_bytes_mut(frame);
+        Ok(Some(frame))
+    })
+    .unwrap_or(Err(EFAULT))?;
+
+    // Never retain the global mapper lock while file-backed paging sleeps on
+    // DMA. The frame remains owned by the address space mapping, and the
+    // direct physical map gives us a stable destination while blocked.
+    let Some(frame) = mapped else { return Ok(()) };
+    let physical = frame.start_address().as_u64();
+    let virtual_address = crate::mm::memory::phys_to_virt(physical).ok_or(EFAULT)?;
+    let destination =
+        unsafe { core::slice::from_raw_parts_mut(virtual_address as *mut u8, 0x1000) };
+    let populate = (|| {
         match &vma.backing {
             VmaBacking::FilePrivate {
                 file,
@@ -57,12 +69,10 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
             } => {
                 let offset = file_offset + (page - vma.start);
                 if offset >= *file_size {
-                    let _ = mapper.unmap_page_from(l4, VirtAddr::new(page));
                     return Err(EFAULT);
                 }
                 let available = (*file_size - offset).min(0x1000) as usize;
                 if file.read_at(offset, &mut destination[..available]).is_err() {
-                    let _ = mapper.unmap_page_from(l4, VirtAddr::new(page));
                     return Err(EFAULT);
                 }
             }
@@ -79,7 +89,6 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
                         .read_at(file_offset + relative, &mut destination[..available])
                         .is_err()
                     {
-                        let _ = mapper.unmap_page_from(l4, VirtAddr::new(page));
                         return Err(EFAULT);
                     }
                 }
@@ -91,8 +100,13 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
             | VmaBacking::Anonymous => {}
         }
         Ok(())
-    })
-    .unwrap_or(Err(EFAULT))
+    })();
+    if populate.is_err() {
+        let _ = crate::mm::memory::with_memory_mapper(|mapper| {
+            mapper.unmap_page_from(l4, VirtAddr::new(page))
+        });
+    }
+    populate
 }
 
 pub fn ensure_user_range(ptr: u64, len: u64, write: bool) -> Result<(), i64> {

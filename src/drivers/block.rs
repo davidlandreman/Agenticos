@@ -35,7 +35,6 @@ pub trait BlockDevice: Sync {
     }
 
     /// Get a human-readable name for the device
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn name(&self) -> &str;
 
     /// Flush any pending writes to the device

@@ -130,7 +130,7 @@ agenticos/
 │   ├── drivers/             # Hardware drivers
 │   │   ├── display/         # Framebuffer display
 │   │   ├── virtio/          # VirtIO devices
-│   │   └── ...              # PS/2, IDE, PCI
+│   │   └── ...              # PS/2, VirtIO block, PCI
 │   ├── fs/                  # Filesystem (ext2, FAT, tmpfs, overlay, VFS)
 │   ├── graphics/            # Graphics primitives, fonts
 │   ├── input/               # Input processing pipeline

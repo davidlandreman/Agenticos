@@ -97,6 +97,8 @@ pub enum BlockReason {
     /// in the ring-3 exit path (`long_jump_to_run_or_halt`).
     /// The `u32` payload is the ring-3 PID being awaited.
     WaitingForRing3Exit(u32),
+    /// Waiting for an asynchronous block request completion token.
+    WaitingForBlockIo(u64),
     /// Deferred timer heap has no due work.
     WaitingForTimerWork,
 }

@@ -576,7 +576,6 @@ impl Virtqueue {
 
 /// Modern VirtIO device with MMIO
 pub struct VirtioDevice {
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub pci: PciDevice,
     /// Base addresses for each BAR
     bar_addrs: [u64; 6],

@@ -412,7 +412,7 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
             crate::userland::network_syscalls::read_connected(args, handle.id(), ptr, cap as usize)
         }
         Some(FdSlot::File { handle, .. }) => {
-            // Stage the read inside a kernel buffer so the FAT/IDE path
+            // Stage the read inside a kernel buffer so the FAT/block path
             // never sees a user pointer (which could be unmapped, span a
             // page boundary the FAT layer doesn't understand, etc.).
             let mut staging = vec![0u8; cap as usize];
@@ -1222,6 +1222,7 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         // child's fork() return 0; other regs match parent's state at
         // the SYSCALL boundary.
         saved_user_state: child_saved_state,
+        kernel_continuation: None,
         // Routing: stdout/stderr flow to the same terminal as parent.
         terminal_id: parent.terminal_id,
     });
@@ -4106,8 +4107,10 @@ fn readlink_common(path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> i64 {
     }
     let bytes = match resolve_proc_link(&path) {
         Some(target) => target.into_bytes(),
+        None if path.starts_with("/proc/self/fd/") => return ENOENT,
         None => match crate::fs::vfs::vfs_read_link(&path) {
             Ok(target) => target,
+            Err(crate::fs::filesystem::FilesystemError::InvalidPath) => return ENOENT,
             Err(ref error) => return map_filesystem_err(error),
         },
     };

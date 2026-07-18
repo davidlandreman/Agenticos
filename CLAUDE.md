@@ -76,7 +76,7 @@ Each entry below points to the folder's own `CLAUDE.md`, which carries the detai
 
 - `src/arch/` — Architecture-specific code (x86_64 IDT, interrupts). No folder file yet — currently thin.
 - `src/commands/` — `guishell` plus the (empty today) GUI launch table. File Manager, Calc, Notepad, Painting, GL Arena, and the Task Manager are ring-3 ELFs under `userland/apps/`. See [`src/commands/CLAUDE.md`](src/commands/CLAUDE.md).
-- `src/drivers/` — Hardware drivers (PCI, IDE, PS/2, VirtIO, framebuffer display). See [`src/drivers/CLAUDE.md`](src/drivers/CLAUDE.md).
+- `src/drivers/` — Hardware drivers (PCI, PS/2, VirtIO including block storage, framebuffer display). See [`src/drivers/CLAUDE.md`](src/drivers/CLAUDE.md).
 - `src/fs/` — VFS with ext2, FAT12/16/32, tmpfs, overlay, and `Arc`-based handles. See [`src/fs/CLAUDE.md`](src/fs/CLAUDE.md).
 - `src/graphics/` — Drawing primitives, text rendering, image loading, compositor. See [`src/graphics/CLAUDE.md`](src/graphics/CLAUDE.md).
 - `src/input/` — Lock-free input pipeline (SPSC queue, scancode state machines). See [`src/input/CLAUDE.md`](src/input/CLAUDE.md).
@@ -112,7 +112,7 @@ These are cross-cutting (not subsystem-local). Subsystem-specific known issues l
 
 ### Current Limitations
 1. **No SMP** — Single CPU. The scheduler is preemptive (PIT @ 100 Hz) and multitasks kernel threads + ring-3 processes (U5-U8 in `docs/plans/2026-05-16-005-feat-multi-ring3-process-scheduling-plan.md`), but doesn't exploit multiple cores.
-2. **Three namespaces with different persistence semantics.** `/` is `overlay(tmpfs, boot-FAT)` — RAM upper, FAT lower. `/data` is an ext2 disk on Secondary Master IDE, persistent across reboots and supporting normal Unix directory/link metadata. `/host` is vvfat (read-only). Overlay writes to `/` survive reboot via the BusyBox `sync` applet (calls `sync(2)` → overlay-state.{0,1} on `/data`). An explicitly supplied old FAT image can be mounted read-only at `/legacy-data` for migration.
+2. **Three namespaces with different persistence semantics.** `/` is `overlay(tmpfs, boot-FAT)` — RAM upper, FAT lower. `/data` is a persistent ext2 VirtIO block disk supporting normal Unix directory/link metadata. `/host` is vvfat (read-only). Overlay writes to `/` survive reboot via the BusyBox `sync` applet (calls `sync(2)` → overlay-state.{0,1} on `/data`). An explicitly supplied old FAT image can be mounted read-only at `/legacy-data` for migration.
 3. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
 4. **Global State** — Heavy use of `static mut` and `lazy_static`.
 5. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.
