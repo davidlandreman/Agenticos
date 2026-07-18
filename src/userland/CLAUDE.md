@@ -82,6 +82,10 @@ Each process owns:
 - `network_wait` (restart-stable absolute deadline for a blocked socket
   syscall; cleared on success, close, signal, exit, or syscall identity
   change).
+- `real_timer` plus `pending_syscall_interrupt` for 100 Hz ITIMER_REAL /
+  SIGALRM delivery. Timer expiry is processed by kernel housekeeping and the
+  inline test dispatcher; a signal-woken blocking syscall re-enters the
+  dispatcher as `-EINTR` so its handler runs before the syscall can re-block.
 
 Socket slots hold `Arc<net::socket::SocketHandle>`. The handle is a shared
 open-file description: dup/fork share `O_NONBLOCK` and protocol state, while

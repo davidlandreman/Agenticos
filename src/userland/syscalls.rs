@@ -1126,6 +1126,9 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         mmap_next: parent.mmap_next,
         fd_table: parent.fd_table.clone(),
         network_wait: None,
+        // POSIX timers are not inherited across fork.
+        real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        pending_syscall_interrupt: false,
         cwd: parent.cwd.clone(),
         address_space: Some(child_aspace),
         // Phase 5 PR-B: child inherits parent's signal dispositions
@@ -3807,20 +3810,92 @@ struct LinuxItimerval {
     it_value_usec: i64,
 }
 
-/// `setitimer(which: i32, *new_value, *old_value) -> int`
-///
-/// Stub: returns 0, no real timer wired. zsh installs SIGALRM handlers
-/// for KEYTIMEOUT and TMOUT; without the timer firing those features are
-/// effectively no-op (acceptable for `--no-rcs`-style usage). If
-/// `old_value` is non-null, write zeroed itimerval (no prior timer was
-/// active).
-pub fn setitimer_handler(args: &mut SyscallArgs) -> i64 {
-    let old_ptr = args.rdx;
-    if old_ptr == 0 {
-        return 0;
+const ITIMER_REAL: i32 = 0;
+const PIT_MICROSECONDS_PER_TICK: u64 = 10_000;
+
+fn timeval_to_ticks(seconds: i64, microseconds: i64) -> Result<u64, i64> {
+    if seconds < 0 || !(0..1_000_000).contains(&microseconds) {
+        return Err(EINVAL);
     }
-    let zero = LinuxItimerval::default();
-    crate::userland::usercopy::write_unaligned(old_ptr, &zero).map_or_else(|e| e, |_| 0)
+    let total = (seconds as u64)
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(microseconds as u64))
+        .ok_or(EINVAL)?;
+    if total == 0 {
+        return Ok(0);
+    }
+    Ok(total.saturating_add(PIT_MICROSECONDS_PER_TICK - 1) / PIT_MICROSECONDS_PER_TICK)
+}
+
+fn ticks_to_timeval(ticks: u64) -> (i64, i64) {
+    let total = ticks.saturating_mul(PIT_MICROSECONDS_PER_TICK);
+    ((total / 1_000_000) as i64, (total % 1_000_000) as i64)
+}
+
+/// `setitimer(which: i32, *new_value, *old_value) -> int`.
+///
+/// ITIMER_REAL uses the monotonic 100 Hz PIT and queues SIGALRM from kernel
+/// housekeeping. ITIMER_VIRTUAL and ITIMER_PROF remain unsupported.
+pub fn setitimer_handler(args: &mut SyscallArgs) -> i64 {
+    if args.rdi as i32 != ITIMER_REAL {
+        return EINVAL;
+    }
+
+    let new_value = if args.rsi == 0 {
+        LinuxItimerval::default()
+    } else {
+        match crate::userland::usercopy::read_unaligned::<LinuxItimerval>(args.rsi) {
+            Ok(value) => value,
+            Err(error) => return error,
+        }
+    };
+    let interval_ticks =
+        match timeval_to_ticks(new_value.it_interval_sec, new_value.it_interval_usec) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+    let value_ticks = match timeval_to_ticks(new_value.it_value_sec, new_value.it_value_usec) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+
+    let old_ptr = args.rdx;
+    if old_ptr != 0 {
+        if let Err(error) = crate::userland::usercopy::ensure_user_range(
+            old_ptr,
+            core::mem::size_of::<LinuxItimerval>() as u64,
+            true,
+        ) {
+            return error;
+        }
+    }
+
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let old_value = crate::userland::lifecycle::with_current_process(|process| {
+        let remaining_ticks = process
+            .real_timer
+            .deadline_tick
+            .map(|deadline| deadline.saturating_sub(now))
+            .unwrap_or(0);
+        let (interval_sec, interval_usec) = ticks_to_timeval(process.real_timer.interval_ticks);
+        let (value_sec, value_usec) = ticks_to_timeval(remaining_ticks);
+        let old = LinuxItimerval {
+            it_interval_sec: interval_sec,
+            it_interval_usec: interval_usec,
+            it_value_sec: value_sec,
+            it_value_usec: value_usec,
+        };
+        process.real_timer.interval_ticks = interval_ticks;
+        process.real_timer.deadline_tick =
+            (value_ticks != 0).then(|| now.saturating_add(value_ticks));
+        old
+    });
+
+    if old_ptr != 0 {
+        return crate::userland::usercopy::write_unaligned(old_ptr, &old_value)
+            .map_or_else(|error| error, |_| 0);
+    }
+    0
 }
 
 /// `nanosleep(*req: *const timespec, *rem: *mut timespec) -> int`

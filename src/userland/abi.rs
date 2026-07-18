@@ -323,6 +323,14 @@ pub mod nr {
 pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
     use crate::userland::syscalls;
 
+    // A blocking syscall resumes by re-executing its SYSCALL instruction.
+    // If an asynchronous signal woke it, deliver the handler before calling
+    // the syscall implementation again; otherwise recv/read would simply
+    // park a second time and the pending signal could never run.
+    if crate::userland::lifecycle::take_pending_syscall_interrupt() {
+        let _ = syscalls::maybe_deliver_signal(args, EINTR);
+    }
+
     crate::userland::lifecycle::clear_stale_network_wait(args.rax);
 
     let result = match args.rax {
