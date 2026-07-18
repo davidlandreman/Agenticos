@@ -54,6 +54,14 @@ if [ "$HELP" = true ]; then
     echo "                          REBUILD_ZSH=1."
     echo "                          QEMU RAM defaults to 2G; override with"
     echo "                          AGENTICOS_QEMU_MEMORY (for example 4G)."
+    echo "                          Rendering: AGENTICOS_COMPOSITOR=legacy|retained|gpu|auto"
+    echo "                          AGENTICOS_GPU_STRICT=1 refuses GPU fallback."
+    echo "                          AGENTICOS_QEMU_BIN selects one exact QEMU binary;"
+    echo "                          AGENTICOS_QEMU_GL=es|core selects Cocoa GL mode."
+    echo "                          macOS window: cocoa zoom-to-fit is on by default so"
+    echo "                          the 1280x720 guest can be resized/enlarged on Retina."
+    echo "                          AGENTICOS_QEMU_ZOOM=off disables it; AGENTICOS_QEMU_FULLSCREEN=1"
+    echo "                          starts maximized to the display."
     echo "  -h, --help              Show this help message"
     echo ""
     echo "Default: Build in release mode, create images, and run in QEMU"
@@ -220,7 +228,20 @@ if [ "$RUN_QEMU" = true ]; then
     mkdir -p "$HOST_SHARE"
     # Stale socket from a previous run will block QEMU's listener.
     rm -f "$RPC_SOCK"
+    QEMU_BIN="${AGENTICOS_QEMU_BIN:-$(command -v qemu-system-x86_64 || true)}"
+    if [ -z "$QEMU_BIN" ] || [ ! -x "$QEMU_BIN" ]; then
+        echo "❌ QEMU binary is missing or not executable: ${QEMU_BIN:-<unset>}" >&2
+        exit 1
+    fi
+    # shellcheck source=scripts/qemu-compositor.sh
+    . "$(pwd)/scripts/qemu-compositor.sh"
+    if ! agenticos_configure_qemu "$QEMU_BIN"; then
+        exit 1
+    fi
     echo "🚀 Launching QEMU with image: $BIOS_IMAGE"
+    echo "🖥  QEMU binary: $QEMU_BIN"
+    "$QEMU_BIN" --version | head -n 1
+    echo "🎨 Requested compositor: ${AGENTICOS_COMPOSITOR:-legacy} (strict=${AGENTICOS_GPU_STRICT:-0})"
     echo "📂 Mounting host folder: $HOST_SHARE -> /host (read-only)"
     echo "🔌 MCP RPC chardev socket: $RPC_SOCK (chmod 0600 once QEMU creates it)"
     QEMU_MEMORY="${AGENTICOS_QEMU_MEMORY:-2G}"
@@ -238,15 +259,17 @@ if [ "$RUN_QEMU" = true ]; then
     ) &
     DATA_IMAGE="${AGENTICOS_DATA_IMAGE:-target/bootloader/data.img}"
     echo "💽 Persistent data disk: $DATA_IMAGE"
-    qemu-system-x86_64 \
-        -drive format=raw,file="$BIOS_IMAGE",if=ide,index=0 \
-        -drive file=fat:ro:"$HOST_SHARE",if=ide,index=1,snapshot=on \
-        -drive format=raw,file="$DATA_IMAGE",if=ide,index=2 \
-        -serial stdio \
-        -chardev socket,id=rpc,path="$RPC_SOCK",server=on,wait=off \
-        -serial chardev:rpc \
-        -no-reboot -no-shutdown \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-        -device virtio-tablet-pci \
+    QEMU_ARGS=(
+        -drive "format=raw,file=$BIOS_IMAGE,if=ide,index=0"
+        -drive "file=fat:ro:$HOST_SHARE,if=ide,index=1,snapshot=on"
+        -drive "format=raw,file=$DATA_IMAGE,if=ide,index=2"
+        -serial stdio
+        -chardev "socket,id=rpc,path=$RPC_SOCK,server=on,wait=off"
+        -serial chardev:rpc
+        -no-reboot -no-shutdown
+        -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
+        -device virtio-tablet-pci
         -m "$QEMU_MEMORY"
+    )
+    "$QEMU_BIN" "${QEMU_ARGS[@]}" "${AGENTICOS_QEMU_RENDER_ARGS[@]}" "${AGENTICOS_QEMU_FW_CFG_ARGS[@]}"
 fi

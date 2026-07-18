@@ -9,5 +9,9 @@ pub mod images;
 pub mod framebuffer;
 pub mod compositor;
 pub mod render;
+pub mod surface;
+pub mod scene;
+pub mod composition;
+pub mod present;
 
 // Re-exports for convenient access

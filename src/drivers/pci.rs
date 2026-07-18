@@ -6,6 +6,8 @@
 use x86_64::instructions::port::Port;
 use alloc::vec::Vec;
 use crate::debug_info;
+use spin::Mutex;
+use lazy_static::lazy_static;
 
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
 const PCI_CONFIG_DATA: u16 = 0xCFC;
@@ -240,9 +242,22 @@ pub fn enumerate_devices() -> Vec<PciDevice> {
     devices
 }
 
+lazy_static! {
+    static ref PCI_DEVICES: Mutex<Option<Vec<PciDevice>>> = Mutex::new(None);
+}
+
+/// Enumerate once and reuse the result for drivers initialized later in boot.
+pub fn enumerate_devices_cached() -> Vec<PciDevice> {
+    let mut cache = PCI_DEVICES.lock();
+    if cache.is_none() {
+        *cache = Some(enumerate_devices());
+    }
+    cache.as_ref().cloned().unwrap_or_default()
+}
+
 /// Find all devices with the given vendor and device ID
 pub fn find_devices(vendor_id: u16, device_id: u16) -> Vec<PciDevice> {
-    enumerate_devices()
+    enumerate_devices_cached()
         .into_iter()
         .filter(|d| d.vendor_id == vendor_id && d.device_id == device_id)
         .collect()
@@ -250,7 +265,7 @@ pub fn find_devices(vendor_id: u16, device_id: u16) -> Vec<PciDevice> {
 
 /// Find all devices with the given class code
 pub fn find_devices_by_class(class_code: u8, subclass: u8) -> Vec<PciDevice> {
-    enumerate_devices()
+    enumerate_devices_cached()
         .into_iter()
         .filter(|d| d.class_code == class_code && d.subclass == subclass)
         .collect()
@@ -261,11 +276,24 @@ pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 
 // VirtIO device IDs (transitional)
 pub const VIRTIO_DEVICE_INPUT: u16 = 0x1052;
+pub const VIRTIO_DEVICE_GPU_MODERN: u16 = 0x1050;
+pub const VIRTIO_DEVICE_GPU_TRANSITIONAL: u16 = 0x1010;
 
 /// Find VirtIO input devices
 pub fn find_virtio_input_devices() -> Vec<PciDevice> {
-    enumerate_devices()
+    enumerate_devices_cached()
         .into_iter()
         .filter(|d| d.vendor_id == VIRTIO_VENDOR_ID && d.device_id == VIRTIO_DEVICE_INPUT)
+        .collect()
+}
+
+/// Find VirtIO GPU devices (device type 16).
+pub fn find_virtio_gpu_devices() -> Vec<PciDevice> {
+    enumerate_devices_cached()
+        .into_iter()
+        .filter(|d| {
+            d.vendor_id == VIRTIO_VENDOR_ID
+                && matches!(d.device_id, VIRTIO_DEVICE_GPU_MODERN | VIRTIO_DEVICE_GPU_TRANSITIONAL)
+        })
         .collect()
 }

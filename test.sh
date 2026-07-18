@@ -50,6 +50,9 @@ Flags:
 Environment:
   AGENTICOS_TEST_MEMORY  QEMU RAM for tests (default: 256M; use 128M for
                          reclamation stress runs).
+  AGENTICOS_QEMU_BIN     Exact qemu-system-x86_64 binary to launch.
+  AGENTICOS_COMPOSITOR   Boot policy: legacy (default), retained, gpu, or auto.
+  AGENTICOS_GPU_STRICT   Set to 1 to make unavailable GPU mode fail loudly.
 EOF
 }
 
@@ -223,7 +226,19 @@ if [ -n "$FILTER" ]; then
     QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/test_filter,string=$ESCAPED_FILTER")
 fi
 
-qemu-system-x86_64 "${QEMU_ARGS[@]}"
+COMPOSITOR_REQUEST="${AGENTICOS_COMPOSITOR:-legacy}"
+GPU_STRICT="${AGENTICOS_GPU_STRICT:-0}"
+case "$COMPOSITOR_REQUEST" in legacy|retained|gpu|auto) ;; *) echo "Invalid AGENTICOS_COMPOSITOR: $COMPOSITOR_REQUEST" >&2; exit 2 ;; esac
+case "$GPU_STRICT" in 0|1) ;; *) echo "AGENTICOS_GPU_STRICT must be 0 or 1" >&2; exit 2 ;; esac
+QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/compositor,string=$COMPOSITOR_REQUEST")
+QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/gpu_strict,string=$GPU_STRICT")
+
+QEMU_BIN="${AGENTICOS_QEMU_BIN:-$(command -v qemu-system-x86_64 || true)}"
+if [ -z "$QEMU_BIN" ] || [ ! -x "$QEMU_BIN" ]; then
+    echo "QEMU binary is missing or not executable: ${QEMU_BIN:-<unset>}" >&2
+    exit 1
+fi
+"$QEMU_BIN" "${QEMU_ARGS[@]}"
 
 # Check exit code
 EXIT_CODE=$?

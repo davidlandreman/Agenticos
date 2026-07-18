@@ -76,6 +76,65 @@ pub struct VirtqUsedElem {
     pub len: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VirtqBuffer {
+    pub addr: u64,
+    pub len: u32,
+    pub device_writable: bool,
+}
+
+impl VirtqBuffer {
+    pub fn from_slice(buffer: &[u8], device_writable: bool) -> Self {
+        let virt = buffer.as_ptr() as u64;
+        Self {
+            addr: translate_virt_to_phys(virt).unwrap_or(virt),
+            len: buffer.len().min(u32::MAX as usize) as u32,
+            device_writable,
+        }
+    }
+
+    /// Describe a virtually contiguous buffer as page-bounded DMA segments.
+    /// Heap pages are mapped lazily and are not guaranteed to be physically
+    /// adjacent, so a single descriptor must never span a page boundary.
+    pub fn from_slice_segments(buffer: &[u8], device_writable: bool) -> Vec<Self> {
+        Self::from_raw_segments(buffer.as_ptr(), buffer.len(), device_writable)
+    }
+
+    /// Mutable counterpart used for device-writable response buffers. The
+    /// returned descriptors contain addresses only and do not retain a shared
+    /// Rust reference while the device owns the buffer.
+    pub fn from_mut_slice_segments(buffer: &mut [u8]) -> Vec<Self> {
+        Self::from_raw_segments(buffer.as_mut_ptr(), buffer.len(), true)
+    }
+
+    fn from_raw_segments(pointer: *const u8, len: usize, device_writable: bool) -> Vec<Self> {
+        const PAGE_SIZE: usize = 4096;
+        let mut segments = Vec::new();
+        let mut offset = 0usize;
+        while offset < len {
+            let virtual_address = pointer as usize + offset;
+            let bytes_in_page = PAGE_SIZE - (virtual_address & (PAGE_SIZE - 1));
+            let segment_len = bytes_in_page.min(len - offset);
+            let virtual_address = virtual_address as u64;
+            segments.push(Self {
+                addr: translate_virt_to_phys(virtual_address).unwrap_or(virtual_address),
+                len: segment_len as u32,
+                device_writable,
+            });
+            offset += segment_len;
+        }
+        segments
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtqueueError {
+    EmptyChain,
+    NoDescriptors,
+    Timeout,
+    UnexpectedDescriptor,
+}
+
 /// Aligned available ring structure
 #[repr(C, align(2))]
 pub struct VirtqAvailRing {
@@ -200,34 +259,37 @@ impl Virtqueue {
 
     /// Add a buffer to the available ring
     pub fn add_buffer(&mut self, buffer: &[u8], device_writable: bool) -> Option<u16> {
-        if self.num_free == 0 {
-            return None;
+        let segments = VirtqBuffer::from_slice_segments(buffer, device_writable);
+        self.add_chain(&segments).ok()
+    }
+
+    /// Add a readable/writable descriptor chain as one request.
+    pub fn add_chain(&mut self, buffers: &[VirtqBuffer]) -> Result<u16, VirtqueueError> {
+        if buffers.is_empty() { return Err(VirtqueueError::EmptyChain); }
+        if buffers.len() > self.num_free as usize { return Err(VirtqueueError::NoDescriptors); }
+
+        let head = self.free_head;
+        let mut current = head;
+        for (position, buffer) in buffers.iter().enumerate() {
+            let next_free = self.descriptors[current as usize].next;
+            let has_next = position + 1 < buffers.len();
+            self.descriptors[current as usize] = VirtqDesc {
+                addr: buffer.addr,
+                len: buffer.len,
+                flags: (if buffer.device_writable { desc_flags::WRITE } else { 0 })
+                    | (if has_next { desc_flags::NEXT } else { 0 }),
+                next: if has_next { next_free } else { 0 },
+            };
+            current = next_free;
         }
+        self.free_head = current;
+        self.num_free -= buffers.len() as u16;
 
-        let desc_idx = self.free_head;
-        self.free_head = self.descriptors[desc_idx as usize].next;
-        self.num_free -= 1;
-
-        // Convert buffer virtual address to physical address for DMA
-        let virt_addr = buffer.as_ptr() as u64;
-        let phys_addr = translate_virt_to_phys(virt_addr).unwrap_or(virt_addr);
-
-        let desc = &mut self.descriptors[desc_idx as usize];
-        desc.addr = phys_addr;
-        desc.len = buffer.len() as u32;
-        desc.flags = if device_writable { desc_flags::WRITE } else { 0 };
-        desc.next = 0;
-
-        // Add to available ring
         let avail_idx = self.avail.idx.load(Ordering::Relaxed);
-        self.avail.ring[(avail_idx % self.size) as usize] = desc_idx;
-
-        // Memory barrier
+        self.avail.ring[(avail_idx % self.size) as usize] = head;
         core::sync::atomic::fence(Ordering::SeqCst);
-
         self.avail.idx.store(avail_idx.wrapping_add(1), Ordering::Release);
-
-        Some(desc_idx)
+        Ok(head)
     }
 
     /// Notify the device that there are new buffers available
@@ -256,12 +318,46 @@ impl Virtqueue {
 
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
-        // Return descriptor to free list
-        self.descriptors[desc_idx as usize].next = self.free_head;
-        self.free_head = desc_idx;
-        self.num_free += 1;
+        // Return the full descriptor chain to the free list.
+        let mut current = desc_idx;
+        let mut released = 0u16;
+        loop {
+            if current >= self.size || released >= self.size { break; }
+            let has_next = self.descriptors[current as usize].flags & desc_flags::NEXT != 0;
+            let next = self.descriptors[current as usize].next;
+            self.descriptors[current as usize] = VirtqDesc {
+                next: self.free_head,
+                ..VirtqDesc::default()
+            };
+            self.free_head = current;
+            self.num_free = self.num_free.saturating_add(1);
+            released += 1;
+            if !has_next { break; }
+            current = next;
+        }
 
         Some((desc_idx, len))
+    }
+
+    /// Bounded synchronous completion for control queues.
+    pub fn wait_used(&mut self, expected_head: u16, max_spins: usize) -> Result<u32, VirtqueueError> {
+        for _ in 0..max_spins {
+            if let Some((head, len)) = self.pop_used() {
+                return if head == expected_head { Ok(len) } else { Err(VirtqueueError::UnexpectedDescriptor) };
+            }
+            core::hint::spin_loop();
+        }
+        Err(VirtqueueError::Timeout)
+    }
+
+    #[cfg(feature = "test")]
+    pub fn test_num_free(&self) -> u16 { self.num_free }
+
+    #[cfg(feature = "test")]
+    pub fn test_complete(&mut self, head: u16, len: u32) {
+        let index = self.used.idx.load(Ordering::Relaxed);
+        self.used.ring[(index % self.size) as usize] = VirtqUsedElem { id: head as u32, len };
+        self.used.idx.store(index.wrapping_add(1), Ordering::Release);
     }
 }
 
@@ -513,6 +609,16 @@ impl VirtioDevice {
         }
     }
 
+
+    /// Write device-specific configuration.
+    pub fn write_device_config<T: Copy>(&self, offset: u32, value: T) {
+        unsafe {
+            let addr = self.mmio_addr(self.caps.device_cfg_bar,
+                self.caps.device_cfg_offset + offset);
+            write_volatile(addr as *mut T, value);
+        }
+    }
+
     /// Initialize the device following VirtIO 1.0 spec
     pub fn init_simple(&self) -> bool {
         // 1. Reset
@@ -543,6 +649,30 @@ impl VirtioDevice {
         }
 
         true
+    }
+
+    /// Initialize while negotiating only explicitly understood features.
+    pub fn init_with_features(&self, supported_low: u32, supported_high: u32) -> Option<(u32, u32)> {
+        self.reset();
+        self.write_status(status::ACKNOWLEDGE);
+        self.write_status(status::ACKNOWLEDGE | status::DRIVER);
+        let device_low = self.read_device_features(0);
+        let device_high = self.read_device_features(1);
+        let negotiated_low = device_low & supported_low;
+        // VIRTIO_F_VERSION_1 (feature bit 32) is mandatory here.
+        let negotiated_high = device_high & supported_high & 0x1;
+        if negotiated_high & 0x1 == 0 {
+            self.write_status(status::ACKNOWLEDGE | status::DRIVER | status::FAILED);
+            return None;
+        }
+        self.write_driver_features(0, negotiated_low);
+        self.write_driver_features(1, negotiated_high);
+        self.write_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
+        if self.read_status() & status::FEATURES_OK == 0 {
+            self.write_status(status::ACKNOWLEDGE | status::DRIVER | status::FAILED);
+            return None;
+        }
+        Some((negotiated_low, negotiated_high))
     }
 
     /// Complete initialization
