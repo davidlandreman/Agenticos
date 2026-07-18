@@ -1,5 +1,5 @@
 use crate::graphics::color::Color;
-use crate::window::theme::{FrameChrome, AERO_METRICS};
+use crate::window::theme::{lerp_color, lerp_u8, FrameChrome, AERO_METRICS};
 use crate::window::GraphicsDevice;
 
 pub(super) fn draw(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
@@ -318,17 +318,4 @@ fn outside_rounded_rect(x: i32, y: i32, width: i32, height: i32, radius: i32) ->
     let dx = x - cx;
     let dy = y - cy;
     dx * dx + dy * dy > radius * radius
-}
-
-fn lerp_u8(start: u8, end: u8, position: u32, span: u32) -> u8 {
-    let position = position.min(span);
-    ((start as u32 * (span - position) + end as u32 * position) / span.max(1)) as u8
-}
-
-fn lerp_color(start: Color, end: Color, position: u32, span: u32) -> Color {
-    Color::new(
-        lerp_u8(start.red, end.red, position, span),
-        lerp_u8(start.green, end.green, position, span),
-        lerp_u8(start.blue, end.blue, position, span),
-    )
 }

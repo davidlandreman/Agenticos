@@ -71,7 +71,10 @@ pub use self::types::{Point, Rect, ScreenId, WindowId};
 pub const PALETTE_CHROME_ACTIVE: crate::graphics::color::Color =
     crate::graphics::color::Color::new(0, 100, 200);
 
-/// Window-frame chrome color when the frame is inactive.
+/// Window-frame chrome color when the frame is inactive. Retained as part of
+/// the widget palette; the classic frame theme now paints its own Win98
+/// caption gradient rather than this flat chrome color.
+#[expect(dead_code, reason = "widget palette API surface")]
 pub const PALETTE_CHROME_INACTIVE: crate::graphics::color::Color =
     crate::graphics::color::Color::new(100, 100, 100);
 

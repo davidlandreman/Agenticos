@@ -6,6 +6,7 @@ mod classic;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::drivers::fw_cfg;
+use crate::graphics::color::Color;
 use crate::window::renderer::RendererKind;
 use crate::window::{GraphicsDevice, Rect};
 
@@ -67,14 +68,21 @@ pub struct FrameMetrics {
     pub corner_radius_top: u32,
     pub corner_radius_bottom: u32,
     pub shadow_margin: u32,
+    /// Caption button footprint and its inset from the caption's right edge.
+    pub button_width: u32,
+    pub button_height: u32,
+    pub button_right_margin: u32,
 }
 
 pub const CLASSIC_METRICS: FrameMetrics = FrameMetrics {
-    title_bar_height: 24,
-    border_width: 2,
+    title_bar_height: 20,
+    border_width: 4,
     corner_radius_top: 0,
     corner_radius_bottom: 0,
     shadow_margin: 0,
+    button_width: 18,
+    button_height: 16,
+    button_right_margin: 2,
 };
 
 pub const AERO_METRICS: FrameMetrics = FrameMetrics {
@@ -83,6 +91,11 @@ pub const AERO_METRICS: FrameMetrics = FrameMetrics {
     corner_radius_top: 8,
     corner_radius_bottom: 4,
     shadow_margin: 16,
+    // Chosen so close_button_rect is bit-identical to the pre-refactor
+    // SIZE=16 / PADDING=4 formula: x = right − 5 − 4 − 16, y = y + 5 + 6.
+    button_width: 16,
+    button_height: 16,
+    button_right_margin: 4,
 };
 
 pub struct FrameChrome<'a> {
@@ -175,17 +188,31 @@ pub const fn metrics_for(kind: ThemeKind) -> FrameMetrics {
 }
 
 pub fn close_button_rect(bounds: Rect, metrics: FrameMetrics) -> Rect {
-    const SIZE: u32 = 16;
-    const PADDING: u32 = 4;
     let x = bounds
         .right()
         .saturating_sub(metrics.border_width as i32)
-        .saturating_sub(PADDING as i32)
-        .saturating_sub(SIZE as i32);
+        .saturating_sub(metrics.button_right_margin as i32)
+        .saturating_sub(metrics.button_width as i32);
     let y = bounds.y
         + metrics.border_width as i32
-        + (metrics.title_bar_height as i32 - SIZE as i32) / 2;
-    Rect::new(x, y, SIZE, SIZE)
+        + (metrics.title_bar_height as i32 - metrics.button_height as i32) / 2;
+    Rect::new(x, y, metrics.button_width, metrics.button_height)
+}
+
+/// Linear interpolation of one channel; `position`/`span` give the fraction.
+/// Hoisted here so both the Aero glass and the classic caption gradient share
+/// one implementation.
+pub(super) fn lerp_u8(start: u8, end: u8, position: u32, span: u32) -> u8 {
+    let position = position.min(span);
+    ((start as u32 * (span - position) + end as u32 * position) / span.max(1)) as u8
+}
+
+pub(super) fn lerp_color(start: Color, end: Color, position: u32, span: u32) -> Color {
+    Color::new(
+        lerp_u8(start.red, end.red, position, span),
+        lerp_u8(start.green, end.green, position, span),
+        lerp_u8(start.blue, end.blue, position, span),
+    )
 }
 
 pub fn draw_frame(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
