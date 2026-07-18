@@ -121,14 +121,21 @@ AGENTICOS_QEMU_GL=es \
 AGENTICOS_COMPOSITOR=gpu \
 AGENTICOS_GPU_STRICT=1 \
 AGENTICOS_THEME=aero \
-AGENTICOS_NETWORK=off \
 ./build.sh
 ```
 
 An explicit Aero request stays on qualified VirGL and renders blurred glass;
 `auto` also selects Aero after the full production blur gate succeeds.
-The custom bottle has no QEMU `user` network backend, so the workspace launch
-disables networking; this is independent of VirGL.
+
+The custom bottle has no QEMU `user` (slirp) network backend. When
+networking is on and the selected QEMU lacks `user`, `build.sh` starts a
+machine-less stock-QEMU bridge (`scripts/qemu-slirp-bridge.sh`) that joins
+its own slirp NAT and a unix stream listener on one hub, and attaches the
+guest's virtio-net through `-netdev stream` on that socket. The guest sees
+the ordinary slirp addressing (10.0.2.0/24, gateway 10.0.2.2, DNS 10.0.2.3),
+so VirGL launches keep DHCP, DNS, and outbound IPv4. Pin the helper with
+`AGENTICOS_QEMU_NET_HELPER_BIN`, move the socket with
+`AGENTICOS_SLIRP_SOCK`, or set `AGENTICOS_NETWORK=off` for an offline boot.
 
 The currently pinned ANGLE capset reports no supported depth-attachment
 format. `GLGAME.ELF` therefore uses the bounded frontend depth-order fallback

@@ -119,7 +119,10 @@ network and process-table locks never overlap or survive the yield.
 
 Interactive QEMU uses user-mode NAT and usually leases `10.0.2.15` with
 gateway/host alias `10.0.2.2`; `AGENTICOS_NETWORK=off` provides a nonfatal
-no-NIC boot. Tests use `restrict=on` and repository-owned guest-forwarded
+no-NIC boot. When the selected QEMU has no `user` backend (the pinned macOS
+VirGL bottle), `build.sh` bridges the NIC to a stock-QEMU slirp helper over
+a unix stream socket with identical guest-visible addressing (see
+`scripts/qemu-slirp-bridge.sh`). Tests use `restrict=on` and repository-owned guest-forwarded
 services, with deterministic `/etc/hosts` aliases for hostname tests. IPv6,
 TLS, fragmentation, offloads, multiple NICs, and interface configuration are
 deferred.
