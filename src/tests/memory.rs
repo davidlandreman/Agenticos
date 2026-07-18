@@ -298,14 +298,15 @@ fn test_live_frame_refcounts_and_failure_injection() {
     );
 }
 
-// ---------- Page-fault demotion baseline (U4) ----------
+// ---------- Page-fault logging-policy baseline (U4) ----------
 //
 // Documentary regression guard: allocates ~1 MiB of heap (256 demand-paged
 // pages) and asserts the runtime debug level is `Debug`, the level the
-// kernel boots with at `src/kernel.rs:14`. The actual U2 expectation —
-// silence from per-fault `[INFO]`/`[DEBUG]` chatter at the default level —
+// kernel boots with at `src/kernel.rs:14`. The expectation is complete
+// silence from successfully handled per-fault `[INFO]`/`[DEBUG]` chatter —
+// including the initial fault address/error diagnostic, which is Trace-only —
 // is observed by reading the test's serial output: a developer who
-// regresses the U2 demotions will see those lines reappear during this
+// regresses the logging policy will see those lines reappear during this
 // test's heap touches. The assertion below pins the level invariant; the
 // allocation forces the page-fault path to run inside the test
 // environment.
@@ -333,7 +334,7 @@ fn test_heap_demand_paging_at_default_log_level() {
         level,
         DebugLevel::Debug,
         "test environment must match the boot default log level (Debug). \
-         U2's per-fault log demotions to trace are tuned for this level — \
+         routine page-fault logging is tuned to be silent at this level — \
          changing the default level will silently invalidate the demotion \
          expectation."
     );
