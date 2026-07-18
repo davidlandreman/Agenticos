@@ -79,12 +79,20 @@ impl FontRef {
 /// Default size for the system TTF, in pixels.
 const SYSTEM_FONT_PX: u16 = 14;
 
+/// Size for the window-caption font, in pixels. Approximates 8 pt MS Sans
+/// Serif bold as used by the Windows 98 classic caption bar.
+const CAPTION_FONT_PX: u16 = 11;
+
 /// Bundled monospaced TTF used as the default system font.
 static SYSTEM_TTF_DATA: &[u8] = include_bytes!("../../../assets/system.ttf");
 
 /// Boot-set default font. Set exactly once by [`init_fonts`]. Reads before
 /// init fall through to the embedded 8x8 fallback.
 static DEFAULT_FONT: Once<FontRef> = Once::new();
+
+/// Boot-set caption font (smaller instantiation of the same TTF). Set once by
+/// [`init_fonts`]; reads before init fall through to the embedded 8x8 fallback.
+static CAPTION_FONT: Once<FontRef> = Once::new();
 
 /// Parse the bundled system TTF and install it as the default font. Called
 /// once during kernel boot, after heap init and before any window drawing.
@@ -115,12 +123,43 @@ pub fn init_fonts() {
             }
         },
     );
+
+    CAPTION_FONT.call_once(
+        || match TtfFont::from_data(SYSTEM_TTF_DATA, CAPTION_FONT_PX) {
+            Some(font) => {
+                crate::debug_info!(
+                    "init_fonts: parsed caption font at {}px (cell {}x{}, ascent {})",
+                    CAPTION_FONT_PX,
+                    font.cell_width(),
+                    font.line_height(),
+                    font.ascent(),
+                );
+                let leaked: &'static TtfFont = Box::leak(Box::new(font));
+                FontRef::new(leaked)
+            }
+            None => {
+                crate::debug_warn!(
+                    "init_fonts: caption font failed to parse; using embedded 8x8 fallback"
+                );
+                FontRef::new(&DEFAULT_8X8_FONT as &dyn Font)
+            }
+        },
+    );
 }
 
 /// Return the system default font. Before [`init_fonts`] runs (or if it fails),
 /// this returns the embedded 8x8 fallback.
 pub fn get_default_font() -> FontRef {
     if let Some(font) = DEFAULT_FONT.get() {
+        return *font;
+    }
+    get_embedded_font()
+}
+
+/// Return the window-caption font. Before [`init_fonts`] runs (or if it
+/// fails), this returns the embedded 8x8 fallback.
+pub fn get_caption_font() -> FontRef {
+    if let Some(font) = CAPTION_FONT.get() {
         return *font;
     }
     get_embedded_font()

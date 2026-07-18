@@ -29,9 +29,25 @@ fn test_theme_selection_and_fallback_matrix() {
 }
 
 fn test_metrics_and_decoration_geometry() {
-    assert_eq!(CLASSIC_METRICS.title_bar_height, 24);
-    assert_eq!(CLASSIC_METRICS.border_width, 2);
+    assert_eq!(CLASSIC_METRICS.title_bar_height, 20);
+    assert_eq!(CLASSIC_METRICS.border_width, 4);
     assert_eq!(AERO_METRICS.shadow_margin, 16);
+
+    // Caption-button footprint drives close_button_rect for both themes.
+    assert_eq!(CLASSIC_METRICS.button_width, 18);
+    assert_eq!(CLASSIC_METRICS.button_height, 16);
+    assert_eq!(CLASSIC_METRICS.button_right_margin, 2);
+    assert_eq!(AERO_METRICS.button_width, 16);
+    assert_eq!(AERO_METRICS.button_height, 16);
+    assert_eq!(AERO_METRICS.button_right_margin, 4);
+
+    // Classic close button for an 80×50 window: x = right − border − margin −
+    // width, y = top + border + (title − button_height)/2.
+    assert_eq!(
+        theme::close_button_rect(Rect::new(0, 0, 80, 50), CLASSIC_METRICS),
+        Rect::new(80 - 4 - 2 - 18, 4 + 2, 18, 16)
+    );
+
     assert_eq!(
         Insets::uniform(16).expand(Rect::new(100, 50, 800, 600)),
         Rect::new(84, 34, 832, 632)
@@ -71,14 +87,41 @@ fn test_classic_key_pixels_regression() {
     let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (80, 50));
     theme::draw_frame_for(ThemeKind::Classic, &chrome, &mut canvas);
     drop(canvas);
-    assert_eq!(surface.pixel(0, 0).unwrap().to_rgba(), (0, 100, 200, 255));
-    assert_eq!(surface.pixel(10, 10).unwrap().to_rgba(), (0, 100, 200, 255));
+
+    // Raised bevel: light/highlight top-left, shadow/dark bottom-right, then
+    // ButtonFace fill. These do NOT follow focus.
+    assert_eq!(surface.pixel(0, 0).unwrap().to_rgba(), (223, 223, 223, 255));
+    assert_eq!(surface.pixel(1, 1).unwrap().to_rgba(), (255, 255, 255, 255));
+    assert_eq!(surface.pixel(2, 2).unwrap().to_rgba(), (192, 192, 192, 255));
+    assert_eq!(surface.pixel(79, 49).unwrap().to_rgba(), (0, 0, 0, 255));
+    assert_eq!(
+        surface.pixel(78, 48).unwrap().to_rgba(),
+        (128, 128, 128, 255)
+    );
+
+    // Active caption gradient: navy at the left column, ~#1084D0 at the right.
+    assert_eq!(surface.pixel(4, 10).unwrap().to_rgba(), (0, 0, 128, 255));
+    let (r, g, b, _) = surface.pixel(75, 10).unwrap().to_rgba();
+    assert!((14..=18).contains(&r), "gradient right red {r}");
+    assert!((130..=208).contains(&g), "gradient right green {g}");
+    assert!((190..=208).contains(&b), "gradient right blue {b}");
+
+    // Close button: raised ButtonFace face pixel, black ✕ glyph pixel.
     assert_eq!(
         surface
             .pixel((button.x + 2) as u32, (button.y + 2) as u32)
             .unwrap()
             .to_rgba(),
-        (192, 0, 0, 255)
+        (192, 192, 192, 255)
+    );
+    let glyph_x = button.x + (button.width as i32 - 8) / 2;
+    let glyph_y = button.y + (button.height as i32 - 7) / 2;
+    assert_eq!(
+        surface
+            .pixel(glyph_x as u32, glyph_y as u32)
+            .unwrap()
+            .to_rgba(),
+        (0, 0, 0, 255)
     );
 
     let inactive = FrameChrome {
@@ -88,10 +131,18 @@ fn test_classic_key_pixels_regression() {
     let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (80, 50));
     theme::draw_frame_for(ThemeKind::Classic, &inactive, &mut canvas);
     drop(canvas);
-    assert_eq!(surface.pixel(0, 0).unwrap().to_rgba(), (150, 150, 150, 255));
+
+    // Bevel is unchanged by focus…
+    assert_eq!(surface.pixel(0, 0).unwrap().to_rgba(), (223, 223, 223, 255));
+    assert_eq!(surface.pixel(79, 49).unwrap().to_rgba(), (0, 0, 0, 255));
+    // …only the caption gradient recolors to the inactive grey ramp.
     assert_eq!(
-        surface.pixel(10, 10).unwrap().to_rgba(),
-        (100, 100, 100, 255)
+        surface.pixel(4, 10).unwrap().to_rgba(),
+        (128, 128, 128, 255)
+    );
+    assert_eq!(
+        surface.pixel(75, 10).unwrap().to_rgba(),
+        (181, 181, 181, 255)
     );
 }
 

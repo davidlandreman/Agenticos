@@ -15,9 +15,14 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   visible top-level subtree into separate premultiplied surfaces, builds a flat
   scene, CPU-composes damage, and presents through the boot framebuffer or
   VirtIO-GPU 2D.
-- `theme/` — boot-selected frame theme. `classic` preserves the historical
-  chrome; `aero` supplies translucent rounded glass, shadows, and backdrop blur
-  metadata for retained composition.
+- `theme/` — boot-selected frame theme. `classic` renders Windows 98 "Windows
+  Standard" chrome — a raised 3D bevel border, a horizontal caption gradient
+  (navy→blue active, grey inactive), an 8pt-ish bold caption font, and a raised
+  ButtonFace close button with a bitmap ✕; the bevel does not follow focus, only
+  the caption does. `aero` supplies translucent rounded glass, shadows, and
+  backdrop blur metadata for retained composition. Caption-button geometry for
+  both is data-driven via `FrameMetrics.button_*`, shared by painting and
+  `manager.rs` hit-testing through `theme::close_button_rect`.
 - `screen.rs` — virtual screen abstraction (today there is one physical display).
 - `console.rs` — kernel `print!` macro output buffer.
 - `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.
