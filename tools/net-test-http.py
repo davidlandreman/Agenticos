@@ -12,7 +12,7 @@ def main():
             return
         request.extend(chunk)
 
-    body = b"AgenticOS numeric HTTP OK\n"
+    body = b"AgenticOS HTTP OK\n"
     response = (
         b"HTTP/1.0 200 OK\r\n"
         b"Content-Type: text/plain\r\n"

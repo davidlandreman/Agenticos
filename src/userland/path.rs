@@ -67,35 +67,6 @@ pub fn copy_user_cstr(ptr: u64) -> Result<String, i64> {
     Err(ENAMETOOLONG)
 }
 
-/// Apply the U4 `/etc/...` allowlist rewrite to a *normalized* path.
-/// Caller MUST have already run `normalize_path` so `..` segments are
-/// collapsed — a path like `/etc/../etc/shadow` would otherwise match
-/// the prefix here and rewrite surprisingly. The security finding from
-/// the doc-review pass made this ordering a hard requirement: never
-/// run the rewrite on the raw user string.
-///
-/// Today's allowlist is just `/etc/...` → `/host/etc/...`. This makes
-/// musl's `getpwuid_r` find `/etc/passwd` (staged at
-/// `host_share/ETC/PASSWD` by build.sh / test.sh). Other paths are
-/// returned unchanged.
-///
-/// Known cosmetic limitation: `chdir("/etc")` rewrites to
-/// `chdir("/host/etc")`, so the user-visible cwd becomes `/host/etc`.
-/// Acceptable for Phase A-C; a real `/etc` VFS mount is the long-term
-/// fix.
-pub fn apply_fs_rewrite(normalized: &str) -> String {
-    if normalized == "/etc" {
-        return String::from("/host/etc");
-    }
-    if let Some(rest) = normalized.strip_prefix("/etc/") {
-        let mut out = String::with_capacity("/host/etc/".len() + rest.len());
-        out.push_str("/host/etc/");
-        out.push_str(rest);
-        return out;
-    }
-    String::from(normalized)
-}
-
 /// Resolve `path` against `cwd`. Absolute paths ignore `cwd`; relative
 /// paths are anchored at `cwd`. The result is normalized:
 /// - leading/repeated `/` collapse,
@@ -162,36 +133,9 @@ mod tests_internal {
         assert_eq!(normalize_path("/host", "."), "/host");
     }
 
-    // ---------- U4: /etc rewrite ----------
-
-    pub fn test_etc_rewrite_passwd() {
-        assert_eq!(apply_fs_rewrite("/etc/passwd"), "/host/etc/passwd");
-        assert_eq!(apply_fs_rewrite("/etc/group"), "/host/etc/group");
-    }
-
-    pub fn test_etc_rewrite_bare_etc() {
-        // /etc by itself rewrites to /host/etc — `cd /etc` then `pwd`
-        // would land at /host/etc (acceptable cosmetic limitation).
-        assert_eq!(apply_fs_rewrite("/etc"), "/host/etc");
-    }
-
-    pub fn test_etc_rewrite_pass_through() {
-        // Non-/etc paths are unchanged.
-        assert_eq!(apply_fs_rewrite("/host/zsh.elf"), "/host/zsh.elf");
-        assert_eq!(apply_fs_rewrite("/"), "/");
-        assert_eq!(apply_fs_rewrite("/etcetera/foo"), "/etcetera/foo"); // not /etc/
-    }
-
-    pub fn test_etc_rewrite_after_normalize_collapses_traversal() {
-        // The security-critical ordering: normalize_path collapses ..
-        // segments first, so /etc/../etc/shadow → /etc/shadow → rewrite
-        // to /host/etc/shadow (which doesn't exist on the FAT mount,
-        // returning ENOENT as expected). Without normalize_path first
-        // the raw string would still match /etc/ and rewrite to
-        // /host/etc/../etc/shadow.
+    pub fn test_etc_paths_normalize_into_runtime_namespace() {
         let normalized = normalize_path("/host", "/etc/../etc/shadow");
         assert_eq!(normalized, "/etc/shadow");
-        assert_eq!(apply_fs_rewrite(&normalized), "/host/etc/shadow");
     }
 
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
@@ -200,10 +144,7 @@ mod tests_internal {
             &test_normalize_relative_anchors_at_cwd,
             &test_normalize_collapses_redundancy,
             &test_normalize_root_idempotent,
-            &test_etc_rewrite_passwd,
-            &test_etc_rewrite_bare_etc,
-            &test_etc_rewrite_pass_through,
-            &test_etc_rewrite_after_normalize_collapses_traversal,
+            &test_etc_paths_normalize_into_runtime_namespace,
         ]
     }
 }

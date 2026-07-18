@@ -6,10 +6,13 @@
 
 pub mod abi;
 mod config;
+mod resolver_config;
 pub mod socket;
 mod stack;
 
 pub use config::NetworkConfig;
+#[cfg(feature = "test")]
+pub use resolver_config::resolver_tests;
 
 use alloc::string::String;
 use lazy_static::lazy_static;
@@ -43,9 +46,12 @@ fn network_worker() {
 
 pub fn poll_once() -> bool {
     socket::drain_deferred_closes();
-    let changed = with_stack_mut(NetworkStack::poll_once).unwrap_or(false);
-    crate::userland::lifecycle::wake_ring3_blocked_on_network(changed);
-    changed
+    let outcome = with_stack_mut(NetworkStack::poll_once).unwrap_or_default();
+    if outcome.config_changed {
+        resolver_config::publish(outcome.config);
+    }
+    crate::userland::lifecycle::wake_ring3_blocked_on_network(outcome.changed);
+    outcome.changed
 }
 
 pub fn drain_deferred_closes() {

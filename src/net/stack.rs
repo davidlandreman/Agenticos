@@ -21,6 +21,13 @@ pub(super) struct NetworkStack {
     config: NetworkConfig,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct PollOutcome {
+    pub(super) changed: bool,
+    pub(super) config_changed: bool,
+    pub(super) config: NetworkConfig,
+}
+
 impl NetworkStack {
     pub(super) fn new() -> Option<Self> {
         let mut device = VirtioNet::discover()?;
@@ -42,13 +49,14 @@ impl NetworkStack {
         })
     }
 
-    pub(super) fn poll_once(&mut self) -> bool {
+    pub(super) fn poll_once(&mut self) -> PollOutcome {
         let timestamp = now();
         let mut changed = matches!(
             self.interface
                 .poll(timestamp, &mut self.device, &mut self.sockets),
             PollResult::SocketStateChanged
         );
+        let mut config_changed = false;
         let event = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll();
         match event {
             Some(dhcpv4::Event::Configured(config)) => {
@@ -92,6 +100,7 @@ impl NetworkStack {
                     );
                     self.config = snapshot;
                     changed = true;
+                    config_changed = true;
                 }
             }
             Some(dhcpv4::Event::Deconfigured) => {
@@ -102,11 +111,16 @@ impl NetworkStack {
                     debug_info!("DHCP lease lost");
                     self.config = NetworkConfig::default();
                     changed = true;
+                    config_changed = true;
                 }
             }
             None => {}
         }
-        changed
+        PollOutcome {
+            changed,
+            config_changed,
+            config: self.config,
+        }
     }
 
     pub(super) fn config(&self) -> NetworkConfig {

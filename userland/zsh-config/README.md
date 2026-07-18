@@ -1,12 +1,16 @@
 # AgenticOS zsh configuration
 
-Committed, toolchain-independent files staged into the guest's read-only
-`/etc` namespace by `build.sh` and `test.sh`:
+Committed, toolchain-independent files staged under the read-only `/host`
+share by `build.sh` and `test.sh`, then imported into the kernel-managed
+runtime `/etc` namespace during boot:
 
 - `zshrc` becomes `/etc/zshrc`.
 - `agnoster.zsh-theme` becomes `/etc/zsh/agnoster.zsh-theme`.
 - `functions/*` become `/etc/zsh/functions/*` and are refreshed from the
   pinned zsh 5.9 tarball with `make -C userland/apps/zsh functions`.
+
+`stage_zsh_config` also writes a function manifest so the kernel can import
+the complete pruned library without relying on VFS directory enumeration.
 
 The agnoster theme is vendored from oh-my-zsh commit
 `ac5295678f3325de1a69f9e2a603d69573112d05` (the last pre-Terraform version)

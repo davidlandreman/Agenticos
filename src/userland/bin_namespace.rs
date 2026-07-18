@@ -177,6 +177,7 @@ pub const APPLETS: &[&str] = &[
     "nohup",
     "nologin",
     "nproc",
+    "nslookup",
     "od",
     "partprobe",
     "paste",
@@ -331,7 +332,7 @@ pub fn lookup_gui(name: &str) -> Option<&'static str> {
 ///
 /// Caller MUST pass a `normalize_path`-normalized string. Raw user
 /// input must run through `normalize_path` first so `/bin/../etc/shadow`
-/// can't slip past — same security ordering as `apply_fs_rewrite`.
+/// can't slip past the namespace checks.
 pub fn apply_bin_rewrite(normalized: &str) -> Option<(&'static str, &'static str)> {
     let after = normalized.strip_prefix("/bin/")?;
     // Single path component only — `/bin/ls` matches; `/bin/ls/extra`

@@ -68,17 +68,22 @@ stage_zsh_config() {
     _prebuilt_atomic_copy "$source_dir/agnoster.zsh-theme" "$zsh_dir/agnoster.zsh-theme"
 
     local source_file count=0
+    local manifest_tmp="$zsh_dir/.FUNCTIONS.MANIFEST.tmp.$$"
+    : > "$manifest_tmp"
     for source_file in "$source_dir"/functions/*; do
         [ -f "$source_file" ] || continue
         _prebuilt_atomic_copy "$source_file" "$functions_dir/${source_file##*/}"
+        printf '%s\n' "${source_file##*/}" >> "$manifest_tmp"
         count=$((count + 1))
     done
     if [ "$count" -eq 0 ]; then
+        rm -f "$manifest_tmp"
         echo "❌ No zsh functions found under $source_dir/functions"
         return 1
     fi
+    mv -f "$manifest_tmp" "$zsh_dir/FUNCTIONS.MANIFEST"
 
-    echo "📦 Staged /etc/zshrc, agnoster, and $count zsh functions"
+    echo "📦 Staged runtime /etc zsh sources: zshrc, agnoster, and $count functions"
 }
 
 # Stage ZSH.ELF. Returns 0 on success (file present in host_share), 1

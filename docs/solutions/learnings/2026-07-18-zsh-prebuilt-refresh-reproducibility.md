@@ -60,6 +60,6 @@ successful `make` alone:
 - Generated `config.h` defines `GLOBAL_ZSHRC` while the unused global rc files
   remain undefined.
 
-The normal `./test.sh` boot then proves the committed ELF, staged `/etc` tree,
-and kernel syscall surface work together without requiring the cross-toolchain
-on subsequent clones.
+The normal `./test.sh` boot then proves the committed ELF, staged zsh source
+tree, runtime `/etc` import, and kernel syscall surface work together without
+requiring the cross-toolchain on subsequent clones.

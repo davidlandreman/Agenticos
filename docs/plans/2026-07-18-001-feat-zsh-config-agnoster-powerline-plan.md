@@ -15,6 +15,11 @@ related_docs:
 
 # feat: zsh startup config + agnoster prompt with Powerline font
 
+> Implementation note: after this plan was written, the DHCP-backed DNS work
+> replaced the broad `/etc` path rewrite with a kernel-managed runtime `/etc`.
+> The zsh files are still staged under read-only `/host`, but boot now imports
+> them into runtime `/etc` using a generated function manifest.
+
 ## Summary
 
 Today the terminal boots ring-3 zsh with **no startup files at all**: the
