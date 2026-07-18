@@ -85,6 +85,15 @@ impl<T> PreemptionMutex<T> {
         }
     }
 
+    /// Whether the underlying spin mutex is currently held.
+    ///
+    /// This is intended for debug lock-order assertions only. The value can
+    /// change immediately after it is observed, so callers must not use it to
+    /// make synchronization decisions.
+    pub fn is_locked(&self) -> bool {
+        self.inner.is_locked()
+    }
+
     #[cfg_attr(
         not(feature = "test"),
         expect(dead_code, reason = "test coverage and future non-blocking callers")
