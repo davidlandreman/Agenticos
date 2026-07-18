@@ -48,6 +48,10 @@ pub const PAINTING_HOST_PATH: &str = "/host/PAINTING.ELF";
 
 pub const CALC_HOST_PATH: &str = "/host/CALC.ELF";
 
+/// TinyCC: on-target C compiler. `tcc` and the traditional `cc` alias
+/// both rewrite here; argv[0] keeps the invoked name.
+pub const TCC_HOST_PATH: &str = "/host/TCC.ELF";
+
 /// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
 /// MUST stay in sync with the match arms in
 /// [`crate::commands::gui_launch_table::spawn_by_name`]; a test in
@@ -59,7 +63,7 @@ pub const GUI_APPLETS: &[&str] = &["explorer", "tasks"];
 
 /// Sorted standalone executables synthesized into `/bin` without a multicall
 /// launcher. `apply_bin_rewrite` maps each name directly to its staged ELF.
-pub const DIRECT_APPLETS: &[&str] = &["calc", "notepad", "painting"];
+pub const DIRECT_APPLETS: &[&str] = &["calc", "cc", "notepad", "painting", "tcc"];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
 /// `/bin/<name>`. Binary-searched on every lookup. MUST stay sorted —
@@ -343,6 +347,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
     let canonical = DIRECT_APPLETS[index];
     let path = match canonical {
         "calc" => CALC_HOST_PATH,
+        "cc" | "tcc" => TCC_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,
         "painting" => PAINTING_HOST_PATH,
         _ => return None,

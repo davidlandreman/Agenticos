@@ -66,6 +66,8 @@ pub mod splitter_tests;
 #[cfg(feature = "test")]
 pub mod surface_alpha;
 #[cfg(feature = "test")]
+pub mod tcc;
+#[cfg(feature = "test")]
 pub mod text_editor_migration_tests;
 #[cfg(feature = "test")]
 pub mod toolbar_status_tests;
@@ -124,6 +126,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("gui_userland", gui_userland::get_tests),
     ("vm", vm::get_tests),
     ("compiler_compat", compiler_compat::get_tests),
+    ("tcc", tcc::get_tests),
     ("userland_switch", userland_switch::get_tests),
     ("path", crate::userland::path::path_tests),
     ("etc", crate::userland::etc::etc_tests),
