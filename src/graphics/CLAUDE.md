@@ -30,7 +30,7 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
   premultiplied source-over. The result is fenced and directly scanned out from
   the host texture. Layer opacity is draw state rather than cached pixel data,
   so movement/focus/opacity-only frames reuse textures without upload or GPU
-  object churn. Qualified VirGL supports Aero's radius-4 blurred glass without
+  object churn. Qualified VirGL supports Aero's radius-6 blurred glass without
   ordinary-frame readback; unsupported effect radii fail composition instead
   of silently rendering sharp glass.
   The same physical VirGL context owns logical GL client targets: two color

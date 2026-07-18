@@ -100,7 +100,7 @@ pub const AERO_METRICS: FrameMetrics = FrameMetrics {
     button_right_margin: 4,
 };
 
-pub const AERO_BACKDROP_RADIUS: u16 = 4;
+pub const AERO_BACKDROP_RADIUS: u16 = 6;
 
 pub struct FrameChrome<'a> {
     pub bounds: Rect,
