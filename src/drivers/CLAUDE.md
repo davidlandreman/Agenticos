@@ -13,6 +13,10 @@ PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet for se
 - `mouse_old.rs` — legacy mouse code; **triage before relying on it**. If dead, remove in a separate PR; if intentional, document why.
 - `virtio/mod.rs` — VirtIO module init.
 - `virtio/common.rs` — VirtIO device abstraction and Virtqueue.
+- `virtio/gpu/` — VirtIO 1.3 GPU wire layouts, checked control/cursor queues,
+  guest-backed 2D resources, display discovery/events, exact damage transfer +
+  flush, and scanout lifecycle. This is a presenter, not an accelerated
+  composition engine.
 - `virtio/input.rs` — VirtIO tablet (absolute pointing, seamless mouse in QEMU).
 - `display/` — framebuffer driver. `display.rs` controls single/double buffering (the `USE_DOUBLE_BUFFER` flag lives here even though graphics primitives live in `src/graphics/`). `frame_buffer.rs` is the low-level abstraction; `text_buffer.rs` and `double_buffered_text.rs` handle text rendering; `double_buffer.rs` provides the 8 MiB static back buffer.
 
@@ -33,6 +37,14 @@ During boot, the kernel:
 3. **If absent**: falls back to PS/2 mouse on IRQ12 (relative positioning; QEMU grabs the mouse).
 
 The VirtIO tablet requires `-device virtio-tablet-pci` in the QEMU command line. `./build.sh` includes this flag.
+
+## VirtIO-GPU selection
+
+Modern GPU PCI device type 16 is discovered through cached PCI enumeration.
+Only explicitly understood features are negotiated. `scripts/qemu-compositor.sh`
+probes the exact `AGENTICOS_QEMU_BIN`: retained mode can request `virtio-vga`
+for 2D scanout, while GL device names are used only for `gpu`/`auto`. Presence
+of `virtio-vga-gl` alone never makes the kernel report acceleration.
 
 ## PS/2 mouse packet format
 

@@ -8,6 +8,14 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
 - `core_gfx.rs` — primitives: Bresenham lines, circles, rectangles, polygons.
 - `core_text.rs` — font-agnostic text rendering.
 - `compositor.rs` — dirty-rectangle tracking and cursor-overlay management.
+- `surface.rs` — retained canonical premultiplied ARGB8888 surfaces, local
+  damage merging, and explicit allocation budgeting.
+- `scene.rs` — backend-neutral ordered layers, opacity, 16.16 transforms, and
+  reserved effect metadata.
+- `composition/cpu.rs` — pixel-correct premultiplied source-over reference
+  compositor and runtime fallback.
+- `present/` — scanout boundary. The boot-framebuffer presenter converts only
+  damaged pixels; VirtIO-GPU 2D presentation is owned by `src/drivers/`.
 - `framebuffer.rs` — region save/restore (`SavedRegion`, `RegionCapableBuffer` trait).
 - `render.rs` — `RenderTarget` abstraction for efficient row-based drawing.
 - `mouse_cursor.rs` — 12×12 arrow sprite with background save/restore.
@@ -20,6 +28,12 @@ Controlled by the `USE_DOUBLE_BUFFER` flag in `src/drivers/display/display.rs` (
 
 - **Enabled (default)** — 8 MiB static back buffer; smoother rendering at the cost of bulk copies.
 - **Disabled** — direct framebuffer writes; lower latency for small updates, no tearing protection for full-frame work.
+
+This buffer is part of the `legacy` renderer only. The `retained` renderer owns
+canonical output storage and does not use `WindowBuffer` as its surface format.
+Do not call VirtIO-GPU 2D composition acceleration: it only transfers the CPU-
+composed output. Actual acceleration remains gated on a VirGL render/readback
+smoke test.
 
 ## Performance notes
 

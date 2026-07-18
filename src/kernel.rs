@@ -21,6 +21,10 @@ pub fn init(boot_info: &'static mut BootInfo) {
     #[cfg(feature = "test")]
     crate::tests::filter::init();
 
+    // Rendering policy is another small read-only fw_cfg input. It is parsed
+    // before display/window-manager initialization and defaults to legacy.
+    crate::window::renderer::init_boot_policy();
+
     // Enable SSE/SSE2 in CR0/CR4 before any code path that could end up in
     // ring 3 (loader → enter_user_mode). musl + libstdc++ binaries emit SSE2
     // in `__init_tls` before reaching `main`; without this the first SSE
@@ -679,4 +683,3 @@ pub fn run() -> ! {
         x86_64::instructions::hlt();
     }
 }
-

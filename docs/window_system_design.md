@@ -209,16 +209,54 @@ pub enum EventResult {
 
 ## Rendering Pipeline
 
-### Double Buffering Per Window
+### Current dual-compositor architecture
 
-Each window maintains its own buffer to enable:
+Rendering policy is selected once at boot through QEMU `fw_cfg`:
+
+| Request | Behavior |
+|---|---|
+| `legacy` or missing | Existing immediate dirty-rectangle renderer, double buffer, and cursor background save/restore. This remains the default. |
+| `retained` | Premultiplied top-level surfaces, CPU scene composition, and boot-framebuffer or VirtIO-GPU 2D presentation. |
+| `auto` | Accelerated engine when its mandatory smoke gate passes, then retained CPU, then legacy. |
+| `gpu` | Same fallback unless strict mode is set; strict mode fails rather than silently claiming acceleration. |
+
+The retained pipeline separates widget rasterization, composition, and
+presentation. The desktop and each visible direct child of the desktop own one
+surface; descendants paint into their top-level ancestor's local surface using
+the existing tree order and clipping. Moving a same-size top-level window
+reuses its surface and damages composition only. Scene layers carry stable
+surface identity, bounds, clips, opacity, a 16.16 affine transform contract,
+and effect metadata.
+
+Surfaces and the CPU output use premultiplied `0xAARRGGBB`. The CPU engine is
+the executable source-over oracle and the runtime fallback. It recomposes only
+damaged output rectangles. `BootFramebufferPresenter` converts those pixels to
+the boot framebuffer; the VirtIO-GPU 2D presenter copies the same damage into a
+guest-backed resource and issues matching `TRANSFER_TO_HOST_2D` and
+`RESOURCE_FLUSH` commands. VirtIO-GPU 2D does not accelerate composition.
+
+The retained cursor is a final output overlay, so no framebuffer background is
+saved or restored. Hardware cursor protocol support exists on the dedicated
+VirtIO cursor queue and can replace that overlay after successful setup.
+
+VirGL is a hard gate, not a placeholder mode. The kernel does not select or log
+an accelerated engine until feature negotiation, a supported capset, known
+premultiplied-alpha rendering, synchronization, readback, and deterministic
+pixel comparison all succeed. Stock Homebrew QEMU on the current Apple Silicon
+development host lacks the required GL device, so retained CPU remains the
+working product path there.
+
+### Legacy backing buffers
+
+The compatibility renderer retains the existing framebuffer-native opt-in
+`WindowBuffer` cache. It is distinct from canonical retained surfaces:
 - Efficient partial redraws
 - Window compositing
 - Future transparency/effects
 
 ```rust
 pub struct WindowBuffer {
-    pixels: Vec<u32>,  // RGBA buffer
+    pixels: Vec<u8>,  // framebuffer-native bytes
     width: usize,
     height: usize,
     dirty_region: Option<Rect>,  // Area needing redraw
@@ -232,7 +270,7 @@ pub struct WindowBuffer {
 3. **Clipping**: Set clip rectangle to window bounds
 4. **Drawing**: Window paints itself via `paint()` method
 5. **Recursion**: Window asks children to paint
-6. **Compositing**: Buffers combined respecting z-order
+6. **Compositing**: Legacy windows paint immediately in z-order
 7. **Present**: Final composed image sent to THE physical framebuffer
 
 #### Hardware Reality
@@ -619,4 +657,4 @@ Not yet implemented:
 
 This window system design provides a flexible foundation for both text and graphical interfaces in AgenticOS. By treating everything as a window with a common event and rendering model, we can build sophisticated user interfaces while maintaining simplicity and consistency. The unique text-first hybrid mode sets AgenticOS apart by allowing rich graphical content to enhance text-based workflows without sacrificing the efficiency and clarity of a terminal interface.
 
-The implementation revealed important performance considerations around framebuffer access patterns and the trade-offs between double buffering and direct rendering. The current system achieves good mouse responsiveness while maintaining a clean architecture for future enhancements. 
+The implementation revealed important performance considerations around framebuffer access patterns and the trade-offs between double buffering and direct rendering. The current system achieves good mouse responsiveness while maintaining a clean architecture for future enhancements.

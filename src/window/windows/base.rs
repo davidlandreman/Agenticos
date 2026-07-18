@@ -1,7 +1,7 @@
 //! Base window implementation with common functionality
 
 use alloc::vec::Vec;
-use crate::window::{WindowId, Rect};
+use crate::window::{CompositorProperties, WindowId, Rect};
 
 /// Base window structure that provides common functionality
 pub struct WindowBase {
@@ -21,6 +21,8 @@ pub struct WindowBase {
     can_focus: bool,
     /// Whether this window currently has focus
     has_focus: bool,
+    compositor_properties: CompositorProperties,
+    composition_dirty: bool,
 }
 
 impl WindowBase {
@@ -35,6 +37,8 @@ impl WindowBase {
             needs_repaint: true,
             can_focus: false,
             has_focus: false,
+            compositor_properties: CompositorProperties::OPAQUE,
+            composition_dirty: false,
         }
     }
 
@@ -102,6 +106,15 @@ impl WindowBase {
     
     pub fn invalidate(&mut self) { self.needs_repaint = true; }
     pub fn clear_needs_repaint(&mut self) { self.needs_repaint = false; }
+    pub fn compositor_properties(&self) -> CompositorProperties { self.compositor_properties }
+    pub fn composition_dirty(&self) -> bool { self.composition_dirty }
+    pub fn set_compositor_properties(&mut self, properties: CompositorProperties) {
+        if self.compositor_properties != properties {
+            self.compositor_properties = properties;
+            self.composition_dirty = true;
+        }
+    }
+    pub fn clear_composition_dirty(&mut self) { self.composition_dirty = false; }
     
     pub fn set_focus(&mut self, focused: bool) { 
         self.has_focus = focused;

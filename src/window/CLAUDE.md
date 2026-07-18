@@ -10,6 +10,11 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `event.rs` — keyboard, mouse, and window events.
 - `graphics.rs` — `GraphicsDevice` trait that abstracts rendering targets.
 - `manager.rs` — `WindowManager`. Coordinates windows and screens. Owns `render_window_tree_with_offset`, which performs parent-child coordinate transformation.
+- `renderer/` — boot policy and two real renderer siblings. `legacy` preserves
+  the dirty framebuffer/cursor path; `retained` rasterizes the desktop and each
+  visible top-level subtree into separate premultiplied surfaces, builds a flat
+  scene, CPU-composes damage, and presents through the boot framebuffer or
+  VirtIO-GPU 2D.
 - `screen.rs` — virtual screen abstraction (today there is one physical display).
 - `console.rs` — kernel `print!` macro output buffer.
 - `cursor.rs` — `CursorRenderer`. Background save/restore for clean cursor movement.
@@ -56,6 +61,18 @@ There is a single source of truth for z-order: each parent's `children` Vec. `ch
 ## Cursor rendering
 
 Owned by this folder, NOT `src/drivers/`. `CursorRenderer` (in `cursor.rs`) saves the framebuffer region under the cursor before drawing, restores it before the next move. The 12×12 arrow sprite lives in `src/graphics/mouse_cursor.rs`. Cursor uses the direct-framebuffer adapter (the double-buffered path is too slow for cursor latency).
+
+That save/restore behavior applies only to `legacy`. In `retained`, the cursor
+is drawn as the final canonical output overlay after damaged regions have been
+recomposed; it never restores framebuffer background.
+
+## Renderer boot policy
+
+`build.sh` passes `opt/agenticos/compositor` (`legacy`, `retained`, `gpu`, or
+`auto`) and `opt/agenticos/gpu_strict` through QEMU `fw_cfg`. Missing policy
+defaults to `legacy`. `gpu` and `auto` currently fall back to retained CPU
+because accelerated mode is not exposed without a passing VirGL capset and
+alpha/readback smoke test. Strict GPU mode fails initialization instead.
 
 ## Implementation status
 

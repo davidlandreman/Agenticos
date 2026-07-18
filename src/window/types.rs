@@ -1,6 +1,7 @@
 //! Common types used throughout the window system
 
 use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::graphics::scene::{LayerEffect, Transform2D};
 
 /// Minimum window width for resizing
 pub const MIN_WINDOW_WIDTH: u32 = 100;
@@ -244,6 +245,34 @@ pub enum ColorDepth {
     Bit16,
     Bit24,
     Bit32,
+}
+
+/// Composition-only properties for a retained top-level layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositorProperties {
+    pub opacity: u8,
+    pub transform: Transform2D,
+    pub effect: LayerEffect,
+}
+
+impl CompositorProperties {
+    pub const OPAQUE: Self = Self {
+        opacity: u8::MAX,
+        transform: Transform2D::IDENTITY,
+        effect: LayerEffect::None,
+    };
+}
+
+impl Default for CompositorProperties {
+    fn default() -> Self { Self::OPAQUE }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositorCapabilities {
+    pub opacity: bool,
+    pub translation: bool,
+    pub backdrop_sample: bool,
+    pub accelerated: bool,
 }
 
 /// Cached layout information for a window.

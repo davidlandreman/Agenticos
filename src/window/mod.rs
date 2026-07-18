@@ -24,6 +24,7 @@ pub mod console;
 pub mod keyboard;
 pub mod cursor;
 pub mod compositor;
+pub mod renderer;
 pub mod terminal_factory;
 
 pub use types::*;
@@ -200,6 +201,27 @@ pub trait Window: Send {
     /// Mark this window as needing repaint
     fn invalidate(&mut self) {
         self.base_mut().invalidate();
+    }
+
+    /// Clear content invalidation after a retained position-only update.
+    fn clear_needs_repaint(&mut self) {
+        self.base_mut().clear_needs_repaint();
+    }
+
+    fn compositor_properties(&self) -> CompositorProperties {
+        self.base().compositor_properties()
+    }
+
+    fn set_compositor_properties(&mut self, properties: CompositorProperties) {
+        self.base_mut().set_compositor_properties(properties);
+    }
+
+    fn composition_dirty(&self) -> bool {
+        self.base().composition_dirty()
+    }
+
+    fn clear_composition_dirty(&mut self) {
+        self.base_mut().clear_composition_dirty();
     }
 
     /// Check if this window currently has focus

@@ -75,6 +75,16 @@ pub mod window_manager_render;
 pub mod window_buffer;
 #[cfg(feature = "test")]
 pub mod desktop_backing_store;
+#[cfg(feature = "test")]
+pub mod surface_alpha;
+#[cfg(feature = "test")]
+pub mod retained_scene;
+#[cfg(feature = "test")]
+pub mod composition_cpu;
+#[cfg(feature = "test")]
+pub mod compositor_selection;
+#[cfg(feature = "test")]
+pub mod virtio_gpu_protocol;
 
 #[cfg(feature = "test")]
 type GetTestsFn = fn() -> &'static [&'static dyn crate::lib::test_utils::Testable];
@@ -128,6 +138,11 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("window_manager_render", window_manager_render::get_tests),
     ("window_buffer", window_buffer::get_tests),
     ("desktop_backing_store", desktop_backing_store::get_tests),
+    ("surface_alpha", surface_alpha::get_tests),
+    ("retained_scene", retained_scene::get_tests),
+    ("composition_cpu", composition_cpu::get_tests),
+    ("compositor_selection", compositor_selection::get_tests),
+    ("virtio_gpu_protocol", virtio_gpu_protocol::get_tests),
     ("filter", filter::get_tests),
     ("terminal", crate::terminal::get_tests),
     ("vte", crate::terminal::vte::get_tests),
