@@ -1102,29 +1102,23 @@ pub fn rt_sigprocmask_handler(args: &mut SyscallArgs) -> i64 {
     0
 }
 
-/// `rt_sigsuspend(*mask, sigsetsize) -> int` — always returns `-EINTR`.
+/// `rt_sigsuspend(*mask, sigsetsize) -> int` — atomically replace the
+/// blocked-signal mask and sleep until a signal becomes actionable.
 ///
 /// POSIX: atomically replace the signal mask with `*mask`, suspend
 /// until a deliverable signal arrives, run its handler, then return
 /// with the original mask restored.
 ///
-/// Our kernel can't truly suspend (no scheduler that blocks user
-/// processes mid-syscall). Pragmatic implementation that works for
-/// zsh's `waitjobs` loop: install the new mask on the current process,
-/// return `-EINTR`. The dispatcher tail's `maybe_deliver_signal` then
-/// finds any pending handler-installed signal that the new mask
-/// unblocks (notably SIGCHLD, which our synchronous fork has already
-/// raised by the time zsh enters sigsuspend) and `iretq`s into the
-/// handler. The handler runs `waitpid`, reaps the zombie, returns via
-/// `rt_sigreturn`, and zsh sees the syscall returned `-EINTR`.
+/// The first entry saves the caller's original mask and installs the supplied
+/// temporary mask. If that exposes an already-pending signal, returning
+/// `-EINTR` lets the dispatcher tail deliver it immediately. Otherwise the
+/// process is parked until a signal raise calls `wake_ring3_for_signal`.
+/// Blocking rewinds RIP to re-fire the syscall, while the wake path sets
+/// `pending_syscall_interrupt`; the dispatcher therefore delivers the signal
+/// with an interrupted-syscall return before this handler runs again.
 ///
-/// Known gap: the original mask is not restored after the handler
-/// returns. `rt_sigreturn` only restores `UserState`, not `blocked`.
-/// Same gap exists for `sa_mask` on regular signal delivery. zsh
-/// re-asserts its mask via `rt_sigprocmask` on every `waitjobs`
-/// iteration, so this doesn't bite in practice. Real fix lands when we
-/// teach `deliver_signal` / `rt_sigreturn` to save and restore the
-/// blocked mask alongside `UserState`.
+/// Signal delivery consumes `suspend_restore_mask` into the signal frame, so
+/// `rt_sigreturn` restores the caller's original mask after the handler.
 pub fn rt_sigsuspend_handler(args: &mut SyscallArgs) -> i64 {
     use crate::userland::signal::{SIGKILL, SIGSTOP};
     let mask_ptr = args.rdi;
@@ -1138,14 +1132,26 @@ pub fn rt_sigsuspend_handler(args: &mut SyscallArgs) -> i64 {
         Err(e) => return e,
     };
     // POSIX: SIGKILL and SIGSTOP can never be blocked. Strip them so
-    // the new mask doesn't accidentally swallow a pending KILL/STOP
-    // bit during the (zero-duration) suspension window.
+    // the temporary mask cannot swallow KILL/STOP during suspension.
     let kill_stop_mask = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
     let sanitized = mask & !kill_stop_mask;
-    crate::userland::lifecycle::with_current_process(|p| {
+    let should_block = crate::userland::lifecycle::with_current_process(|p| {
+        if p.signal_state.suspend_restore_mask.is_none() {
+            p.signal_state.suspend_restore_mask = Some(p.signal_state.blocked);
+        }
         p.signal_state.blocked = sanitized;
+        !p.signal_state.has_actionable_pending()
     });
-    EINTR
+    if !should_block {
+        return EINTR;
+    }
+
+    unsafe {
+        crate::userland::switch::block_current_ring3_and_yield(
+            args,
+            crate::userland::lifecycle::Ring3BlockReason::WaitingForSignal,
+        );
+    }
 }
 
 // ---------- credentials ----------
@@ -1897,6 +1903,25 @@ pub fn handler_blocked_mask(old_blocked: u64, sa_mask: u64, signum: i32) -> u64 
     (old_blocked | sa_mask | (1u64 << (signum - 1))) & !kill_stop_mask
 }
 
+/// Consume one deliverable handled signal and install the mask that must be
+/// active while its user handler runs. The returned mask is the one the
+/// signal frame must restore: normally the pre-delivery mask, or the original
+/// pre-`sigsuspend` mask when delivery completes a suspended wait.
+pub fn prepare_deliverable_signal() -> Option<(i32, crate::userland::signal::SigAction, u64)> {
+    crate::userland::lifecycle::with_current_process(|p| {
+        let (sig, action) = p.signal_state.consume_deliverable()?;
+        let delivery_mask = p.signal_state.blocked;
+        let restore_mask = p
+            .signal_state
+            .suspend_restore_mask
+            .take()
+            .unwrap_or(delivery_mask);
+        let handler_mask = handler_blocked_mask(delivery_mask, action.sa_mask, sig);
+        p.signal_state.blocked = handler_mask;
+        Some((sig, action, restore_mask))
+    })
+}
+
 pub fn maybe_deliver_signal(args: &SyscallArgs, syscall_ret: i64) -> Option<i64> {
     // U9 invariant (production): the dispatcher tail calls us right
     // after a ring-3 SYSCALL returned through the dispatcher. The
@@ -1940,16 +1965,9 @@ pub fn maybe_deliver_signal(args: &SyscallArgs, syscall_ret: i64) -> Option<i64>
             crate::userland::lifecycle::cooperative_exit(code);
         }
     }
-    let prepared = crate::userland::lifecycle::with_current_process(|p| {
-        let (sig, action) = p.signal_state.consume_deliverable()?;
-        let old_blocked = p.signal_state.blocked;
-        let handler_mask = handler_blocked_mask(old_blocked, action.sa_mask, sig);
-        p.signal_state.blocked = handler_mask;
-        Some((sig, action, old_blocked))
-    });
-    if let Some((sig, action, old_blocked)) = prepared {
+    if let Some((sig, action, restore_mask)) = prepare_deliverable_signal() {
         unsafe {
-            deliver_signal(sig, action, args, syscall_ret, old_blocked);
+            deliver_signal(sig, action, args, syscall_ret, restore_mask);
         }
     }
     None

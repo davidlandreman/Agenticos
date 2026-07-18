@@ -122,6 +122,10 @@ Each process owns:
   SIGALRM delivery. Timer expiry is processed by kernel housekeeping and the
   inline test dispatcher; a signal-woken blocking syscall re-enters the
   dispatcher as `-EINTR` so its handler runs before the syscall can re-block.
+- `signal_state.suspend_restore_mask` preserves the caller's original mask
+  while blocking `rt_sigsuspend` temporarily replaces it. Actionable signals
+  wake `Ring3BlockReason::WaitingForSignal`; delivery transfers the saved mask
+  into the user signal frame for `rt_sigreturn` to restore.
 - `utime_ticks` (CPU time charged by the timer ISR whenever it observes the
   process at CPL=3 — sampled, so sub-tick syscall time is unattributed) and
   `cmdline` (retained argv, capped at `CMDLINE_MAX_BYTES`), both read by
