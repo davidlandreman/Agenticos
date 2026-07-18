@@ -19,7 +19,7 @@ use crate::window::windows::layout::Spacer;
 use crate::window::windows::splitter::{
     Splitter, SplitterOrientation, DIVIDER_WIDTH,
 };
-use crate::window::{with_window_manager, Rect, Window, WindowId};
+use crate::window::{with_window_manager, Rect, WindowId};
 
 // ---------------------------------------------------------------------------
 // Synthetic event helpers

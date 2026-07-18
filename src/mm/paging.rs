@@ -4,11 +4,14 @@ use alloc::vec::Vec;
 use bootloader_api::info::MemoryRegions;
 use x86_64::{
     structures::paging::{
-        mapper::MapToError, page_table::PageTableLevel, FrameAllocator, Mapper, OffsetPageTable,
-        Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
+        mapper::MapToError, FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
+        PageTableFlags, PhysFrame, Size4KiB, Translate,
     },
     PhysAddr, VirtAddr,
 };
+
+#[cfg(feature = "test")]
+use x86_64::structures::paging::page_table::PageTableLevel;
 
 /// Base virtual address where a static non-PIE user binary is loaded.
 pub const USER_LOAD_BASE: u64 = 0x0000_0000_0040_0000;
@@ -426,7 +429,7 @@ impl MemoryMapper {
         }
     }
 
-    pub fn frame_bytes_mut(&self, frame: PhysFrame<Size4KiB>) -> &mut [u8; 0x1000] {
+    pub fn frame_bytes_mut(&mut self, frame: PhysFrame<Size4KiB>) -> &mut [u8; 0x1000] {
         unsafe {
             &mut *((self.physical_memory_offset.as_u64() + frame.start_address().as_u64())
                 as *mut [u8; 0x1000])

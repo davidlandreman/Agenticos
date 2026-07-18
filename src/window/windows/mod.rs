@@ -42,10 +42,14 @@ pub use menu_bar::{MenuBar, MenuItemDef, PendingPopup, MENU_BAR_HEIGHT};
 pub use menu_bar_popup::MenuBarPopup;
 pub use layout::{HBox, Padding, SizeHint, Spacer, VBox};
 pub use scroll_view::ScrollView;
+#[allow(unused_imports)]
 pub use tree_view::{TreeView, TreeNode, NodeId};
+#[allow(unused_imports)]
 pub use splitter::{Splitter, SplitterOrientation};
 pub use toolbar::Toolbar;
 pub use status_bar::StatusBar;
 pub use path_bar::PathBar;
+#[allow(unused_imports)]
 pub use icon_view::{IconView, Tile};
+#[allow(unused_imports)]
 pub use progress_bar::ProgressBar;

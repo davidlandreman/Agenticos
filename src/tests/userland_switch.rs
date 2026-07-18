@@ -417,7 +417,7 @@ fn test_try_preempt_ring3_switches_to_other() {
 /// raise targeted the correct slot.
 fn test_signal_raised_on_other_process_does_not_land_in_current() {
     use crate::userland::lifecycle::{
-        insert_process, remove_process, set_current_user_pid, with_process,
+        remove_process, set_current_user_pid, with_process,
     };
     use crate::userland::signal::SIGUSR1;
 
@@ -461,7 +461,7 @@ fn test_signal_raised_on_other_process_does_not_land_in_current() {
 /// returns from a syscall.
 fn test_signal_delivery_consumes_from_current_only() {
     use crate::userland::lifecycle::{
-        insert_process, remove_process, set_current_user_pid, with_process,
+        remove_process, set_current_user_pid, with_process,
     };
     use crate::userland::signal::{SigAction, SIGUSR1};
 

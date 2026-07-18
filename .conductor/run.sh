@@ -10,6 +10,13 @@ set -euo pipefail
 # Conductor sets CONDUCTOR_WORKSPACE_PATH; honor it but tolerate manual runs.
 cd "${CONDUCTOR_WORKSPACE_PATH:-$(git rev-parse --show-toplevel)}"
 
+# build.sh's manual-run default is machine-global. Give each Conductor
+# workspace its own RPC socket so parallel QEMUs cannot unlink or replace one
+# another's endpoint.
+if [[ -z "${AGENTICOS_RPC_SOCK:-}" && -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]]; then
+    export AGENTICOS_RPC_SOCK="/tmp/agenticos-rpc-${CONDUCTOR_WORKSPACE_NAME}.sock"
+fi
+
 # Per-workspace override hook. Dropping a .conductor/run.local.sh in a
 # workspace lets you experiment with QEMU flags (e.g. -gdb, -d int)
 # without dirtying git. The file is gitignored.

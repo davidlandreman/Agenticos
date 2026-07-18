@@ -1,7 +1,11 @@
 use core::panic::PanicInfo;
+#[cfg(not(feature = "test"))]
 use crate::drivers::display::text_buffer;
+#[cfg(not(feature = "test"))]
 use crate::graphics::color::Color;
-use crate::{debug_error, println};
+use crate::debug_error;
+#[cfg(not(feature = "test"))]
+use crate::println;
 
 #[cfg(not(feature = "test"))]
 #[panic_handler]

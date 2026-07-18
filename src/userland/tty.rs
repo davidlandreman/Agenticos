@@ -12,6 +12,7 @@
 //! the rare case where the kernel touches tty state before a real
 //! terminal exists (early boot, tests that don't model a window).
 
+#[allow(unused_imports)]
 pub use crate::terminal::pty::{
     Termios, Winsize, ECHO, ECHOE, ECHOK, ICANON, ICRNL, IEXTEN, ISIG, IXON, NCCS, ONLCR, OPOST,
     VEOF, VERASE, VINTR, VKILL, VMIN, VQUIT, VSUSP, VTIME,

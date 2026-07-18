@@ -11,7 +11,7 @@ This doc explains what's wired up, how it stays isolated, and how to extend it.
 | File | Purpose |
 |---|---|
 | `conductor.json` | Lifecycle config Conductor reads when opening the repo. |
-| `.conductor/setup.sh` | Runs **once** when Conductor creates a workspace. Installs the pinned Rust toolchain, verifies QEMU, seeds personal Claude Code permissions. |
+| `.conductor/setup.sh` | Runs **once** when Conductor creates a workspace. Installs the pinned Rust toolchain, verifies QEMU, seeds personal Claude Code permissions, and warms the release build cache. |
 | `.conductor/run.sh` | Runs every time you click **Run** in a workspace. Delegates to `./build.sh`. |
 | `.conductor/archive.sh` | Runs before Conductor archives a workspace. Kills any QEMU process scoped to that workspace. |
 | `.conductor/run.local.sh` | Optional, gitignored. Drop one in a workspace to override `run.sh` (e.g., add `-gdb` flags) without dirtying git. |
@@ -36,7 +36,8 @@ Conductor uses `git worktree` under the hood: each workspace is a separate worki
 |---|---|---|
 | Cargo `target/` directory | Two parallel `cargo build`s on a shared target dir corrupt each other. | Cargo resolves `target/` relative to the manifest dir, so each worktree gets its own automatically. `build.rs` derives every path from `CARGO_MANIFEST_DIR` (no absolute paths). |
 | Bootloader disk image | `target/bootloader/bios.img` would collide. | Lives inside per-worktree `target/`, so naturally isolated. `build.sh` and `test.sh` honor an `AGENTICOS_BIOS_IMAGE` override if you want to point at a custom path. |
-| QEMU process | Two QEMUs from the same workspace fight over stdio. | `runScriptMode: "nonconcurrent"` in `conductor.json` makes Conductor SIGTERM the prior QEMU before launching a new one in the same workspace. Different workspaces still run concurrently. |
+| QEMU process | Two QEMUs from the same workspace fight over stdio. | `runScriptMode: "nonconcurrent"` in `conductor.json` makes Conductor stop the prior QEMU before launching a new one in the same workspace. Different workspaces still run concurrently. |
+| QEMU RPC socket | A machine-global `/tmp/agenticos-rpc.sock` would be unlinked by the next workspace to start. | `.conductor/run.sh` sets `AGENTICOS_RPC_SOCK` from `CONDUCTOR_WORKSPACE_NAME`; archive removes that workspace's socket. |
 | Cargo registry / git index (`~/.cargo`) | None — cargo handles concurrent reads safely. | Shared by design; second-workspace builds are fast. |
 | Personal Claude Code permissions | `.claude/settings.local.json` is gitignored, so it isn't carried into a new worktree. | `.conductor/setup.sh` copies it from `$CONDUCTOR_ROOT_PATH` if present, otherwise creates an empty allowlist. Shared `.claude/settings.json` (plugin enablement + base permissions) is committed and inherited automatically. |
 
@@ -81,7 +82,7 @@ exec ./build.sh -d
 
 **Adding MCP servers per workspace:** Conductor reads `.mcp.json` at the repo root if present. AgenticOS does not ship one yet; add it the first time you wire up an MCP server.
 
-**Customizing toolchain installation:** edit `.conductor/setup.sh`. The script intentionally avoids running `cargo build` so workspace creation stays fast — keep it that way.
+**Customizing toolchain installation:** edit `.conductor/setup.sh`. The script runs `./build.sh -n` once to warm each workspace's independent Cargo and boot-image cache; expect initial workspace creation to take longer than later Run clicks.
 
 ---
 

@@ -4,7 +4,7 @@ use crate::fs::fat::fat_table::FatTable;
 use crate::fs::fat::directory::{DirectoryEntry as RawDirEntry, DirectoryIterator, LongFileNameEntry};
 use crate::fs::fat::lfn::{
     encode_lfn_run, fits_short_name, format_short_name_with_case, generate_short_name,
-    lfn_slot_count, short_name_checksum, LfnAccumulator, MAX_LFN_UTF8,
+    LfnAccumulator, MAX_LFN_UTF8,
 };
 use crate::fs::fat::types::{FatType, FatError, ClusterId};
 use crate::debug_info;
@@ -546,9 +546,6 @@ impl<'a> FatFilesystem<'a> {
 
         let last = components.len() - 1;
         let mut current_cluster: Option<ClusterId> = None;
-        let mut long_name = [0u8; MAX_LFN_UTF8];
-        let mut long_len: usize = 0;
-
         for (idx, component) in components.iter().enumerate() {
             let mut found: Option<(ClusterId, u32, bool)> = None;
             let mut tmp_name = [0u8; MAX_LFN_UTF8];
@@ -568,8 +565,6 @@ impl<'a> FatFilesystem<'a> {
             let (first_cluster, size, is_dir) = found.ok_or(FatError::NotFound)?;
 
             if idx == last {
-                long_name = tmp_name;
-                long_len = tmp_len;
                 let mut name_arr = [0u8; 13];
                 let copy = tmp_len.min(12);
                 name_arr[..copy].copy_from_slice(&tmp_name[..copy]);
@@ -580,8 +575,8 @@ impl<'a> FatFilesystem<'a> {
                         first_cluster,
                         is_directory: is_dir,
                     },
-                    long_name,
-                    long_len,
+                    tmp_name,
+                    tmp_len,
                 ));
             }
             if !is_dir {
@@ -1094,12 +1089,6 @@ impl<'a> FatFilesystem<'a> {
         *start_cluster_out = head;
 
         let table = self.fresh_fat_table()?;
-        let eoc = match self.fat_type {
-            FatType::Fat12 => ClusterId(0x0FFF),
-            FatType::Fat16 => ClusterId(0xFFFF),
-            FatType::Fat32 => ClusterId(0x0FFFFFFF),
-        };
-
         // Walk the chain to the cluster containing `offset`, extending
         // as needed. Track absolute position in the chain.
         let mut current = head;

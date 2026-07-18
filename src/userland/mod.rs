@@ -29,7 +29,7 @@ use core::arch::naked_asm;
 use x86_64::VirtAddr;
 
 use crate::userland::image::UserImage;
-use crate::userland::lifecycle::{with_active_user, ExitKind};
+use crate::userland::lifecycle::ExitKind;
 
 // ---------- Linux x86-64 auxv constants ----------
 
