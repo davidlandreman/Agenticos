@@ -9,7 +9,7 @@ syscall, and exits.
 
 ## Why it exists
 
-The remaining kernel-side GUI apps (`painting`, `calc`, `tasks`, `explorer`)
+The remaining kernel-side GUI apps (`painting`, `tasks`, `explorer`)
 live in `src/commands/<app>/` and run as kernel processes.
 With zsh as the default terminal shell, the user typing `painting`
 needs to land in ring 3 and ride zsh's normal PATH-lookup +
@@ -29,8 +29,9 @@ GUILAUNCH._start:
 Same multicall trick BusyBox uses, but with a single syscall instead
 of a 240-entry applet dispatcher.
 
-New and migrated GUI apps should use the ring-3 GUI toolkit instead. Notepad
-is a standalone `/host/NOTEPAD.ELF` and does not pass through GUILAUNCH.
+New and migrated GUI apps should use the ring-3 GUI toolkit instead. Calc and
+notepad are standalone `/host/CALC.ELF` / `/host/NOTEPAD.ELF` and do not pass
+through GUILAUNCH.
 
 ## Build
 

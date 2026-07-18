@@ -5,16 +5,16 @@
 //! - **GUILAUNCH** (`GLAUNCH.ELF`) — one ring-3 launcher binary that
 //!   takes an applet name in `argv[0]` and issues the
 //!   `gui_launch` syscall, spawning the matching kernel-side GUI app
-//!   (`calc`, `tasks`, `explorer`).
-//! - **Direct apps** — standalone native ELFs such as `NOTEPAD.ELF` and
-//!   `PAINTING.ELF`.
+//!   (`tasks`, `explorer`).
+//! - **Direct apps** — standalone native ELFs such as `CALC.ELF`,
+//!   `NOTEPAD.ELF`, and `PAINTING.ELF`.
 //!
 //! The kernel exposes a single virtual `/bin` directory whose entries
 //! resolve into either binary based on which list the name belongs to.
 //! `execve("/bin/ls", ["ls", ...], envp)` rewrites to
-//! `execve("/host/BB.ELF", ["ls", ...], envp)`; `execve("/bin/calc",
-//! ["calc"], envp)` rewrites to `execve("/host/GLAUNCH.ELF",
-//! ["calc"], envp)`. The respective multicall dispatcher then takes
+//! `execve("/host/BB.ELF", ["ls", ...], envp)`; `execve("/bin/tasks",
+//! ["tasks"], envp)` rewrites to `execve("/host/GLAUNCH.ELF",
+//! ["tasks"], envp)`. The respective multicall dispatcher then takes
 //! over.
 //!
 //! No symlinks, no directory mirror in `host_share/` — the namespace is
@@ -46,6 +46,8 @@ pub const NOTEPAD_HOST_PATH: &str = "/host/NOTEPAD.ELF";
 
 pub const PAINTING_HOST_PATH: &str = "/host/PAINTING.ELF";
 
+pub const CALC_HOST_PATH: &str = "/host/CALC.ELF";
+
 /// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
 /// MUST stay in sync with the match arms in
 /// [`crate::commands::gui_launch_table::spawn_by_name`]; a test in
@@ -53,11 +55,11 @@ pub const PAINTING_HOST_PATH: &str = "/host/PAINTING.ELF";
 ///
 /// Names MUST NOT collide with [`APPLETS`] or [`DIRECT_APPLETS`]. The
 /// disjoint-list invariant is asserted at test time.
-pub const GUI_APPLETS: &[&str] = &["calc", "explorer", "tasks"];
+pub const GUI_APPLETS: &[&str] = &["explorer", "tasks"];
 
 /// Sorted standalone executables synthesized into `/bin` without a multicall
 /// launcher. `apply_bin_rewrite` maps each name directly to its staged ELF.
-pub const DIRECT_APPLETS: &[&str] = &["notepad", "painting"];
+pub const DIRECT_APPLETS: &[&str] = &["calc", "notepad", "painting"];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
 /// `/bin/<name>`. Binary-searched on every lookup. MUST stay sorted —
@@ -340,6 +342,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
     let index = DIRECT_APPLETS.binary_search(&name).ok()?;
     let canonical = DIRECT_APPLETS[index];
     let path = match canonical {
+        "calc" => CALC_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,
         "painting" => PAINTING_HOST_PATH,
         _ => return None,
@@ -633,9 +636,9 @@ mod tests_internal {
     }
 
     fn test_apply_bin_rewrite_dispatches_gui_app() {
-        let (path, applet) = apply_bin_rewrite("/bin/calc").expect("must resolve");
+        let (path, applet) = apply_bin_rewrite("/bin/tasks").expect("must resolve");
         assert_eq!(path, "/host/GLAUNCH.ELF");
-        assert_eq!(applet, "calc");
+        assert_eq!(applet, "tasks");
     }
 
     fn test_apply_bin_rewrite_dispatches_direct_app() {
@@ -648,6 +651,10 @@ mod tests_internal {
         let (path, applet) = apply_bin_rewrite("/bin/painting").expect("must resolve");
         assert_eq!(path, "/host/PAINTING.ELF");
         assert_eq!(applet, "painting");
+
+        let (path, applet) = apply_bin_rewrite("/bin/calc").expect("must resolve");
+        assert_eq!(path, "/host/CALC.ELF");
+        assert_eq!(applet, "calc");
     }
 
     fn test_apply_bin_rewrite_busybox_still_resolves() {
@@ -685,9 +692,10 @@ mod tests_internal {
             "merged stream missing BusyBox 'ls'"
         );
         assert!(
-            entries.contains(&"calc"),
-            "merged stream missing GUI 'calc'"
+            entries.contains(&"tasks"),
+            "merged stream missing GUI 'tasks'"
         );
+        assert!(entries.contains(&"calc"));
         assert!(entries.contains(&"notepad"));
         assert!(entries.contains(&"painting"));
     }

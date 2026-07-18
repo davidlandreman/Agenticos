@@ -1,5 +1,8 @@
 use crate::drivers::virtio::common::{VirtqBuffer, Virtqueue, VirtqueueError};
 use crate::drivers::virtio::gpu::protocol::*;
+use crate::drivers::virtio::gpu::virgl::commands::{ClearColor, VirglCommandEncoder};
+use crate::drivers::virtio::gpu::virgl::{select_pinned_capset, transfer_layout, CapsetInfo};
+use crate::drivers::virtio::gpu::GpuError;
 
 fn test_protocol_layouts() {
     assert_eq!(core::mem::size_of::<CtrlHeader>(), 24);
@@ -9,6 +12,146 @@ fn test_protocol_layouts() {
     assert_eq!(core::mem::size_of::<MemEntry>(), 16);
     assert_eq!(core::mem::size_of::<TransferToHost2d>(), 56);
     assert_eq!(core::mem::size_of::<DisplayInfoResponse>(), 408);
+    assert_eq!(core::mem::size_of::<GetCapsetInfo>(), 32);
+    assert_eq!(core::mem::size_of::<CapsetInfoResponse>(), 40);
+    assert_eq!(core::mem::size_of::<ResourceCreate3d>(), 72);
+    assert_eq!(core::mem::size_of::<TransferHost3d>(), 72);
+    assert_eq!(core::mem::size_of::<ContextCreate>(), 96);
+    assert_eq!(core::mem::size_of::<Submit3d>(), 32);
+    assert_eq!(core::mem::size_of::<SetScanout>(), 48);
+    assert_eq!(core::mem::size_of::<ResourceFlush>(), 48);
+    assert_eq!(core::mem::size_of::<UpdateCursor>(), 56);
+}
+
+fn test_scanout_and_cursor_wire_bytes() {
+    let set = SetScanout {
+        header: CtrlHeader::command(CMD_SET_SCANOUT),
+        rect: GpuRect {
+            x: 3,
+            y: 5,
+            width: 640,
+            height: 480,
+        },
+        scanout_id: 2,
+        resource_id: 17,
+    };
+    let bytes = bytes_of(&set);
+    assert_eq!(&bytes[0..4], &CMD_SET_SCANOUT.to_le_bytes());
+    assert_eq!(&bytes[24..28], &3u32.to_le_bytes());
+    assert_eq!(&bytes[40..44], &2u32.to_le_bytes());
+    assert_eq!(&bytes[44..48], &17u32.to_le_bytes());
+
+    let cursor = UpdateCursor {
+        header: CtrlHeader::command(CMD_UPDATE_CURSOR),
+        position: CursorPosition {
+            scanout_id: 2,
+            x: 11,
+            y: 13,
+            padding: 0,
+        },
+        resource_id: 19,
+        hot_x: 1,
+        hot_y: 2,
+        padding: 0,
+    };
+    let bytes = bytes_of(&cursor);
+    assert_eq!(&bytes[0..4], &CMD_UPDATE_CURSOR.to_le_bytes());
+    assert_eq!(&bytes[24..28], &2u32.to_le_bytes());
+    assert_eq!(&bytes[40..44], &19u32.to_le_bytes());
+    assert_eq!(&bytes[44..48], &1u32.to_le_bytes());
+    assert_eq!(&bytes[48..52], &2u32.to_le_bytes());
+}
+
+fn test_pinned_capset_selection_is_exact_and_prefers_virgl2() {
+    let capsets = [
+        CapsetInfo {
+            id: CAPSET_VIRGL,
+            max_version: 1,
+            max_size: 128,
+        },
+        CapsetInfo {
+            id: CAPSET_VIRGL2,
+            max_version: 2,
+            max_size: 256,
+        },
+    ];
+    assert_eq!(select_pinned_capset(&capsets), Some(capsets[1]));
+    assert_eq!(
+        select_pinned_capset(&[CapsetInfo {
+            id: CAPSET_VIRGL2,
+            max_version: 3,
+            max_size: 256,
+        }]),
+        None
+    );
+}
+
+fn test_fenced_header_wire_bytes() {
+    let header = CtrlHeader::fenced(CMD_SUBMIT_3D, 7, 0x1122_3344_5566_7788);
+    let bytes = bytes_of(&header);
+    assert_eq!(&bytes[4..8], &CTRL_FLAG_FENCE.to_le_bytes());
+    assert_eq!(&bytes[8..16], &header.fence_id.to_le_bytes());
+    assert_eq!(&bytes[16..20], &7u32.to_le_bytes());
+    assert!(header.matches_fence(0x1122_3344_5566_7788));
+    assert!(!header.matches_fence(1));
+    assert!(!CtrlHeader::context_command(CMD_SUBMIT_3D, 7).matches_fence(header.fence_id));
+}
+
+fn test_3d_transfer_layout_checks_bounds_and_backing() {
+    let region = GpuBox {
+        x: 2,
+        y: 1,
+        z: 0,
+        width: 3,
+        height: 2,
+        depth: 1,
+    };
+    assert_eq!(transfer_layout(8, 4, 8 * 4 * 4, region), Ok((40, 32, 128)));
+    assert_eq!(
+        transfer_layout(4, 4, 4 * 4 * 4, region),
+        Err(GpuError::InvalidResource)
+    );
+    assert_eq!(
+        transfer_layout(8, 4, 64, region),
+        Err(GpuError::InvalidResource)
+    );
+}
+
+fn test_clear_command_stream_matches_classic_virgl_layout() {
+    let mut encoder = VirglCommandEncoder::new();
+    encoder
+        .create_surface(9, 4, FORMAT_B8G8R8A8_UNORM, 0, 0)
+        .unwrap();
+    encoder.set_framebuffer(9).unwrap();
+    encoder.clear_color(ClearColor::RED).unwrap();
+    encoder.destroy_surface(9).unwrap();
+
+    assert_eq!(
+        encoder.words(),
+        &[
+            1 | (8 << 8) | (5 << 16),
+            9,
+            4,
+            FORMAT_B8G8R8A8_UNORM,
+            0,
+            0,
+            5 | (3 << 16),
+            1,
+            0,
+            9,
+            7 | (8 << 16),
+            1 << 2,
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f64.to_bits() as u32,
+            (1.0f64.to_bits() >> 32) as u32,
+            0,
+            3 | (8 << 8) | (1 << 16),
+            9,
+        ]
+    );
 }
 
 fn test_serialized_header_is_little_endian() {
@@ -101,6 +244,11 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_protocol_layouts,
         &test_serialized_header_is_little_endian,
         &test_backing_entry_layout,
+        &test_pinned_capset_selection_is_exact_and_prefers_virgl2,
+        &test_fenced_header_wire_bytes,
+        &test_scanout_and_cursor_wire_bytes,
+        &test_3d_transfer_layout_checks_bounds_and_backing,
+        &test_clear_command_stream_matches_classic_virgl_layout,
         &test_virtqueue_chain_recycles_all_descriptors,
         &test_virtqueue_timeout_and_capacity,
         &test_dma_buffers_split_at_page_boundaries,

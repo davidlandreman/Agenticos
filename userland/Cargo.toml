@@ -13,16 +13,19 @@ exclude = ["build-support"]
 members = [
     "runtime",
     "libs/gui",
+    "libs/dialogs",
     "apps/hello",
     "apps/guilaunch",
     "apps/guidemo",
     "apps/notepad",
+    "apps/calc",
     "apps/painting",
 ]
 
-# Release profile: small, panic-abort, LTO, strip. The output ELF must fit
-# inside the FAT16/vvfat-friendly 64 KiB ceiling and be acceptable to the U6
-# loader (static, non-PIE, ET_EXEC, x86_64).
+# Release profile: small, panic-abort, LTO, strip. The output ELF must be
+# acceptable to the U6 loader: static, non-PIE, ET_EXEC, x86_64. There is no
+# size ceiling — ZSH.ELF (1.5 MB) and HELLOCPP.ELF (8.7 MB) stage and run;
+# the run command caps user binaries at 16 MiB (MAX_USER_BINARY_BYTES).
 [profile.release]
 opt-level = "z"
 lto = true

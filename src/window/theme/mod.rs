@@ -117,7 +117,7 @@ pub fn select_theme(requested: ThemeRequest, renderer: RendererKind) -> ThemeSel
         ThemeRequest::Aero if renderer == RendererKind::Legacy => ThemeSelection {
             requested,
             selected: ThemeKind::Classic,
-            fallback_reason: Some("Aero requires the retained renderer"),
+            fallback_reason: Some("Aero requires a retained compositor"),
         },
         ThemeRequest::Aero => ThemeSelection {
             requested,
@@ -126,10 +126,10 @@ pub fn select_theme(requested: ThemeRequest, renderer: RendererKind) -> ThemeSel
         },
         ThemeRequest::Auto => ThemeSelection {
             requested,
-            selected: if renderer == RendererKind::Legacy {
-                ThemeKind::Classic
-            } else {
+            selected: if renderer == RendererKind::RetainedCpu {
                 ThemeKind::Aero
+            } else {
+                ThemeKind::Classic
             },
             fallback_reason: None,
         },

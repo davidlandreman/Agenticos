@@ -670,10 +670,10 @@ fn restore_overlay_upper_from_data() {
 pub fn run() -> ! {
     debug_info!("Kernel initialization complete.");
 
-    // Legacy GUI app launchers (calc, tasks, explorer) are invoked via
-    // `GLAUNCH.ELF`; notepad and painting are standalone ring-3 GUI ELFs.
-    // File-utility commands are BusyBox applets. zsh drives the synthetic
-    // /bin namespace.
+    // Legacy GUI app launchers (tasks, explorer) are invoked via
+    // `GLAUNCH.ELF`; calc, notepad, and painting are standalone ring-3 GUI
+    // ELFs. File-utility commands are BusyBox applets. zsh drives the
+    // synthetic /bin namespace.
 
     // Force an initial render to display the desktop
     window::render_frame();

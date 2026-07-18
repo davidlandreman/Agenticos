@@ -53,7 +53,7 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
   to BusyBox, the remaining kernel-side GUI apps through `GLAUNCH.ELF`, or
-  standalone ELFs such as `/host/NOTEPAD.ELF`.
+  standalone ELFs such as `/host/CALC.ELF` and `/host/NOTEPAD.ELF`.
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
 - `error.rs` — loader-side error enum.

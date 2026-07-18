@@ -12,7 +12,13 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
   reserved effect metadata.
 - `composition/cpu.rs` — pixel-correct premultiplied source-over reference
   compositor and runtime fallback, including the three-pass backdrop blur used
-  by Aero glass layers.
+  by Aero glass layers. Optional render telemetry separates surface raster,
+  upload, composition, blur, fence, and presentation cycle buckets.
+- `composition/virgl.rs` — qualified accelerated compositor. It uploads
+  canonical surfaces, renders ordered clipped/scissored textured quads with
+  premultiplied source-over, fences, and directly scans out its host texture.
+  Explicit Aero chrome is supported with sharp translucency; GPU backdrop blur
+  remains intentionally unsupported.
 - `present/` — scanout boundary. The boot-framebuffer presenter converts only
   damaged pixels; VirtIO-GPU 2D presentation is owned by `src/drivers/`.
 - `fonts/` — font support. `core_font.rs` defines the glyph-centric `Font` trait + `Glyph<'a>` struct (8bpp coverage). `ttf.rs` is the TTF/OTF backend (parses via `ttf-parser`, rasterizes via `ab_glyph_rasterizer`, ASCII pre-rendered into per-glyph `Box<[u8]>` slots, non-ASCII lazy via `BTreeMap`). `embedded_font.rs` is the 8x8 bitmap fallback used only on TTF parse failure. `font_data.rs` holds the embedded font's bit-packed source. The system TTF lives at `assets/system.ttf` and is `include_bytes!`-baked into the kernel; `init_fonts()` parses it once during boot, after heap init.
@@ -28,8 +34,8 @@ Controlled by the `USE_DOUBLE_BUFFER` flag in `src/drivers/display/display.rs` (
 This buffer is part of the `legacy` renderer only. The `retained` renderer owns
 canonical output storage and does not use `WindowBuffer` as its surface format.
 Do not call VirtIO-GPU 2D composition acceleration: it only transfers the CPU-
-composed output. Actual acceleration remains gated on a VirGL render/readback
-smoke test.
+composed output. The VirGL engine is the accelerated composition path and owns
+its VirtIO device for its entire lifetime.
 
 ## Performance notes
 

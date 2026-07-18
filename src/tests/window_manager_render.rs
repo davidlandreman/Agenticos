@@ -1080,6 +1080,16 @@ fn test_retained_cursor_move_presents_old_and_new_without_window_rasterization()
         0,
         "cursor-only retained frame must reuse existing surfaces",
     );
+    assert_eq!(
+        wm.render_stats().surface_raster_cycles,
+        0,
+        "cursor-only retained frame must report zero raster work",
+    );
+    assert_eq!(
+        wm.render_stats().texture_bytes_uploaded,
+        0,
+        "cursor-only CPU frame must not report texture uploads",
+    );
 }
 
 pub fn get_tests() -> &'static [&'static dyn Testable] {

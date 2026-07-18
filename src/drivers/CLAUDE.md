@@ -15,8 +15,10 @@ PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet and ne
 - `virtio/common.rs` — modern VirtIO PCI feature negotiation, page-safe DMA storage, tokenized queue ownership, and descriptor chains.
 - `virtio/gpu/` — VirtIO 1.3 GPU wire layouts, checked control/cursor queues,
   guest-backed 2D resources, display discovery/events, exact damage transfer +
-  flush, and scanout lifecycle. This is a presenter, not an accelerated
-  composition engine.
+  flush, scanout lifecycle, and the VirGL transport for capsets, contexts, 3D
+  resources/transfers, submissions, fences, and deterministic TGSI command
+  encoding. The production VirGL engine owns the device exclusively and opens
+  only after clear, alpha/readback, and repeated-lifecycle gates pass.
 - `virtio/input.rs` — VirtIO tablet (absolute pointing, seamless mouse in QEMU).
 - `virtio/net.rs` — polling modern VirtIO-net device, bounded RX/TX DMA pools, and smoltcp Ethernet adapter.
 - `display/` — framebuffer driver. `display.rs` controls single/double buffering (the `USE_DOUBLE_BUFFER` flag lives here even though graphics primitives live in `src/graphics/`). `frame_buffer.rs` is the low-level abstraction; `text_buffer.rs` and `double_buffered_text.rs` handle text rendering; `double_buffer.rs` provides the 8 MiB static back buffer.
@@ -48,7 +50,8 @@ for 2D scanout, while GL device names are used only for `gpu`/`auto`. Plain 2D
 scanout is disabled by default on macOS because QEMU 11.0.1's Cocoa frontend
 can show a black window for an otherwise valid scanout; set
 `AGENTICOS_QEMU_2D=on` only for diagnostics. Presence of `virtio-vga-gl` alone
-never makes the kernel report acceleration.
+never makes the kernel report acceleration; the guest qualification gates and
+successful `VirglCompositionEngine` construction do.
 
 ## VirtIO DMA and network invariants
 

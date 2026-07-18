@@ -16,7 +16,7 @@ See `docs/ai-context-conventions.md` for the convention in detail (when to add a
 
 AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch with the eventual goal of supporting agent-based computing capabilities.
 
-**Current State**: The OS has memory management, writable overlay/data filesystems, display/graphics, preemptive kernel and ring-3 scheduling, and a Linux static-musl process platform. A window system provides hierarchical window management, event routing, mouse support, and copy-blit ring-3 client surfaces. The OS boots into a GUI desktop; Start → Terminal launches ring-3 zsh with shipped `/etc/zshrc` defaults, a pruned upstream function library, and an agnoster prompt rendered with the bundled Powerline-capable JetBrains Mono subset, while Start → Notepad launches the standalone ring-3 `NOTEPAD.ELF` with real filesystem-backed Open and Save, and Start → Painting launches the standalone ring-3 `PAINTING.ELF` bouncing-shapes demo. A static BusyBox (`BB.ELF`) provides core utilities plus `ping`, `nc`, `nslookup`, and HTTP-only `wget` through the virtual `/bin/<applet>` namespace. A single-interface, polling-driven IPv4 stack uses modern VirtIO-net + smoltcp for DHCPv4, ICMP, UDP, TCP, and DHCP-backed musl name resolution through a kernel-managed `/etc`. IPv6, TLS, interrupt-driven NIC I/O, and the "Agentic" runtime remain deferred.
+**Current State**: The OS has memory management, writable overlay/data filesystems, display/graphics, preemptive kernel and ring-3 scheduling, and a Linux static-musl process platform. A window system provides hierarchical window management, event routing, mouse support, and copy-blit ring-3 client surfaces. The OS boots into a GUI desktop; Start → Terminal launches ring-3 zsh with shipped `/etc/zshrc` defaults, a pruned upstream function library, and an agnoster prompt rendered with the bundled Powerline-capable JetBrains Mono subset, while Start → Notepad launches the standalone ring-3 `NOTEPAD.ELF` with real filesystem-backed Open and Save, Start → Calc launches the standalone ring-3 `CALC.ELF`, and Start → Painting launches the standalone ring-3 `PAINTING.ELF` bouncing-shapes demo. Ring-3 GUI apps share a userland toolkit: `userland/libs/gui` retained-mode widgets (`Button`, `TextField`, `ListView`, `MenuBar`) plus `userland/libs/dialogs`, a common-dialogs library (`FileDialog`, `MessageBox`, `ColorPicker`) built entirely from the four GUI syscalls — no kernel dialog ABI. A static BusyBox (`BB.ELF`) provides core utilities plus `ping`, `nc`, `nslookup`, and HTTP-only `wget` through the virtual `/bin/<applet>` namespace. A single-interface, polling-driven IPv4 stack uses modern VirtIO-net + smoltcp for DHCPv4, ICMP, UDP, TCP, and DHCP-backed musl name resolution through a kernel-managed `/etc`. IPv6, TLS, interrupt-driven NIC I/O, and the "Agentic" runtime remain deferred.
 
 The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.
 
@@ -52,6 +52,11 @@ Tests run automatically on kernel boot when built with the test feature. QEMU ex
 - `cargo clippy` — Lint
 - `cargo check` — Quick compilation check (preferred for validating code changes — avoids producing binaries)
 
+Set `AGENTICOS_RENDER_STATS=1` with a retained compositor launch to emit
+per-frame raster/upload/composition/blur/fence/presentation counters. The
+optional pinned macOS VirGL host verifier and its side-by-side QEMU rules are
+documented in `docs/macos-virgl-qualification.md`.
+
 ### Parallel development with Conductor
 This repo is configured for [conductor.build](https://www.conductor.build) — see `docs/conductor-workflow.md` for the full reference. Lifecycle is declared in `conductor.json`; `.conductor/setup.sh` bootstraps a workspace, `.conductor/run.sh` invokes `./build.sh`, `.conductor/archive.sh` cleans up QEMU on teardown. Each Conductor workspace is a git worktree with its own `target/` and QEMU process; the compound-engineering plugin is enabled via the committed `.claude/settings.json`. When proposing or evaluating cross-cutting changes, point the user at `docs/conductor-workflow.md` rather than re-deriving the workflow.
 
@@ -69,7 +74,7 @@ The project follows a modular monolithic kernel design with clear separation of 
 Each entry below points to the folder's own `CLAUDE.md`, which carries the detailed context for that subsystem. Folder files load on demand when Claude reads files in that directory.
 
 - `src/arch/` — Architecture-specific code (x86_64 IDT, interrupts). No folder file yet — currently thin.
-- `src/commands/` — Remaining kernel-side GUI apps (`calc`, `tasks`, `explorer`) + `guishell`. Notepad and painting are ring-3 ELFs under `userland/apps/`. See [`src/commands/CLAUDE.md`](src/commands/CLAUDE.md).
+- `src/commands/` — Remaining kernel-side GUI apps (`tasks`, `explorer`) + `guishell`. Calc, notepad, and painting are ring-3 ELFs under `userland/apps/`. See [`src/commands/CLAUDE.md`](src/commands/CLAUDE.md).
 - `src/drivers/` — Hardware drivers (PCI, IDE, PS/2, VirtIO, framebuffer display). See [`src/drivers/CLAUDE.md`](src/drivers/CLAUDE.md).
 - `src/fs/` — Read-only FAT12/16/32 filesystem with `Arc`-based handles. See [`src/fs/CLAUDE.md`](src/fs/CLAUDE.md).
 - `src/graphics/` — Drawing primitives, text rendering, image loading, compositor. See [`src/graphics/CLAUDE.md`](src/graphics/CLAUDE.md).

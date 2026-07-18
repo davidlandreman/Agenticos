@@ -1,25 +1,25 @@
 # `src/commands/` — Kernel-side GUI policy and legacy apps
 
-This directory now contains three kernel-side GUI applications (`calc`,
-`tasks`, `explorer`) plus `guishell`, the desktop/taskbar policy layer.
-`notepad` and `painting` have been migrated to the ring-3 GUI platform and
-live at `userland/apps/notepad/` and `userland/apps/painting/`.
+This directory now contains two kernel-side GUI applications (`tasks`,
+`explorer`) plus `guishell`, the desktop/taskbar policy layer. `notepad` was
+the first application migrated to the ring-3 GUI platform, and `calc` and
+`painting` followed; all three live under `userland/apps/`.
 
-`gui_launch_table` still dispatches the three legacy applications for
+`gui_launch_table` still dispatches the two legacy applications for
 `GLAUNCH.ELF` and syscall 5000. Its names must match `GUI_APPLETS` in
-`src/userland/bin_namespace.rs`. Notepad and painting are deliberately absent:
-`/bin/notepad` and `/bin/painting` rewrite directly to `/host/NOTEPAD.ELF`
-and `/host/PAINTING.ELF`.
+`src/userland/bin_namespace.rs`. Calc, notepad, and painting are deliberately
+absent: `/bin/calc`, `/bin/notepad`, and `/bin/painting` rewrite directly to
+`/host/CALC.ELF`, `/host/NOTEPAD.ELF`, and `/host/PAINTING.ELF`.
 
 ## Launch paths
 
-- Start → Notepad and Start → Painting call
+- Start → Notepad, Start → Calc, and Start → Painting call
   `terminal_factory::spawn_gui_user_app`, which launches the standalone ELF on
   a blocking kernel wrapper thread.
-- zsh `notepad` / `painting` resolve through the synthetic `/bin` namespace
-  directly to `NOTEPAD.ELF` / `PAINTING.ELF`.
-- Explorer launches the notepad ELF with the selected text path as `argv[1]`.
-- The three remaining kernel apps continue through `GLAUNCH.ELF` →
+- zsh `notepad` / `calc` / `painting` resolve through the synthetic `/bin`
+  namespace directly to `NOTEPAD.ELF` / `CALC.ELF` / `PAINTING.ELF`.
+- Explorer launches `NOTEPAD.ELF` with the selected text path as `argv[1]`.
+- The two remaining kernel apps continue through `GLAUNCH.ELF` →
   `sys_gui_launch` → `gui_launch_table::spawn_by_name`.
 
 ## Adding GUI applications

@@ -6,7 +6,9 @@ use crate::graphics::scene::{inflate_rect, LayerEffect, SceneFrame};
 use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
 use crate::window::Rect;
 
-use super::{CompositionEngine, CompositionEngineKind, CompositionError, RenderStats};
+use super::{
+    timestamp_cycles, CompositionEngine, CompositionEngineKind, CompositionError, RenderStats,
+};
 
 /// Pixel-correct reference compositor and fallback engine.
 pub struct CpuCompositionEngine {
@@ -76,6 +78,7 @@ impl CompositionEngine for CpuCompositionEngine {
         surfaces: &BTreeMap<SurfaceId, Surface>,
         damage: &[Rect],
     ) -> Result<RenderStats, CompositionError> {
+        let composition_started = timestamp_cycles();
         if scene.output_size != (self.output.width(), self.output.height()) {
             return Err(CompositionError::InvalidOutput);
         }
@@ -122,7 +125,12 @@ impl CompositionEngine for CpuCompositionEngine {
                 };
                 let blurred = match layer.effect {
                     LayerEffect::BackdropSample { radius } => {
-                        Some(self.blurred_backdrop(work_rect, radius))
+                        let blur_started = timestamp_cycles();
+                        let blurred = self.blurred_backdrop(work_rect, radius);
+                        stats.backdrop_blur_cycles = stats
+                            .backdrop_blur_cycles
+                            .saturating_add(timestamp_cycles().saturating_sub(blur_started));
+                        Some(blurred)
                     }
                     LayerEffect::None | LayerEffect::AlphaMask => None,
                 };
@@ -175,6 +183,8 @@ impl CompositionEngine for CpuCompositionEngine {
                 }
             }
         }
+        let total_cycles = timestamp_cycles().saturating_sub(composition_started);
+        stats.composition_cycles = total_cycles.saturating_sub(stats.backdrop_blur_cycles);
         Ok(stats)
     }
 

@@ -82,6 +82,8 @@ pub mod userland_fixtures;
 #[cfg(feature = "test")]
 pub mod userland_switch;
 #[cfg(feature = "test")]
+pub mod virgl_integration;
+#[cfg(feature = "test")]
 pub mod virtio_gpu_protocol;
 #[cfg(feature = "test")]
 pub mod vm;
@@ -168,6 +170,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("compositor_selection", compositor_selection::get_tests),
     ("window_theme", window_theme::get_tests),
     ("virtio_gpu_protocol", virtio_gpu_protocol::get_tests),
+    ("virgl_integration", virgl_integration::get_tests),
     ("filter", filter::get_tests),
     ("terminal", crate::terminal::get_tests),
     ("vte", crate::terminal::vte::get_tests),
