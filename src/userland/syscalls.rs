@@ -189,6 +189,7 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
 
     enum Target {
         StdoutErr,
+        Pipe(crate::userland::pipe::PipeWriteHandle),
         File(crate::lib::arc::Arc<crate::fs::file_handle::File>),
         Socket(u64),
     }
@@ -196,10 +197,7 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Target::StdoutErr,
         Some(FdSlot::File { handle, .. }) => Target::File(handle),
         Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
-        // Phase 5 PR-A: writev on pipes is rare in practice (libc uses
-        // single-buffer write for pipe stdio); reject for now to keep
-        // the pipe path simple.
-        Some(FdSlot::PipeWrite(_, _)) => return ENOSYS,
+        Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
         Some(FdSlot::Stdin) | None => return EBADF,
@@ -261,6 +259,39 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                     None => crate::print!("{}", s),
                 }
                 written += len;
+            }
+            Target::Pipe(handle) => {
+                if handle.pipe().readers() == 0 {
+                    return if written > 0 {
+                        written as i64
+                    } else {
+                        crate::userland::abi::EPIPE
+                    };
+                }
+                let n = handle.pipe().write(slice);
+                if n > 0 {
+                    written += n as u64;
+                    if (n as u64) < len {
+                        break;
+                    }
+                    continue;
+                }
+                if handle.pipe().readers() == 0 {
+                    return if written > 0 {
+                        written as i64
+                    } else {
+                        crate::userland::abi::EPIPE
+                    };
+                }
+                if written > 0 {
+                    return written as i64;
+                }
+                unsafe {
+                    crate::userland::switch::block_current_ring3_and_yield(
+                        args,
+                        crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeWrite,
+                    )
+                }
             }
             Target::File(handle) => match handle.write(slice) {
                 Ok(n) => {

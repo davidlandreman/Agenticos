@@ -91,11 +91,6 @@ matches via `lifecycle::raise_signal_on_terminal`.
   is wired (handle in `TerminalWindow`), but Scroll events aren't yet
   produced by the PS/2 driver. Shift+PgUp/PgDn scrolls scrollback
   unconditionally.
-- **Powerline-patched font** — the current `assets/system.ttf` is
-  JetBrains Mono (no Powerline glyphs at U+E0A0–E0B3). agnoster's
-  separators render as `.notdef`. Swap the TTF for a Powerline-patched
-  variant (DejaVu Sans Mono for Powerline is permissively licensed) and
-  update `assets/system.ttf.LICENSE`.
 - **DCS / Sixel / mouse tracking modes** — parser absorbs DCS and
   ignores `?1000h` / `?1006h`; vi-mouse + sixel graphics are out of
   scope.

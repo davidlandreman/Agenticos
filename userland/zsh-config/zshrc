@@ -1,0 +1,19 @@
+# AgenticOS system-wide interactive zsh defaults.
+
+fpath=(/etc/zsh/functions $fpath)
+autoload -Uz promptinit colors add-zsh-hook is-at-least
+colors
+
+HISTFILE=/root/.zsh_history
+HISTSIZE=5000
+SAVEHIST=5000
+setopt share_history hist_ignore_dups
+
+setopt interactive_comments prompt_subst
+
+# Hide the redundant root@host segment in agnoster.
+DEFAULT_USER=root
+
+# /root lives in the writable overlay. Run `sync` to persist history and a
+# user-created /root/.zshrc across reboots.
+source /etc/zsh/agnoster.zsh-theme 2>/dev/null || PS1='%F{green}%~%f %# '

@@ -1,4 +1,12 @@
+JetBrainsMono Nerd Font Mono 3.4.0, subset to JetBrains Mono 2.304's
+Unicode coverage plus Powerline U+E0A0-U+E0B3.
+
+Generated from the Nerd Fonts patched distribution:
+https://github.com/ryanoasis/nerd-fonts
+
 Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+Nerd Fonts patch and Powerline glyph attribution: The Nerd Fonts Authors
+(https://github.com/ryanoasis/nerd-fonts)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

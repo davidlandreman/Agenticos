@@ -109,6 +109,13 @@ mkdir -p "$HOST_SHARE_STAGE"
 mkdir -p "$HOST_SHARE_STAGE/ETC"
 printf 'root:x:0:0::/root:/bin/zsh\n' > "$HOST_SHARE_STAGE/ETC/PASSWD"
 printf 'root:x:0:\n'                  > "$HOST_SHARE_STAGE/ETC/GROUP"
+
+REPO_ROOT="$(pwd)"
+export REPO_ROOT HOST_SHARE_STAGE
+# shellcheck source=userland/prebuilt-lib.sh
+. "$REPO_ROOT/userland/prebuilt-lib.sh"
+stage_zsh_config || exit 1
+
 if cargo build --release --manifest-path userland/Cargo.toml; then
     USER_HELLO="userland/target/x86_64-unknown-none/release/hello"
     if [ -f "$USER_HELLO" ]; then
@@ -193,10 +200,6 @@ fi
 # working zsh. Pass --rebuild-userland (or REBUILD_USERLAND=1 /
 # REBUILD_ZSH=1) to compile from source via userland/apps/zsh/Makefile
 # and refresh the committed prebuilt. See userland/prebuilt/README.md.
-REPO_ROOT="$(pwd)"
-export REPO_ROOT HOST_SHARE_STAGE
-# shellcheck source=userland/prebuilt-lib.sh
-. "$REPO_ROOT/userland/prebuilt-lib.sh"
 stage_zsh || true      # soft-fail: kernel build + tests don't depend on ZSH.ELF
 stage_busybox || true  # soft-fail: kernel build + tests don't depend on BB.ELF
 

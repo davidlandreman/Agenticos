@@ -72,6 +72,25 @@ fn test_glyph_coverage_has_antialiasing() {
     );
 }
 
+fn test_powerline_glyphs_and_metrics() {
+    let font = get_default_font();
+    for ch in ['\u{E0A0}', '\u{E0B0}', '\u{E0B1}', '\u{E0B2}', '\u{E0B3}'] {
+        let glyph = font.glyph(ch).expect("missing Powerline glyph");
+        assert!(glyph.width > 0, "Powerline glyph {:?} has zero width", ch);
+        assert!(glyph.height > 0, "Powerline glyph {:?} has zero height", ch);
+        assert!(
+            glyph.coverage.iter().any(|&alpha| alpha != 0),
+            "Powerline glyph {:?} has empty coverage",
+            ch
+        );
+    }
+
+    // JetBrains Mono 2.304 at SYSTEM_FONT_PX=14. Pinning these metrics keeps
+    // the desktop and terminal grids stable across font refreshes.
+    assert_eq!(font.cell_width(), 8);
+    assert_eq!(font.line_height(), 18);
+}
+
 fn test_embedded_fallback_has_full_ascii() {
     // The embedded 8x8 fallback must cover printable ASCII end-to-end so a
     // TTF parse failure still leaves a usable kernel.
@@ -94,6 +113,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_monospace_invariant,
         &test_measure_text_sums_advances,
         &test_glyph_coverage_has_antialiasing,
+        &test_powerline_glyphs_and_metrics,
         &test_embedded_fallback_has_full_ascii,
     ]
 }

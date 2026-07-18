@@ -38,6 +38,49 @@ _prebuilt_atomic_copy() {
     cp "$src" "$tmp" && mv -f "$tmp" "$dst"
 }
 
+# Stage the committed global zsh configuration and pruned function library.
+# Unlike ZSH.ELF this is source data, so no toolchain or rebuild decision is
+# involved. Returns 1 when a required committed artifact is missing.
+stage_zsh_config() {
+    local source_dir="$REPO_ROOT/userland/zsh-config"
+    local etc_dir="$HOST_SHARE_STAGE/ETC"
+    local zsh_dir="$etc_dir/ZSH"
+    local functions_dir="$zsh_dir/FUNCTIONS"
+
+    local required
+    for required in \
+        zshrc \
+        agnoster.zsh-theme \
+        functions/promptinit \
+        functions/colors \
+        functions/add-zsh-hook \
+        functions/is-at-least \
+        functions/vcs_info
+    do
+        if [ ! -f "$source_dir/$required" ]; then
+            echo "❌ Missing required zsh config artifact: $source_dir/$required"
+            return 1
+        fi
+    done
+
+    mkdir -p "$functions_dir"
+    _prebuilt_atomic_copy "$source_dir/zshrc" "$etc_dir/ZSHRC"
+    _prebuilt_atomic_copy "$source_dir/agnoster.zsh-theme" "$zsh_dir/agnoster.zsh-theme"
+
+    local source_file count=0
+    for source_file in "$source_dir"/functions/*; do
+        [ -f "$source_file" ] || continue
+        _prebuilt_atomic_copy "$source_file" "$functions_dir/${source_file##*/}"
+        count=$((count + 1))
+    done
+    if [ "$count" -eq 0 ]; then
+        echo "❌ No zsh functions found under $source_dir/functions"
+        return 1
+    fi
+
+    echo "📦 Staged /etc/zshrc, agnoster, and $count zsh functions"
+}
+
 # Stage ZSH.ELF. Returns 0 on success (file present in host_share), 1
 # if neither rebuild nor prebuilt produced a staged file.
 stage_zsh() {
@@ -70,6 +113,9 @@ stage_zsh() {
                     fi
                     _prebuilt_atomic_copy "$src_build" "$prebuilt"
                     _prebuilt_atomic_copy "$src_build" "$staged"
+                    # The zsh Makefile refreshes the pruned function library
+                    # alongside the binary; restage it before returning.
+                    stage_zsh_config || return 1
                     local size
                     size=$(wc -c < "$staged" | tr -d ' ')
                     echo "📦 Refreshed userland/prebuilt/ZSH.ELF and staged $staged ($size bytes)"
