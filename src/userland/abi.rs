@@ -217,6 +217,7 @@ pub mod nr {
     pub const RT_SIGACTION: u64 = 13;
     pub const RT_SIGPROCMASK: u64 = 14;
     pub const IOCTL: u64 = 16;
+    pub const READV: u64 = 19;
     pub const WRITEV: u64 = 20;
     pub const SELECT: u64 = 23;
     pub const NANOSLEEP: u64 = 35;
@@ -252,6 +253,7 @@ pub mod nr {
     pub const GETEGID: u64 = 108;
     pub const GETPPID: u64 = 110;
     pub const GETTIMEOFDAY: u64 = 96;
+    pub const UMASK: u64 = 95;
     pub const GETRLIMIT: u64 = 97;
     pub const GETRUSAGE: u64 = 98;
     pub const SYSINFO: u64 = 99;
@@ -266,6 +268,7 @@ pub mod nr {
     pub const PSELECT6: u64 = 270;
     pub const PPOLL: u64 = 271;
     pub const SET_ROBUST_LIST: u64 = 273;
+    pub const UTIMENSAT: u64 = 280;
     pub const ACCEPT4: u64 = 288;
     pub const PRLIMIT64: u64 = 302;
     pub const GETDENTS64: u64 = 217;
@@ -358,6 +361,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         // Phase 1: streams + memory + signal stubs
         nr::READ => syscalls::read_handler(args),
         nr::WRITE => syscalls::write_handler(args),
+        nr::READV => syscalls::readv_handler(args),
         nr::WRITEV => syscalls::writev_handler(args),
         nr::MMAP => syscalls::mmap_handler(args),
         nr::MPROTECT => syscalls::mprotect_handler(args),
@@ -420,6 +424,8 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         // Phase 2: time / random / uname
         nr::CLOCK_GETTIME => syscalls::clock_gettime_handler(args),
         nr::GETTIMEOFDAY => syscalls::gettimeofday_handler(args),
+        nr::UMASK => syscalls::umask_handler(args),
+        nr::UTIMENSAT => syscalls::utimensat_handler(args),
         nr::GETRANDOM => syscalls::getrandom_handler(args),
         nr::UNAME => syscalls::uname_handler(args),
         // Credentials and exits

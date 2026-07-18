@@ -96,6 +96,10 @@ pub struct Process {
     /// Phase 2: file-descriptor table. Slots 0/1/2 are pinned to the
     /// standard streams; slots 3..N hold `Arc<File>` opened via `openat`.
     pub fd_table: FdTable,
+    /// Process file-creation mask. Inherited across fork and retained across
+    /// execve, matching POSIX process state even though filesystem permission
+    /// enforcement remains intentionally minimal.
+    pub umask: u32,
     /// Restart-stable deadline state for a blocking network syscall.
     pub network_wait: Option<NetworkWaitState>,
     /// Linux ITIMER_REAL state, represented against the monotonic 100 Hz PIT.
@@ -406,6 +410,7 @@ impl Process {
             brk_base: 0,
             mmap_next: 0,
             fd_table: FdTable::new(),
+            umask: 0o022,
             network_wait: None,
             real_timer: RealTimerState::disarmed(),
             sleep_deadline: None,
@@ -1405,6 +1410,7 @@ pub fn install_new_process_opt(
         brk_base,
         mmap_next: mmap_base,
         fd_table,
+        umask: 0o022,
         network_wait: None,
         real_timer: RealTimerState::disarmed(),
         sleep_deadline: None,

@@ -55,6 +55,9 @@ const WRITEV_MAX_IOV: usize = 16;
 /// Maximum total bytes per `writev` (sum of iov_len). Matches Linux's
 /// MAX_RW_COUNT; per-iov chunking keeps kernel memory bounded below this.
 const WRITEV_MAX_TOTAL: u64 = 0x7fff_f000;
+/// `readv` uses the same bounded vector count and Linux MAX_RW_COUNT ceiling.
+const READV_MAX_IOV: usize = WRITEV_MAX_IOV;
+const READV_MAX_TOTAL: u64 = WRITEV_MAX_TOTAL;
 /// Maximum mmap allocation in bytes.
 const MMAP_MAX_LEN: u64 = 512 * 1024 * 1024;
 /// Maximum brk growth from the initial anchor in bytes. Bumped from
@@ -83,6 +86,9 @@ const TCSETSF: u64 = 0x5404;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
 const TIOCGWINSZ: u64 = 0x5413;
+
+const UTIME_NOW: i64 = 0x3fff_ffff;
+const UTIME_OMIT: i64 = 0x3fff_fffe;
 
 // ---------- write / writev / read ----------
 
@@ -479,6 +485,67 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
     if len == 0 {
         return 0;
     }
+    read_fd_once(args, fd, ptr, len)
+}
+
+/// `readv(fd: i32, iov: *const iovec, iovcnt: i32) -> isize`.
+///
+/// Validate the complete vector before advancing the open-file description,
+/// then read entries in order. A short read ends the operation, matching the
+/// Linux/POSIX scatter-read contract. Blocking on the first entry is safe:
+/// the scheduler restarts the original `readv` syscall with untouched user
+/// registers. Once bytes have been consumed, an error is reported as a short
+/// read instead of losing the progress already made.
+pub fn readv_handler(args: &mut SyscallArgs) -> i64 {
+    let fd = args.rdi as i32;
+    let iov_ptr = args.rsi;
+    let iovcnt = args.rdx as i64;
+
+    if iovcnt < 0 || iovcnt as usize > READV_MAX_IOV {
+        return EINVAL;
+    }
+    let mut total_len = 0u64;
+    let mut iovecs = alloc::vec::Vec::with_capacity(iovcnt as usize);
+    for index in 0..iovcnt as u64 {
+        let Some(entry) = iov_ptr.checked_add(index * 16) else {
+            return EFAULT;
+        };
+        let base = match crate::userland::usercopy::read_unaligned::<u64>(entry) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let len = match crate::userland::usercopy::read_unaligned::<u64>(entry + 8) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        if let Err(error) = crate::userland::usercopy::ensure_user_range(base, len, true) {
+            return error;
+        }
+        total_len = match total_len.checked_add(len) {
+            Some(total) if total <= READV_MAX_TOTAL => total,
+            _ => return EINVAL,
+        };
+        iovecs.push((base, len));
+    }
+
+    let mut read = 0u64;
+    for (base, len) in iovecs {
+        if len == 0 {
+            continue;
+        }
+        let result = read_fd_once(args, fd, base, len);
+        if result < 0 {
+            return if read > 0 { read as i64 } else { result };
+        }
+        read += result as u64;
+        if result as u64 != len {
+            break;
+        }
+    }
+    read as i64
+}
+
+fn read_fd_once(args: &SyscallArgs, fd: i32, ptr: u64, len: u64) -> i64 {
     let cap = core::cmp::min(len, READ_MAX_LEN as u64);
     let slot = with_fd_slot(fd);
     match slot {
@@ -1327,6 +1394,7 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         brk_base: parent.brk_base,
         mmap_next: parent.mmap_next,
         fd_table: parent.fd_table.clone(),
+        umask: parent.umask,
         network_wait: None,
         // POSIX timers are not inherited across fork.
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
@@ -2473,9 +2541,15 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
             Ok(h) => h,
             Err(ref e) => return map_file_err(e),
         };
-        return with_fd_table_mut(|t| t.alloc(FdSlot::File { handle, cloexec }))
-            .map(|fd| fd as i64)
-            .unwrap_or(EMFILE);
+        return with_fd_table_mut(|t| {
+            t.alloc(FdSlot::File {
+                handle,
+                status_flags: O_RDONLY,
+                cloexec,
+            })
+        })
+        .map(|fd| fd as i64)
+        .unwrap_or(EMFILE);
     }
 
     // Check whether the path exists and is a directory. Directories
@@ -2533,9 +2607,16 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
         Ok(h) => h,
         Err(ref e) => return map_file_err(e),
     };
-    with_fd_table_mut(|t| t.alloc(FdSlot::File { handle, cloexec }))
-        .map(|fd| fd as i64)
-        .unwrap_or(EMFILE)
+    let status_flags = access | (flags & (O_APPEND | O_NONBLOCK));
+    with_fd_table_mut(|t| {
+        t.alloc(FdSlot::File {
+            handle,
+            status_flags,
+            cloexec,
+        })
+    })
+    .map(|fd| fd as i64)
+    .unwrap_or(EMFILE)
 }
 
 /// `close(fd) -> int`. Drops the `Arc<File>` (which closes the underlying
@@ -3314,23 +3395,21 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
                 Err(e) => e,
             }
         }
-        F_GETFL => {
-            // Always-RDONLY for files; stdin treats it as readable too.
-            match with_fd_slot(fd) {
-                Some(FdSlot::Socket { handle, .. }) => {
-                    let nonblocking = crate::net::socket::nonblocking(handle.id()).unwrap_or(false);
-                    (O_RDWR | if nonblocking { O_NONBLOCK } else { 0 }) as i64
-                }
-                Some(FdSlot::PipeRead(handle, _)) => {
-                    (O_RDONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
-                }
-                Some(FdSlot::PipeWrite(handle, _)) => {
-                    (O_WRONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
-                }
-                Some(_) => O_RDONLY as i64,
-                None => EBADF,
+        F_GETFL => match with_fd_slot(fd) {
+            Some(FdSlot::File { status_flags, .. }) => status_flags as i64,
+            Some(FdSlot::Socket { handle, .. }) => {
+                let nonblocking = crate::net::socket::nonblocking(handle.id()).unwrap_or(false);
+                (O_RDWR | if nonblocking { O_NONBLOCK } else { 0 }) as i64
             }
-        }
+            Some(FdSlot::PipeRead(handle, _)) => {
+                (O_RDONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+            }
+            Some(FdSlot::PipeWrite(handle, _)) => {
+                (O_WRONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+            }
+            Some(_) => O_RDONLY as i64,
+            None => EBADF,
+        },
         F_SETFL => match with_fd_slot(fd) {
             Some(FdSlot::Socket { handle, .. }) => {
                 crate::net::socket::set_nonblocking(handle.id(), arg & O_NONBLOCK as u64 != 0)
@@ -3344,6 +3423,14 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
                 handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
                 0
             }
+            Some(FdSlot::File { .. }) => with_fd_table_mut(|table| {
+                let Some(FdSlot::File { status_flags, .. }) = table.get_mut(fd) else {
+                    return EBADF;
+                };
+                *status_flags =
+                    (*status_flags & O_ACCMODE) | (arg as u32 & (O_APPEND | O_NONBLOCK));
+                0
+            }),
             Some(_) => 0,
             None => EBADF,
         },
@@ -3880,6 +3967,84 @@ pub fn gettimeofday_handler(args: &mut SyscallArgs) -> i64 {
         tv_usec: ((ns % 1_000_000_000) / 1_000) as i64,
     };
     crate::userland::usercopy::write_unaligned(tv_ptr, &tv).map_or_else(|e| e, |_| 0)
+}
+
+/// `umask(mask) -> previous_mask`. Permission enforcement remains minimal,
+/// but the state is process-local, inherited across fork, and retained across
+/// exec so BFD and future toolchains observe normal POSIX behavior.
+pub fn umask_handler(args: &mut SyscallArgs) -> i64 {
+    crate::userland::lifecycle::with_current_process(|process| {
+        let old = process.umask;
+        process.umask = args.rdi as u32 & 0o777;
+        old as i64
+    })
+}
+
+fn decode_utimens_value(value: LinuxTimespec, now: u64) -> Result<Option<u64>, i64> {
+    match value.tv_nsec {
+        UTIME_NOW => Ok(Some(now)),
+        UTIME_OMIT => Ok(None),
+        0..=999_999_999 if value.tv_sec >= 0 => Ok(Some(value.tv_sec as u64)),
+        _ => Err(EINVAL),
+    }
+}
+
+/// `utimensat(AT_FDCWD, path, times, 0)` with Linux `UTIME_NOW` and
+/// `UTIME_OMIT` support. Directory-fd-relative and no-follow variants stay
+/// outside the current path ABI and fail explicitly.
+pub fn utimensat_handler(args: &mut SyscallArgs) -> i64 {
+    let dirfd = args.rdi as i32;
+    let path_ptr = args.rsi;
+    let times_ptr = args.rdx;
+    let flags = args.r10;
+    if dirfd != AT_FDCWD {
+        return ENOSYS;
+    }
+    if flags != 0 {
+        return EINVAL;
+    }
+    let path = match resolve_user_path(path_ptr) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    if let Some(error) = bin_namespace_mutation_check(&path) {
+        return error;
+    }
+    if let Some(error) = managed_etc_mutation_check(&path) {
+        return error;
+    }
+    if let Some(error) = proc_namespace_mutation_check(&path) {
+        return error;
+    }
+    if let Some(error) = dev_namespace_mutation_check(&path) {
+        return error;
+    }
+
+    let now = crate::time::realtime_ns() / 1_000_000_000;
+    let (accessed, modified) = if times_ptr == 0 {
+        (Some(now), Some(now))
+    } else {
+        let atime: LinuxTimespec = match crate::userland::usercopy::read_unaligned(times_ptr) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let mtime: LinuxTimespec = match crate::userland::usercopy::read_unaligned(times_ptr + 16) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let accessed = match decode_utimens_value(atime, now) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let modified = match decode_utimens_value(mtime, now) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        (accessed, modified)
+    };
+
+    crate::fs::vfs::vfs_set_times(&path, accessed, modified)
+        .map_or_else(|ref error| map_filesystem_err(error), |_| 0)
 }
 
 /// `getrandom(buf, len, flags) -> ssize_t` backed by the kernel's trusted

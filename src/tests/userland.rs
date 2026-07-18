@@ -2295,6 +2295,97 @@ fn test_dispatch_open_writable_flag_returns_erofs() {
     teardown_phase2_active_user();
 }
 
+fn test_dispatch_regular_file_fcntl_reports_write_access() {
+    setup_phase2_active_user();
+    let path = b"/fcntl-status.tmp\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
+
+    let mut open = SyscallArgs::default();
+    open.rax = nr::OPEN;
+    open.rdi = ptr;
+    open.rsi = 0o1101; // O_WRONLY|O_CREAT|O_TRUNC
+    let fd = syscall_dispatch(&mut open);
+    assert!(fd >= 0, "open for write failed: {}", fd);
+
+    let mut fcntl = SyscallArgs::default();
+    fcntl.rax = nr::FCNTL;
+    fcntl.rdi = fd as u64;
+    fcntl.rsi = 3; // F_GETFL
+    assert_eq!(syscall_dispatch(&mut fcntl), 1, "expected O_WRONLY");
+
+    let mut close = SyscallArgs::default();
+    close.rax = nr::CLOSE;
+    close.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut close), 0);
+    crate::fs::vfs::vfs_unlink("/fcntl-status.tmp").expect("unlink fcntl fixture");
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_readv_regular_file_scatter() {
+    setup_phase2_active_user();
+    let fixture = crate::fs::File::create("/readv.tmp").expect("create readv fixture");
+    assert_eq!(fixture.write(b"scatter").expect("write readv fixture"), 7);
+
+    let path = b"/readv.tmp\0";
+    let path_ptr = path.as_ptr() as u64;
+    let mut first = [0u8; 3];
+    let mut second = [0u8; 4];
+    let iovecs = [
+        first.as_mut_ptr() as u64,
+        first.len() as u64,
+        second.as_mut_ptr() as u64,
+        second.len() as u64,
+    ];
+    let iov_ptr = iovecs.as_ptr() as u64;
+    let start = [
+        path_ptr,
+        first.as_ptr() as u64,
+        second.as_ptr() as u64,
+        iov_ptr,
+    ]
+    .into_iter()
+    .min()
+    .unwrap();
+    let end = [
+        path_ptr + path.len() as u64,
+        first.as_ptr() as u64 + first.len() as u64,
+        second.as_ptr() as u64 + second.len() as u64,
+        iov_ptr + 32,
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut open = SyscallArgs::default();
+    open.rax = nr::OPEN;
+    open.rdi = path_ptr;
+    let fd = syscall_dispatch(&mut open);
+    assert!(fd >= 0, "open readv fixture failed: {}", fd);
+
+    let mut readv = SyscallArgs::default();
+    readv.rax = nr::READV;
+    readv.rdi = fd as u64;
+    readv.rsi = iov_ptr;
+    readv.rdx = 2;
+    assert_eq!(syscall_dispatch(&mut readv), 7);
+    assert_eq!(&first, b"sca");
+    assert_eq!(&second, b"tter");
+
+    let mut close = SyscallArgs::default();
+    close.rax = nr::CLOSE;
+    close.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut close), 0);
+    crate::fs::vfs::vfs_unlink("/readv.tmp").expect("unlink readv fixture");
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
 /// The kernel-owned runtime `/etc/passwd` is directly visible to userland.
 fn test_dispatch_open_runtime_etc_passwd() {
     setup_phase2_active_user();
@@ -2552,6 +2643,114 @@ fn test_dispatch_clock_realtime_uses_rtc_epoch() {
         seconds
     );
 
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_umask_roundtrip_and_masks_bits() {
+    setup_phase2_active_user();
+    crate::userland::lifecycle::with_active_user(|process| process.umask = 0o022);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::UMASK;
+    args.rdi = 0o1077;
+    assert_eq!(syscall_dispatch(&mut args), 0o022);
+    assert_eq!(
+        crate::userland::lifecycle::with_active_user(|process| process.umask),
+        0o077
+    );
+
+    args.rdi = 0o022;
+    assert_eq!(syscall_dispatch(&mut args), 0o077);
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_utimensat_values_now_omit_and_errors() {
+    const AT_FDCWD: u64 = (-100i64) as u64;
+    const UTIME_NOW: i64 = 0x3fff_ffff;
+    const UTIME_OMIT: i64 = 0x3fff_fffe;
+
+    setup_phase2_active_user();
+    let fixture = crate::fs::File::create("/utimens.tmp").expect("create utimens fixture");
+    assert_eq!(fixture.write(b"x").expect("write utimens fixture"), 1);
+    let data_fixture =
+        crate::fs::File::create("/data/utimens-data.tmp").expect("create ext2 utimens fixture");
+    assert_eq!(
+        data_fixture
+            .write(b"x")
+            .expect("write ext2 utimens fixture"),
+        1
+    );
+    crate::fs::vfs::vfs_set_times("/utimens.tmp", Some(11), Some(22)).expect("seed timestamps");
+
+    let path = b"/utimens.tmp\0";
+    let data_path = b"/data/utimens-data.tmp\0";
+    let missing = b"/utimens-missing.tmp\0";
+    let host = b"/host/BB.ELF\0";
+    let explicit = [123i64, 0, 456, 0];
+    let sentinels = [0i64, UTIME_OMIT, 0, UTIME_NOW];
+    let pointers = [
+        path.as_ptr() as u64,
+        data_path.as_ptr() as u64,
+        missing.as_ptr() as u64,
+        host.as_ptr() as u64,
+        explicit.as_ptr() as u64,
+        sentinels.as_ptr() as u64,
+    ];
+    let start = *pointers.iter().min().unwrap();
+    let end = [
+        path.as_ptr() as u64 + path.len() as u64,
+        data_path.as_ptr() as u64 + data_path.len() as u64,
+        missing.as_ptr() as u64 + missing.len() as u64,
+        host.as_ptr() as u64 + host.len() as u64,
+        explicit.as_ptr() as u64 + 32,
+        sentinels.as_ptr() as u64 + 32,
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::UTIMENSAT;
+    args.rdi = AT_FDCWD;
+    args.rsi = path.as_ptr() as u64;
+    args.rdx = explicit.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let metadata = crate::fs::vfs::vfs_unix_metadata("/utimens.tmp").expect("explicit stat");
+    assert_eq!(metadata.accessed, 123);
+    assert_eq!(metadata.modified, 456);
+
+    args.rsi = data_path.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let data_metadata =
+        crate::fs::vfs::vfs_unix_metadata("/data/utimens-data.tmp").expect("ext2 explicit stat");
+    assert_eq!(data_metadata.accessed, 123);
+    assert_eq!(data_metadata.modified, 456);
+    args.rsi = path.as_ptr() as u64;
+
+    args.rdx = sentinels.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let metadata = crate::fs::vfs::vfs_unix_metadata("/utimens.tmp").expect("sentinel stat");
+    assert_eq!(metadata.accessed, 123, "UTIME_OMIT must preserve atime");
+    assert!(
+        metadata.modified > 1_500_000_000,
+        "UTIME_NOW must use realtime"
+    );
+
+    args.r10 = 1;
+    assert_eq!(syscall_dispatch(&mut args), EINVAL);
+    args.r10 = 0;
+    args.rdx = u64::MAX - 15;
+    assert_eq!(syscall_dispatch(&mut args), EFAULT);
+    args.rdx = explicit.as_ptr() as u64;
+    args.rsi = missing.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), ENOENT);
+    args.rsi = host.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), EROFS);
+
+    crate::fs::vfs::vfs_unlink("/utimens.tmp").expect("unlink utimens fixture");
+    crate::fs::vfs::vfs_unlink("/data/utimens-data.tmp").expect("unlink ext2 utimens fixture");
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
 }
@@ -3184,6 +3383,7 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -5192,6 +5392,7 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -5256,6 +5457,7 @@ fn test_has_children_sees_live_child() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -5406,6 +5608,7 @@ fn test_remove_process_cleans_ring3_queues() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -5438,6 +5641,7 @@ fn test_remove_process_cleans_ring3_queues() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -5642,6 +5846,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_chdir_nonexistent_returns_enoent,
         &test_dispatch_open_nonexistent_returns_enoent,
         &test_dispatch_open_writable_flag_returns_erofs,
+        &test_dispatch_regular_file_fcntl_reports_write_access,
+        &test_dispatch_readv_regular_file_scatter,
         &test_dispatch_open_runtime_etc_passwd,
         &test_dispatch_stat_runtime_zsh_config,
         &test_dispatch_open_etc_unmanaged_file_returns_enoent,
@@ -5654,6 +5860,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_clock_gettime_writes_timespec,
         &test_dispatch_clock_gettime_invalid_clock_einval,
         &test_dispatch_clock_realtime_uses_rtc_epoch,
+        &test_dispatch_umask_roundtrip_and_masks_bits,
+        &test_dispatch_utimensat_values_now_omit_and_errors,
         &test_dispatch_getrandom_fills_buffer,
         &test_dispatch_dev_urandom_read_stat_and_seek,
         &test_dispatch_dev_directory_lists_urandom,

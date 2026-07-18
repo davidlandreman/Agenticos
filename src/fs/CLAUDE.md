@@ -68,6 +68,12 @@ Copy-up is size-capped at 64 KiB (`overlay::filesystem::MAX_COPY_UP_BYTES`) to b
 
 Writes directly to `/data/<file>` skip the overlay and go straight to ext2. `fsync`, `fdatasync`, or `sync` checkpoints the filesystem clean bit and flushes the device.
 
+`Filesystem::set_times` is the path-based timestamp mutation hook behind
+`utimensat(2)`. `None` preserves a field. Tmpfs retains atime/mtime seconds in
+a side map, overlay copies lower nodes up before a legal mutation, and ext2
+updates inode atime/mtime plus ctime. Read-only FAT/vvfat mounts are rejected
+by VFS policy before reaching the filesystem implementation.
+
 ## tmpfs and overlay
 
 - `tmpfs/` — `BTreeMap<String, TmpNode>` directories with `Arc<Mutex<Vec<u8>>>` file bodies. Open handles are anchored in a per-FS side table so `unlink` doesn't drop data out from under live readers (POSIX unlink-while-open).

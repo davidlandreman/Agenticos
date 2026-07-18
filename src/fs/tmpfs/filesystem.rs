@@ -61,6 +61,7 @@ struct OpenFile {
 pub struct Tmpfs {
     root: DirBody,
     open: Mutex<BTreeMap<u64, OpenFile>>,
+    times: Mutex<BTreeMap<String, (u64, u64)>>,
     next_handle_id: AtomicU64,
 }
 
@@ -69,6 +70,7 @@ impl Tmpfs {
         Self {
             root: Arc::new(Mutex::new(BTreeMap::new())),
             open: Mutex::new(BTreeMap::new()),
+            times: Mutex::new(BTreeMap::new()),
             next_handle_id: AtomicU64::new(1),
         }
     }
@@ -205,6 +207,7 @@ impl Filesystem for Tmpfs {
 
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError> {
         let node = self.resolve(path).ok_or(FilesystemError::NotFound)?;
+        let (accessed, modified) = self.times.lock().get(path).copied().unwrap_or((0, 0));
         // Use the last component as the name (or "/" for root).
         let comps = Self::split_path(path);
         let name = comps.last().copied().unwrap_or("/");
@@ -226,8 +229,8 @@ impl Filesystem for Tmpfs {
                 archive: false,
             },
             created: 0,
-            modified: 0,
-            accessed: 0,
+            modified,
+            accessed,
         };
         entry.name[..copy].copy_from_slice(&bytes[..copy]);
         Ok(entry)
@@ -331,6 +334,22 @@ impl Filesystem for Tmpfs {
         ftruncate(self, handle, size)
     }
 
+    fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<u64>,
+        modified: Option<u64>,
+    ) -> Result<(), FilesystemError> {
+        self.resolve(path).ok_or(FilesystemError::NotFound)?;
+        let mut times = self.times.lock();
+        let current = times.get(path).copied().unwrap_or((0, 0));
+        times.insert(
+            path.to_string(),
+            (accessed.unwrap_or(current.0), modified.unwrap_or(current.1)),
+        );
+        Ok(())
+    }
+
     fn mkdir(&self, path: &str) -> Result<(), FilesystemError> {
         let (parent, leaf) = self
             .resolve_parent(path)
@@ -357,6 +376,7 @@ impl Filesystem for Tmpfs {
         match dir.get(leaf) {
             Some(TmpNode::File(_)) => {
                 dir.remove(leaf);
+                self.times.lock().remove(path);
                 Ok(())
             }
             Some(TmpNode::Dir(_)) => Err(FilesystemError::IsADirectory),
@@ -415,6 +435,10 @@ impl Filesystem for Tmpfs {
                 }
             }
             dir.insert(dst_leaf.to_string(), node);
+            let mut times = self.times.lock();
+            if let Some(value) = times.remove(old_path) {
+                times.insert(new_path.to_string(), value);
+            }
             return Ok(());
         }
 
@@ -453,6 +477,10 @@ impl Filesystem for Tmpfs {
             }
         }
         dst_dir.insert(dst_leaf.to_string(), node);
+        let mut times = self.times.lock();
+        if let Some(value) = times.remove(old_path) {
+            times.insert(new_path.to_string(), value);
+        }
         Ok(())
     }
 
@@ -677,6 +705,21 @@ mod tests {
         assert_eq!(h.size, 3);
     }
 
+    fn test_tmpfs_set_times_roundtrip_and_omit() {
+        let fs = Tmpfs::new();
+        open_write_read(&fs, "/dated", b"x");
+        fs.set_times("/dated", Some(123), Some(456))
+            .expect("set both times");
+        let first = fs.stat("/dated").expect("stat dated");
+        assert_eq!(first.accessed, 123);
+        assert_eq!(first.modified, 456);
+
+        fs.set_times("/dated", None, Some(789)).expect("omit atime");
+        let second = fs.stat("/dated").expect("stat dated again");
+        assert_eq!(second.accessed, 123);
+        assert_eq!(second.modified, 789);
+    }
+
     pub fn get_tests() -> &'static [&'static dyn Testable] {
         &[
             &test_tmpfs_write_then_read,
@@ -691,6 +734,7 @@ mod tests {
             &test_tmpfs_unlink_directory_returns_isadir,
             &test_tmpfs_open_directory_returns_isadir,
             &test_tmpfs_ftruncate_extends_and_shrinks,
+            &test_tmpfs_set_times_roundtrip_and_omit,
         ]
     }
 }

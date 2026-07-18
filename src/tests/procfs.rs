@@ -28,6 +28,7 @@ fn synthetic_process(pid: u32) -> Process {
         brk_current: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         sleep_deadline: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
