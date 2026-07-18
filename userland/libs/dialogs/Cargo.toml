@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = ["standalone"]
+standalone = ["runtime/standalone", "gui/standalone"]
+embedded = ["runtime/embedded", "gui/embedded"]
+
 [dependencies]
-runtime = { path = "../../runtime" }
-gui = { path = "../gui" }
+runtime = { path = "../../runtime", default-features = false }
+gui = { path = "../gui", default-features = false }

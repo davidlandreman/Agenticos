@@ -2,9 +2,11 @@
 
 extern crate alloc;
 
+mod controls;
 pub mod file_ui;
 mod font;
 mod input;
+mod menu;
 mod scrollbar;
 mod slider;
 mod text_area;
@@ -14,11 +16,13 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+pub use controls::{CheckBox, ProgressBar, RadioButton, StatusBar, ToggleAction, Toolbar};
 pub use gui_core::{
     Axis, ControlInput, ControlResponse, KeyInput, Modifiers, MouseButtons, PointerInput,
     PointerKind, Rect, ScrollState, ScrollbarPolicy, TextEdit,
 };
 pub use input::decode_control_input;
+pub use menu::{MenuEntry, MenuEntryFlags, MenuPopup, MenuPopupAction};
 pub use runtime::{
     GuiEvent, GUI_EVENT_CLOSE, GUI_EVENT_FOCUS_CHANGE, GUI_EVENT_KEY, GUI_EVENT_MOUSE,
     GUI_EVENT_RESIZE, GUI_EVENT_SETTINGS_CHANGED, GUI_EVENT_THEME_CHANGED, GUI_MOUSE_DOWN,
@@ -49,10 +53,35 @@ pub const COLOR_ACCENT_FILL: u32 = 0xCCE4F7;
 /// Secondary graph series (green) and its fill shade.
 pub const COLOR_ACCENT2: u32 = 0x107C10;
 
+enum PixelBuffer {
+    Owned(Vec<u32>),
+    Borrowed { pointer: *mut u32, len: usize },
+}
+
+impl PixelBuffer {
+    fn as_slice(&self) -> &[u32] {
+        match self {
+            Self::Owned(pixels) => pixels,
+            Self::Borrowed { pointer, len } => unsafe {
+                core::slice::from_raw_parts(*pointer, *len)
+            },
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u32] {
+        match self {
+            Self::Owned(pixels) => pixels,
+            Self::Borrowed { pointer, len } => unsafe {
+                core::slice::from_raw_parts_mut(*pointer, *len)
+            },
+        }
+    }
+}
+
 pub struct Canvas {
     width: u32,
     height: u32,
-    pixels: Vec<u32>,
+    pixels: PixelBuffer,
     clip: Option<Rect>,
 }
 
@@ -61,9 +90,31 @@ impl Canvas {
         Self {
             width,
             height,
-            pixels: vec![0; width as usize * height as usize],
+            pixels: PixelBuffer::Owned(vec![0; width as usize * height as usize]),
             clip: None,
         }
+    }
+
+    /// Wraps an existing tightly packed XRGB8888 pixel buffer without taking
+    /// ownership of it.
+    ///
+    /// # Safety
+    ///
+    /// `pointer` must remain valid and exclusively borrowed for at least
+    /// `width * height` `u32` pixels for the entire lifetime of the canvas.
+    /// The canvas must be dropped before the backing allocation is resized or
+    /// released.
+    pub unsafe fn from_borrowed(width: u32, height: u32, pointer: *mut u32) -> Option<Self> {
+        let len = (width as usize).checked_mul(height as usize)?;
+        if len != 0 && pointer.is_null() {
+            return None;
+        }
+        Some(Self {
+            width,
+            height,
+            pixels: PixelBuffer::Borrowed { pointer, len },
+            clip: None,
+        })
     }
 
     pub fn width(&self) -> u32 {
@@ -73,13 +124,25 @@ impl Canvas {
         self.height
     }
     pub fn pixels(&self) -> &[u32] {
-        &self.pixels
+        self.pixels.as_slice()
+    }
+    pub fn pixels_mut(&mut self) -> &mut [u32] {
+        self.pixels.as_mut_slice()
+    }
+    pub fn is_borrowed(&self) -> bool {
+        matches!(self.pixels, PixelBuffer::Borrowed { .. })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        let len = width as usize * height as usize;
+        match &mut self.pixels {
+            PixelBuffer::Owned(pixels) => pixels.resize(len, 0),
+            PixelBuffer::Borrowed { len: current, .. } => {
+                assert_eq!(*current, len, "cannot resize a borrowed canvas buffer")
+            }
+        }
         self.width = width;
         self.height = height;
-        self.pixels.resize(width as usize * height as usize, 0);
         self.clip = None;
     }
 
@@ -92,7 +155,7 @@ impl Canvas {
     }
 
     pub fn clear(&mut self, color: u32) {
-        self.pixels.fill(color);
+        self.pixels.as_mut_slice().fill(color);
     }
 
     pub fn pixel(&mut self, x: i32, y: i32, color: u32) {
@@ -102,7 +165,7 @@ impl Canvas {
         if self.clip.map(|clip| !clip.contains(x, y)).unwrap_or(false) {
             return;
         }
-        self.pixels[y as usize * self.width as usize + x as usize] = color;
+        self.pixels.as_mut_slice()[y as usize * self.width as usize + x as usize] = color;
     }
 
     fn blend_pixel(&mut self, x: i32, y: i32, color: u32, alpha: u8) {
@@ -117,7 +180,7 @@ impl Canvas {
             return;
         }
         let index = y as usize * self.width as usize + x as usize;
-        let background = self.pixels[index];
+        let background = self.pixels.as_slice()[index];
         let alpha = alpha as u32;
         let inverse = 255 - alpha;
         let blend = |shift: u32| {
@@ -127,7 +190,7 @@ impl Canvas {
                 / 255)
                 << shift
         };
-        self.pixels[index] = blend(16) | blend(8) | blend(0);
+        self.pixels.as_mut_slice()[index] = blend(16) | blend(8) | blend(0);
     }
 
     pub fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: u32) {
@@ -155,7 +218,7 @@ impl Canvas {
         for row in top..bottom {
             let start = row as usize * self.width as usize + left as usize;
             let end = row as usize * self.width as usize + right as usize;
-            self.pixels[start..end].fill(color);
+            self.pixels.as_mut_slice()[start..end].fill(color);
         }
     }
 
@@ -2002,4 +2065,31 @@ fn stat_is_dir(directory: &str, name: &str) -> bool {
     let result = runtime::fstat(fd as i32, &mut stat);
     let _ = runtime::close(fd as i32);
     result == 0 && stat.st_mode & 0o170000 == 0o040000
+}
+
+#[cfg(test)]
+mod canvas_tests {
+    use super::Canvas;
+
+    #[test]
+    fn borrowed_canvas_matches_owned_drawing() {
+        let mut owned = Canvas::new(40, 24);
+        owned.clear(0x112233);
+        owned.fill_rect(3, 4, 17, 9, 0xabcdef);
+        owned.draw_text(1, 1, "Native", 0x010203);
+
+        let mut pixels = alloc::vec![0; 40 * 24];
+        let mut borrowed = unsafe { Canvas::from_borrowed(40, 24, pixels.as_mut_ptr()).unwrap() };
+        borrowed.clear(0x112233);
+        borrowed.fill_rect(3, 4, 17, 9, 0xabcdef);
+        borrowed.draw_text(1, 1, "Native", 0x010203);
+
+        assert!(borrowed.is_borrowed());
+        assert_eq!(owned.pixels(), borrowed.pixels());
+    }
+
+    #[test]
+    fn borrowed_canvas_rejects_null_storage() {
+        assert!(unsafe { Canvas::from_borrowed(1, 1, core::ptr::null_mut()) }.is_none());
+    }
 }

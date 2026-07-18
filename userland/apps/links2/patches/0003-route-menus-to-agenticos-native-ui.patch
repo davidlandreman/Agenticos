@@ -1,0 +1,301 @@
+--- a/links.h
++++ b/links.h
+@@ -32,6 +32,10 @@
+ 
+ #include "com-defs.h"
+ 
++#ifdef GRDRV_AGENTICOS
++#include "agenticos_ui.h"
++#endif
++
+ #define LINKS_COPYRIGHT "(C) 1999 - 2021 Mikulas Patocka\n(C) 2000 - 2021 Petr Kulhavy, Karel Kulhavy, Martin Pergel"
+ #define LINKS_COPYRIGHT_8859_1 "(C) 1999 - 2021 Mikul\341s Patocka\n(C) 2000 - 2021 Petr Kulhav\375, Karel Kulhav\375, Martin Pergel"
+ #define LINKS_COPYRIGHT_8859_2 "(C) 1999 - 2021 Mikul\341\271 Pato\350ka\n(C) 2000 - 2021 Petr Kulhav\375, Karel Kulhav\375, Martin Pergel"
+--- a/bfu.c
++++ b/bfu.c
+@@ -5,6 +5,11 @@
+ 
+ #include "links.h"
+ 
++#ifdef GRDRV_AGENTICOS
++extern int agenticos_ui_open_links_menu(struct terminal *, struct menu_item *, void *,
++	int, void (*)(void *), void *, int);
++#endif
++
+ static void menu_func(struct window *, struct links_event *, int);
+ static void mainmenu_func(struct window *, struct links_event *, int);
+ 
+@@ -161,6 +166,10 @@
+ 
+ void do_menu_selected(struct terminal *term, struct menu_item *items, void *data, int selected, void (*free_function)(void *), void *free_data)
+ {
++#ifdef GRDRV_AGENTICOS
++	if (agenticos_ui_open_links_menu(term, items, data, selected, free_function, free_data, 0))
++		return;
++#endif
+ 	int i;
+ 	struct menu *menu;
+ 	for (i = 0; items[i].text; i++) if (i == (MAXINT - sizeof(struct menu)) / sizeof(unsigned)) overalloc();
+@@ -667,6 +676,10 @@
+ 
+ void do_mainmenu(struct terminal *term, struct menu_item *items, void *data, int sel)
+ {
++#ifdef GRDRV_AGENTICOS
++	if (agenticos_ui_open_links_menu(term, items, data, sel, NULL, NULL, 1))
++		return;
++#endif
+ 	int i;
+ 	struct mainmenu *menu;
+ 	for (i = 0; items[i].text; i++) if (i == (MAXINT - sizeof(struct mainmenu)) / sizeof(unsigned)) overalloc();
+@@ -1095,6 +1108,9 @@
+ static void x_display_dlg_item(struct dialog_data *dlg, struct dialog_item_data *di, int sel)
+ {
+ 	struct dspd dspd;
+ 	dspd.dlg = dlg, dspd.di = di, dspd.sel = sel;
+ 	draw_to_window(dlg->win, u_display_dlg_item, &dspd);
++#ifdef GRDRV_AGENTICOS
++	if (!dlg->dlg->handle_event) agenticos_ui_dialog_refresh(dlg);
++#endif
+ }
+@@ -1221,5 +1237,8 @@
+ {
+ 	struct dialog_data *dlg = (struct dialog_data *)dlg_;
++#ifdef GRDRV_AGENTICOS
++	if (!dlg->dlg->handle_event) agenticos_ui_dialog_begin(dlg);
++#endif
+ #ifdef G
+ 	int i;
+ #endif
+@@ -1238,4 +1257,7 @@
+ 		dlg->s = NULL;
+ 	}
+ #endif
++#ifdef GRDRV_AGENTICOS
++	if (!dlg->dlg->handle_event) agenticos_ui_dialog_refresh(dlg);
++#endif
+ }
+@@ -1593,7 +1615,10 @@
+				break;
+			}
+			break;
+		case EV_ABORT:
++#ifdef GRDRV_AGENTICOS
++			agenticos_ui_dialog_close(dlg);
++#endif
+		/* Moved this line up so that the dlg would have access to its
+		   member vars before they get freed. */
+			if (dlg->dlg->abort) dlg->dlg->abort(dlg);
+@@ -1970,5 +1995,8 @@
+ 		if (term) {
+ 			int xx = (align & AL_MASK) == AL_CENTER ? x + (w - www) / 2 : x;
++#ifdef GRDRV_AGENTICOS
++			agenticos_ui_dialog_label(dlg, txt, xx, *y);
++#endif
+ 			g_print_text(dlg->win->term->dev, xx, *y, ww.style, txt, NULL);
+ 			if (dlg->s) exclude_from_set(&dlg->s, xx, *y, xx + www, *y + G_BFU_FONT_SIZE);
+ 			if (!r) mem_free(txt);
+@@ -2165,4 +2193,7 @@
+ 			else {
+ 				int l, ll;
+ 				l = ll = x + nx + (item->item->type == D_CHECKBOX ? txtlen(dlg->win->term, cast_uchar(G_DIALOG_CHECKBOX_L G_DIALOG_CHECKBOX_X G_DIALOG_CHECKBOX_R)) + G_DIALOG_GROUP_TEXT_SPACE : 0);
++#ifdef GRDRV_AGENTICOS
++				agenticos_ui_dialog_label(dlg, get_text_translation(texts[0], dlg->win->term), l, *y);
++#endif
+ 				g_print_text(term->dev, ll, *y, bfu_style_bw, get_text_translation(texts[0], dlg->win->term), &ll);
+--- a/session.c
++++ b/session.c
+@@ -276,6 +276,9 @@
+ static void x_print_screen_status(struct terminal *term, void *ses_)
+ {
+ 	struct session *ses = (struct session *)ses_;
++#ifdef GRDRV_AGENTICOS
++	if (agenticos_ui_set_status(term, ses->st)) return;
++#endif
+	if (!F) {
+		decc_volatile int p = proxies.only_proxies;
+		unsigned char color = get_session_attribute(ses, p);
+@@ -675,7 +678,10 @@
+ 			ss = g_text_width(bfu_style_bw_mono, q);
+ 			p = w - s - ss;
+ 			if (p < 0) p = 0;
+ 			m = download_meter(p, stat);
++#ifdef GRDRV_AGENTICOS
++			agenticos_ui_dialog_progress(dlg, x, y, w, m, p);
++#endif
+ 			g_print_text(term->dev, x, y, bfu_style_bw_mono, cast_uchar "[", NULL);
+ 			drv->fill_area(term->dev, x + s, y, x + s + m, y + G_BFU_FONT_SIZE, bfu_fg_color);
+ 			drv->fill_area(term->dev, x + s + m, y, x + s + p, y + G_BFU_FONT_SIZE, bfu_bg_color);
+@@ -2813,6 +2817,10 @@
+ 
+ static void set_doc_view(struct session *ses)
+ {
++#ifdef GRDRV_AGENTICOS
++	if (agenticos_ui_set_document_view(ses, &ses->screen->xp, &ses->screen->yp,
++	    &ses->screen->xw, &ses->screen->yw)) return;
++#endif
+ 	ses->screen->xp = 0;
+ 	ses->screen->yp = gf_val(1, G_BFU_FONT_SIZE);
+ 	ses->screen->xw = ses->term->x;
+--- a/listedit.c
++++ b/listedit.c
+@@ -1086,5 +1086,10 @@
+ 	}
+ #endif
++#ifdef GRDRV_AGENTICOS
++	if (F) agenticos_ui_dialog_list_row(dlg, txt, dlg->x + DIALOG_LB, y, w,
++		G_BFU_FONT_SIZE, ld->type ? l->depth : 0,
++		ld->type ? l->type : (l->type & 4), l == ld->current_pos);
++#endif
+ 	mem_free(txt);
+ }
+ 
+@@ -1105,6 +1110,10 @@
+ 		int visible = get_visible_items(ld);
+ 		int pos = get_scroll_pos(ld);
+ 		draw_vscroll_bar(term->dev, dlg->x + DIALOG_LB + w + G_SCROLL_BAR_WIDTH, y, G_BFU_FONT_SIZE * ld->n_items, total, visible, pos);
++#ifdef GRDRV_AGENTICOS
++		agenticos_ui_dialog_scrollbar(dlg, dlg->x + DIALOG_LB + w + G_SCROLL_BAR_WIDTH,
++			y, G_SCROLL_BAR_WIDTH, G_BFU_FONT_SIZE * ld->n_items, total, visible, pos);
++#endif
+ 		if (dlg->s) exclude_from_set(&dlg->s, dlg->x + DIALOG_LB + w + G_SCROLL_BAR_WIDTH, y, dlg->x + DIALOG_LB + w + sirka_scrollovadla, y + G_BFU_FONT_SIZE * ld->n_items);
+ 	}
+ #endif
+@@ -1221,6 +1230,10 @@
+ 			int visible = get_visible_items(ld);
+ 			int pos = get_scroll_pos(ld);
+ 			draw_vscroll_bar(term->dev, dlg->x + DIALOG_LB + w + G_SCROLL_BAR_WIDTH, y, G_BFU_FONT_SIZE * ld->n_items, total, visible, pos);
++#ifdef GRDRV_AGENTICOS
++			agenticos_ui_dialog_scrollbar(dlg, dlg->x + DIALOG_LB + w + G_SCROLL_BAR_WIDTH,
++				y, G_SCROLL_BAR_WIDTH, G_BFU_FONT_SIZE * ld->n_items, total, visible, pos);
++#endif
+ 			if (dlg->s) exclude_from_set(&dlg->s, dlg->x + DIALOG_LB + w + G_SCROLL_BAR_WIDTH, y, dlg->x + DIALOG_LB + w + sirka_scrollovadla, y + G_BFU_FONT_SIZE * ld->n_items);
+ 		}
+ 		set_clip_area(term->dev, &old_area);
+@@ -1786,6 +1799,9 @@
+ 	dlg->yw=y+2*DIALOG_TB;
+ 	center_dlg(dlg);
+ 	draw_dlg(dlg);
++#ifdef GRDRV_AGENTICOS
++	agenticos_ui_dialog_begin(dlg);
++#endif
+ 
+ 	rd.ld=ld;
+ 	rd.dlg=dlg;
+@@ -1795,6 +1811,9 @@
+ 
+ 	y=dlg->y+DIALOG_TB+gf_val(ld->n_items+1,(ld->n_items+1)*G_BFU_FONT_SIZE);
+ 	dlg_format_buttons(dlg, term, dlg->items, a, dlg->x+DIALOG_LB, &y, w, &rw, AL_CENTER);
++#ifdef GRDRV_AGENTICOS
++	agenticos_ui_dialog_refresh(dlg);
++#endif
+ }
+ 
+ 
+--- a/view_gr.c
++++ b/view_gr.c
+@@ -127,13 +127,19 @@
+ 			case FC_RADIO:
+ 				if (link && fd->active && fd->vs->g_display_link && fd->vs->current_link == link - fd->f_data->links) inv = g_invert_style(t->style), in = 1;
+ 				else inv = t->style, in = 0;
+ 				g_print_text(dev, x, y, inv, fs->state ? cast_uchar "[X]" : cast_uchar "[ ]", NULL);
+ 				if (in) g_free_style(inv);
++#ifdef GRDRV_AGENTICOS
++				agenticos_ui_form_control(fd->ses->term, form->type, x, y, t->goti.go.xw, t->goti.go.yw, cast_uchar "", fs->state, in);
++#endif
+ 				return;
+ 			case FC_CHECKBOX:
+ 				if (link && fd->active && fd->vs->g_display_link && fd->vs->current_link == link - fd->f_data->links) inv = g_invert_style(t->style), in = 1;
+ 				else inv = t->style, in = 0;
+ 				g_print_text(dev, x, y, inv, fs->state ? cast_uchar "[X]" : cast_uchar "[ ]", NULL);
+ 				if (in) g_free_style(inv);
++#ifdef GRDRV_AGENTICOS
++				agenticos_ui_form_control(fd->ses->term, form->type, x, y, t->goti.go.xw, t->goti.go.yw, cast_uchar "", fs->state, in);
++#endif
+ 				return;
+ 			case FC_SELECT:
+@@ -143,6 +149,9 @@
+ 				l = 0;
+ 				if (fs->state < form->nvalues) g_print_text(dev, x, y, inv, form->labels[fs->state], &l);
+ 				while (l < t->goti.go.xw) g_print_text(dev, x + l, y, inv, cast_uchar "_", &l);
++#ifdef GRDRV_AGENTICOS
++				agenticos_ui_form_control(fd->ses->term, form->type, x, y, t->goti.go.xw, t->goti.go.yw, fs->state < form->nvalues ? form->labels[fs->state] : cast_uchar "", fs->state, in);
++#endif
+ 				if (in) g_free_style(inv);
+ 				return;
+ 			case FC_TEXT:
+@@ -182,6 +191,9 @@
+ 					g_print_text(dev, x + l, y, st, tx, &l);
+ 					if (sm) g_free_style(st);
+ 				}
++#ifdef GRDRV_AGENTICOS
++				agenticos_ui_form_control(fd->ses->term, form->type, x, y, t->goti.go.xw, t->goti.go.yw, fs->string, fs->state, t->goti.link_num == fd->vs->current_link && fd->ses->locked_link);
++#endif
+ 				return;
+ 			case FC_TEXTAREA:
+ 				cur = area_cursor(fd, form, fs);
+@@ -250,6 +262,9 @@
+ 					}
+ 					if (lid < ftce->n_lines) lid++;
+ 				}
++#ifdef GRDRV_AGENTICOS
++				if (!t->goti.link_order) agenticos_ui_form_control(fd->ses->term, form->type, x, yy, t->goti.go.xw, form->rows * t->style->height, fs->string, fs->state, t->goti.link_num == fd->vs->current_link && fd->ses->locked_link);
++#endif
+ 				return;
+ 		}
+ 	}
+@@ -323,6 +338,10 @@
+ 		g_free_style(inv);
+ 		mem_free(mask);
+ 	}
++#ifdef GRDRV_AGENTICOS
++	if (link && link->form && (link->form->type == FC_SUBMIT || link->form->type == FC_RESET || link->form->type == FC_BUTTON))
++		agenticos_ui_form_control(fd->ses->term, link->form->type, x, y, t->goti.go.xw, t->goti.go.yw, t->text, 0, fd->active && fd->vs->current_link == link - fd->f_data->links);
++#endif
+ }
+ 
+ void g_text_destruct(struct g_object *t_)
+@@ -485,7 +504,10 @@
+ 	get_scrollbar_pos(yw - 4, total, view, pos, &spos, &epos);
+ 	drv->fill_area(dev, x + 2, y + 1, x + G_SCROLL_BAR_WIDTH - 2, y + 2 + spos, scroll_bar_area_color);
+ 	drv->fill_area(dev, x + 2, y + 2 + spos, x + G_SCROLL_BAR_WIDTH - 2, y + 2 + epos, scroll_bar_bar_color);
+ 	drv->fill_area(dev, x + 2, y + 2 + epos, x + G_SCROLL_BAR_WIDTH - 2, y + yw - 1, scroll_bar_area_color);
++#ifdef GRDRV_AGENTICOS
++	agenticos_ui_scrollbar(dev, x, y, G_SCROLL_BAR_WIDTH, yw, total, view, pos, 1);
++#endif
+ }
+ 
+ void draw_hscroll_bar(struct graphics_device *dev, int x, int y, int xw, int total, int view, int pos)
+@@ -500,7 +522,10 @@
+ 	get_scrollbar_pos(xw - 4, total, view, pos, &spos, &epos);
+ 	drv->fill_area(dev, x + 1, y + 2, x + 2 + spos, y + G_SCROLL_BAR_WIDTH - 2, scroll_bar_area_color);
+ 	drv->fill_area(dev, x + 2 + spos, y + 2, x + 2 + epos, y + G_SCROLL_BAR_WIDTH - 2, scroll_bar_bar_color);
+ 	drv->fill_area(dev, x + 2 + epos, y + 2, x + xw - 1, y + G_SCROLL_BAR_WIDTH - 2, scroll_bar_area_color);
++#ifdef GRDRV_AGENTICOS
++	agenticos_ui_scrollbar(dev, x, y, xw, G_SCROLL_BAR_WIDTH, total, view, pos, 0);
++#endif
+ }
+ 
+ static void g_get_search(struct f_data *f, unsigned char *s)
+@@ -1323,6 +1323,11 @@
+ 
+ void draw_title(struct f_data_c *f)
+ {
++#ifdef GRDRV_AGENTICOS
++	if (agenticos_ui_set_location(f->ses->term,
++	    f->rq && f->rq->url ? f->rq->url : cast_uchar ""))
++		return;
++#endif
+ 	int b, z, w;
+ 	struct graphics_device *dev = f->ses->term->dev;
+ 	unsigned char *title = stracpy(!drv->set_title && f->f_data && f->f_data->title && f->f_data->title[0] ? f->f_data->title : NULL);
+--- a/view.c
++++ b/view.c
+@@ -3648,4 +3648,8 @@
+ 			ev->y &= ~KBD_ALT;
+ 			activate_bfu_technology(ses, -1);
++#ifdef GRDRV_AGENTICOS
++			if (agenticos_ui_main_menu_key(ses->term, ev->x, ev->y))
++				goto x;
++#endif
+ 			m = list_struct(ses->term->windows.next, struct window);
+ 			m->handler(m, ev, 0);

@@ -1,9 +1,15 @@
 #![no_std]
+#![feature(alloc_error_handler)]
 #![allow(
     clippy::missing_safety_doc,
     reason = "private C ABI functions share the pointer contracts declared by agenticos.c"
 )]
 
+extern crate alloc;
+
+mod native_ui;
+
+use core::alloc::{GlobalAlloc, Layout};
 use core::cmp::{max, min};
 use core::ffi::{c_int, c_void};
 use core::ptr;
@@ -60,7 +66,48 @@ const B_MOVE: i32 = 48;
 extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn free(pointer: *mut c_void);
+    fn realloc(pointer: *mut c_void, size: usize) -> *mut c_void;
+    fn posix_memalign(pointer: *mut *mut c_void, alignment: usize, size: usize) -> c_int;
 }
+
+struct MuslAllocator;
+
+unsafe impl GlobalAlloc for MuslAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let size = layout.size().max(1);
+        if layout.align() <= 16 {
+            return malloc(size).cast();
+        }
+        let mut pointer = ptr::null_mut();
+        if posix_memalign(&mut pointer, layout.align(), size) == 0 {
+            pointer.cast()
+        } else {
+            ptr::null_mut()
+        }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
+        free(pointer.cast());
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, old: Layout, new_size: usize) -> *mut u8 {
+        if old.align() <= 16 {
+            return realloc(pointer.cast(), new_size.max(1)).cast();
+        }
+        let Ok(new_layout) = Layout::from_size_align(new_size, old.align()) else {
+            return ptr::null_mut();
+        };
+        let replacement = self.alloc(new_layout);
+        if !replacement.is_null() {
+            ptr::copy_nonoverlapping(pointer, replacement, min(old.size(), new_size));
+            self.dealloc(pointer, old);
+        }
+        replacement
+    }
+}
+
+#[global_allocator]
+static MUSL_ALLOCATOR: MuslAllocator = MuslAllocator;
 
 #[repr(C)]
 pub struct Surface {
@@ -527,6 +574,11 @@ fn map_mouse(event: &GuiEvent, out: &mut MappedEvent, previous: &mut u32) {
         _ => B_MOVE,
     };
     *previous = current;
+}
+
+#[alloc_error_handler]
+fn allocation_error(_: Layout) -> ! {
+    unsafe { runtime::exit(127) }
 }
 
 #[panic_handler]

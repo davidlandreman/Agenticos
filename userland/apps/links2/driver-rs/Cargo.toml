@@ -7,6 +7,11 @@ publish = false
 [lib]
 crate-type = ["staticlib"]
 
+[dependencies]
+gui = { path = "../../../libs/gui", default-features = false, features = ["embedded"] }
+gui-core = { path = "../../../libs/gui-core" }
+runtime = { path = "../../../runtime", default-features = false, features = ["embedded"] }
+
 [profile.release]
 panic = "abort"
 opt-level = 2
