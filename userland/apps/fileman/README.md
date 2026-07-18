@@ -3,6 +3,12 @@
 `FILEMAN.ELF` is AgenticOS's standalone ring-3 file manager. It replaces the
 old kernel Explorer while preserving the `explorer [path]` shell command.
 
+Its code-drawn file/navigation icons, breadcrumbs, Places rows, text clipping,
+size formatting, and mount capability presentation are shared with the modern
+common file dialog through `gui::file_ui`. File Manager keeps its own
+multi-selection and filesystem-operation policy; the common chooser remains a
+single-selection commit surface.
+
 ## Interaction
 
 - Back, Forward, Up, Home, New Folder, and Refresh toolbar actions
@@ -20,8 +26,7 @@ are reaped without blocking the manager.
 ## Filesystem capabilities
 
 - Overlay root: full file/folder operations with `sync()` persistence
-- `/data`: persistent file create/copy/delete; its FAT backend does not expose
-  directory creation or rename
+- `/data`: persistent ext2 storage with normal file and directory operations
 - `/host` and `/bin`: read-only browsing and copying out
 
 Folder copy is intentionally not offered yet. Delete is permanent and always
