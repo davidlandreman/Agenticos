@@ -616,6 +616,22 @@ pub fn set_robust_list(tid: u32, head: u64, len: usize) {
     }
 }
 
+/// Drop task-local userspace pointers that cannot survive a successful exec.
+///
+/// Both registrations point into the old address space. Retaining either one
+/// after replacing that address space lets the eventual exit path write or
+/// walk an unmapped address. Linux resets the same state during exec.
+pub fn reset_task_exec_metadata(tid: u32) {
+    let mut g = PROCESS_TABLE.lock();
+    g.clear_child_tid.remove(&tid);
+    g.robust_lists.remove(&tid);
+}
+
+#[cfg(feature = "test")]
+pub fn robust_list(tid: u32) -> Option<(u64, usize)> {
+    PROCESS_TABLE.lock().robust_lists.get(&tid).copied()
+}
+
 pub fn register_thread_task(tid: u32, tgid: u32, process: Process) -> Result<(), ()> {
     let cpu = crate::arch::x86_64::percpu::cpu_id();
     let members = {

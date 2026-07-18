@@ -57,9 +57,18 @@ pub const GLGAME_HOST_PATH: &str = "/host/GLGAME.ELF";
 pub const FILEMAN_HOST_PATH: &str = "/host/FILEMAN.ELF";
 pub const CONTROL_HOST_PATH: &str = "/host/CONTROL.ELF";
 
+/// Text-only `pbcopy` / `pbpaste` multicall executable.
+pub const CLIPBOARD_HOST_PATH: &str = "/host/PBCLIP.ELF";
+
 /// TinyCC: on-target C compiler. `tcc` and the traditional `cc` alias
 /// both rewrite here; argv[0] keeps the invoked name.
 pub const TCC_HOST_PATH: &str = "/host/TCC.ELF";
+
+/// GCC: native C compiler driver inside the staged install prefix
+/// (`stage_gcc_install` extracts `gcc-install.tar.gz` to `host_share/gcc`).
+/// The driver locates cc1/collect2/libgcc through its configured
+/// `--prefix=/host/gcc`, so only the driver needs a `/bin` name.
+pub const GCC_HOST_PATH: &str = "/host/gcc/bin/gcc";
 
 /// Text-mode Links browser. Both command spellings resolve to one ELF.
 pub const LINKS_HOST_PATH: &str = "/host/LINKS.ELF";
@@ -134,6 +143,7 @@ pub const DIRECT_APPLETS: &[&str] = &[
     "curl",
     "elfedit",
     "explorer",
+    "gcc",
     "git",
     "git-receive-pack",
     "git-remote-http",
@@ -149,6 +159,8 @@ pub const DIRECT_APPLETS: &[&str] = &[
     "objcopy",
     "objdump",
     "painting",
+    "pbcopy",
+    "pbpaste",
     "ranlib",
     "readelf",
     "settings",
@@ -461,6 +473,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "cc" | "tcc" => TCC_HOST_PATH,
         "control" | "settings" => CONTROL_HOST_PATH,
         "curl" => CURL_HOST_PATH,
+        "gcc" => GCC_HOST_PATH,
         "git" | "git-upload-pack" | "git-receive-pack" | "git-upload-archive" => GIT_HOST_PATH,
         "git-remote-http" | "git-remote-https" => GIT_REMOTE_HTTP_HOST_PATH,
         "glgame" => GLGAME_HOST_PATH,
@@ -468,6 +481,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "explorer" => FILEMAN_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,
         "painting" => PAINTING_HOST_PATH,
+        "pbcopy" | "pbpaste" => CLIPBOARD_HOST_PATH,
         "taskmgr" | "tasks" => TASKMGR_HOST_PATH,
         _ => binutils_host_path(canonical)?,
     };
@@ -878,6 +892,13 @@ mod tests_internal {
         let (path, applet) = apply_bin_rewrite("/bin/settings").expect("must resolve");
         assert_eq!(path, "/host/CONTROL.ELF");
         assert_eq!(applet, "settings");
+
+        let (path, applet) = apply_bin_rewrite("/bin/pbcopy").expect("must resolve");
+        assert_eq!(path, "/host/PBCLIP.ELF");
+        assert_eq!(applet, "pbcopy");
+        let (path, applet) = apply_bin_rewrite("/bin/pbpaste").expect("must resolve");
+        assert_eq!(path, "/host/PBCLIP.ELF");
+        assert_eq!(applet, "pbpaste");
 
         for (name, expected) in [
             ("addr2line", "/host/ADDRLINE.ELF"),

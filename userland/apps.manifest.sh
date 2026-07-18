@@ -2,6 +2,7 @@
 # name | source dir | build kind | staged 8.3 name | ship kind | toolchain |
 # build output (relative to userland/) | committed prebuilt (or -)
 app_row hello            apps/hello             cargo HELLO.ELF    built-every-run rust-nightly target/x86_64-unknown-none/release/hello            -
+app_row clipboard        apps/clipboard         cargo PBCLIP.ELF   built-every-run rust-nightly target/x86_64-unknown-none/release/clipboard        -
 app_row guilaunch        apps/guilaunch         cargo GLAUNCH.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/guilaunch        -
 app_row guidemo          apps/guidemo           cargo GUIDEMO.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/guidemo          -
 app_row notepad          apps/notepad           cargo NOTEPAD.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/notepad          -

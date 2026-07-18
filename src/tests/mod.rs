@@ -8,6 +8,8 @@ pub mod basic;
 #[cfg(feature = "test")]
 pub mod binutils;
 #[cfg(feature = "test")]
+pub mod clipboard;
+#[cfg(feature = "test")]
 pub mod compiler_compat;
 #[cfg(feature = "test")]
 pub mod composition_cpu;
@@ -29,6 +31,10 @@ pub mod fat_write;
 pub mod filesystem;
 #[cfg(feature = "test")]
 pub mod fonts;
+// Kept but not yet registered in MODULES (cc1 runtime hang — see below).
+#[cfg(feature = "test")]
+#[allow(dead_code)]
+pub mod gcc;
 #[cfg(feature = "test")]
 pub mod git_userland;
 #[cfg(feature = "test")]
@@ -55,6 +61,8 @@ pub mod mouse_event_extension_tests;
 pub mod network;
 #[cfg(feature = "test")]
 pub mod network_userland;
+#[cfg(feature = "test")]
+pub mod p9;
 #[cfg(feature = "test")]
 pub mod path_bar_tests;
 #[cfg(feature = "test")]
@@ -144,6 +152,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("tmpfs", crate::fs::tmpfs::filesystem::tmpfs_tests),
     ("overlay", crate::fs::overlay::filesystem::overlay_tests),
     ("fat_write", fat_write::get_tests),
+    ("p9", p9::get_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
     ("libuv", libuv_plumbing::get_tests),
@@ -157,6 +166,11 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("vm", vm::get_tests),
     ("compiler_compat", compiler_compat::get_tests),
     ("tcc", tcc::get_tests),
+    // GCC end-to-end compile is not yet registered: the driver → cc1 → as →
+    // ld pipeline is wired and cc1 loads, but cc1 hangs early in userspace
+    // when run as a fork+execve child (see the GCC port plan's "Known gap").
+    // The test module and staged fixtures are kept for when that is solved.
+    // ("gcc", gcc::get_tests),
     ("userland_switch", userland_switch::get_tests),
     ("path", crate::userland::path::path_tests),
     ("etc", crate::userland::etc::etc_tests),
@@ -168,6 +182,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
         "bin_namespace",
         crate::userland::bin_namespace::bin_namespace_tests,
     ),
+    ("clipboard", clipboard::get_tests),
     (
         "gui_launch_table",
         crate::commands::gui_launch_table::gui_launch_table_tests,

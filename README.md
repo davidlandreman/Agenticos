@@ -11,6 +11,8 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 - **GUI Desktop**: Boots directly into graphical mode with a blue desktop background
 - **Window System**: Hierarchical window management with mouse support
 - **Terminal**: Windowed terminals running static-musl zsh and BusyBox applets
+- **Host text clipboard**: `pbcopy` and `pbpaste` bridge UTF-8 text through
+  QEMU to the host clipboard (up to 1 MiB)
 - **POSIX threads**: musl pthread creation/join, per-thread TLS/TIDs,
   mutexes, condition variables, and detached cleanup through clone + futexes
 - **Memory Management**: Virtual memory, demand paging, per-process address spaces, and heap allocation
@@ -42,6 +44,8 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 - Rust nightly toolchain (managed automatically via `rust-toolchain.toml`)
 - QEMU for x86-64 (`qemu-system-x86_64`)
 - e2fsprogs (`mke2fs` and `e2fsck`; `brew install e2fsprogs` on macOS)
+- Python 3 for the QEMU host clipboard bridge (`pbcopy`/`pbpaste` are built
+  into macOS)
 
 ### Build and Run
 
@@ -104,6 +108,43 @@ HELLO.TXT  HOST.TXT
 Hello from the host!
 ```
 
+The terminal can also exchange text with the live host clipboard:
+
+```sh
+echo "from AgenticOS" | pbcopy
+pbpaste --ensure-newline
+```
+
+Clipboard support is UTF-8 text-only and capped at 1 MiB. It uses a dedicated
+QEMU serial channel, so it also works when guest networking is disabled.
+Like macOS `pbpaste`, the guest command writes the clipboard bytes exactly and
+does not add a trailing newline unless `--ensure-newline` is requested.
+
+Useful copy modes include direct text, clipboard merging, whitespace cleanup,
+and status reporting:
+
+```sh
+pbcopy --text "ready"
+printf '\nnext line' | pbcopy --append
+printf '  clean me  \n' | pbcopy --trim
+pbcopy --clear
+```
+
+Paste modes can inspect, safely quote, or explicitly execute the clipboard:
+
+```sh
+pbpaste --length                 # UTF-8 bytes
+pbpaste --chars                  # Unicode characters
+pbpaste --lines
+pbpaste --trim --shell-quote
+pbpaste --exec                   # executes as: zsh -c COMMAND
+```
+
+`pbpaste --exec` passes the clipboard directly to `zsh -c`. Run
+`pbcopy --help` or `pbpaste --help` for the complete option reference.
+Executed commands currently have a 4095-byte limit imposed by the guest's argv
+ABI; ordinary copy/paste remains capped at 1 MiB.
+
 **Caveats** (inherent to the QEMU vvfat mechanism this uses):
 
 - The directory listing is **snapshotted at QEMU start**. Adding or removing a file on the host while the guest is running will not be reflected until the next boot. File contents do update live, but new files do not appear.
@@ -127,6 +168,7 @@ Once booted, the terminal supports these commands:
 | `hexdump` | Display file in hex format |
 | `time` | Show system time |
 | `touch` | Create empty file (limited) |
+| `pbcopy`, `pbpaste` | Copy text to or paste text from the host clipboard |
 
 ## Project Structure
 

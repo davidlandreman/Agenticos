@@ -97,6 +97,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     try_mount_host_disk();
     try_mount_data_disk();
     try_mount_legacy_data_disk();
+    try_mount_shared();
     // Phase D U11: now that /data is mounted (if present), restore
     // the overlay's upper-layer tmpfs from any persistent state.
     // No-op when /data is missing or has no prior sync.
@@ -126,6 +127,15 @@ pub fn init(boot_info: &'static mut BootInfo) {
         Err(e) => debug_info!("[boot] /root provisioning failed: {:?}", e),
     }
 
+    // POSIX temp-file directory. GCC's driver (and anything else relying
+    // on mkstemp/choose_tmpdir defaults) writes scratch files here with
+    // no TMPDIR convention. Overlay-backed like /work.
+    match crate::fs::vfs::vfs_mkdir("/tmp") {
+        Ok(()) => {}
+        Err(crate::fs::filesystem::FilesystemError::AlreadyExists) => {}
+        Err(e) => debug_info!("[boot] /tmp provisioning failed: {:?}", e),
+    }
+
     debug_info!("[boot] managed /etc");
     crate::userland::etc::init();
 
@@ -149,11 +159,11 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // both hold at this point, and no ring-3 process exists yet.
     crate::userland::etc::publish_theme(crate::window::theme::active());
 
-    // Mouse, GUIShell desktop, and MCP bridge are not exercised by any
+    // Mouse, GUIShell desktop, and host bridges are not exercised by any
     // in-kernel test. Skipping them under `feature = "test"` removes the
     // largest chunks of `./test.sh` startup latency: GUIShell paints the
-    // wallpaper + initial render; the MCP bridge spawns a kernel process
-    // and brings up COM2.
+    // wallpaper + initial render; the MCP bridge spawns a kernel process,
+    // while the two host bridges bring up COM2 and COM3.
     #[cfg(not(feature = "test"))]
     {
         debug_info!("[boot] mouse");
@@ -168,12 +178,15 @@ pub fn init(boot_info: &'static mut BootInfo) {
 
         debug_info!("[boot] mcp-bridge");
         init_mcp_bridge();
+
+        debug_info!("[boot] host-clipboard");
+        crate::clipboard::init();
     }
 
     #[cfg(feature = "test")]
     {
         let _ = screen_dims;
-        debug_info!("[boot] test mode — skipping mouse, guishell, mcp");
+        debug_info!("[boot] test mode — skipping mouse, guishell, host bridges");
     }
 
     debug_info!("[boot] init complete");
@@ -650,6 +663,25 @@ fn try_mount_data_disk() {
         Err(_) => {
             debug_info!("Data disk: filesystem detection failed (uninitialized?)");
         }
+    }
+}
+
+/// Probe the `agenticos-shared` virtio-9p device and mount the host share at
+/// `/shared`. Absence is normal (share disabled, or QEMU without the
+/// device); every failure path leaves boot identical to today.
+fn try_mount_shared() {
+    use crate::drivers::virtio::p9::P9Transport;
+
+    let Some(transport) = P9Transport::discover_by_tag("agenticos-shared") else {
+        debug_info!("shared: no virtio-9p device; /shared not mounted");
+        return;
+    };
+    match crate::fs::p9::P9Filesystem::new(transport) {
+        Ok(filesystem) => match crate::fs::vfs::mount_p9(filesystem, "/shared") {
+            Ok(()) => debug_info!("Mounted 9p host share at /shared"),
+            Err(error) => debug_warn!("shared: mount failed: {:?}", error),
+        },
+        Err(error) => debug_warn!("shared: 9p handshake failed: {:?}", error),
     }
 }
 

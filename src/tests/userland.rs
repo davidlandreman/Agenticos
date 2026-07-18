@@ -1133,6 +1133,58 @@ fn test_pwrite_large_and_pread_short() {
     teardown_phase2_active_user();
 }
 
+/// BusyBox `cat` copies regular files to stdout with `sendfile(2)`. The
+/// kernel must route that stdout through the issuing process's PTY just like
+/// `write(2)`/`writev(2)`; the legacy `crate::print!` path draws outside the
+/// terminal while still reporting a successful byte count.
+fn test_sendfile_stdout_routes_to_current_terminal() {
+    const PATH: &str = "/sendfile-terminal-route.tmp";
+    const CONTENT: &[u8] = b"sendfile reaches the process terminal";
+
+    setup_phase2_active_user();
+    let writer = crate::fs::File::create(PATH).expect("create sendfile fixture");
+    assert_eq!(
+        writer.write(CONTENT).expect("write sendfile fixture"),
+        CONTENT.len()
+    );
+    drop(writer);
+
+    let terminal_id = crate::window::WindowId::new();
+    let master = crate::terminal::pty::install_for_terminal(terminal_id, 24, 80);
+    let prior_terminal = crate::userland::lifecycle::with_active_user(|process| {
+        let prior = process.terminal_id;
+        process.terminal_id = Some(terminal_id);
+        prior
+    });
+    let input = crate::fs::File::open_read(PATH).expect("open sendfile fixture");
+    let input_fd = crate::userland::lifecycle::with_active_user(|process| {
+        process
+            .fd_table
+            .alloc(FdSlot::File {
+                handle: input,
+                status_flags: 0,
+                cloexec: false,
+            })
+            .expect("allocate sendfile input fd")
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::SENDFILE;
+    args.rdi = 1;
+    args.rsi = input_fd as u64;
+    args.rdx = 0;
+    args.r10 = CONTENT.len() as u64;
+    assert_eq!(syscall_dispatch(&mut args), CONTENT.len() as i64);
+    assert_eq!(master.drain_output().as_slice(), CONTENT);
+
+    crate::userland::lifecycle::with_active_user(|process| {
+        process.terminal_id = prior_terminal;
+    });
+    crate::terminal::pty::clear_for_terminal(terminal_id);
+    teardown_phase2_active_user();
+    crate::fs::vfs::vfs_unlink(PATH).expect("unlink sendfile fixture");
+}
+
 /// `chmod`/`fchmod` are validated success no-ops: FAT and tmpfs carry no
 /// permission bits and execve performs no +x check. TinyCC chmods its
 /// output executable after writing it.
@@ -2096,6 +2148,23 @@ fn test_fdtable_alloc_and_close() {
     let fd3 = t.alloc(FdSlot::Stdin).expect("third alloc reuses slot 3");
     assert_eq!(fd3, 3, "closed slot 3 must be reused");
     assert_eq!(t.close(99).err(), Some(EBADF));
+}
+
+fn test_fdtable_capacity_64() {
+    use crate::userland::fdtable::FD_TABLE_SIZE;
+    assert_eq!(FD_TABLE_SIZE, 64, "GCC driver chains rely on 64 fd slots");
+    let mut t = FdTable::new();
+    t.install_default_streams();
+    for expected in 3..FD_TABLE_SIZE as i32 {
+        assert_eq!(t.alloc(FdSlot::Stdin), Some(expected));
+    }
+    assert_eq!(t.alloc(FdSlot::Stdin), None, "table must cap at 64 slots");
+    assert!(t.close(FD_TABLE_SIZE as i32 - 1).is_ok());
+    assert_eq!(
+        t.alloc(FdSlot::Stdin),
+        Some(FD_TABLE_SIZE as i32 - 1),
+        "top slot must be reusable after close"
+    );
 }
 
 fn test_fdtable_dup_and_dup2() {
@@ -6053,6 +6122,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_write_file_large_chunked,
         &test_writev_file_large_iovs,
         &test_pwrite_large_and_pread_short,
+        &test_sendfile_stdout_routes_to_current_terminal,
         &test_dispatch_eventfd_epoll_edge_round_trip,
         &test_dispatch_socketpair_full_duplex,
         &test_dispatch_sigaltstack_membarrier_and_yield_profile,
@@ -6108,6 +6178,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         // Phase 2: FD table
         &test_fdtable_install_default_streams,
         &test_fdtable_alloc_and_close,
+        &test_fdtable_capacity_64,
         &test_fdtable_dup_and_dup2,
         // Phase 2: path utilities
         &test_normalize_path_absolute_keeps_path,

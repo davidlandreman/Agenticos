@@ -292,6 +292,74 @@ stage_tcc_sysroot() {
     echo "Staged $dest ($(find "$dest" -type f | wc -l | tr -d ' ') files)"
 }
 
+# Stage the committed GCC install tree as an extracted prefix under
+# host_share/gcc (guest: /host/gcc). Prebuilt-managed like the sysroot
+# tarball: normal builds extract the committed gcc-install.tar.gz;
+# REBUILD_USERLAND=1 / REBUILD_GCC=1 / a missing tarball trigger a rebuild
+# through the gcc Makefile. The tree layout is load-bearing — the driver
+# finds cc1/collect2/libgcc through its configured --prefix=/host/gcc —
+# so it ships as one tarball, not flat ELFs. A content stamp keeps repeat
+# stagings cheap.
+stage_gcc_install() {
+    local tarball="$REPO_ROOT/userland/prebuilt/gcc-install.tar.gz"
+    local built="$REPO_ROOT/userland/apps/gcc/build/gcc-install.tar.gz"
+    local dest="$HOST_SHARE_STAGE/gcc"
+    local stamp="$dest/.staged.sha256" want have tmp
+
+    if [ "${REBUILD_USERLAND:-0}" = 1 ] || [ "${REBUILD_GCC:-0}" = 1 ] || [ ! -f "$tarball" ]; then
+        if _make_app apps/gcc musl-cc && [ -f "$built" ]; then
+            mkdir -p "${tarball%/*}"
+            cp "$built" "$tarball.tmp.$$" && mv -f "$tarball.tmp.$$" "$tarball"
+        else
+            echo "Could not rebuild gcc install tree; trying committed tarball" >&2
+        fi
+    fi
+    if [ ! -f "$tarball" ]; then
+        echo "Warning: gcc install tarball missing; /host/gcc not staged" >&2
+        return 1
+    fi
+
+    want=$(shasum -a 256 "$tarball" | awk '{print $1}')
+    have=$(cat "$stamp" 2>/dev/null || true)
+    if [ "$want" = "$have" ] && [ -d "$dest" ]; then
+        return 0
+    fi
+    tmp="$HOST_SHARE_STAGE/.gcc.tmp.$$"
+    rm -rf "$tmp" "$dest"
+    mkdir -p "$tmp"
+    if ! tar xzf "$tarball" -C "$tmp"; then
+        rm -rf "$tmp"
+        echo "Warning: could not extract gcc install tarball" >&2
+        return 1
+    fi
+    printf '%s\n' "$want" > "$tmp/.staged.sha256"
+    mv "$tmp" "$dest"
+    echo "Staged $dest ($(find "$dest" -type f | wc -l | tr -d ' ') files)"
+}
+
+# Stage small C source fixtures used by the booted GCC integration tests.
+# Ordinary read-only guest inputs, not generated prebuilts.
+stage_gcc_fixtures() {
+    local source_dir="$REPO_ROOT/userland/apps/gcc/tests"
+    local dest="$HOST_SHARE_STAGE/GCCTEST"
+    local f
+    for f in hello.c two-main.c two-util.c compute.c crash.c; do
+        [ -f "$source_dir/$f" ] || {
+            echo "Missing GCC test fixture: $source_dir/$f" >&2
+            return 1
+        }
+    done
+    mkdir -p "$dest"
+    # Lowercase .c staged names are load-bearing: GCC's driver classifies
+    # an uppercase `.C` suffix as C++ source and refuses it in this
+    # C-only build. Kernel FAT lookups stay case-insensitive either way.
+    _stage_atomic_copy "$source_dir/hello.c" "$dest/hello.c"
+    _stage_atomic_copy "$source_dir/two-main.c" "$dest/twomain.c"
+    _stage_atomic_copy "$source_dir/two-util.c" "$dest/twoutil.c"
+    _stage_atomic_copy "$source_dir/compute.c" "$dest/compute.c"
+    _stage_atomic_copy "$source_dir/crash.c" "$dest/crash.c"
+}
+
 # stage_userland MODE SKIP_BUILT
 # MODE is `build` or `test`; SKIP_BUILT=1 preserves prebuilt + fixture staging.
 stage_userland() {
@@ -319,6 +387,9 @@ stage_userland() {
     # non-fixture apps.
     stage_tcc_sysroot || echo "Warning: tcc sysroot was not staged" >&2
     stage_binutils_fixtures || echo "Warning: binutils fixtures were not staged" >&2
+    # The GCC install prefix is a tarball-shipped tree like the sysroot.
+    stage_gcc_install || echo "Warning: gcc install tree was not staged" >&2
+    stage_gcc_fixtures || echo "Warning: gcc fixtures were not staged" >&2
     return 0
 }
 
@@ -343,4 +414,15 @@ refresh_manifest_prebuilts() {
     [ -f "$sysroot_built" ] || { echo "tcc sysroot tarball was not built" >&2; return 1; }
     cp "$sysroot_built" "$sysroot_prebuilt.tmp.$$" && mv -f "$sysroot_prebuilt.tmp.$$" "$sysroot_prebuilt" || return 1
     echo "Refreshed $sysroot_prebuilt"
+    # GCC ships as a pruned install-prefix tarball rather than manifest-row
+    # ELFs; rebuild, validate the contained executables, and refresh the
+    # committed tarball. Hard-fail like the other artifacts.
+    make -C "$REPO_ROOT/userland/apps/gcc" \
+        MUSL_CC="${MUSL_CC:-x86_64-linux-musl-gcc}" \
+        MUSL_GXX="${MUSL_GXX:-x86_64-linux-musl-g++}" all validate || return 1
+    local gcc_built="$REPO_ROOT/userland/apps/gcc/build/gcc-install.tar.gz"
+    local gcc_prebuilt="$REPO_ROOT/userland/prebuilt/gcc-install.tar.gz"
+    [ -f "$gcc_built" ] || { echo "gcc install tarball was not built" >&2; return 1; }
+    cp "$gcc_built" "$gcc_prebuilt.tmp.$$" && mv -f "$gcc_prebuilt.tmp.$$" "$gcc_prebuilt" || return 1
+    echo "Refreshed $gcc_prebuilt"
 }

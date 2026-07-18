@@ -1175,10 +1175,36 @@ fn test_root_home_provisioned_and_writable() {
     crate::fs::vfs::vfs_unlink(path).expect("cleanup Links state probe");
 }
 
+/// /tmp is provisioned on the overlay at every boot: the POSIX default
+/// temp-file directory (GCC's driver and mkstemp callers use it with no
+/// TMPDIR convention).
+fn test_tmp_directory_provisioned_and_writable() {
+    let meta = crate::fs::metadata("/tmp").expect("/tmp must exist after boot");
+    assert_eq!(
+        meta.file_type,
+        crate::fs::filesystem::FileType::Directory,
+        "/tmp must be a directory"
+    );
+
+    let path = "/tmp/ccProbe.s";
+    let f = crate::fs::File::create(path).expect("create temp probe in /tmp");
+    assert_eq!(f.write(b"scratch").expect("write in /tmp"), 7);
+    drop(f);
+    assert_eq!(
+        crate::fs::File::open_read(path)
+            .expect("reopen temp probe")
+            .read_to_string()
+            .expect("read temp probe"),
+        "scratch"
+    );
+    crate::fs::vfs::vfs_unlink(path).expect("cleanup temp probe");
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_work_directory_provisioned_and_writable,
         &test_root_home_provisioned_and_writable,
+        &test_tmp_directory_provisioned_and_writable,
         &test_seek_past_eof_tmpfs_zero_fill,
         &test_seek_past_eof_data_zero_fill,
         &test_seek_past_eof_readonly_rejected,
