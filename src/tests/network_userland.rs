@@ -216,6 +216,120 @@ fn test_links_https_rejects_future_certificate() {
     run_links_https_rejection("future.agenticos.test", "links-https-future.txt");
 }
 
+fn assert_curl_staged() {
+    let path = crate::userland::bin_namespace::CURL_HOST_PATH;
+    assert!(
+        crate::fs::exists(path),
+        "mandatory fixture missing: {}",
+        path
+    );
+}
+
+/// `curl --version` needs no network but proves the committed static binary
+/// starts, and pins the TLS backend and protocol scope the Makefile promises.
+fn test_curl_version_reports_https() {
+    assert_curl_staged();
+    run_zsh_network_command(
+        "curl --version > /work/curl-version.txt && \
+         grep -q 'OpenSSL/3.5.7' /work/curl-version.txt && \
+         grep -q 'https' /work/curl-version.txt && \
+         ! grep -q 'ftp' /work/curl-version.txt",
+    );
+}
+
+fn test_curl_numeric_http() {
+    assert_curl_staged();
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    run_zsh_network_command(
+        "curl -fsS -o /work/curl-http.txt http://10.0.2.101:8081/ && \
+         grep -q 'AgenticOS HTTP OK' /work/curl-http.txt",
+    );
+}
+
+fn test_curl_hostname_http() {
+    assert_curl_staged();
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    run_zsh_network_command(
+        "curl -fsS -o /work/curl-http-name.txt http://agenticos-http.test:8081/ && \
+         grep -q 'AgenticOS HTTP OK' /work/curl-http-name.txt",
+    );
+}
+
+fn test_curl_follows_relative_http_redirect() {
+    assert_curl_staged();
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    run_zsh_network_command(
+        "curl -fsSL -o /work/curl-redirect.txt http://10.0.2.101:8081/redirect && \
+         grep -q 'AgenticOS second page' /work/curl-redirect.txt",
+    );
+}
+
+fn run_curl_https_success(host: &str, output: &str, extra_flags: &str) {
+    assert_curl_staged();
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    let command = alloc::format!(
+        "rm -f /work/{0}; attempt=0; \
+         until curl -fsS {3} -o /work/{0} https://{1}:8443/ && \
+         grep -q '{2}' /work/{0}; do \
+             attempt=$((attempt + 1)); \
+             if [ $attempt -ge 3 ]; then cat /work/{0}; exit 1; fi; \
+         done",
+        output,
+        host,
+        "AgenticOS HTTPS OK",
+        extra_flags
+    );
+    run_zsh_network_command(&command);
+}
+
+fn run_curl_https_rejection(host: &str, output: &str) {
+    assert_curl_staged();
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    // CURLE_PEER_FAILED_VERIFICATION = 60 — the failure must be certificate
+    // verification specifically, and no body may reach the output file.
+    let command = alloc::format!(
+        "rm -f /work/{0}; \
+         curl -sS -o /work/{0} https://{1}:8443/ 2> /work/{0}.err; \
+         [ $? -eq 60 ] || {{ cat /work/{0}.err; exit 1 }}; \
+         ! grep -q 'AgenticOS HTTPS OK' /work/{0} 2>/dev/null",
+        output,
+        host
+    );
+    run_zsh_network_command(&command);
+}
+
+fn test_curl_https_valid_hostname() {
+    run_curl_https_success("valid.agenticos.test", "curl-https-valid.txt", "");
+}
+
+fn test_curl_https_valid_numeric_ip() {
+    run_curl_https_success("10.0.2.102", "curl-https-ip.txt", "");
+}
+
+fn test_curl_https_rejects_hostname_mismatch() {
+    run_curl_https_rejection("mismatch.agenticos.test", "curl-https-mismatch.txt");
+}
+
+fn test_curl_https_rejects_untrusted_root() {
+    run_curl_https_rejection("untrusted.agenticos.test", "curl-https-untrusted.txt");
+}
+
+fn test_curl_https_rejects_expired_certificate() {
+    run_curl_https_rejection("expired.agenticos.test", "curl-https-expired.txt");
+}
+
+/// `-k` is the explicit user-typed escape hatch: the same mismatched host
+/// the rejection test proves fails closed must succeed once verification is
+/// deliberately waived.
+fn test_curl_insecure_flag_overrides_mismatch() {
+    run_curl_https_success("mismatch.agenticos.test", "curl-https-insecure.txt", "-k");
+}
+
 fn run_zsh_network_command(command: &str) {
     let path = crate::userland::process_service::ZSH_HOST_PATH;
     assert!(
@@ -286,6 +400,16 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_links_dump_numeric_http,
         &test_links_dump_hostname_http,
         &test_links_follows_relative_http_redirect,
+        &test_curl_version_reports_https,
+        &test_curl_numeric_http,
+        &test_curl_hostname_http,
+        &test_curl_follows_relative_http_redirect,
+        &test_curl_https_valid_hostname,
+        &test_curl_https_valid_numeric_ip,
+        &test_curl_https_rejects_hostname_mismatch,
+        &test_curl_https_rejects_untrusted_root,
+        &test_curl_https_rejects_expired_certificate,
+        &test_curl_insecure_flag_overrides_mismatch,
         &test_zsh_ping_numeric_ipv4,
         &test_zsh_wget_numeric_http,
         &test_zsh_wget_hostname,
