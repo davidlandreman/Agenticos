@@ -2,7 +2,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::graphics::scene::{inflate_rect, LayerEffect, SceneFrame};
+use crate::graphics::scene::{
+    backdrop_box_radii, backdrop_halo, inflate_rect, LayerEffect, SceneFrame,
+};
 use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
 use crate::window::Rect;
 
@@ -41,8 +43,7 @@ impl CpuCompositionEngine {
         if radius == 0 || rect.is_empty() {
             return pixels;
         }
-        let total = radius as u32;
-        let passes = [total / 3, total / 3, total / 3 + total % 3];
+        let passes = backdrop_box_radii(radius);
         let mut scratch = vec![PremulArgb::TRANSPARENT; pixels.len()];
         for radius in passes {
             if radius == 0 {
@@ -89,12 +90,7 @@ impl CompositionEngine for CpuCompositionEngine {
         }
 
         let output_bounds = Rect::new(0, 0, self.output.width(), self.output.height());
-        let total_halo = scene.layers.iter().fold(0u32, |halo, layer| {
-            halo.saturating_add(match layer.effect {
-                LayerEffect::BackdropSample { radius } if layer.visible => radius as u32,
-                _ => 0,
-            })
-        });
+        let total_halo = backdrop_halo(&scene.layers);
         let mut stats = RenderStats::default();
         for requested in damage {
             let Some(damage_rect) = requested.intersection(&output_bounds) else {

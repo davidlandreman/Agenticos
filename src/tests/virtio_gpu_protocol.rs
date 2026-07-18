@@ -201,6 +201,71 @@ fn test_sampler_view_state_can_persist_and_unbind() {
     assert_eq!(&words[words.len() - 2..], &[3 | (6 << 8) | (1 << 16), 9]);
 }
 
+fn test_resource_copy_and_multi_sampler_command_streams() {
+    let mut encoder = VirglCommandEncoder::new();
+    encoder
+        .resource_copy_region(
+            7,
+            3,
+            5,
+            0,
+            9,
+            GpuBox {
+                x: 11,
+                y: 13,
+                z: 0,
+                width: 17,
+                height: 19,
+                depth: 1,
+            },
+        )
+        .unwrap();
+    encoder.set_fragment_sampler_views(0, &[21, 22]).unwrap();
+    encoder.bind_fragment_sampler_states(0, &[8, 8]).unwrap();
+    encoder.clear_fragment_sampler_views(0, 2).unwrap();
+
+    assert_eq!(
+        &encoder.words()[..14],
+        &[17 | (13 << 16), 7, 0, 3, 5, 0, 9, 0, 11, 13, 0, 17, 19, 1,]
+    );
+    assert!(encoder
+        .words()
+        .windows(5)
+        .any(|words| words == [10 | (4 << 16), 1, 0, 21, 22]));
+    assert!(encoder
+        .words()
+        .windows(5)
+        .any(|words| words == [18 | (4 << 16), 1, 0, 8, 8]));
+    assert!(encoder
+        .words()
+        .windows(5)
+        .any(|words| words == [10 | (4 << 16), 1, 0, 0, 0]));
+
+    let mut invalid = VirglCommandEncoder::new();
+    assert_eq!(
+        invalid.resource_copy_region(
+            7,
+            0,
+            0,
+            0,
+            7,
+            GpuBox {
+                x: 0,
+                y: 0,
+                z: 0,
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        ),
+        Err(GpuError::InvalidCommandStream)
+    );
+    assert_eq!(
+        invalid.set_fragment_sampler_views(15, &[1, 2]),
+        Err(GpuError::InvalidCommandStream)
+    );
+}
+
 fn test_serialized_header_is_little_endian() {
     let header = CtrlHeader {
         command_type: CMD_RESOURCE_CREATE_2D,
@@ -298,6 +363,7 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_partial_surface_staging_preserves_untouched_backing,
         &test_clear_command_stream_matches_classic_virgl_layout,
         &test_sampler_view_state_can_persist_and_unbind,
+        &test_resource_copy_and_multi_sampler_command_streams,
         &test_virtqueue_chain_recycles_all_descriptors,
         &test_virtqueue_timeout_and_capacity,
         &test_dma_buffers_split_at_page_boundaries,

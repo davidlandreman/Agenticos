@@ -90,9 +90,10 @@ fails initialization or panics on a runtime GPU failure instead.
 On macOS, an explicit host-side `gpu` request must first pass the pinned custom
 QEMU verifier; see `docs/macos-virgl-qualification.md`.
 `AGENTICOS_THEME=classic|aero|auto` is passed as `opt/agenticos/theme`. Explicit
-Aero is available on retained CPU and VirGL; the VirGL variant accelerates
-rounded translucent chrome and shadows but leaves backdrop blur disabled.
-Legacy falls back to Classic, and `auto` keeps Classic on VirGL.
+Aero is available on retained CPU and qualified VirGL; VirGL performs the
+radius-4 frame backdrop blur on the host GPU. `auto` selects Aero for retained
+CPU and qualified VirGL. Legacy selects Classic, and a non-strict runtime
+fallback to legacy activates Classic before repainting.
 
 ## Implementation status
 

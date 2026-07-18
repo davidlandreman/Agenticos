@@ -2,7 +2,7 @@ use crate::graphics::color::Color;
 use crate::graphics::surface::{Surface, SurfaceDesc};
 use crate::window::renderer::{RendererKind, RetainedRenderer, SurfaceCanvas};
 use crate::window::theme::{
-    self, FrameChrome, ThemeKind, ThemeRequest, AERO_METRICS, CLASSIC_METRICS,
+    self, FrameChrome, ThemeKind, ThemeRequest, AERO_BACKDROP_RADIUS, AERO_METRICS, CLASSIC_METRICS,
 };
 use crate::window::{GraphicsDevice, Insets, Rect, WindowId};
 
@@ -31,7 +31,17 @@ fn test_theme_selection_and_fallback_matrix() {
     assert!(virgl.fallback_reason.is_none());
     assert_eq!(
         theme::select_theme(ThemeRequest::Auto, RendererKind::Virgl).selected,
-        ThemeKind::Classic
+        ThemeKind::Aero
+    );
+    assert_eq!(
+        theme::frame_effect_for(ThemeKind::Classic),
+        crate::graphics::scene::LayerEffect::None
+    );
+    assert_eq!(
+        theme::frame_effect_for(ThemeKind::Aero),
+        crate::graphics::scene::LayerEffect::BackdropSample {
+            radius: AERO_BACKDROP_RADIUS
+        }
     );
 }
 
