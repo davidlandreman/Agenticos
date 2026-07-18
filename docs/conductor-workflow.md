@@ -12,7 +12,7 @@ This doc explains what's wired up, how it stays isolated, and how to extend it.
 |---|---|
 | `conductor.json` | Lifecycle config Conductor reads when opening the repo. |
 | `.conductor/setup.sh` | Runs **once** when Conductor creates a workspace. Installs the pinned Rust toolchain, verifies QEMU, seeds personal Claude Code permissions, and warms the release build cache. |
-| `.conductor/run.sh` | Runs every time you click **Run** in a workspace. Delegates to `./build.sh`. |
+| `.conductor/run.sh` | Runs every time you click **Run** in a workspace. Defaults to strict VirGL on the qualified QEMU 1.0.27 bottle with Aero chrome and networking disabled, then delegates to `./build.sh`; explicit environment overrides still win. |
 | `.conductor/archive.sh` | Runs before Conductor archives a workspace. Kills any QEMU process scoped to that workspace. |
 | `.conductor/run.local.sh` | Optional, gitignored. Drop one in a workspace to override `run.sh` (e.g., add `-gdb` flags) without dirtying git. |
 

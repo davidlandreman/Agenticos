@@ -177,10 +177,24 @@ impl RetainedRenderer {
         scene: &SceneFrame,
         damage: &[Rect],
     ) -> Result<RenderStats, RetainedRendererError> {
+        let mut snapshots = BTreeMap::<SurfaceId, alloc::vec::Vec<Rect>>::new();
+        for layer in &scene.layers {
+            if !layer.visible || layer.opacity == 0 || snapshots.contains_key(&layer.surface_id) {
+                continue;
+            }
+            if let Some(surface) = self.surfaces.get(&layer.surface_id) {
+                snapshots.insert(layer.surface_id, surface.damage_snapshot());
+            }
+        }
         let stats = self
             .engine
             .compose(scene, &self.surfaces, damage)
             .map_err(|_| RetainedRendererError::Composition)?;
+        for (surface_id, snapshot) in snapshots {
+            if let Some(surface) = self.surfaces.get_mut(&surface_id) {
+                let _ = surface.acknowledge_damage(&snapshot);
+            }
+        }
         self.last_stats = stats;
         Ok(stats)
     }

@@ -105,6 +105,7 @@ impl CompositionEngine for CpuCompositionEngine {
                 .unwrap_or(damage_rect);
             let saved = self.copy_region(work_rect);
             self.output.clear(work_rect, PremulArgb::TRANSPARENT);
+            stats.output_damage_regions = stats.output_damage_regions.saturating_add(1);
             stats.output_pixels_damaged = stats
                 .output_pixels_damaged
                 .saturating_add(damage_rect.area());

@@ -10,10 +10,16 @@ set -euo pipefail
 # Conductor sets CONDUCTOR_WORKSPACE_PATH; honor it but tolerate manual runs.
 cd "${CONDUCTOR_WORKSPACE_PATH:-$(git rev-parse --show-toplevel)}"
 
-# Exercise retained composition with classic window chrome.
-# Explicit caller values still override these defaults.
-export AGENTICOS_COMPOSITOR="${AGENTICOS_COMPOSITOR:-retained}"
-export AGENTICOS_THEME="${AGENTICOS_THEME:-classic}"
+# Exercise the qualified VirGL compositor with Aero window chrome. The pinned
+# macOS QEMU bottle has no user-network backend, so its default launch is
+# offline. Explicit caller values still override all of these defaults.
+qemu_virgl_prefix="${AGENTICOS_QEMU_VIRGL_PREFIX:-$(brew --cellar qemu)/1.0.27}"
+export AGENTICOS_COMPOSITOR="${AGENTICOS_COMPOSITOR:-gpu}"
+export AGENTICOS_GPU_STRICT="${AGENTICOS_GPU_STRICT:-1}"
+export AGENTICOS_QEMU_BIN="${AGENTICOS_QEMU_BIN:-$qemu_virgl_prefix/bin/qemu-system-x86_64}"
+export AGENTICOS_QEMU_GL="${AGENTICOS_QEMU_GL:-es}"
+export AGENTICOS_THEME="${AGENTICOS_THEME:-aero}"
+export AGENTICOS_NETWORK="${AGENTICOS_NETWORK:-off}"
 
 # build.sh's manual-run default is machine-global. Give each Conductor
 # workspace its own RPC socket so parallel QEMUs cannot unlink or replace one
@@ -39,7 +45,10 @@ echo " AgenticOS — running workspace ${CONDUCTOR_WORKSPACE_NAME:-<local>}"
 echo "------------------------------------------------------------------"
 echo " image path     : $bios_image"
 echo " compositor     : $AGENTICOS_COMPOSITOR"
+echo " gpu strict     : $AGENTICOS_GPU_STRICT"
+echo " qemu binary    : $AGENTICOS_QEMU_BIN"
 echo " window theme   : $AGENTICOS_THEME"
+echo " network        : $AGENTICOS_NETWORK"
 echo " reserved ports : ${port_lo}-${port_hi} (currently unused; future GDB)"
 echo "=================================================================="
 

@@ -243,8 +243,19 @@ VirGL is a hard gate, not a placeholder mode. The kernel does not select or log
 an accelerated engine until feature negotiation, a supported capset, known
 premultiplied-alpha rendering, synchronization, readback, and deterministic
 pixel comparison all succeed. Stock Homebrew QEMU on the current Apple Silicon
-development host lacks the required GL device, so retained CPU remains the
-working product path there.
+host remains a retained-CPU path. Once selected, VirGL maps stable `SurfaceId`s
+to a bounded persistent texture cache. New/resized surfaces receive one full
+upload; later frames transfer only bounded surface-local damage. Layer opacity
+is applied by the quad shader, so moving, focusing, reordering, or changing the
+opacity of unchanged windows uploads no texture pixels. The framebuffer
+surface, fixed shader/state objects, sampler views, and a growable vertex
+resource persist across frames; resize and eviction defer referenced resource
+destruction until the fenced command stream has removed the old view/binding.
+For each clipped output-damage rectangle, VirGL draws a transparent overwrite
+quad through the scissor and redraws only layers that intersect that rectangle;
+unaffected output pixels and nonintersecting windows receive no fragment work.
+Damage is acknowledged only after successful composition, preserving retry and
+CPU-fallback safety.
 
 ### Legacy backing buffers
 

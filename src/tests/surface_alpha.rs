@@ -54,6 +54,34 @@ fn test_surface_resize_and_rows() {
     assert!(!surface.resize(SurfaceDesc::new(4, 5)).unwrap());
 }
 
+fn test_surface_damage_acknowledgement_is_transactional() {
+    let mut surface = Surface::new(SurfaceDesc::new(8, 8)).unwrap();
+    let initial = surface.damage_snapshot();
+    assert!(surface.acknowledge_damage(&initial));
+    assert!(surface.damage().is_empty());
+
+    surface.mark_damage(Rect::new(1, 1, 2, 2));
+    let stale = surface.damage_snapshot();
+    surface.mark_damage(Rect::new(6, 6, 1, 1));
+    assert!(!surface.acknowledge_damage(&stale));
+    assert_eq!(surface.damage().len(), 2);
+
+    let current = surface.damage_snapshot();
+    assert!(surface.acknowledge_damage(&current));
+    assert!(surface.damage().is_empty());
+}
+
+fn test_surface_damage_region_count_is_bounded() {
+    let mut surface = Surface::new(SurfaceDesc::new(64, 64)).unwrap();
+    surface.clear_damage();
+    for index in 0..17 {
+        let x = (index % 8) * 4;
+        let y = (index / 8) * 4;
+        surface.mark_damage(Rect::new(x, y, 1, 1));
+    }
+    assert_eq!(surface.damage(), &[Rect::new(0, 0, 64, 64)]);
+}
+
 fn test_budget_rejection_and_accounting() {
     let mut budget = SurfaceBudget::new(100);
     budget.reserve(SurfaceClass::Visible, 60).unwrap();
@@ -75,6 +103,8 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_half_alpha_source_over,
         &test_surface_checked_sizes_and_damage_merge,
         &test_surface_resize_and_rows,
+        &test_surface_damage_acknowledgement_is_transactional,
+        &test_surface_damage_region_count_is_bounded,
         &test_budget_rejection_and_accounting,
     ]
 }
