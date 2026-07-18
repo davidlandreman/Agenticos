@@ -47,7 +47,6 @@ pub const ESPIPE: i64 = -29;
 pub const EROFS: i64 = -30;
 pub const ERANGE: i64 = -34;
 pub const ENAMETOOLONG: i64 = -36;
-pub const ENOTSUP: i64 = -95;
 pub const ECHILD: i64 = -10;
 pub const EAGAIN: i64 = -11;
 pub const EPIPE: i64 = -32;
@@ -118,6 +117,7 @@ static SEEN_NRS: [AtomicBool; TRACE_NR_CAPACITY] = {
     [INIT; TRACE_NR_CAPACITY]
 };
 
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn set_trace_mode(enabled: bool) {
     TRACE_MODE.store(enabled, Ordering::Relaxed);
 }
@@ -139,6 +139,7 @@ pub fn reset_unknown_syscall_trace() {
 /// log for this number since the last `reset_unknown_syscall_trace`?
 /// Returns false for numbers ≥ `TRACE_NR_CAPACITY` (those are logged on
 /// every occurrence rather than tracked individually).
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn unknown_syscall_was_seen(nr: u64) -> bool {
     let idx = nr as usize;
     if idx >= TRACE_NR_CAPACITY {
@@ -151,6 +152,7 @@ pub fn set_user_va_bounds(bounds: UserVaBounds) {
     *USER_VA_BOUNDS.lock() = Some(bounds);
 }
 
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn clear_user_va_bounds() {
     *USER_VA_BOUNDS.lock() = None;
 }

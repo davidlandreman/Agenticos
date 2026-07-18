@@ -14,6 +14,7 @@ use spin::Mutex;
 pub mod event_types {
     pub const EV_SYN: u16 = 0x00;
     pub const EV_KEY: u16 = 0x01;
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const EV_REL: u16 = 0x02;
     pub const EV_ABS: u16 = 0x03;
 }
@@ -261,29 +262,12 @@ impl VirtioTablet {
         (x, y)
     }
 
-    /// Get raw absolute coordinates (0-32767)
-    pub fn get_absolute_position(&self) -> (u32, u32) {
-        (self.abs_x, self.abs_y)
-    }
-
     /// Get button state
     pub fn get_buttons(&self) -> u8 {
         self.buttons
     }
 
-    /// Check if position was updated since last check
-    pub fn take_position_updated(&mut self) -> bool {
-        let updated = self.position_updated;
-        self.position_updated = false;
-        updated
     }
-
-    /// Update screen dimensions (for coordinate scaling)
-    pub fn set_screen_size(&mut self, width: u32, height: u32) {
-        self.screen_width = width;
-        self.screen_height = height;
-    }
-}
 
 /// Initialize the global VirtIO tablet if available
 pub fn init(screen_width: u32, screen_height: u32) -> bool {
@@ -319,10 +303,6 @@ pub fn init(screen_width: u32, screen_height: u32) -> bool {
     false
 }
 
-/// Check if VirtIO tablet is available
-pub fn is_available() -> bool {
-    TABLET.lock().is_some()
-}
 
 /// Poll for events (call from main loop or interrupt handler)
 pub fn poll() -> bool {
@@ -340,9 +320,4 @@ pub fn get_state() -> Option<(i32, i32, u8)> {
         let (x, y) = t.get_screen_position();
         (x, y, t.get_buttons())
     })
-}
-
-/// Handle VirtIO input interrupt
-pub fn handle_interrupt() {
-    poll();
 }

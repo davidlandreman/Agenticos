@@ -8,7 +8,7 @@ PCI bus, IDE/ATA storage, PS/2 keyboard and mouse, VirtIO devices (tablet and ne
 - `ide.rs` — IDE/ATA PIO-mode storage driver. Supports up to 4 drives.
 - `block.rs` — `BlockDevice` trait used by `src/fs/`.
 - `ps2_controller.rs` — shared PS/2 controller setup; enables IRQ1 (keyboard) and IRQ12 (mouse).
-- `keyboard.rs` — PS/2 keyboard driver (scancode set 2).
+- `src/input/keyboard_driver.rs` — PS/2 keyboard state machine (scancode set 2).
 - `mouse.rs` — PS/2 mouse driver, fallback when VirtIO tablet is absent.
 - `mouse_old.rs` — legacy mouse code; **triage before relying on it**. If dead, remove in a separate PR; if intentional, document why.
 - `virtio/mod.rs` — VirtIO module init.

@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::fs::File;
-use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
+use crate::process::RunnableProcess;
 use crate::window::dialogs::{show_error, show_info, show_save_dialog};
 use crate::window::dialogs::{open_file_dialog, poll_file_dialog};
 use crate::window::windows::scroll_view::ScrollView;
@@ -44,6 +44,7 @@ mod menu_ids {
 enum PendingDialog {
     None,
     OpenFile,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     SaveFile,
 }
 
@@ -54,6 +55,7 @@ struct NotepadState {
     /// Frame window ID
     frame_id: WindowId,
     /// Menu bar ID
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     menu_bar_id: WindowId,
     /// Text editor ID
     editor_id: WindowId,
@@ -88,25 +90,14 @@ fn take_pending_action(notepad_id: usize) -> Option<usize> {
 
 /// Notepad process
 pub struct NotepadProcess {
-    base: BaseProcess,
     args: Vec<String>,
 }
 
 impl NotepadProcess {
     pub fn new_with_args(args: Vec<String>) -> Self {
         Self {
-            base: BaseProcess::new("notepad"),
             args,
         }
-    }
-}
-
-impl HasBaseProcess for NotepadProcess {
-    fn base(&self) -> &BaseProcess {
-        &self.base
-    }
-    fn base_mut(&mut self) -> &mut BaseProcess {
-        &mut self.base
     }
 }
 

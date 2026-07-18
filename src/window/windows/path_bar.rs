@@ -99,6 +99,7 @@ impl PathBar {
     }
 
     /// Create a new PathBar (generates its own id).
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect) -> Self {
         Self::new_with_id(WindowId::new(), bounds)
     }
@@ -129,6 +130,7 @@ impl PathBar {
     }
 
     /// Returns the path most recently set, byte-for-byte.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn path(&self) -> &str {
         &self.path
     }

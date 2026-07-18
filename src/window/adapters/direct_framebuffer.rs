@@ -4,7 +4,6 @@ use bootloader_api::info::FrameBuffer;
 use crate::graphics::color::Color;
 use crate::drivers::display::frame_buffer::FrameBufferWriter;
 use crate::window::{GraphicsDevice, Rect, ColorDepth};
-use crate::window::graphics::Snapshot;
 use crate::window::adapters::clip::{clip_line, clip_rect, pixel_visible};
 use spin::Mutex;
 
@@ -135,17 +134,4 @@ impl GraphicsDevice for DirectFrameBufferDevice {
         // Direct framebuffer doesn't need flushing
     }
 
-    fn snapshot(&self) -> Option<Snapshot> {
-        let writer = self.writer.lock();
-        let (width, height, stride, bytes_per_pixel, pixel_format, pixels) =
-            writer.snapshot_bytes();
-        Some(Snapshot {
-            width,
-            height,
-            stride,
-            bytes_per_pixel,
-            pixel_format,
-            pixels,
-        })
-    }
 }

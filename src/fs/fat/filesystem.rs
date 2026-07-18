@@ -61,6 +61,7 @@ pub struct FatFilesystem<'a> {
 
 #[derive(Clone, Copy)]
 pub struct FileHandle {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub name: [u8; 13],
     pub size: u32,
     pub first_cluster: ClusterId,
@@ -87,6 +88,7 @@ pub enum DirSlotLoc {
 /// tombstone exactly that range and nothing else.
 pub struct DirEntryLookup {
     pub first_cluster: ClusterId,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub size: u32,
     pub attrs: u8,
     pub slot_locs: Vec<DirSlotLoc>,
@@ -286,6 +288,7 @@ impl<'a> FatFilesystem<'a> {
         self.state.lock().writable
     }
 
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub fn total_clusters(&self) -> u32 {
         self.total_clusters
     }
@@ -591,6 +594,7 @@ impl<'a> FatFilesystem<'a> {
     /// List the entries of a directory identified by either the root
     /// (`None`) or a starting cluster. Used by `enumerate_path` and the
     /// userland `getdents64` syscall.
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub fn list_directory(
         &self,
         cluster: Option<ClusterId>,
@@ -1039,6 +1043,7 @@ impl<'a> FatFilesystem<'a> {
     /// Walk an existing chain from `start` to its tail cluster.
     /// Returns the last cluster (whose FAT entry is the EOC marker)
     /// and the number of clusters in the chain.
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub fn walk_chain_to_tail(&self, start: ClusterId) -> Result<(ClusterId, u32), FatError> {
         let table = self.fresh_fat_table()?;
         let mut tail = start;

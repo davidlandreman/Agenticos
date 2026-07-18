@@ -17,9 +17,11 @@ use crate::window::types::Point;
 
 /// Cap to bound dispatcher work per call. Larger batches must be chunked by
 /// the caller.
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 const MAX_BATCH: usize = 256;
 
 #[derive(Deserialize)]
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 struct SendInputArgs {
     #[serde(default)]
     keyboard: Vec<KeyboardEntry>,
@@ -28,6 +30,7 @@ struct SendInputArgs {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 struct KeyboardEntry {
     key_code: alloc::string::String,
     pressed: bool,
@@ -36,6 +39,7 @@ struct KeyboardEntry {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 struct ModifierEntry {
     #[serde(default)]
     shift: bool,
@@ -48,6 +52,7 @@ struct ModifierEntry {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 struct MouseEntry {
     event_type: alloc::string::String,
     #[serde(default)]
@@ -71,6 +76,7 @@ struct MouseEntry {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 struct MouseButtonsEntry {
     #[serde(default)]
     left: bool,
@@ -80,6 +86,7 @@ struct MouseButtonsEntry {
     middle: bool,
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub struct SendInput;
 
 impl Tool for SendInput {
@@ -161,6 +168,7 @@ impl Tool for SendInput {
     }
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 fn parse_key_code(s: &str) -> Option<KeyCode> {
     Some(match s {
         "A" => KeyCode::A, "B" => KeyCode::B, "C" => KeyCode::C, "D" => KeyCode::D,
@@ -215,6 +223,7 @@ fn parse_key_code(s: &str) -> Option<KeyCode> {
     })
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 fn parse_mouse_event_type(s: &str, delta_x: i32, delta_y: i32) -> Option<MouseEventType> {
     Some(match s {
         "Move" | "move" => MouseEventType::Move,

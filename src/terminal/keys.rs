@@ -191,6 +191,7 @@ fn push_decimal(buf: &mut Vec<u8>, mut v: u16) {
 
 /// Wrap a paste in bracketed-paste markers — `ESC [ 200 ~ … ESC [ 201
 /// ~`. Used when the screen has `?2004h` set.
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn wrap_bracketed_paste(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 12);
     out.extend_from_slice(b"\x1B[200~");

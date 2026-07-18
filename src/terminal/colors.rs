@@ -38,10 +38,12 @@ pub enum ColorSpec {
 }
 
 impl ColorSpec {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn default_fg() -> Self {
         ColorSpec::Default
     }
 
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn default_bg() -> Self {
         ColorSpec::Default
     }

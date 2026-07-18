@@ -104,12 +104,7 @@ impl PciDevice {
         self.write_config(0x04, command | 0x02);
     }
 
-    /// Enable I/O space access for this device
-    pub fn enable_io_space(&self) {
-        let command = self.read_config(0x04);
-        self.write_config(0x04, command | 0x01);
     }
-}
 
 /// PCI Base Address Register types
 #[derive(Debug, Clone, Copy)]
@@ -117,7 +112,9 @@ pub enum Bar {
     Memory {
         address: u64,
         size: u64,
+        #[expect(dead_code, reason = "intentional kernel API surface")]
         prefetchable: bool,
+        #[expect(dead_code, reason = "intentional kernel API surface")]
         is_64bit: bool,
     },
     Io {
@@ -263,21 +260,7 @@ pub fn enumerate_devices_cached() -> Vec<PciDevice> {
     cache.as_ref().cloned().unwrap_or_default()
 }
 
-/// Find all devices with the given vendor and device ID
-pub fn find_devices(vendor_id: u16, device_id: u16) -> Vec<PciDevice> {
-    enumerate_devices_cached()
-        .into_iter()
-        .filter(|d| d.vendor_id == vendor_id && d.device_id == device_id)
-        .collect()
-}
 
-/// Find all devices with the given class code
-pub fn find_devices_by_class(class_code: u8, subclass: u8) -> Vec<PciDevice> {
-    enumerate_devices_cached()
-        .into_iter()
-        .filter(|d| d.class_code == class_code && d.subclass == subclass)
-        .collect()
-}
 
 // VirtIO vendor ID
 pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;

@@ -21,13 +21,16 @@ use crate::window::types::WindowId;
 
 /// Retained so `src/kernel.rs` boot wiring stays compilable until the
 /// follow-up cleanup removes the synthetic-terminal registration.
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub const RPC_TERMINAL_ID: WindowId = WindowId(usize::MAX);
 
 #[derive(Deserialize)]
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 struct ShellRunArgs {
     command: String,
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub struct ShellRun;
 
 impl Tool for ShellRun {

@@ -92,23 +92,7 @@ impl InterruptGuard {
         Self { was_enabled }
     }
 
-    /// Capture current interrupt state without changing it.
-    ///
-    /// Useful when you want to ensure interrupts are restored to whatever
-    /// state they were in, regardless of what happens in between.
-    #[inline]
-    pub fn capture() -> Self {
-        Self {
-            was_enabled: x86_64::instructions::interrupts::are_enabled(),
-        }
     }
-
-    /// Check if interrupts were enabled when this guard was created.
-    #[inline]
-    pub fn was_enabled(&self) -> bool {
-        self.was_enabled
-    }
-}
 
 impl Drop for InterruptGuard {
     fn drop(&mut self) {

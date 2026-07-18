@@ -301,6 +301,7 @@ pub const APPLETS: &[&str] = &[
 
 /// True if `name` is any known applet (BusyBox or GUI). O(log N) per
 /// list via `binary_search`.
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn is_applet(name: &str) -> bool {
     APPLETS.binary_search(&name).is_ok() || GUI_APPLETS.binary_search(&name).is_ok()
 }

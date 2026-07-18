@@ -6,18 +6,6 @@ use crate::graphics::fonts::core_font::Font;
 use crate::graphics::images::Image;
 use super::types::{Rect, ColorDepth};
 
-/// Owned snapshot of the device's current pixels plus enough metadata to
-/// reconstruct an image on the host. Returned by [`GraphicsDevice::snapshot`].
-pub struct Snapshot {
-    pub width: usize,
-    pub height: usize,
-    pub stride: usize,
-    pub bytes_per_pixel: usize,
-    /// `"rgb"`, `"bgr"`, or `"u8"` — matches the bootloader's `PixelFormat`.
-    pub pixel_format: &'static str,
-    pub pixels: alloc::vec::Vec<u8>,
-}
-
 /// Abstract interface for graphics rendering.
 ///
 /// All implementations ultimately write to the single physical framebuffer
@@ -38,6 +26,7 @@ pub trait GraphicsDevice: Send {
     fn height(&self) -> usize;
 
     /// Get the color depth of the device
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn color_depth(&self) -> ColorDepth;
 
     /// Clear the entire device with a color
@@ -105,6 +94,7 @@ pub trait GraphicsDevice: Send {
     /// The default implementation walks every source pixel and forwards it to
     /// `draw_pixel`, which clips against the device bounds and the active clip
     /// rect. Adapters that can do bulk row blits may override.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     fn draw_image(&mut self, x: i32, y: i32, image: &dyn Image) {
         let height = image.height();
         let width = image.width();
@@ -162,13 +152,6 @@ pub trait GraphicsDevice: Send {
         self.flush();
     }
 
-    /// Snapshot the device's current pixels into an owned buffer. Default
-    /// returns `None`; adapters that back the framebuffer override this.
-    /// Used by the `screenshot` tool.
-    fn snapshot(&self) -> Option<Snapshot> {
-        None
-    }
-
     /// Pixel byte order used by this device's underlying framebuffer.
     ///
     /// Used by windows that maintain framebuffer-native backing stores
@@ -192,6 +175,7 @@ pub trait GraphicsDevice: Send {
     /// Pixel stride between consecutive rows, in pixels. May exceed `width`
     /// when the framebuffer is padded for alignment. The default mirrors
     /// the device width, which is correct for tightly-packed framebuffers.
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn stride(&self) -> usize {
         self.width()
     }
@@ -277,6 +261,7 @@ impl WindowBuffer {
 
     /// Reallocate to new dimensions if they differ from the current size.
     /// Returns `true` when reallocation happened (and pixels were zeroed).
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn resize_to(&mut self, width: usize, height: usize) -> bool {
         if self.width == width && self.height == height {
             return false;
@@ -292,6 +277,7 @@ impl WindowBuffer {
     }
 
     /// Total backing-store size in bytes.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn byte_len(&self) -> usize {
         self.height * self.stride_pixels * self.bytes_per_pixel
     }
@@ -338,6 +324,7 @@ impl WindowBuffer {
 
     /// Borrow row `y`'s bytes (length = `width * bytes_per_pixel`). Used
     /// by the compositor's blit path to feed `ptr::copy_nonoverlapping`.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn row_bytes(&self, y: usize) -> &[u8] {
         let start = self.row_byte_offset(y);
         let len = self.width * self.bytes_per_pixel;

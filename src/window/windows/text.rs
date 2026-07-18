@@ -120,10 +120,7 @@ impl TextWindow {
     }
 
     /// Create a new text window (generates its own ID)
-    pub fn new(bounds: Rect) -> Self {
-        Self::new_with_id(crate::window::WindowId::new(), bounds)
-    }
-    
+
     /// Write a character at the cursor position
     pub fn write_char(&mut self, ch: char) {
         crate::debug_trace!("TextWindow::write_char called with '{}'", ch);
@@ -207,18 +204,7 @@ impl TextWindow {
     }
     
     /// Clear the text window
-    pub fn clear(&mut self) {
-        self.buffer = vec![vec![CharCell::default(); self.cols]; self.rows];
-        self.cursor_x = 0;
-        self.cursor_y = 0;
-        // Clearing requires full repaint
-        self.incremental_updates = false;
-        self.dirty_cells.clear();
-        if !self.suppress_invalidation {
-            self.base.invalidate();
-        }
-    }
-    
+
     /// Grid dimensions in cells: `Some((rows, cols))`. Returned as
     /// `Option` to match the `Window::grid_size` trait signature so
     /// callers can use either form interchangeably.
@@ -227,18 +213,8 @@ impl TextWindow {
     }
 
     /// Set cursor position
-    pub fn set_cursor(&mut self, x: usize, y: usize) {
-        if x < self.cols && y < self.rows {
-            self.cursor_x = x;
-            self.cursor_y = y;
-        }
-    }
-    
+
     /// Set text colors
-    pub fn set_colors(&mut self, fg: Color, bg: Color) {
-        self.current_fg = fg;
-        self.current_bg = bg;
-    }
 
     /// Overwrite a single cell with explicit content + colors. Bypasses
     /// `write_char`'s cursor-advance / autowrap behavior — used by the
@@ -282,33 +258,7 @@ impl TextWindow {
         }
     }
     
-    /// Handle backspace
-    pub fn backspace(&mut self) {
-        if self.cursor_x > 0 {
-            self.cursor_x -= 1;
-            self.buffer[self.cursor_y][self.cursor_x] = CharCell::default();
-            // Track as dirty cell
-            if self.incremental_updates {
-                self.dirty_cells.push((self.cursor_x, self.cursor_y));
-            }
-            if !self.suppress_invalidation {
-                self.base.invalidate();
-            }
-        } else if self.cursor_y > 0 {
-            // Move to end of previous line
-            self.cursor_y -= 1;
-            self.cursor_x = self.cols - 1;
-            self.buffer[self.cursor_y][self.cursor_x] = CharCell::default();
-            // Track as dirty cell
-            if self.incremental_updates {
-                self.dirty_cells.push((self.cursor_x, self.cursor_y));
-            }
-            if !self.suppress_invalidation {
-                self.base.invalidate();
-            }
-        }
     }
-}
 
 impl Window for TextWindow {
     fn base(&self) -> &WindowBase {

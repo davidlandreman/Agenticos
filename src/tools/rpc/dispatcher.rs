@@ -5,7 +5,6 @@
 
 use alloc::format;
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::fmt::Write;
 
 use serde::Deserialize;
@@ -29,6 +28,7 @@ const LIST_TOOLS: &str = "__list_tools__";
 
 /// Dispatcher process body. Runs forever — never returns. Spawned via
 /// `crate::process::spawn_process` during kernel boot.
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub fn run_dispatcher() {
     let com = match serial::com2() {
         Some(c) => c,
@@ -185,19 +185,3 @@ fn push_json_string(s: &mut String, value: &str) {
     }
     s.push('"');
 }
-
-#[cfg(feature = "test")]
-#[allow(dead_code)]
-pub(crate) fn render_list_tools_for_test() -> String {
-    render_list_tools()
-}
-
-#[cfg(feature = "test")]
-#[allow(dead_code)]
-pub(crate) fn push_json_string_for_test(s: &mut String, value: &str) {
-    push_json_string(s, value);
-}
-
-// Suppress unused-import warnings under non-test builds.
-#[allow(dead_code)]
-fn _silence_vec_import(_v: Vec<u8>) {}

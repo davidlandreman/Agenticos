@@ -133,31 +133,6 @@ impl InputQueue {
         Some(event)
     }
 
-    /// Check if the queue is empty.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.head.load(Ordering::Acquire) == self.tail.load(Ordering::Acquire)
-    }
-
-    /// Get the number of events currently in the queue.
-    #[inline]
-    pub fn len(&self) -> usize {
-        let head = self.head.load(Ordering::Acquire);
-        let tail = self.tail.load(Ordering::Acquire);
-        (head.wrapping_sub(tail)) & (QUEUE_SIZE - 1)
-    }
-
-    /// Get the number of events that have been dropped due to queue overflow.
-    #[inline]
-    pub fn dropped_count(&self) -> usize {
-        self.dropped.load(Ordering::Relaxed)
-    }
-
-    /// Reset the dropped counter (useful after logging).
-    #[inline]
-    pub fn reset_dropped_count(&self) {
-        self.dropped.store(0, Ordering::Relaxed);
-    }
 }
 
 // SAFETY: InputQueue uses atomic operations for all shared state

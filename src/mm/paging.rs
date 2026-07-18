@@ -575,6 +575,7 @@ impl MemoryMapper {
 
     /// Test-only: total frames issued by the live frame allocator.
     #[cfg(feature = "test")]
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn frames_issued(&self) -> u64 {
         self.frame_allocator.frames_issued()
     }

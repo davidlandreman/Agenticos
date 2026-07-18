@@ -5,7 +5,9 @@ use smoltcp::socket::dhcpv4;
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpCidr};
 
-use crate::drivers::virtio::net::{NetDriverCounters, VirtioNet};
+#[cfg(feature = "test")]
+use crate::drivers::virtio::net::NetDriverCounters;
+use crate::drivers::virtio::net::VirtioNet;
 use crate::net::socket::SocketRegistry;
 use crate::net::NetworkConfig;
 use crate::{debug_info, debug_warn};
@@ -111,6 +113,7 @@ impl NetworkStack {
         self.config
     }
 
+    #[cfg(feature = "test")]
     pub(super) fn counters(&self) -> NetDriverCounters {
         self.device.counters()
     }

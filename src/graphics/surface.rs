@@ -160,19 +160,20 @@ impl Surface {
     pub fn byte_len(&self) -> usize {
         self.pixels.len() * 4
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn pixels(&self) -> &[PremulArgb] {
         &self.pixels
     }
-    pub fn pixels_mut(&mut self) -> &mut [PremulArgb] {
-        &mut self.pixels
-    }
+        #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn damage(&self) -> &[Rect] {
         &self.damage
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn clear_damage(&mut self) {
         self.damage.clear();
     }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn resize(&mut self, desc: SurfaceDesc) -> Result<bool, SurfaceError> {
         if self.desc == desc {
             return Ok(false);
@@ -200,13 +201,6 @@ impl Surface {
         Some(&self.pixels[start..start + self.desc.width as usize])
     }
 
-    pub fn row_mut(&mut self, y: u32) -> Option<&mut [PremulArgb]> {
-        if y >= self.desc.height {
-            return None;
-        }
-        let start = y as usize * self.desc.width as usize;
-        Some(&mut self.pixels[start..start + self.desc.width as usize])
-    }
 
     pub fn clear(&mut self, rect: Rect, pixel: PremulArgb) {
         let Some(rect) = self.clip(rect) else {
@@ -255,6 +249,7 @@ fn touches_or_overlaps(a: Rect, b: Rect) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceClass {
     Visible,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Hidden,
     Output,
 }
@@ -300,18 +295,22 @@ impl SurfaceBudget {
         *self.bucket_mut(class) = self.bucket(class).saturating_sub(bytes);
     }
 
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn limit(&self) -> usize {
         self.limit
     }
     pub const fn total(&self) -> usize {
         self.visible + self.hidden + self.output
     }
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const fn visible_bytes(&self) -> usize {
         self.visible
     }
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn hidden_bytes(&self) -> usize {
         self.hidden
     }
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn output_bytes(&self) -> usize {
         self.output
     }

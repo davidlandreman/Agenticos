@@ -18,6 +18,7 @@ pub struct HBox {
 
 impl HBox {
     /// Create a new `HBox` covering `bounds`.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect) -> Self {
         HBox {
             base: WindowBase::new(bounds),

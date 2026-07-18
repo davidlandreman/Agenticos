@@ -40,8 +40,6 @@ where
     with_window_manager(|wm| (slot.take().unwrap())(wm))
 }
 
-/// Default status bar height.
-pub const STATUS_BAR_HEIGHT: u32 = 20;
 
 /// Default section background color — shared content background from
 /// the U15 palette so a default status bar sits flush against a default
@@ -63,9 +61,6 @@ pub struct StatusBar {
 
 impl StatusBar {
     /// Create a new `StatusBar` covering `bounds`.
-    pub fn new(bounds: Rect) -> Self {
-        Self::new_with_id(WindowId::new(), bounds)
-    }
 
     /// Create a new `StatusBar` with a specific `WindowId`.
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
@@ -78,16 +73,9 @@ impl StatusBar {
     }
 
     /// Set the strip background color.
-    pub fn set_bg_color(&mut self, color: Color) {
-        self.bg_color = color;
-        self.hbox.base_mut().invalidate();
-    }
 
     /// Set the default text color used by future sections. Existing
     /// sections retain whatever color they were constructed with.
-    pub fn set_text_color(&mut self, color: Color) {
-        self.text_color = color;
-    }
 
     /// Append a section with `text` and the given `Fill` weight. Returns
     /// the section's `WindowId` so callers can later update its text via
@@ -127,6 +115,7 @@ impl StatusBar {
 
     /// Update the text of a previously-added section. Silently no-ops
     /// when `label_id` is not a known section.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn set_section_text(&mut self, label_id: WindowId, text: &str) {
         if !self.sections.contains(&label_id) {
             return;
@@ -140,11 +129,7 @@ impl StatusBar {
         });
     }
 
-    /// List the section ids in display order.
-    pub fn sections(&self) -> &[WindowId] {
-        &self.sections
     }
-}
 
 impl Window for StatusBar {
     fn base(&self) -> &WindowBase {

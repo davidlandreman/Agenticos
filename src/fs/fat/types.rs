@@ -10,6 +10,7 @@ pub enum FatType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FatError {
     InvalidBootSector,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     InvalidFatType,
     InvalidCluster,
     EndOfChain,
@@ -21,6 +22,7 @@ pub enum FatError {
     BlockDeviceError,
     BufferTooSmall,
     InvalidDirectoryEntry,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     UnsupportedOperation,
 }
 
@@ -93,6 +95,7 @@ impl FileAttributes {
 pub struct ClusterId(pub u32);
 
 impl ClusterId {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const INVALID: Self = Self(0);
     pub const ROOT_FAT16: Self = Self(0);
     

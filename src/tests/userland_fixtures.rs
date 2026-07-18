@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Hand-rolled ELF64 fixtures for the U6 loader tests.
 //!
 //! We build minimal `Vec<u8>` ELF binaries directly here rather than
@@ -28,7 +27,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-pub const EI_NIDENT: usize = 16;
 pub const EHDR_SIZE: u64 = 64;
 pub const PHDR_SIZE: u64 = 56;
 pub const SHDR_SIZE: u64 = 64;
@@ -53,7 +51,6 @@ pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
 
-pub const SHT_PROGBITS: u32 = 1;
 pub const SHT_RELA: u32 = 4;
 pub const SHT_DYNSYM: u32 = 11;
 pub const SHT_STRTAB: u32 = 3;

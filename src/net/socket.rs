@@ -33,6 +33,7 @@ pub enum SocketError {
     NetworkDown,
     NetworkUnreachable,
     TooManySockets,
+    #[expect(dead_code, reason = "socket error contract")]
     NoBuffers,
     Invalid,
     AddressInUse,
@@ -44,6 +45,7 @@ pub enum SocketError {
     InProgress,
     Already,
     ConnectionRefused,
+    #[expect(dead_code, reason = "socket error contract")]
     TimedOut,
     WouldBlock,
     Unsupported,
@@ -257,18 +259,6 @@ pub fn drain_deferred_closes() {
 #[cfg(feature = "test")]
 pub fn live_socket_count() -> usize {
     crate::net::with_stack_mut(|stack| stack.registry.entries.len()).unwrap_or(0)
-}
-
-pub fn socket_type(id: SocketId) -> Result<SocketType, SocketError> {
-    crate::net::with_stack_mut(|stack| {
-        let entry = stack.registry.entries.get(&id).ok_or(SocketError::Closed)?;
-        Ok(match entry.kind {
-            EntryKind::Tcp { .. } => SocketType::Stream,
-            EntryKind::Udp => SocketType::Datagram,
-            EntryKind::Icmp => SocketType::RawIcmp,
-        })
-    })
-    .unwrap_or(Err(SocketError::NetworkDown))
 }
 
 pub fn nonblocking(id: SocketId) -> Result<bool, SocketError> {

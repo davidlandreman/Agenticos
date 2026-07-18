@@ -145,9 +145,6 @@ impl MemoryManager {
         self.stats
     }
 
-    pub fn get_usable_memory(&self) -> u64 {
-        self.stats.usable_memory
-    }
 
     /// Get the physical memory offset used for virtual address translation
     pub fn get_physical_memory_offset(&self) -> Option<u64> {
@@ -159,25 +156,7 @@ impl MemoryManager {
         self.physical_memory_offset.map(|offset| phys_addr + offset)
     }
 
-    pub fn get_largest_usable_region(&self) -> Option<(u64, u64)> {
-        let mut largest_size = 0u64;
-        let mut largest_region = None;
-
-        for i in 0..self.region_count {
-            if let Some(region) = &self.regions[i] {
-                if matches!(region.kind, MemoryRegionKind::Usable) {
-                    let size = region.end - region.start;
-                    if size > largest_size {
-                        largest_size = size;
-                        largest_region = Some((region.start, region.end));
-                    }
-                }
-            }
-        }
-
-        largest_region
     }
-}
 
 // Global memory manager instance
 static mut MEMORY_MANAGER: MemoryManager = MemoryManager::new();
@@ -225,6 +204,7 @@ pub fn print_memory_info() {
     }
 }
 
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn get_memory_stats() -> MemoryStats {
     unsafe { (*&raw const MEMORY_MANAGER).get_stats() }
 }
@@ -239,19 +219,7 @@ pub fn phys_to_virt(phys_addr: u64) -> Option<u64> {
     unsafe { (*&raw const MEMORY_MANAGER).phys_to_virt(phys_addr) }
 }
 
-/// Convert a virtual address (in the physical memory region) back to a physical address
-/// This only works for addresses created via phys_to_virt, not for heap/stack addresses
-pub fn virt_to_phys_mmio(virt_addr: u64) -> Option<u64> {
-    get_physical_memory_offset().map(|offset| virt_addr.wrapping_sub(offset))
-}
 
-/// Convert a heap virtual address to a physical address
-/// For heap addresses, the virtual address IS the physical address (identity mapped by bootloader)
-/// Note: Heap starts at 0x4444_4444_0000, which is in the lower virtual address range
-pub fn virt_to_phys_heap(virt_addr: u64) -> u64 {
-    // Heap memory is identity mapped - virtual = physical for heap region
-    virt_addr
-}
 
 /// Run a closure with mutable access to the global `MemoryMapper`. Returns
 /// `None` if `init_heap` has not run yet. Used by the userland subsystem

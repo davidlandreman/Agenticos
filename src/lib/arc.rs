@@ -73,17 +73,20 @@ impl<T> Arc<T> {
     }
     
     /// Gets the number of strong (`Arc`) pointers to this allocation.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn strong_count(this: &Self) -> usize {
         this.inner().strong.load(Ordering::Acquire)
     }
     
     /// Gets the number of weak (`Weak`) pointers to this allocation.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn weak_count(this: &Self) -> usize {
         this.inner().weak.load(Ordering::Acquire) - 1
     }
     
     /// Returns a mutable reference into the given `Arc`, if there are
     /// no other `Arc` or `Weak` pointers to the same allocation.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn get_mut(this: &mut Self) -> Option<&mut T> {
         if this.is_unique() {
             unsafe {
@@ -96,6 +99,7 @@ impl<T> Arc<T> {
     
     /// Consumes the `Arc`, returning the wrapped value if this was the
     /// last remaining reference.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn try_unwrap(this: Self) -> Result<T, Self> {
         if this.is_unique() {
             unsafe {
@@ -117,6 +121,7 @@ impl<T> Arc<T> {
     }
     
     /// Creates a new `Weak` pointer to this allocation.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn downgrade(this: &Self) -> Weak<T> {
         this.inner().weak.fetch_add(1, Ordering::Relaxed);
         Weak {
@@ -214,6 +219,7 @@ impl<T> Weak<T> {
     }
     
     /// Attempts to upgrade the `Weak` pointer to an `Arc`.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn upgrade(&self) -> Option<Arc<T>> {
         if self.ptr.as_ptr() as *const u8 as usize == WEAK_SENTINEL {
             return None;
@@ -246,6 +252,7 @@ impl<T> Weak<T> {
 
 impl<T: ?Sized> Weak<T> {
     /// Gets the number of strong (`Arc`) pointers to this allocation.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn strong_count(&self) -> usize {
         if self.ptr.as_ptr() as *const u8 as usize == WEAK_SENTINEL {
             0
@@ -255,6 +262,7 @@ impl<T: ?Sized> Weak<T> {
     }
     
     /// Gets the number of weak (`Weak`) pointers to this allocation.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn weak_count(&self) -> usize {
         if self.ptr.as_ptr() as *const u8 as usize == WEAK_SENTINEL {
             0

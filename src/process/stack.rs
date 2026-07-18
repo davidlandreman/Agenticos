@@ -135,16 +135,7 @@ impl StackAllocator {
         }
     }
 
-    /// Get the number of currently allocated stacks
-    pub fn allocated_count(&self) -> usize {
-        self.allocated.iter().filter(|&&x| x).count()
     }
-
-    /// Check if we can allocate more stacks
-    pub fn can_allocate(&self) -> bool {
-        !self.free_list.is_empty() || self.next_index < MAX_PROCESSES
-    }
-}
 
 /// Allocate a stack using the global allocator
 pub fn allocate_stack() -> Result<(u64, u64), &'static str> {

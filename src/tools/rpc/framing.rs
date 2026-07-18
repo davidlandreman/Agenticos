@@ -17,8 +17,10 @@ pub enum FrameError {
     OversizeBinary,
 }
 
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub struct Frame {
     pub header: Vec<u8>,
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub binary: Option<Vec<u8>>,
 }
 

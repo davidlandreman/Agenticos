@@ -61,11 +61,13 @@ pub struct Splitter {
 
 impl Splitter {
     /// Create a horizontally-divided splitter (panes stacked top/bottom).
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new_horizontal(bounds: Rect) -> Self {
         Self::new_with_id(WindowId::new(), SplitterOrientation::Horizontal, bounds)
     }
 
     /// Create a vertically-divided splitter (panes side-by-side).
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new_vertical(bounds: Rect) -> Self {
         Self::new_with_id(WindowId::new(), SplitterOrientation::Vertical, bounds)
     }
@@ -134,11 +136,13 @@ impl Splitter {
 
     /// Current divider offset, in pixels from the start edge along the
     /// divided axis.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn divider_position(&self) -> u32 {
         self.divider_position
     }
 
     /// The orientation chosen at construction.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn orientation(&self) -> SplitterOrientation {
         self.orientation
     }

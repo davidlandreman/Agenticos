@@ -11,8 +11,6 @@ use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 use super::base::WindowBase;
 use super::menu_bar::MenuItemDef;
 
-/// Callback type for popup item selection
-pub type PopupSelectCallback = fn(usize);
 
 /// A popup window for displaying menu bar dropdowns
 pub struct MenuBarPopup {
@@ -47,19 +45,10 @@ impl MenuBarPopup {
     }
 
     /// Poll for pending selection
-    pub fn poll_pending_selection(&mut self) -> Option<(WindowId, usize)> {
-        self.pending_selection.take().map(|idx| (self.menu_bar_id, idx))
-    }
 
     /// Get the menu bar ID this popup belongs to
-    pub fn menu_bar_id(&self) -> WindowId {
-        self.menu_bar_id
-    }
 
     /// Get the currently hovered item index
-    pub fn hover_index(&self) -> Option<usize> {
-        self.hover_index
-    }
 
     /// Get popup item index at y position
     fn item_at_y(&self, y: i32) -> Option<usize> {

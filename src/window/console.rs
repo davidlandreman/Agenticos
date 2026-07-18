@@ -14,18 +14,6 @@ static CONSOLE_BUFFER: Mutex<ConsoleBuffer> = Mutex::new(ConsoleBuffer::new());
 /// The WindowManager processes these at the start of each render cycle.
 static PENDING_INVALIDATIONS: Mutex<Vec<WindowId>> = Mutex::new(Vec::new());
 
-/// Queue a window invalidation without acquiring the WindowManager lock.
-///
-/// This is safe to call from anywhere, including during event handling.
-/// The invalidation will be processed at the start of the next render cycle.
-pub fn queue_invalidation(window_id: WindowId) {
-    if let Some(mut pending) = PENDING_INVALIDATIONS.try_lock() {
-        if !pending.contains(&window_id) {
-            pending.push(window_id);
-        }
-    }
-    // If we can't get the lock, the invalidation will be picked up later
-}
 
 /// Take all pending invalidations.
 ///
@@ -95,25 +83,6 @@ pub fn take_output() -> (Vec<String>, String) {
     (lines, pending)
 }
 
-/// Restore output that was taken but not processed.
-/// This is used when we need to delay processing.
-pub fn restore_output(lines: Vec<String>, pending: String) {
-    if lines.is_empty() && pending.is_empty() {
-        return;
-    }
-
-    let mut buffer = CONSOLE_BUFFER.lock();
-    // Prepend the lines (they should come before any new output)
-    let mut new_lines = lines;
-    new_lines.append(&mut buffer.lines);
-    buffer.lines = new_lines;
-
-    // Prepend the pending text
-    if !pending.is_empty() {
-        let new_pending = pending + &buffer.pending_line;
-        buffer.pending_line = new_pending;
-    }
-}
 
 /// Writer implementation for core::fmt
 pub struct ConsoleWriter;

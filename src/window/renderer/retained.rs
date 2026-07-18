@@ -167,24 +167,8 @@ impl RetainedRenderer {
     /// Capture the canonical composed output rather than the boot framebuffer.
     /// Once a VirtIO presenter takes over, the boot framebuffer is intentionally
     /// no longer updated, so it cannot be used as the screenshot source.
-    pub fn snapshot(&self) -> crate::window::graphics::Snapshot {
-        let output = self.engine.output();
-        let desc = output.desc();
-        let mut pixels = alloc::vec::Vec::with_capacity(output.byte_len());
-        for pixel in output.pixels() {
-            let (red, green, blue, _) = pixel.to_rgba();
-            pixels.extend_from_slice(&[blue, green, red, 0]);
-        }
-        crate::window::graphics::Snapshot {
-            width: desc.width as usize,
-            height: desc.height as usize,
-            stride: desc.width as usize,
-            bytes_per_pixel: 4,
-            pixel_format: "bgr",
-            pixels,
-        }
-    }
 
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn last_stats(&self) -> RenderStats {
         self.last_stats
     }

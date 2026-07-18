@@ -4,7 +4,7 @@ use spin::Mutex;
 use crate::arch::x86_64::interrupt_guard::InterruptGuard;
 use crate::graphics::color::Color;
 use crate::lib::arc::Arc;
-use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
+use crate::process::RunnableProcess;
 use crate::window::windows::{base::WindowBase, FrameWindow};
 use crate::window::{self, Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 
@@ -201,27 +201,11 @@ impl Window for PaintingCanvasWindow {
     }
 }
 
-pub struct PaintingProcess {
-    base: BaseProcess,
-    args: Vec<String>,
-}
+pub struct PaintingProcess;
 
 impl PaintingProcess {
-    pub fn new_with_args(args: Vec<String>) -> Self {
-        Self {
-            base: BaseProcess::new("painting"),
-            args,
-        }
-    }
-}
-
-impl HasBaseProcess for PaintingProcess {
-    fn base(&self) -> &BaseProcess {
-        &self.base
-    }
-
-    fn base_mut(&mut self) -> &mut BaseProcess {
-        &mut self.base
+    pub fn new_with_args(_args: Vec<String>) -> Self {
+        Self
     }
 }
 

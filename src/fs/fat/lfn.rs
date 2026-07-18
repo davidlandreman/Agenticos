@@ -571,6 +571,7 @@ mod tests {
 
     /// Build a 32-byte directory entry from raw bytes (zero-pad as
     /// needed). Useful for fixture construction.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     fn make_dir_entry(bytes: &[u8]) -> [u8; 32] {
         let mut out = [0u8; 32];
         let n = bytes.len().min(32);
@@ -861,10 +862,6 @@ mod tests {
         ]
     }
 
-    // Unused-import suppression for non-test builds is handled by the
-    // outer `#[cfg(feature = "test")]` gate.
-    #[allow(dead_code)]
-    fn _suppress_unused(_: [u8; 32]) {}
 }
 
 #[cfg(feature = "test")]

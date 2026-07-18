@@ -262,10 +262,6 @@ pub fn poll_file_dialog() -> Option<Option<String>> {
     }
 }
 
-/// Check if a file dialog is currently open
-pub fn is_file_dialog_open() -> bool {
-    is_dialog_open()
-}
 
 /// Get list of files from a directory
 fn get_file_list(path: &str) -> Vec<(String, String, String)> {

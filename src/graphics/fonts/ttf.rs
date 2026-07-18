@@ -120,6 +120,7 @@ impl TtfFont {
         }
     }
 
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub fn px_size(&self) -> u16 {
         self.px_size
     }

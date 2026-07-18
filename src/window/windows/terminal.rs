@@ -95,34 +95,13 @@ impl TerminalWindow {
         }
     }
 
-    /// Create a new terminal window (generates its own ID)
-    pub fn new(bounds: Rect) -> Self {
-        Self::new_with_id(crate::window::WindowId::new(), bounds)
-    }
-    
     /// Set callback for when Enter is pressed
-    pub fn on_input<F>(&mut self, callback: F) 
-    where 
-        F: FnMut(String) + Send + 'static 
-    {
-        self.input_callback = Some(Box::new(callback));
-    }
-    
+
     /// Write output to the terminal. Routes through the Vte parser so
     /// escape sequences in the bytes (colors, cursor moves) take effect.
-    pub fn write(&mut self, text: &str) {
-        let (col, row) = self.text_window.cursor_position();
-        self.input_start_col = col;
-        self.input_start_row = row;
-        self.feed_bytes(text.as_bytes());
-    }
 
     /// Write a line to the terminal. Appends `\r\n` so the cursor wraps
     /// to column 0 on the next row regardless of OPOST state.
-    pub fn write_line(&mut self, text: &str) {
-        self.write(text);
-        self.feed_bytes(b"\r\n");
-    }
 
     /// Push bytes through the parser into the Screen. Used by the local
     /// echo paths (`handle_enter`, `handle_backspace`, key echo in
@@ -158,9 +137,6 @@ impl TerminalWindow {
     }
     
     /// Process any pending console output
-    pub fn process_output(&mut self) {
-        self.text_window.process_console_output();
-    }
 
     /// Drain pending slave-output through the Vte parser into the
     /// Screen, then push any DSR / device-attribute reply bytes the
@@ -556,4 +532,3 @@ fn encode_keystroke_for_raw_mode(
 ) -> Vec<u8> {
     crate::terminal::keys::encode_keystroke(key, modifiers)
 }
-

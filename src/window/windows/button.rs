@@ -59,17 +59,8 @@ impl Button {
     }
 
     /// Set the button label
-    pub fn set_label(&mut self, label: &str) {
-        if self.label != label {
-            self.label = String::from(label);
-            self.base.invalidate();
-        }
-    }
 
     /// Get the button label
-    pub fn label(&self) -> &str {
-        &self.label
-    }
 
     /// Set background color
     pub fn set_bg_color(&mut self, color: Color) {
@@ -99,6 +90,7 @@ impl Button {
     }
 
     /// Returns whether the button is currently enabled.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn enabled(&self) -> bool {
         self.enabled
     }

@@ -18,6 +18,7 @@ impl VmProt {
     pub const WRITE: Self = Self(2);
     pub const EXEC: Self = Self(4);
 
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn from_bits(bits: u8) -> Option<Self> {
         if bits & !7 == 0 {
             Some(Self(bits))

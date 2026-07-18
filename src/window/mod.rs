@@ -95,6 +95,7 @@ pub const PALETTE_TEXT: crate::graphics::color::Color =
     crate::graphics::color::Color::BLACK;
 
 /// Filled portion of a `ProgressBar` — matches the highlight color.
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub const PALETTE_PROGRESS_FILL: crate::graphics::color::Color = PALETTE_HIGHLIGHT_BG;
 
 /// Core window trait that all visual elements implement.
@@ -165,6 +166,7 @@ pub trait Window: Send {
     }
 
     /// Set the visibility of this window
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     fn set_visible(&mut self, visible: bool) {
         self.base_mut().set_visible(visible);
     }
@@ -213,6 +215,7 @@ pub trait Window: Send {
         self.base().compositor_properties()
     }
 
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn set_compositor_properties(&mut self, properties: CompositorProperties) {
         self.base_mut().set_compositor_properties(properties);
     }
@@ -430,26 +433,8 @@ where
     // _guard dropped here, restoring interrupt state
 }
 
-/// Try to execute a function with the window manager without blocking
-pub fn try_with_window_manager<F, R>(f: F) -> Option<R>
-where
-    F: FnOnce(&mut WindowManager) -> R,
-{
-    match WINDOW_MANAGER.try_lock() {
-        Some(mut wm_lock) => wm_lock.as_mut().map(f),
-        None => None,
-    }
-}
 
-/// Create a new screen with the specified mode
-pub fn create_screen(mode: ScreenMode) -> Option<ScreenId> {
-    with_window_manager(|wm| wm.create_screen(mode))
-}
 
-/// Switch to a different screen
-pub fn switch_screen(screen_id: ScreenId) {
-    with_window_manager(|wm| wm.switch_screen(screen_id));
-}
 
 /// Path of the bundled default wallpaper on the FAT root. The basename is
 /// 8.3-compliant — see `src/fs/CLAUDE.md` for the FAT layer's filename limit.
@@ -486,134 +471,8 @@ pub fn load_default_wallpaper() -> Option<Vec<u8>> {
     }
 }
 
-/// Create the default desktop environment
-pub fn create_default_desktop() {
-    let wallpaper = load_default_wallpaper();
-    with_window_manager(|wm| {
-        // Create GUI screen
-        let screen_id = wm.create_screen(ScreenMode::Gui);
-        wm.switch_screen(screen_id);
 
-        // Get actual screen dimensions from graphics device
-        let (width, height) = wm.screen_dimensions();
 
-        // Create desktop background window
-        let desktop_id = wm.create_window(None);
-        let desktop_bounds = Rect::new(0, 0, width, height);
-        let desktop_window: Box<dyn Window> = match wallpaper {
-            Some(bytes) => Box::new(windows::DesktopWindow::new_with_wallpaper(desktop_id, desktop_bounds, bytes)),
-            None => Box::new(windows::DesktopWindow::new(desktop_id, desktop_bounds)),
-        };
-        wm.set_window_impl(desktop_id, desktop_window);
-        
-        // Set desktop as the root window for the screen
-        if let Some(screen) = wm.get_active_screen_mut() {
-            screen.set_root_window(desktop_id);
-        }
-        
-        // Create frame window for terminal
-        let frame_id = wm.create_window(Some(desktop_id));
-        let mut frame_window = Box::new(windows::FrameWindow::new(frame_id, "AgenticOS Terminal"));
-        
-        // Set the parent of the frame window
-        frame_window.set_parent(Some(desktop_id));
-        
-        // Position and size the frame window (not fullscreen)
-        let frame_x = 100;
-        let frame_y = 50;
-        let frame_width = 800.min(width - 200);
-        let frame_height = 600.min(height - 100);
-        frame_window.set_bounds(Rect::new(frame_x as i32, frame_y as i32, frame_width, frame_height));
-        
-        // Create terminal window inside the frame
-        let terminal_id = wm.create_window(Some(frame_id));
-        let content_area = frame_window.content_area();
-        // Terminal window is positioned at the content area offset within the frame
-        let terminal_bounds = Rect::new(content_area.x, content_area.y, content_area.width, content_area.height);
-        // Use new_with_id to ensure the terminal uses the ID from WindowManager
-        let mut terminal_window = Box::new(windows::TerminalWindow::new_with_id(terminal_id, terminal_bounds));
-        
-        // Set the parent of the terminal window
-        terminal_window.set_parent(Some(frame_id));
-        
-        // Set the terminal as the frame's content
-        frame_window.set_content_window(terminal_id);
-        
-        // Add windows to registry - the frame window already has the terminal as a child
-        wm.set_window_impl(frame_id, frame_window);
-        wm.set_window_impl(terminal_id, terminal_window);
-        
-        // Add frame window to desktop's children
-        if let Some(desktop) = wm.window_registry.get_mut(&desktop_id) {
-            desktop.add_child(frame_id);
-        }
-        
-        // Focus both the frame (for blue title bar) and terminal (for keyboard input)
-        if let Some(frame) = wm.window_registry.get_mut(&frame_id) {
-            frame.set_focus(true);
-        }
-        wm.focus_window(terminal_id);
-
-        // Set this as the global terminal window
-        terminal::set_terminal_window(terminal_id);
-        
-        // Force all windows to repaint
-        if let Some(window) = wm.window_registry.get_mut(&desktop_id) {
-            window.invalidate();
-        }
-        if let Some(window) = wm.window_registry.get_mut(&frame_id) {
-            window.invalidate();
-        }
-        if let Some(window) = wm.window_registry.get_mut(&terminal_id) {
-            window.invalidate();
-        }
-    });
-}
-
-/// Create a terminal window
-pub fn create_terminal_window() -> WindowId {
-    let window_id = with_window_manager(|wm| {
-        // Get screen dimensions
-        let (width, height) = wm.screen_dimensions();
-        
-        // Create window
-        let window_id = wm.create_window(None);
-        let terminal_window = Box::new(windows::TerminalWindow::new(Rect::new(0, 0, width, height)));
-        
-        wm.set_window_impl(window_id, terminal_window);
-        
-        // Set as root window if no root exists
-        if let Some(screen) = wm.get_active_screen_mut() {
-            if screen.root_window.is_none() {
-                screen.set_root_window(window_id);
-            }
-        }
-        
-        // Focus the window
-        wm.focus_window(window_id);
-        
-        window_id
-    }).expect("Window manager not initialized");
-    
-    // Set as global terminal window
-    terminal::set_terminal_window(window_id);
-    
-    window_id
-}
-
-/// Write text to a specific window (if it's a terminal window)
-pub fn write_to_window(window_id: WindowId, text: &str) {
-    with_window_manager(|wm| {
-        // Try to get the window and write to it
-        if let Some(window) = wm.window_registry.get_mut(&window_id) {
-            // This is a bit hacky - we need to check if it's a terminal window
-            // For now, just use the console buffer
-            crate::print!("{}", text);
-            // Mark window as needing repaint
-            window.invalidate();
-        }
-    });
-}
 
 /// Process any pending terminal output.
 ///

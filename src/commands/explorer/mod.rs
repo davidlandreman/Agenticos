@@ -23,12 +23,12 @@ pub mod dispatch;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
-use crate::process::{BaseProcess, HasBaseProcess, RunnableProcess};
+use crate::process::RunnableProcess;
 use crate::window::dialogs::show_error;
 use crate::window::windows::tree_view::NodeId;
 use crate::window::windows::{
@@ -38,9 +38,7 @@ use crate::window::windows::{
 use crate::window::{with_window_manager, Rect, Window, WindowId};
 use crate::graphics::color::Color;
 
-use self::dir_model::{
-    child_path, format_size, format_type, parent_path, read_directory, DirEntry, EntryKind,
-};
+use self::dir_model::{format_size, format_type, parent_path, read_directory, DirEntry, EntryKind};
 use self::dispatch::{dispatch_open, OpenAction};
 
 /// Unique ID for each explorer instance.
@@ -55,6 +53,7 @@ enum ExplorerAction {
     NavigateTo(String),
     NavigateUp,
     Refresh,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     OpenFile(String),
     /// Tree node was clicked or expand-toggled.
     /// `(node_id, expanded_after_click)` — when the click landed on
@@ -109,25 +108,14 @@ fn take_pending_action(explorer_id: usize) -> Option<ExplorerAction> {
 }
 
 pub struct ExplorerProcess {
-    base: BaseProcess,
     args: Vec<String>,
 }
 
 impl ExplorerProcess {
     pub fn new_with_args(args: Vec<String>) -> Self {
         Self {
-            base: BaseProcess::new("explorer"),
             args,
         }
-    }
-}
-
-impl HasBaseProcess for ExplorerProcess {
-    fn base(&self) -> &BaseProcess {
-        &self.base
-    }
-    fn base_mut(&mut self) -> &mut BaseProcess {
-        &mut self.base
     }
 }
 
@@ -924,22 +912,7 @@ fn open_file(path: &str) {
     }
 }
 
-// Eliminate "unused" warnings for not-yet-fully-wired helpers if any
-// future cleanup phases hide them behind cfg flags. The two structs
-// imported to support state are referenced by the callbacks above.
-#[allow(dead_code)]
-fn _suppress_unused() {
-    let _ = child_path;
-}
-
 /// Factory for the process manager.
 pub fn create_explorer_process(args: Vec<String>) -> Box<dyn RunnableProcess> {
     Box::new(ExplorerProcess::new_with_args(args))
-}
-
-// `to_string` is used through trait import indirectly in some helpers;
-// keep the import alive even if a future edit removes the call site.
-#[allow(dead_code)]
-fn _force_to_string_import() -> String {
-    "x".to_string()
 }

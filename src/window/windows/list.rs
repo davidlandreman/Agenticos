@@ -86,6 +86,7 @@ impl List {
     }
 
     /// Add multiple items at once
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn add_items(&mut self, texts: &[&str]) {
         for text in texts {
             self.items.push(String::from(*text));
@@ -94,6 +95,7 @@ impl List {
     }
 
     /// Clear all items
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn clear(&mut self) {
         self.items.clear();
         self.selection = Selection::None;
@@ -101,11 +103,13 @@ impl List {
     }
 
     /// Get the number of items
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
     /// Check if the list is empty
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -123,6 +127,7 @@ impl List {
     }
 
     /// Get the selected item text (first selected item in ascending order).
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn selected_item(&self) -> Option<&str> {
         self.selected().and_then(|i| self.items.get(i).map(|s| s.as_str()))
     }
@@ -161,11 +166,13 @@ impl List {
     }
 
     /// Current selection mode.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn selection_mode(&self) -> SelectionMode {
         self.selection_mode
     }
 
     /// Set the selection change callback.
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn on_select<F>(&mut self, callback: F)
     where
         F: FnMut(&Selection) + Send + 'static,
@@ -174,6 +181,7 @@ impl List {
     }
 
     /// Set item height
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn set_item_height(&mut self, height: usize) {
         if self.item_height != height {
             self.item_height = height;
@@ -182,24 +190,28 @@ impl List {
     }
 
     /// Set background color
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn set_bg_color(&mut self, color: Color) {
         self.bg_color = color;
         self.base.invalidate();
     }
 
     /// Set text color
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn set_text_color(&mut self, color: Color) {
         self.text_color = color;
         self.base.invalidate();
     }
 
     /// Set selected background color
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn set_selected_bg_color(&mut self, color: Color) {
         self.selected_bg_color = color;
         self.base.invalidate();
     }
 
     /// Set selected text color
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn set_selected_text_color(&mut self, color: Color) {
         self.selected_text_color = color;
         self.base.invalidate();
@@ -207,6 +219,7 @@ impl List {
 
     /// Item height in pixels (used by callers that wrap this widget in a
     /// `ScrollView` to compute the content size).
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn item_height(&self) -> usize {
         self.item_height
     }

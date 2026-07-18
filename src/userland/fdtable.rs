@@ -69,10 +69,7 @@ pub enum FdSlot {
 }
 
 impl FdSlot {
-    pub fn is_stream(&self) -> bool {
-        matches!(self, FdSlot::Stdin | FdSlot::Stdout | FdSlot::Stderr)
     }
-}
 
 #[derive(Clone)]
 pub struct FdTable {
@@ -98,6 +95,7 @@ impl FdTable {
 
     /// Drop every slot. Called by `release_active_image` after the
     /// long-jump returns from ring 3.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn clear(&mut self) {
         for slot in self.slots.iter_mut() {
             *slot = None;

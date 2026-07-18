@@ -48,9 +48,6 @@ where
     with_window_manager(|wm| (slot.take().unwrap())(wm))
 }
 
-/// Default toolbar height (matches the spec's "consistent button size"
-/// guidance: 24 px buttons in a 32 px strip leaves 4 px above and below).
-pub const TOOLBAR_HEIGHT: u32 = 32;
 
 /// Default button height inside a `Toolbar`.
 const BUTTON_HEIGHT: u32 = 24;
@@ -100,6 +97,7 @@ pub struct Toolbar {
 
 impl Toolbar {
     /// Create a new `Toolbar` covering `bounds` with a generated id.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn new(bounds: Rect) -> Self {
         Self::new_with_id(WindowId::new(), bounds)
     }
@@ -114,10 +112,6 @@ impl Toolbar {
     }
 
     /// Set the strip background color.
-    pub fn set_bg_color(&mut self, color: Color) {
-        self.bg_color = color;
-        self.hbox.base_mut().invalidate();
-    }
 
     /// Compute the pixel width a button needs in order to comfortably
     /// hold `label`. Uses the system font's cell width; pads by

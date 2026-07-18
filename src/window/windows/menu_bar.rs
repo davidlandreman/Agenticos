@@ -99,6 +99,7 @@ pub struct PendingPopup {
     /// Menu items to display
     pub items: Vec<MenuItemDef>,
     /// Menu index this popup belongs to
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub menu_index: usize,
 }
 
@@ -152,9 +153,6 @@ impl MenuBar {
     }
 
     /// Create a new menu bar (generates its own ID)
-    pub fn new(bounds: Rect) -> Self {
-        Self::new_with_id(WindowId::new(), bounds)
-    }
 
     /// Add a menu to the bar
     pub fn add_menu(&mut self, title: &str, items: Vec<MenuItemDef>) {
@@ -186,36 +184,12 @@ impl MenuBar {
     }
 
     /// Set the popup window ID (called by window manager after creating popup)
-    pub fn set_popup_window_id(&mut self, id: Option<WindowId>) {
-        self.popup_window_id = id;
-    }
 
     /// Get the popup window ID
-    pub fn get_popup_window_id(&self) -> Option<WindowId> {
-        self.popup_window_id
-    }
 
     /// Check if there's a pending popup that needs to be created
-    pub fn poll_pending_popup(&mut self) -> Option<PendingPopup> {
-        self.pending_popup.take()
-    }
 
     /// Handle menu item selection from popup
-    pub fn handle_popup_selection(&mut self, item_index: usize) {
-        if let Some(menu_index) = self.open_menu_index {
-            if let Some(menu) = self.menus.get(menu_index) {
-                if let Some(item) = menu.items.get(item_index) {
-                    if let MenuItemDef::Item { id, .. } = item {
-                        let item_id = *id;
-                        self.close_menu();
-                        if let Some(ref mut callback) = self.on_select {
-                            callback(menu_index, item_id);
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     /// Open a menu dropdown - creates pending popup info
     fn open_menu(&mut self, index: usize) {

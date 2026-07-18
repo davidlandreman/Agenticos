@@ -63,6 +63,7 @@ pub fn enable_sse() {
 /// Used by the in-kernel test that proves `enable_sse()` ran before
 /// any ring-3 transition could fire (a regression here makes
 /// musl/libstdc++ binaries `#UD` silently inside `__init_tls`).
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn sse_enabled() -> bool {
     let cr0 = Cr0::read();
     let cr4 = Cr4::read();

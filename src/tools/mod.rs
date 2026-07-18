@@ -15,7 +15,6 @@ use spin::{Mutex, Once};
 
 pub mod kernel_state;
 pub mod rpc;
-pub mod screenshot;
 pub mod send_input;
 pub mod shell_run;
 
@@ -36,6 +35,7 @@ impl ToolResult {
         }
     }
 
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn with_binary(json: String, binary: Vec<u8>) -> Self {
         ToolResult {
             json,
@@ -155,6 +155,7 @@ static TOOL_REGISTRY: Once<Mutex<ToolRegistry>> = Once::new();
 
 /// Initialize the global registry. Idempotent. Call once during kernel boot
 /// (before tools are registered).
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub fn init() {
     TOOL_REGISTRY.call_once(|| Mutex::new(ToolRegistry::new()));
 }

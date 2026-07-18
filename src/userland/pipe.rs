@@ -105,6 +105,7 @@ impl Pipe {
 
     /// Bytes currently buffered (test-facing).
     #[cfg(feature = "test")]
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn len(&self) -> usize {
         self.inner.lock().len()
     }

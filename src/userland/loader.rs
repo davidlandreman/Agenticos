@@ -54,13 +54,11 @@ const ET_EXEC: u16 = 2;
 const EM_X86_64: u16 = 62;
 
 const PT_LOAD: u32 = 1;
-const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const PT_TLS: u32 = 7;
 
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
-const PF_R: u32 = 4;
 
 // Section header types.
 const SHT_RELA: u32 = 4;
@@ -145,6 +143,7 @@ struct Elf64Rela {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
+#[expect(dead_code, reason = "intentional kernel API surface")]
 struct Elf64Sym {
     st_name: u32,
     st_info: u8,
@@ -174,17 +173,6 @@ fn read_at<T: Copy>(bytes: &[u8], off: u64) -> Result<T, LoaderError> {
     Ok(unsafe { core::ptr::read_unaligned(p) })
 }
 
-/// Read a NUL-terminated UTF-8 string from `strtab[off..]`. Returns `""` if
-/// `off` is past the table or no NUL is found within bounds.
-fn cstr_at<'a>(strtab: &'a [u8], off: u32) -> &'a str {
-    let off = off as usize;
-    if off >= strtab.len() {
-        return "";
-    }
-    let tail = &strtab[off..];
-    let len = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
-    core::str::from_utf8(&tail[..len]).unwrap_or("")
-}
 
 /// Translate ELF p_flags into a `UserPerms` profile (D11 NX/WX hygiene).
 fn perms_for_p_flags(flags: u32) -> UserPerms {
@@ -203,7 +191,6 @@ fn perms_for_p_flags(flags: u32) -> UserPerms {
 // ---------- Parsed program headers, snapshot for the allocate phase ----------
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // `head_pad` recorded for diagnostic logging in U7+
 struct ParsedPtLoad {
     p_offset: u64,
     p_filesz: u64,
@@ -227,6 +214,7 @@ struct ParsedPtTls {
     /// Bytes to copy (tdata).
     p_filesz: u64,
     /// In-memory image size (tdata + tbss). Bounded by MAX_TLS_IMAGE_BYTES.
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     p_memsz: u64,
 }
 
@@ -236,6 +224,7 @@ struct ParsedPtTls {
 /// and return a transactional `UserImage` handle. On any failure the partial
 /// image is dropped — its `Drop` unmaps anything that was already installed,
 /// so kernel page-table state is unchanged from before the call.
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn load_elf(bytes: &[u8]) -> Result<UserImage, LoaderError> {
     load_elf_impl(bytes, None)
 }
@@ -888,34 +877,4 @@ fn slice_section<'a>(bytes: &'a [u8], sh: &Elf64Shdr) -> Result<&'a [u8], Loader
         return Err(LoaderError::Truncated);
     }
     Ok(&bytes[start..end])
-}
-
-/// **S1**: reject any r_offset that is not inside a writable PT_LOAD.
-fn validate_reloc_offset(r_off: u64, loads: &[ParsedPtLoad]) -> Result<(), LoaderError> {
-    for s in loads {
-        let start = s.p_vaddr;
-        let end = s.p_vaddr + s.p_memsz;
-        if r_off >= start && r_off + 8 <= end {
-            // Must also be writable — patching a R-X .text would let a
-            // crafted ELF rewrite code via the kernel-mode write path.
-            if s.p_flags & PF_W != 0 {
-                return Ok(());
-            }
-            return Err(LoaderError::BadRelocOffset);
-        }
-    }
-    Err(LoaderError::BadRelocOffset)
-}
-
-fn patch_user_qword(user_va: u64, value: u64) -> Result<(), LoaderError> {
-    let phys = crate::mm::memory::with_memory_mapper(|m| m.translate_addr(VirtAddr::new(user_va)))
-        .flatten()
-        .ok_or(LoaderError::BadRelocOffset)?;
-    let phys_offset =
-        crate::mm::memory::get_physical_memory_offset().ok_or(LoaderError::OutOfFrames)?;
-    let kalias = phys_offset + phys.as_u64();
-    unsafe {
-        core::ptr::write_unaligned(kalias as *mut u64, value);
-    }
-    Ok(())
 }

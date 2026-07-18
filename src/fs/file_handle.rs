@@ -15,10 +15,14 @@ use spin::Mutex;
 pub enum FileError {
     NotFound,
     AccessDenied,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     BufferTooSmall,
     IoError,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     InvalidPath,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     NotAFile,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     NotADirectory,
     FilesystemError(FilesystemError),
     HandleClosed,
@@ -57,7 +61,9 @@ struct FileHandleInner {
     position: u64,
     size: u64,
     fs_handle: Option<crate::fs::filesystem::FileHandle>,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     buffer: Vec<u8>,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     buffer_dirty: bool,
     is_open: bool,
 }
@@ -110,18 +116,6 @@ impl File {
     /// Open a file for reading only
     pub fn open_read(path: &str) -> FileResult<Arc<File>> {
         Self::open(path, FileMode::READ)
-    }
-
-    /// Open a file for writing (creates if doesn't exist)
-    pub fn open_write(path: &str) -> FileResult<Arc<File>> {
-        let mode = FileMode {
-            read: false,
-            write: true,
-            append: false,
-            create: true,
-            truncate: false,
-        };
-        Self::open(path, mode)
     }
 
     /// Read data into the provided buffer
@@ -287,15 +281,7 @@ impl File {
         String::from_utf8(bytes).map_err(|_| FileError::IoError)
     }
 
-    /// Write a string to the file
-    pub fn write_string(&self, text: &str) -> FileResult<usize> {
-        self.write(text.as_bytes())
-    }
-
     /// Write all data in the Vec to the file
-    pub fn write_vec(&self, data: &[u8]) -> FileResult<usize> {
-        self.write(data)
-    }
 
     /// Seek to a specific position in the file
     pub fn seek(&self, position: u64) -> FileResult<u64> {
@@ -345,32 +331,8 @@ impl File {
     }
 
     /// Check if the file is still open
-    pub fn is_open(&self) -> bool {
-        self.inner.lock().is_open
-    }
 
     /// Flush any pending writes to disk
-    pub fn flush(&self) -> FileResult<()> {
-        let inner = self.inner.lock();
-
-        // Check if file is still open
-        if !inner.is_open {
-            return Err(FileError::HandleClosed);
-        }
-
-        // Get VFS and find filesystem for this path
-        let vfs = get_vfs();
-        let (filesystem, _) = vfs
-            .find_filesystem(&inner.path)
-            .ok_or(FileError::NotFound)?;
-
-        // Sync the filesystem
-        filesystem
-            .sync()
-            .map_err(|e| FileError::FilesystemError(e))?;
-
-        Ok(())
-    }
 
     /// Close the file handle explicitly
     /// After calling this, other operations will fail
@@ -521,17 +483,6 @@ impl Directory {
     }
 
     /// Read the next directory entry
-    pub fn read_entry(&self) -> Option<DirectoryEntry> {
-        let mut inner = self.inner.lock();
-
-        if inner.position < inner.entries.len() {
-            let entry = inner.entries[inner.position].clone();
-            inner.position += 1;
-            Some(entry)
-        } else {
-            None
-        }
-    }
 
     /// Get all directory entries as a Vec
     pub fn entries(&self) -> Vec<DirectoryEntry> {

@@ -1984,10 +1984,6 @@ const F_SETFL: i32 = 4;
 const F_DUPFD_CLOEXEC: i32 = 1030;
 const FD_CLOEXEC: u64 = 1;
 
-/// `access` mode bits. The kernel ignores read/write/exec specifics —
-/// the FS is read-only and has no permission model — so we just check
-/// existence (F_OK) and report success for any combination thereof.
-const F_OK: u32 = 0;
 const _R_OK: u32 = 4;
 const _W_OK: u32 = 2;
 const _X_OK: u32 = 1;
@@ -2093,7 +2089,6 @@ fn map_fs_err(err: &crate::fs::fs_manager::FsError) -> i64 {
     use crate::fs::fs_manager::FsError as E;
     match err {
         E::FileNotFound => ENOENT,
-        E::AccessDenied => EACCES,
         E::InvalidPath => ENOENT,
         E::NotAFile => EISDIR,
         E::NotADirectory => ENOTDIR,

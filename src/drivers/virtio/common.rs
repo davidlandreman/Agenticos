@@ -23,6 +23,7 @@ pub mod status {
     pub const DRIVER: u8 = 2;
     pub const DRIVER_OK: u8 = 4;
     pub const FEATURES_OK: u8 = 8;
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const DEVICE_NEEDS_RESET: u8 = 64;
     pub const FAILED: u8 = 128;
 }
@@ -41,12 +42,15 @@ mod common_cfg {
     pub const DEVICE_FEATURE: usize = 0x04;
     pub const DRIVER_FEATURE_SELECT: usize = 0x08;
     pub const DRIVER_FEATURE: usize = 0x0C;
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const MSIX_CONFIG: usize = 0x10;
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const NUM_QUEUES: usize = 0x12;
     pub const DEVICE_STATUS: usize = 0x14;
     pub const CONFIG_GENERATION: usize = 0x15;
     pub const QUEUE_SELECT: usize = 0x16;
     pub const QUEUE_SIZE: usize = 0x18;
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const QUEUE_MSIX_VECTOR: usize = 0x1A;
     pub const QUEUE_ENABLE: usize = 0x1C;
     pub const QUEUE_NOTIFY_OFF: usize = 0x1E;
@@ -59,6 +63,7 @@ mod common_cfg {
 pub mod desc_flags {
     pub const NEXT: u16 = 1;
     pub const WRITE: u16 = 2;
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const INDIRECT: u16 = 4;
 }
 
@@ -88,29 +93,6 @@ pub struct VirtqBuffer {
 }
 
 impl VirtqBuffer {
-    pub fn from_slice(buffer: &[u8], device_writable: bool) -> Self {
-        let virt = buffer.as_ptr() as u64;
-        Self {
-            addr: translate_virt_to_phys(virt).expect("VirtIO DMA buffer is not mapped"),
-            len: buffer.len().min(u32::MAX as usize) as u32,
-            device_writable,
-        }
-    }
-
-    /// Describe a virtually contiguous buffer as page-bounded DMA segments.
-    /// Heap pages are mapped lazily and are not guaranteed to be physically
-    /// adjacent, so a single descriptor must never span a page boundary.
-    pub fn from_slice_segments(buffer: &[u8], device_writable: bool) -> Vec<Self> {
-        Self::from_raw_segments(buffer.as_ptr(), buffer.len(), device_writable)
-    }
-
-    /// Mutable counterpart used for device-writable response buffers. The
-    /// returned descriptors contain addresses only and do not retain a shared
-    /// Rust reference while the device owns the buffer.
-    pub fn from_mut_slice_segments(buffer: &mut [u8]) -> Vec<Self> {
-        Self::from_raw_segments(buffer.as_mut_ptr(), buffer.len(), true)
-    }
-
     pub fn try_from_slice_segments(
         buffer: &[u8],
         device_writable: bool,
@@ -120,11 +102,6 @@ impl VirtqBuffer {
 
     pub fn try_from_mut_slice_segments(buffer: &mut [u8]) -> Result<Vec<Self>, VirtqueueError> {
         Self::try_from_raw_segments(buffer.as_mut_ptr(), buffer.len(), true)
-    }
-
-    fn from_raw_segments(pointer: *const u8, len: usize, device_writable: bool) -> Vec<Self> {
-        Self::try_from_raw_segments(pointer, len, device_writable)
-            .expect("VirtIO DMA buffer is not mapped")
     }
 
     fn try_from_raw_segments(
@@ -250,7 +227,6 @@ impl Drop for DmaPage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueError {
     Full,
-    AddressTranslation,
     LengthOverflow,
     InvalidUsedId(u32),
     DuplicateCompletion(u16),
@@ -389,12 +365,6 @@ impl Virtqueue {
         self.used_page.phys_addr()
     }
 
-    /// Add a buffer to the available ring
-    pub fn add_buffer(&mut self, buffer: &[u8], device_writable: bool) -> Option<u16> {
-        let segments = VirtqBuffer::try_from_slice_segments(buffer, device_writable).ok()?;
-        self.add_chain(&segments).ok()
-    }
-
     /// Add a readable/writable descriptor chain as one request.
     pub fn add_chain(&mut self, buffers: &[VirtqBuffer]) -> Result<u16, VirtqueueError> {
         if buffers.is_empty() {
@@ -484,43 +454,11 @@ impl Virtqueue {
         Ok(desc_idx)
     }
 
-    /// Compatibility helper for small, already-stable buffers. Translation
-    /// failure is explicit and a buffer may not cross a physical page.
-    pub fn submit_slice(
-        &mut self,
-        buffer: &[u8],
-        device_writable: bool,
-        token: u16,
-    ) -> Result<u16, QueueError> {
-        let start = buffer.as_ptr() as u64;
-        let phys = crate::mm::paging::translate_virt_to_phys(start)
-            .ok_or(QueueError::AddressTranslation)?;
-        if !buffer.is_empty() {
-            let end = start
-                .checked_add(buffer.len() as u64 - 1)
-                .ok_or(QueueError::LengthOverflow)?;
-            let end_phys = crate::mm::paging::translate_virt_to_phys(end)
-                .ok_or(QueueError::AddressTranslation)?;
-            if phys / DMA_PAGE_SIZE as u64 != end_phys / DMA_PAGE_SIZE as u64
-                || end_phys != phys + buffer.len() as u64 - 1
-            {
-                return Err(QueueError::AddressTranslation);
-            }
-        }
-        self.submit(phys, buffer.len(), device_writable, token)
-    }
-
     /// Notify the device that there are new buffers available
     pub fn notify(&self) {
         unsafe {
             write_volatile(self.notify_addr, self.queue_idx);
         }
-    }
-
-    /// Check if there are used buffers to process
-    pub fn has_used_buffers(&self) -> bool {
-        let used_idx = self.used().idx.load(Ordering::Acquire);
-        used_idx != self.last_used_idx
     }
 
     /// Get the next used buffer
@@ -638,6 +576,7 @@ impl Virtqueue {
 
 /// Modern VirtIO device with MMIO
 pub struct VirtioDevice {
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub pci: PciDevice,
     /// Base addresses for each BAR
     bar_addrs: [u64; 6],
@@ -852,9 +791,6 @@ impl VirtioDevice {
     }
 
     /// Get number of queues
-    pub fn num_queues(&self) -> u16 {
-        self.read_common(common_cfg::NUM_QUEUES)
-    }
 
     /// Select a virtqueue
     pub fn select_queue(&self, queue: u16) {
@@ -867,9 +803,6 @@ impl VirtioDevice {
     }
 
     /// Set the size of the selected queue
-    pub fn set_queue_size(&self, size: u16) {
-        self.write_common(common_cfg::QUEUE_SIZE, size);
-    }
 
     /// Enable the selected queue
     pub fn enable_queue(&self) {
@@ -919,17 +852,6 @@ impl VirtioDevice {
                 self.caps.device_cfg_offset + offset,
             );
             read_volatile(addr as *const T)
-        }
-    }
-
-    /// Write device-specific configuration.
-    pub fn write_device_config<T: Copy>(&self, offset: u32, value: T) {
-        unsafe {
-            let addr = self.mmio_addr(
-                self.caps.device_cfg_bar,
-                self.caps.device_cfg_offset + offset,
-            );
-            write_volatile(addr as *mut T, value);
         }
     }
 

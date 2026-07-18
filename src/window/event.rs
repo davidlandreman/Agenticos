@@ -44,12 +44,16 @@ pub enum Event {
     /// Mouse input event
     Mouse(MouseEvent),
     /// Window resize event
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Resize(ResizeEvent),
     /// Window move event
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Move(MoveEvent),
     /// Window close request
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Close(CloseEvent),
     /// Focus change event
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     Focus(FocusEvent),
     /// Request that an ancestor (typically a `ScrollView`) bring the given
     /// rectangle into view. The `Rect` is in the emitting child's local
@@ -118,8 +122,10 @@ pub struct MouseButtons {
 #[derive(Debug, Clone, Copy)]
 pub struct ResizeEvent {
     /// New width
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub width: u32,
     /// New height
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub height: u32,
 }
 
@@ -127,8 +133,10 @@ pub struct ResizeEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct MoveEvent {
     /// New X position
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub x: i32,
     /// New Y position
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub y: i32,
 }
 
@@ -136,6 +144,7 @@ pub struct MoveEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct CloseEvent {
     /// Window requesting to close
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub window: WindowId,
 }
 

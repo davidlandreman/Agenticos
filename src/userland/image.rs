@@ -63,7 +63,6 @@ impl core::fmt::Debug for ElfBacking {
 /// Metadata handle for a loaded user binary. The loader records mappings as
 /// it constructs them; normal process setup consumes those records into VMAs.
 #[derive(Debug)]
-#[allow(dead_code)] // bounds_{start,end} are read by U7 when entering ring 3
 pub struct UserImage {
     /// Resolved RIP for `iretq` to user mode.
     pub entry: VirtAddr,
@@ -188,6 +187,7 @@ impl UserImage {
     }
 
     /// Number of recorded mappings. Test-visible.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn mapping_count(&self) -> usize {
         self.mappings.len()
     }
@@ -218,12 +218,14 @@ impl UserImage {
     }
 
     /// Total user pages mapped (PT_LOAD + stack). Test-visible.
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn total_pages(&self) -> u64 {
         self.mappings.iter().map(|m| m.page_count).sum()
     }
 
     /// Test-only: peek at a recorded mapping without consuming it.
     #[cfg(feature = "test")]
+    #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
     pub fn mapping(&self, idx: usize) -> Option<MappingRange> {
         self.mappings.get(idx).copied()
     }
