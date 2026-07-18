@@ -1240,6 +1240,33 @@ pub fn wake_ring3_blocked_on_pipe_writable() {
     });
 }
 
+/// Reliable variants for the live `Pipe::write`/`Pipe::read` data paths,
+/// which run from the write/read syscall handlers on a cloned handle
+/// with no lock held. A `try_lock`-dropped wake on these paths deadlocks
+/// bidirectional pipe conversations; use the blocking-lock wake instead.
+/// The `Drop` paths keep the `try_lock` variants above.
+pub fn wake_ring3_blocked_on_pipe_readable_reliable() {
+    wake_ring3_blocked_by_locking(|r| {
+        matches!(
+            r,
+            Ring3BlockReason::WaitingForPipeRead
+                | Ring3BlockReason::WaitingForNetwork { .. }
+                | Ring3BlockReason::WaitingForReadiness { .. }
+        )
+    });
+}
+
+pub fn wake_ring3_blocked_on_pipe_writable_reliable() {
+    wake_ring3_blocked_by_locking(|r| {
+        matches!(
+            r,
+            Ring3BlockReason::WaitingForPipeWrite
+                | Ring3BlockReason::WaitingForNetwork { .. }
+                | Ring3BlockReason::WaitingForReadiness { .. }
+        )
+    });
+}
+
 /// Wake the owner of a GUI queue when a new event becomes readable. This
 /// covers both the legacy blocking `gui_next_event` syscall and processes
 /// parked in poll/select on a GUI event descriptor.
@@ -1624,22 +1651,56 @@ where
     // from inside `with_fd_table_mut`, which already holds this lock.
     // Callers that mutate the FD table under the lock issue explicit
     // wake calls after release so a skipped wake here is recovered.
-    let Some(mut g) = PROCESS_TABLE.try_lock() else {
-        return false;
+    let waking = {
+        let Some(mut g) = PROCESS_TABLE.try_lock() else {
+            return false;
+        };
+        collect_and_remove_matching(&mut g, matcher)
     };
+    for pid in waking {
+        mark_ring3_ready(pid);
+    }
+    true
+}
+
+/// Reliable (blocking-lock) variant of [`wake_ring3_blocked_by`] for
+/// callers that provably do NOT already hold `PROCESS_TABLE` — namely
+/// the live `Pipe::read`/`Pipe::write` data paths, which run from the
+/// read/write syscall handlers on a cloned handle after the fd-table
+/// lock was released. A dropped wake here strands the peer of a
+/// bidirectional pipe conversation forever (git ↔ `git-upload-pack`,
+/// `git-remote-http` ↔ git), so `try_lock` is not acceptable on this
+/// path. MUST NOT be called while holding `PROCESS_TABLE` (that is what
+/// the `try_lock` variant is for).
+fn wake_ring3_blocked_by_locking<F>(matcher: F) -> bool
+where
+    F: Fn(&Ring3BlockReason) -> bool,
+{
+    let waking = {
+        let mut g = PROCESS_TABLE.lock();
+        collect_and_remove_matching(&mut g, matcher)
+    };
+    // Mark ready AFTER releasing the lock: `mark_ring3_ready` reacquires
+    // `PROCESS_TABLE`.
+    for pid in waking {
+        mark_ring3_ready(pid);
+    }
+    true
+}
+
+fn collect_and_remove_matching<F>(g: &mut ProcessTable, matcher: F) -> alloc::vec::Vec<u32>
+where
+    F: Fn(&Ring3BlockReason) -> bool,
+{
     let waking: alloc::vec::Vec<u32> = g
         .ring3_blocked
         .iter()
         .filter_map(|(pid, reason)| if matcher(reason) { Some(*pid) } else { None })
         .collect();
     for pid in &waking {
-        g.ring3_blocked.remove(&pid);
+        g.ring3_blocked.remove(pid);
     }
-    drop(g);
-    for pid in waking {
-        mark_ring3_ready(pid);
-    }
-    true
+    waking
 }
 
 /// Returns true if `pid` has any child currently tracked in
@@ -2442,6 +2503,11 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
     );
 
     let (pid, parent_pid) = with_current_process(|p| (p.pid, p.parent_pid));
+    // Release the crashing process's fds (see `close_group_fds`) before
+    // waking the parent, so a parent blocked reading a now-dead child's
+    // pipe observes EOF rather than hanging on a write end that would
+    // otherwise linger in the retained zombie.
+    close_group_fds(task_tgid(pid).unwrap_or(pid));
     notify_parent_of_signaled_exit(pid, parent_pid, signum, exit_code);
 
     long_jump_to_run_or_halt();
@@ -2592,6 +2658,32 @@ fn stop_task(tid: u32) {
     scheduler.wake_threads_waiting_for_ring3_exit(tid);
 }
 
+/// Close every fd the exiting group holds, releasing pipe/socket/eventfd
+/// endpoints at exit time (Linux semantics) rather than deferring until
+/// the parent reaps the zombie.
+///
+/// This is load-bearing for the fork→pipe→wait idiom every fork+exec
+/// tool uses: a parent that `read()`s a child's output pipe blocks for
+/// EOF, which only arrives once the child's `PipeWriteHandle` drops. If
+/// we kept the child's `fd_table` alive inside its retained zombie
+/// `Process` (the kernel stack genuinely must survive until reap — this
+/// handler is running on it — but the fd table need not), the write end
+/// would stay open, the parent's read would never see EOF, and it would
+/// never reach `wait4` to reap. Result: a deadlock (observed as git
+/// `clone`/`fetch` and the Links DNS-helper `select` hanging).
+///
+/// The old table is moved out under the `PROCESS_TABLE` lock but dropped
+/// *after* the lock is released, so the `Drop` glue's
+/// `wake_ring3_blocked_on_pipe_readable` (which takes `PROCESS_TABLE`
+/// via `try_lock`) actually acquires the lock and wakes the blocked
+/// reader instead of silently skipping.
+fn close_group_fds(tgid: u32) {
+    let old_table = with_group(tgid, |group| {
+        core::mem::replace(&mut group.fd_table, FdTable::new())
+    });
+    drop(old_table);
+}
+
 fn finish_group(tgid: u32, code: i64) {
     let parent_pid = with_group(tgid, |group| {
         if matches!(group.exit_kind, ExitKind::None) {
@@ -2601,6 +2693,10 @@ fn finish_group(tgid: u32, code: i64) {
         group.parent_pid
     })
     .unwrap_or(KERNEL_PID);
+    // Release fds before publishing the zombie / waking the parent, so a
+    // parent blocked reading this process's pipe observes EOF and can
+    // proceed to reap.
+    close_group_fds(tgid);
     if parent_pid != KERNEL_PID {
         notify_parent_of_exit(tgid, parent_pid, code);
     }

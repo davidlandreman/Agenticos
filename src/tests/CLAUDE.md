@@ -27,6 +27,11 @@ This folder holds in-kernel test modules that run under QEMU when the kernel is 
   inputs than the 32-slot fd table.
 - `network.rs` — Virtqueue ownership/error edges plus bounded registry and
   QEMU-local DHCP coverage.
+- `git_userland.rs` — booted git end-to-end: version + `/etc/gitconfig`
+  identity smoke, local init→commit→branch→merge→fsck round trip, local
+  clone, and a dumb-protocol HTTP clone through the `GITRHTTP.ELF`
+  transport helper against the committed `tools/git-fixture` repo served
+  by `tools/net-test-http.py`.
 - `network_userland.rs` — booted static-musl socket fixture and BusyBox
   numeric IPv4 `ping`, `nc`, and HTTP-only `wget` smokes, including
   zsh→fork/execve regressions for `ping` and `wget`. `test.sh` supplies

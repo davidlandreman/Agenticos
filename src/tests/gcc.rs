@@ -132,7 +132,10 @@ fn test_gcc_compile_and_run_hello() {
     assert_et_exec("/work/gcc-hello");
 
     zsh("/work/gcc-hello > /work/gcc-hello.txt");
-    assert_eq!(read_string("/work/gcc-hello.txt"), "hello from native gcc\n");
+    assert_eq!(
+        read_string("/work/gcc-hello.txt"),
+        "hello from native gcc\n"
+    );
 
     unlink_if_present("/work/gcc-hello");
     unlink_if_present("/work/gcc-hello.txt");
@@ -141,8 +144,18 @@ fn test_gcc_compile_and_run_hello() {
 /// Separate compilation: two translation units, object round-trip, link
 /// step through collect2/ld, and behavioral output.
 fn test_gcc_separate_compile_and_link() {
-    gcc(&["-c", "/host/GCCTEST/twomain.c", "-o", "/work/gcc-two-main.o"]);
-    gcc(&["-c", "/host/GCCTEST/twoutil.c", "-o", "/work/gcc-two-util.o"]);
+    gcc(&[
+        "-c",
+        "/host/GCCTEST/twomain.c",
+        "-o",
+        "/work/gcc-two-main.o",
+    ]);
+    gcc(&[
+        "-c",
+        "/host/GCCTEST/twoutil.c",
+        "-o",
+        "/work/gcc-two-util.o",
+    ]);
     gcc(&[
         "-o",
         "/work/gcc-two",
@@ -171,7 +184,13 @@ fn test_gcc_dash_s_then_standalone_as() {
     gcc(&["-S", "/host/GCCTEST/hello.c", "-o", "/work/gcc-hello.s"]);
     let code = run_to_exit(
         "/host/AS.ELF",
-        &["as", "--64", "/work/gcc-hello.s", "-o", "/work/gcc-hello-as.o"],
+        &[
+            "as",
+            "--64",
+            "/work/gcc-hello.s",
+            "-o",
+            "/work/gcc-hello-as.o",
+        ],
     );
     assert_eq!(code, 0, "standalone as rejected gcc -S output");
     gcc(&["-o", "/work/gcc-hello-as", "/work/gcc-hello-as.o"]);
@@ -265,11 +284,7 @@ int main(void) {
         code
     );
 
-    for path in [
-        "/work/gcc-crash",
-        "/work/gcc-waiter.c",
-        "/work/gcc-waiter",
-    ] {
+    for path in ["/work/gcc-crash", "/work/gcc-waiter.c", "/work/gcc-waiter"] {
         unlink_if_present(path);
     }
 }

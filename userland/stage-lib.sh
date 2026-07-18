@@ -224,6 +224,9 @@ _stage_one() {
                 binutils-*)
                     if [ "${REBUILD_BINUTILS:-0}" = 1 ]; then rebuild_value=1; fi
                     ;;
+                git-*)
+                    if [ "${REBUILD_GIT:-0}" = 1 ]; then rebuild_value=1; fi
+                    ;;
             esac
             if [ "${REBUILD_USERLAND:-0}" = 1 ] || [ "$rebuild_value" = 1 ] || [ ! -f "$prebuilt_path" ]; then
                 if _make_app "$source" "$toolchain" && validate_exec_elf "$output_path"; then

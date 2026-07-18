@@ -91,7 +91,9 @@ impl Pipe {
             take
         };
         if take > 0 {
-            crate::userland::lifecycle::wake_ring3_blocked_on_pipe_readable();
+            // Reliable wake: the write syscall handler holds no process
+            // lock here, and a dropped reader wake deadlocks pipe IPC.
+            crate::userland::lifecycle::wake_ring3_blocked_on_pipe_readable_reliable();
             crate::userland::readiness::notify_changed();
         }
         take
@@ -113,7 +115,10 @@ impl Pipe {
             n
         };
         if n > 0 {
-            crate::userland::lifecycle::wake_ring3_blocked_on_pipe_writable();
+            // Reliable wake: same rationale as `write` — the read syscall
+            // handler holds no process lock, and a dropped writer wake
+            // deadlocks a peer blocked on a full pipe.
+            crate::userland::lifecycle::wake_ring3_blocked_on_pipe_writable_reliable();
             crate::userland::readiness::notify_changed();
         }
         n

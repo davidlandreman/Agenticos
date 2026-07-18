@@ -76,6 +76,22 @@ pub const LINKS_HOST_PATH: &str = "/host/LINKS.ELF";
 /// curl: command-line HTTP/HTTPS transfer tool (static musl + OpenSSL).
 pub const CURL_HOST_PATH: &str = "/host/CURL.ELF";
 
+/// git: distributed version control (static musl, all builtins in one
+/// binary). `git-remote-https` / `git-remote-http` resolve to the
+/// separate transport helper, which links libcurl + OpenSSL and keys
+/// its scheme off `argv[0]` — git spawns it via its compiled-in exec
+/// path `/bin`, so both names must exist in this namespace.
+///
+/// `git-upload-pack` / `git-receive-pack` / `git-upload-archive` are the
+/// server-side pack builtins git spawns (via `sh -c`) for local-path and
+/// git-native transports. `SKIP_DASHED_BUILT_INS` drops their standalone
+/// hardlinks, but git's `main` still dispatches a `git-<cmd>` `argv[0]`
+/// to the matching builtin — so they resolve to `GIT.ELF` and the
+/// preserved invoked name selects the command. Without these on the exec
+/// path a plain `git clone /local/repo` fails with exit 128.
+pub const GIT_HOST_PATH: &str = "/host/GIT.ELF";
+pub const GIT_REMOTE_HTTP_HOST_PATH: &str = "/host/GITRHTTP.ELF";
+
 /// Resolve a GNU binutils command to its FAT-8.3-safe staged ELF path.
 fn binutils_host_path(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -112,7 +128,9 @@ pub const GUI_APPLETS: &[&str] = &[];
 /// `taskmgr` and `tasks` are aliases for the ring-3 Task Manager —
 /// `tasks` preserves the retired kernel app's name. `tcc` and `cc` are
 /// both TinyCC; `links` and `links2` are the Links text browser; `curl`
-/// is the standalone HTTP/HTTPS transfer tool. GNU binutils programs map
+/// is the standalone HTTP/HTTPS transfer tool. `git` is version control;
+/// `git-remote-http`/`git-remote-https` are its HTTP(S) transport helper
+/// (one ELF, scheme from argv[0]). GNU binutils programs map
 /// one-to-one to the staged ELFs above.
 pub const DIRECT_APPLETS: &[&str] = &[
     "addr2line",
@@ -126,6 +144,12 @@ pub const DIRECT_APPLETS: &[&str] = &[
     "elfedit",
     "explorer",
     "gcc",
+    "git",
+    "git-receive-pack",
+    "git-remote-http",
+    "git-remote-https",
+    "git-upload-archive",
+    "git-upload-pack",
     "glgame",
     "ld",
     "links",
@@ -450,6 +474,8 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "control" | "settings" => CONTROL_HOST_PATH,
         "curl" => CURL_HOST_PATH,
         "gcc" => GCC_HOST_PATH,
+        "git" | "git-upload-pack" | "git-receive-pack" | "git-upload-archive" => GIT_HOST_PATH,
+        "git-remote-http" | "git-remote-https" => GIT_REMOTE_HTTP_HOST_PATH,
         "glgame" => GLGAME_HOST_PATH,
         "links" | "links2" => LINKS_HOST_PATH,
         "explorer" => FILEMAN_HOST_PATH,
@@ -828,6 +854,28 @@ mod tests_internal {
         let (path, applet) = apply_bin_rewrite("/bin/curl").expect("must resolve");
         assert_eq!(path, "/host/CURL.ELF");
         assert_eq!(applet, "curl");
+
+        // git and its argv[0]-dispatched server builtins resolve to
+        // GIT.ELF; the two remote helpers resolve to GITRHTTP.ELF. The
+        // invoked name is preserved so git's `main` can select the
+        // right command.
+        for name in [
+            "git",
+            "git-upload-pack",
+            "git-receive-pack",
+            "git-upload-archive",
+        ] {
+            let (path, applet) =
+                apply_bin_rewrite(&alloc::format!("/bin/{}", name)).expect("git name must resolve");
+            assert_eq!(path, "/host/GIT.ELF");
+            assert_eq!(applet, name);
+        }
+        for name in ["git-remote-http", "git-remote-https"] {
+            let (path, applet) = apply_bin_rewrite(&alloc::format!("/bin/{}", name))
+                .expect("git remote helper must resolve");
+            assert_eq!(path, "/host/GITRHTTP.ELF");
+            assert_eq!(applet, name);
+        }
 
         // The Task Manager rewrites under both its own name and the
         // retired kernel app's `tasks` alias.
