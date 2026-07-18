@@ -21,7 +21,7 @@ use crate::drivers::virtio::gpu::virgl::commands::VirglCommandEncoder;
 use crate::drivers::virtio::gpu::virgl::{VirglContext, VirglResource};
 use crate::drivers::virtio::gpu::{CursorResource, VirtioGpu};
 use crate::graphics::scene::{
-    backdrop_box_radii, backdrop_halo, inflate_rect, LayerEffect, LayerSource, SceneFrame,
+    backdrop_box_radii, backdrop_targets, inflate_rect, Layer, LayerEffect, LayerSource, SceneFrame,
 };
 use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
 use crate::window::Rect;
@@ -67,18 +67,20 @@ const BLUR_SURFACE_A: u32 = 16;
 const BLUR_SURFACE_B: u32 = 17;
 const BLUR_SAMPLER_VIEW_A: u32 = 18;
 const BLUR_SAMPLER_VIEW_B: u32 = 19;
+const BLUR_SURFACE_C: u32 = 20;
+const BLUR_SAMPLER_VIEW_C: u32 = 21;
 const FIRST_SAMPLER_VIEW: u32 = 100;
-const PIPELINE_OBJECT_COUNT: u64 = 19;
+const PIPELINE_OBJECT_COUNT: u64 = 21;
 const MAX_GPU_BACKDROP_RADIUS: u16 = 4;
 
-const CLIENT_VERTEX_ELEMENTS: u32 = 20;
-const CLIENT_VERTEX_SHADER: u32 = 21;
-const CLIENT_FRAGMENT_SHADER: u32 = 22;
-const CLIENT_BLEND: u32 = 23;
-const CLIENT_DSA_DISABLED: u32 = 24;
-const CLIENT_DSA_DEPTH: u32 = 25;
-const CLIENT_RASTERIZER: u32 = 26;
-const CLIENT_RASTERIZER_CULL: u32 = 27;
+const CLIENT_VERTEX_ELEMENTS: u32 = 30;
+const CLIENT_VERTEX_SHADER: u32 = 31;
+const CLIENT_FRAGMENT_SHADER: u32 = 32;
+const CLIENT_BLEND: u32 = 33;
+const CLIENT_DSA_DISABLED: u32 = 34;
+const CLIENT_DSA_DEPTH: u32 = 35;
+const CLIENT_RASTERIZER: u32 = 36;
+const CLIENT_RASTERIZER_CULL: u32 = 37;
 const FIRST_CLIENT_OBJECT: u32 = 10_000;
 const CLIENT_VERTEX_STRIDE: u32 = 32;
 const CLIENT_MIN_VERTEX_BUFFER_BYTES: usize = 16 * 1024;
@@ -143,6 +145,7 @@ IMM FLT32 { -0.001, 1.0, 0.0, 0.0 }\n\
   7: END\n";
 
 struct PreparedLayer {
+    layer: Layer,
     sampler_view: u32,
     scissor: Rect,
     first_vertex: u32,
@@ -181,6 +184,7 @@ pub struct VirglCompositionEngine {
     output_resource: Option<VirglResource>,
     blur_resource_a: Option<VirglResource>,
     blur_resource_b: Option<VirglResource>,
+    blur_resource_c: Option<VirglResource>,
     output: Surface,
     scanout_id: u32,
     scanout_active: bool,
@@ -288,12 +292,35 @@ impl VirglCompositionEngine {
                 return Err(CompositionError::GpuFailure);
             }
         };
-        let scanout_id = match gpu.enabled_scanout() {
-            Ok(scanout_id) => scanout_id,
+        let blur_resource_c = match gpu.create_virgl_resource(
+            &mut context,
+            PIPE_TEXTURE_2D,
+            FORMAT_B8G8R8A8_UNORM,
+            blur_bind,
+            width,
+            height,
+            output.byte_len(),
+        ) {
+            Ok(resource) => resource,
             Err(_) => {
                 let mut blur_resource_b = blur_resource_b;
                 let mut blur_resource_a = blur_resource_a;
                 let mut output_resource = output_resource;
+                let _ = gpu.destroy_virgl_resource(&mut context, &mut blur_resource_b);
+                let _ = gpu.destroy_virgl_resource(&mut context, &mut blur_resource_a);
+                let _ = gpu.destroy_virgl_resource(&mut context, &mut output_resource);
+                let _ = gpu.destroy_virgl_context(&mut context);
+                return Err(CompositionError::GpuFailure);
+            }
+        };
+        let scanout_id = match gpu.enabled_scanout() {
+            Ok(scanout_id) => scanout_id,
+            Err(_) => {
+                let mut blur_resource_c = blur_resource_c;
+                let mut blur_resource_b = blur_resource_b;
+                let mut blur_resource_a = blur_resource_a;
+                let mut output_resource = output_resource;
+                let _ = gpu.destroy_virgl_resource(&mut context, &mut blur_resource_c);
                 let _ = gpu.destroy_virgl_resource(&mut context, &mut blur_resource_b);
                 let _ = gpu.destroy_virgl_resource(&mut context, &mut blur_resource_a);
                 let _ = gpu.destroy_virgl_resource(&mut context, &mut output_resource);
@@ -307,6 +334,7 @@ impl VirglCompositionEngine {
             output_resource: Some(output_resource),
             blur_resource_a: Some(blur_resource_a),
             blur_resource_b: Some(blur_resource_b),
+            blur_resource_c: Some(blur_resource_c),
             output,
             scanout_id,
             scanout_active: false,
@@ -712,6 +740,7 @@ impl VirglCompositionEngine {
         output_resource: &mut VirglResource,
         blur_resource_a: &mut VirglResource,
         blur_resource_b: &mut VirglResource,
+        blur_resource_c: &mut VirglResource,
         scene: &SceneFrame,
         surfaces: &BTreeMap<SurfaceId, Surface>,
         damage: &[Rect],
@@ -926,6 +955,7 @@ impl VirglCompositionEngine {
                 source_height,
             );
             prepared_layers.push(PreparedLayer {
+                layer: *layer,
                 sampler_view,
                 scissor,
                 first_vertex,
@@ -972,8 +1002,6 @@ impl VirglCompositionEngine {
             .map(|cached| cached.sampler_view)
             .collect();
         let initialize_pipeline = !self.pipeline_initialized;
-        let total_backdrop_halo = backdrop_halo(&scene.layers);
-
         let composition_started = timestamp_cycles();
         let mut draw_calls = 0u64;
         let mut backdrop_copies = 0u64;
@@ -989,6 +1017,7 @@ impl VirglCompositionEngine {
                     output_resource.id,
                     blur_resource_a.id,
                     blur_resource_b.id,
+                    blur_resource_c.id,
                     width,
                     height,
                 )?;
@@ -1036,74 +1065,101 @@ impl VirglCompositionEngine {
                     match layer.effect {
                         LayerEffect::BackdropSample { radius } => {
                             let blur_started = timestamp_cycles();
-                            let work_rect = inflate_rect(*damage_rect, total_backdrop_halo)
-                                .intersection(&bounds)
-                                .ok_or(
-                                    crate::drivers::virtio::gpu::GpuError::InvalidCommandStream,
-                                )?;
-                            encoder.resource_copy_region(
-                                blur_resource_a.id,
-                                work_rect.x as u32,
-                                work_rect.y as u32,
-                                0,
-                                output_resource.id,
-                                GpuBox {
-                                    x: work_rect.x as u32,
-                                    y: work_rect.y as u32,
-                                    z: 0,
-                                    width: work_rect.width,
-                                    height: work_rect.height,
-                                    depth: 1,
-                                },
-                            )?;
-                            backdrop_copies = backdrop_copies.saturating_add(1);
-                            backdrop_copy_pixels =
-                                backdrop_copy_pixels.saturating_add(work_rect.area());
-
-                            for pass_radius in backdrop_box_radii(radius) {
-                                if pass_radius == 0 {
-                                    continue;
-                                }
-                                let (horizontal, vertical) = blur_shader_handles(pass_radius)
+                            let targets =
+                                backdrop_targets(scene, &layer.layer, *damage_rect, bounds);
+                            let mut work = Vec::with_capacity(targets.len());
+                            for target in targets {
+                                let sample = inflate_rect(target, radius as u32)
+                                    .intersection(&bounds)
                                     .ok_or(
                                         crate::drivers::virtio::gpu::GpuError::InvalidCommandStream,
                                     )?;
-                                encoder.set_framebuffer(BLUR_SURFACE_B)?;
-                                encoder.bind_shader(horizontal, FRAGMENT_SHADER)?;
-                                encoder.bind_object(OBJECT_BLEND, REPLACE_BLEND_STATE)?;
-                                encoder.set_fragment_sampler_view(BLUR_SAMPLER_VIEW_A)?;
-                                set_encoder_scissor(&mut encoder, work_rect)?;
-                                encoder.draw_triangles_from(
-                                    clear_first_vertex.ok_or(
-                                        crate::drivers::virtio::gpu::GpuError::InvalidCommandStream,
-                                    )?,
-                                    6,
+                                encoder.resource_copy_region(
+                                    blur_resource_a.id,
+                                    sample.x as u32,
+                                    sample.y as u32,
+                                    0,
+                                    output_resource.id,
+                                    GpuBox {
+                                        x: sample.x as u32,
+                                        y: sample.y as u32,
+                                        z: 0,
+                                        width: sample.width,
+                                        height: sample.height,
+                                        depth: 1,
+                                    },
                                 )?;
-
-                                encoder.set_framebuffer(BLUR_SURFACE_A)?;
-                                encoder.bind_shader(vertical, FRAGMENT_SHADER)?;
-                                encoder.set_fragment_sampler_view(BLUR_SAMPLER_VIEW_B)?;
-                                set_encoder_scissor(&mut encoder, work_rect)?;
-                                encoder.draw_triangles_from(
-                                    clear_first_vertex.ok_or(
-                                        crate::drivers::virtio::gpu::GpuError::InvalidCommandStream,
-                                    )?,
-                                    6,
-                                )?;
-                                backdrop_blur_passes = backdrop_blur_passes.saturating_add(2);
-                                backdrop_blur_pixels = backdrop_blur_pixels
-                                    .saturating_add(work_rect.area().saturating_mul(2));
+                                backdrop_copies = backdrop_copies.saturating_add(1);
+                                backdrop_copy_pixels =
+                                    backdrop_copy_pixels.saturating_add(sample.area());
+                                work.push((target, sample));
                             }
 
+                            // Draw the whole layer once with ordinary source-over. Opaque client
+                            // pixels are now complete; fractional coverage is replaced below from
+                            // the stable pre-layer backdrop snapshot in scratch A.
                             encoder.set_framebuffer(OUTPUT_SURFACE)?;
-                            encoder.bind_shader(EFFECT_FRAGMENT_SHADER_HANDLE, FRAGMENT_SHADER)?;
-                            encoder.bind_object(OBJECT_BLEND, REPLACE_BLEND_STATE)?;
-                            encoder.set_fragment_sampler_views(
-                                0,
-                                &[layer.sampler_view, BLUR_SAMPLER_VIEW_A],
-                            )?;
+                            encoder.bind_shader(FRAGMENT_SHADER_HANDLE, FRAGMENT_SHADER)?;
+                            encoder.bind_object(OBJECT_BLEND, BLEND_STATE)?;
+                            encoder.set_fragment_sampler_view(layer.sampler_view)?;
                             set_encoder_scissor(&mut encoder, draw_scissor)?;
                             encoder.draw_triangles_from(layer.first_vertex, 6)?;
+                            draw_calls = draw_calls.saturating_add(1);
+
+                            for (target, sample) in work {
+                                let mut first_pass = true;
+                                for pass_radius in backdrop_box_radii(radius) {
+                                    if pass_radius == 0 {
+                                        continue;
+                                    }
+                                    let (horizontal, vertical) = blur_shader_handles(pass_radius)
+                                        .ok_or(
+                                        crate::drivers::virtio::gpu::GpuError::InvalidCommandStream,
+                                    )?;
+                                    encoder.set_framebuffer(BLUR_SURFACE_B)?;
+                                    encoder.bind_shader(horizontal, FRAGMENT_SHADER)?;
+                                    encoder.bind_object(OBJECT_BLEND, REPLACE_BLEND_STATE)?;
+                                    encoder.set_fragment_sampler_view(if first_pass {
+                                        BLUR_SAMPLER_VIEW_A
+                                    } else {
+                                        BLUR_SAMPLER_VIEW_C
+                                    })?;
+                                    set_encoder_scissor(&mut encoder, sample)?;
+                                    encoder.draw_triangles_from(
+                                        clear_first_vertex.ok_or(
+                                            crate::drivers::virtio::gpu::GpuError::InvalidCommandStream,
+                                        )?,
+                                        6,
+                                    )?;
+
+                                    encoder.set_framebuffer(BLUR_SURFACE_C)?;
+                                    encoder.bind_shader(vertical, FRAGMENT_SHADER)?;
+                                    encoder.set_fragment_sampler_view(BLUR_SAMPLER_VIEW_B)?;
+                                    set_encoder_scissor(&mut encoder, sample)?;
+                                    encoder.draw_triangles_from(
+                                        clear_first_vertex.ok_or(
+                                            crate::drivers::virtio::gpu::GpuError::InvalidCommandStream,
+                                        )?,
+                                        6,
+                                    )?;
+                                    first_pass = false;
+                                    backdrop_blur_passes = backdrop_blur_passes.saturating_add(2);
+                                    backdrop_blur_pixels = backdrop_blur_pixels
+                                        .saturating_add(sample.area().saturating_mul(2));
+                                }
+
+                                encoder.set_framebuffer(OUTPUT_SURFACE)?;
+                                encoder
+                                    .bind_shader(EFFECT_FRAGMENT_SHADER_HANDLE, FRAGMENT_SHADER)?;
+                                encoder.bind_object(OBJECT_BLEND, REPLACE_BLEND_STATE)?;
+                                encoder.set_fragment_sampler_views(
+                                    0,
+                                    &[layer.sampler_view, BLUR_SAMPLER_VIEW_C],
+                                )?;
+                                set_encoder_scissor(&mut encoder, target)?;
+                                encoder.draw_triangles_from(layer.first_vertex, 6)?;
+                                draw_calls = draw_calls.saturating_add(1);
+                            }
                             backdrop_blur_cycles = backdrop_blur_cycles
                                 .saturating_add(timestamp_cycles().saturating_sub(blur_started));
                         }
@@ -1114,9 +1170,9 @@ impl VirglCompositionEngine {
                             encoder.set_fragment_sampler_view(layer.sampler_view)?;
                             set_encoder_scissor(&mut encoder, draw_scissor)?;
                             encoder.draw_triangles_from(layer.first_vertex, 6)?;
+                            draw_calls = draw_calls.saturating_add(1);
                         }
                     }
-                    draw_calls = draw_calls.saturating_add(1);
                 }
             }
             Ok::<VirglCommandEncoder, crate::drivers::virtio::gpu::GpuError>(encoder)
@@ -1177,7 +1233,7 @@ impl VirglCompositionEngine {
         stats.backdrop_copy_pixels = backdrop_copy_pixels;
         stats.backdrop_blur_passes = backdrop_blur_passes;
         stats.backdrop_blur_pixels = backdrop_blur_pixels;
-        stats.backdrop_scratch_bytes = self.output.byte_len().saturating_mul(2) as u64;
+        stats.backdrop_scratch_bytes = self.output.byte_len().saturating_mul(3) as u64;
         stats.output_damage_regions = damage_rects.len() as u64;
         stats.output_pixels_damaged = damage_rects.iter().map(Rect::area).sum();
         Ok(stats)
@@ -1270,12 +1326,21 @@ impl CompositionEngine for VirglCompositionEngine {
             self.blur_resource_a = Some(blur_resource_a);
             return Err(CompositionError::GpuFailure);
         };
+        let Some(mut blur_resource_c) = self.blur_resource_c.take() else {
+            self.gpu = Some(gpu);
+            self.context = Some(context);
+            self.output_resource = Some(output_resource);
+            self.blur_resource_a = Some(blur_resource_a);
+            self.blur_resource_b = Some(blur_resource_b);
+            return Err(CompositionError::GpuFailure);
+        };
         let result = self.compose_frame(
             &mut gpu,
             &mut context,
             &mut output_resource,
             &mut blur_resource_a,
             &mut blur_resource_b,
+            &mut blur_resource_c,
             scene,
             surfaces,
             damage,
@@ -1285,6 +1350,7 @@ impl CompositionEngine for VirglCompositionEngine {
         self.output_resource = Some(output_resource);
         self.blur_resource_a = Some(blur_resource_a);
         self.blur_resource_b = Some(blur_resource_b);
+        self.blur_resource_c = Some(blur_resource_c);
         result
     }
 
@@ -1634,12 +1700,14 @@ fn encode_pipeline_create(
     output_resource: u32,
     blur_resource_a: u32,
     blur_resource_b: u32,
+    blur_resource_c: u32,
     width: u32,
     height: u32,
 ) -> Result<(), crate::drivers::virtio::gpu::GpuError> {
     encoder.create_surface(OUTPUT_SURFACE, output_resource, FORMAT_B8G8R8A8_UNORM, 0, 0)?;
     encoder.create_surface(BLUR_SURFACE_A, blur_resource_a, FORMAT_B8G8R8A8_UNORM, 0, 0)?;
     encoder.create_surface(BLUR_SURFACE_B, blur_resource_b, FORMAT_B8G8R8A8_UNORM, 0, 0)?;
+    encoder.create_surface(BLUR_SURFACE_C, blur_resource_c, FORMAT_B8G8R8A8_UNORM, 0, 0)?;
     encoder.create_vertex_elements(
         VERTEX_ELEMENTS,
         &[
@@ -1671,6 +1739,7 @@ fn encode_pipeline_create(
     encoder.bind_fragment_sampler_states(0, &[SAMPLER_STATE, SAMPLER_STATE])?;
     encoder.create_sampler_view(BLUR_SAMPLER_VIEW_A, blur_resource_a, FORMAT_B8G8R8A8_UNORM)?;
     encoder.create_sampler_view(BLUR_SAMPLER_VIEW_B, blur_resource_b, FORMAT_B8G8R8A8_UNORM)?;
+    encoder.create_sampler_view(BLUR_SAMPLER_VIEW_C, blur_resource_c, FORMAT_B8G8R8A8_UNORM)?;
     encoder.create_source_over_blend(BLEND_STATE)?;
     encoder.bind_object(OBJECT_BLEND, BLEND_STATE)?;
     encoder.create_replace_blend(REPLACE_BLEND_STATE)?;
@@ -1699,6 +1768,7 @@ fn encode_pipeline_destroy(
     encoder: &mut VirglCommandEncoder,
 ) -> Result<(), crate::drivers::virtio::gpu::GpuError> {
     encoder.clear_fragment_sampler_views(0, 2)?;
+    encoder.destroy_object(OBJECT_SAMPLER_VIEW, BLUR_SAMPLER_VIEW_C)?;
     encoder.destroy_object(OBJECT_SAMPLER_VIEW, BLUR_SAMPLER_VIEW_B)?;
     encoder.destroy_object(OBJECT_SAMPLER_VIEW, BLUR_SAMPLER_VIEW_A)?;
     encoder.destroy_object(OBJECT_SAMPLER_STATE, SAMPLER_STATE)?;
@@ -1715,6 +1785,7 @@ fn encode_pipeline_destroy(
     encoder.destroy_object(OBJECT_SHADER, FRAGMENT_SHADER_HANDLE)?;
     encoder.destroy_object(OBJECT_SHADER, VERTEX_SHADER_HANDLE)?;
     encoder.destroy_object(OBJECT_VERTEX_ELEMENTS, VERTEX_ELEMENTS)?;
+    encoder.destroy_surface(BLUR_SURFACE_C)?;
     encoder.destroy_surface(BLUR_SURFACE_B)?;
     encoder.destroy_surface(BLUR_SURFACE_A)?;
     encoder.destroy_surface(OUTPUT_SURFACE)
@@ -1875,6 +1946,9 @@ impl Drop for VirglCompositionEngine {
             let _ = gpu.destroy_virgl_resource(&mut context, &mut vertices);
         }
         self.vertex_capacity = 0;
+        if let Some(mut blur) = self.blur_resource_c.take() {
+            let _ = gpu.destroy_virgl_resource(&mut context, &mut blur);
+        }
         if let Some(mut blur) = self.blur_resource_b.take() {
             let _ = gpu.destroy_virgl_resource(&mut context, &mut blur);
         }

@@ -105,7 +105,11 @@ pub struct RenderStats {
     /// Separable render passes issued into blur ping-pong targets.
     pub backdrop_blur_passes: u64,
     pub backdrop_blur_pixels: u64,
-    /// Fixed guest backing held by the two blur scratch targets.
+    /// Fractional-alpha coverage maintenance performed before composition.
+    pub backdrop_coverage_scans: u64,
+    pub backdrop_coverage_pixels_scanned: u64,
+    pub backdrop_coverage_regions: u64,
+    /// Fixed guest backing held by the backdrop snapshot and two blur targets.
     pub backdrop_scratch_bytes: u64,
     /// Hardware cursor define/move commands issued for this frame.
     pub cursor_updates: u64,

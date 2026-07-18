@@ -6,9 +6,10 @@ use crate::graphics::composition::{
     ClientGlFrame, ClientGlId, ClientGlInfo, CompositionEngine, CompositionEngineKind,
     CpuCompositionEngine, RenderStats, VirglCompositionEngine,
 };
-use crate::graphics::scene::{Layer, SceneFrame};
+use crate::graphics::scene::{BackdropCoverage, Layer, LayerEffect, LayerSource, SceneFrame};
 use crate::graphics::surface::{
-    Surface, SurfaceBudget, SurfaceClass, SurfaceDesc, SurfaceError, SurfaceId,
+    fractional_alpha_coverage, Surface, SurfaceBudget, SurfaceClass, SurfaceDesc, SurfaceError,
+    SurfaceId,
 };
 use crate::window::{Rect, WindowId};
 
@@ -30,10 +31,12 @@ pub struct RetainedRenderer {
     surfaces: BTreeMap<SurfaceId, Surface>,
     root_surfaces: BTreeMap<WindowId, SurfaceId>,
     bounds: BTreeMap<WindowId, Rect>,
+    backdrop_coverage: BTreeMap<SurfaceId, BackdropCoverage>,
     engine: Box<dyn CompositionEngine>,
     budget: SurfaceBudget,
     last_stats: RenderStats,
     virtio_presenter: Option<(VirtioGpu, ScanoutResource)>,
+    pending_coverage_stats: (u64, u64, u64),
 }
 
 impl RetainedRenderer {
@@ -78,10 +81,12 @@ impl RetainedRenderer {
             surfaces: BTreeMap::new(),
             root_surfaces: BTreeMap::new(),
             bounds: BTreeMap::new(),
+            backdrop_coverage: BTreeMap::new(),
             engine,
             budget,
             last_stats: RenderStats::default(),
             virtio_presenter,
+            pending_coverage_stats: (0, 0, 0),
         })
     }
 
@@ -182,6 +187,7 @@ impl RetainedRenderer {
                     self.budget
                         .release(SurfaceClass::Visible, surface.byte_len());
                 }
+                self.backdrop_coverage.remove(&id);
             }
             self.bounds.remove(&root);
         }
@@ -202,6 +208,55 @@ impl RetainedRenderer {
         scene
     }
 
+    /// Populate per-surface backdrop coverage after the manager has attached
+    /// effect metadata to the scene. Clean moved surfaces reuse their cache.
+    pub fn prepare_backdrop_coverage(&mut self, scene: &mut SceneFrame) {
+        // Invalidate before selecting effect layers: a surface may be damaged
+        // while its backdrop effect is temporarily disabled, and composition
+        // will acknowledge that damage before the effect is enabled again.
+        for (surface_id, surface) in &self.surfaces {
+            if !surface.damage().is_empty() {
+                self.backdrop_coverage.remove(surface_id);
+            }
+        }
+        let mut scans = 0u64;
+        let mut pixels_scanned = 0u64;
+        let mut region_count = 0u64;
+        let layers = scene.layers.clone();
+        for layer in &layers {
+            if !layer.visible
+                || layer.opacity == 0
+                || !matches!(layer.effect, LayerEffect::BackdropSample { .. })
+            {
+                continue;
+            }
+            let LayerSource::Canonical(surface_id) = layer.source else {
+                continue;
+            };
+            let Some(surface) = self.surfaces.get(&surface_id) else {
+                continue;
+            };
+            if layer.opacity != u8::MAX {
+                scene.set_backdrop_coverage(surface_id, BackdropCoverage::Full);
+                region_count = region_count.saturating_add(1);
+                continue;
+            }
+            let coverage = self.backdrop_coverage.entry(surface_id).or_insert_with(|| {
+                scans = scans.saturating_add(1);
+                pixels_scanned =
+                    pixels_scanned.saturating_add(surface.width() as u64 * surface.height() as u64);
+                fractional_alpha_coverage(surface)
+            });
+            region_count = region_count.saturating_add(match coverage {
+                BackdropCoverage::Empty => 0,
+                BackdropCoverage::Full => 1,
+                BackdropCoverage::Regions(regions) => regions.len() as u64,
+            });
+            scene.set_backdrop_coverage(surface_id, coverage.clone());
+        }
+        self.pending_coverage_stats = (scans, pixels_scanned, region_count);
+    }
+
     pub fn compose(
         &mut self,
         scene: &SceneFrame,
@@ -219,10 +274,15 @@ impl RetainedRenderer {
                 snapshots.insert(surface_id, surface.damage_snapshot());
             }
         }
-        let stats = self
+        let mut stats = self
             .engine
             .compose(scene, &self.surfaces, damage)
             .map_err(|_| RetainedRendererError::Composition)?;
+        let (scans, pixels_scanned, regions) = self.pending_coverage_stats;
+        self.pending_coverage_stats = (0, 0, 0);
+        stats.backdrop_coverage_scans = scans;
+        stats.backdrop_coverage_pixels_scanned = pixels_scanned;
+        stats.backdrop_coverage_regions = regions;
         for (surface_id, snapshot) in snapshots {
             if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                 let _ = surface.acknowledge_damage(&snapshot);

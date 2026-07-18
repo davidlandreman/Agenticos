@@ -1221,6 +1221,7 @@ impl WindowManager {
                 scene.push(client_layer);
             }
         }
+        retained.prepare_backdrop_coverage(&mut scene);
         compose_regions = Self::expand_backdrop_damage(&scene, &compose_regions);
         let mut stats = retained.compose(&scene, &compose_regions)?;
 
@@ -1276,7 +1277,7 @@ impl WindowManager {
                 crate::graphics::composition::CompositionEngineKind::Virgl => "virgl",
             };
             crate::debug_info!(
-            "render_stats renderer={} engine={} presenter={} frames={} windows={} surface_pixels={} layers={} upload_bytes={} upload_regions={} texture_hits={} texture_misses={} texture_replacements={} texture_evictions={} texture_creates={} texture_destroys={} pipeline_creates={} sampler_view_creates={} sampler_view_destroys={} vertex_creates={} vertex_destroys={} vertex_capacity={} texture_cache_bytes={} texture_cache_peak={} command_dwords={} gpu_submissions={} readback_bytes={} output_regions={} output_pixels={} scanout_flushes={} backdrop_copies={} backdrop_copy_pixels={} blur_passes={} blur_pixels={} blur_scratch_bytes={} cursor_updates={} presents={} cycles_raster={} cycles_upload={} cycles_compose={} cycles_blur={} cycles_fence={} cycles_readback={} cycles_present={} surface_bytes={} surface_peak={}",
+            "render_stats renderer={} engine={} presenter={} frames={} windows={} surface_pixels={} layers={} upload_bytes={} upload_regions={} texture_hits={} texture_misses={} texture_replacements={} texture_evictions={} texture_creates={} texture_destroys={} pipeline_creates={} sampler_view_creates={} sampler_view_destroys={} vertex_creates={} vertex_destroys={} vertex_capacity={} texture_cache_bytes={} texture_cache_peak={} command_dwords={} gpu_submissions={} readback_bytes={} output_regions={} output_pixels={} scanout_flushes={} backdrop_copies={} backdrop_copy_pixels={} blur_passes={} blur_pixels={} coverage_scans={} coverage_pixels={} coverage_regions={} blur_scratch_bytes={} cursor_updates={} presents={} cycles_raster={} cycles_upload={} cycles_compose={} cycles_blur={} cycles_fence={} cycles_readback={} cycles_present={} surface_bytes={} surface_peak={}",
             if engine == "virgl" { "gpu" } else { "retained" },
             engine,
             if direct_scanout { "virgl-direct" } else if presented_by_virtio { "virtio-gpu-2d" } else { "boot-framebuffer" },
@@ -1310,6 +1311,9 @@ impl WindowManager {
             stats.backdrop_copy_pixels,
             stats.backdrop_blur_passes,
             stats.backdrop_blur_pixels,
+            stats.backdrop_coverage_scans,
+            stats.backdrop_coverage_pixels_scanned,
+            stats.backdrop_coverage_regions,
             stats.backdrop_scratch_bytes,
             stats.cursor_updates,
             stats.presents,
@@ -1526,9 +1530,7 @@ impl WindowManager {
                     continue;
                 };
                 let halo = crate::graphics::scene::inflate_rect(rect, radius as u32);
-                if let Some(affected) = halo
-                    .intersection(&layer.output_bounds())
-                    .and_then(|value| value.intersection(&layer.clip_rect))
+                for affected in crate::graphics::scene::backdrop_targets(scene, layer, halo, screen)
                 {
                     Self::add_present_region(&mut expanded, affected, screen);
                 }
