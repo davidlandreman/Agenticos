@@ -11,7 +11,8 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
 - `scene.rs` — backend-neutral ordered layers, opacity, 16.16 transforms, and
   reserved effect metadata.
 - `composition/cpu.rs` — pixel-correct premultiplied source-over reference
-  compositor and runtime fallback.
+  compositor and runtime fallback, including the three-pass backdrop blur used
+  by Aero glass layers.
 - `present/` — scanout boundary. The boot-framebuffer presenter converts only
   damaged pixels; VirtIO-GPU 2D presentation is owned by `src/drivers/`.
 - `fonts/` — font support. `core_font.rs` defines the glyph-centric `Font` trait + `Glyph<'a>` struct (8bpp coverage). `ttf.rs` is the TTF/OTF backend (parses via `ttf-parser`, rasterizes via `ab_glyph_rasterizer`, ASCII pre-rendered into per-glyph `Box<[u8]>` slots, non-ASCII lazy via `BTreeMap`). `embedded_font.rs` is the 8x8 bitmap fallback used only on TTF parse failure. `font_data.rs` holds the embedded font's bit-packed source. The system TTF lives at `assets/system.ttf` and is `include_bytes!`-baked into the kernel; `init_fonts()` parses it once during boot, after heap init.

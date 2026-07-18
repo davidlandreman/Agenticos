@@ -45,6 +45,7 @@ pub enum CompositionError {
     InvalidOutput,
     MissingSurface(SurfaceId),
     UnsupportedTransform,
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     UnsupportedEffect,
     SurfaceAllocation,
 }

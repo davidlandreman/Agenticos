@@ -15,6 +15,9 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   visible top-level subtree into separate premultiplied surfaces, builds a flat
   scene, CPU-composes damage, and presents through the boot framebuffer or
   VirtIO-GPU 2D.
+- `theme/` — boot-selected frame theme. `classic` preserves the historical
+  chrome; `aero` supplies translucent rounded glass, shadows, and backdrop blur
+  metadata for retained composition.
 - `screen.rs` — virtual screen abstraction (today there is one physical display).
 - `console.rs` — kernel `print!` macro output buffer.
 - `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.
@@ -29,7 +32,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | Type | Purpose | Notes |
 |---|---|---|
 | `DesktopWindow` | Full-screen background | Optionally owns BMP wallpaper bytes (loaded via `window::load_default_wallpaper`) and blits them through `GraphicsDevice::draw_image_scaled`. Falls back to solid blue (RGB `0, 50, 100`) when no wallpaper is provided or parsing fails — boot must succeed in either branch. |
-| `FrameWindow` | Title bar + borders | Active = blue chrome; inactive = grey. Title bar 24 px, border 2 px. Uses `WindowBase`. |
+| `FrameWindow` | Title bar + borders | Metrics and painting come from the active Classic/Aero theme. Aero requires the retained renderer. Uses `WindowBase`. |
 | `TextWindow` | Grid-based text rendering | Cell size derived from the system TTF (`get_default_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
@@ -73,6 +76,8 @@ recomposed; it never restores framebuffer background.
 defaults to `legacy`. `gpu` and `auto` currently fall back to retained CPU
 because accelerated mode is not exposed without a passing VirGL capset and
 alpha/readback smoke test. Strict GPU mode fails initialization instead.
+`AGENTICOS_THEME=classic|aero|auto` is passed as `opt/agenticos/theme`; `auto`
+selects Aero for retained rendering and Classic for legacy rendering.
 
 ## Implementation status
 

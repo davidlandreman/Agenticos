@@ -56,6 +56,9 @@ if [ "$HELP" = true ]; then
     echo "                          AGENTICOS_QEMU_MEMORY (for example 4G)."
     echo "                          Rendering: AGENTICOS_COMPOSITOR=legacy|retained|gpu|auto"
     echo "                          AGENTICOS_GPU_STRICT=1 refuses GPU fallback."
+    echo "                          AGENTICOS_THEME=classic|aero|auto (default auto)."
+    echo "                          AGENTICOS_QEMU_2D=on forces plain VirtIO 2D scanout;"
+    echo "                          auto (default) avoids its black Cocoa window on macOS."
     echo "                          AGENTICOS_QEMU_BIN selects one exact QEMU binary;"
     echo "                          AGENTICOS_QEMU_GL=es|core selects Cocoa GL mode."
     echo "                          macOS window: cocoa zoom-to-fit is on by default so"
@@ -246,6 +249,7 @@ if [ "$RUN_QEMU" = true ]; then
     echo "🖥  QEMU binary: $QEMU_BIN"
     "$QEMU_BIN" --version | head -n 1
     echo "🎨 Requested compositor: ${AGENTICOS_COMPOSITOR:-legacy} (strict=${AGENTICOS_GPU_STRICT:-0})"
+    echo "🪟 Requested theme: ${AGENTICOS_THEME:-auto}"
     echo "📂 Mounting host folder: $HOST_SHARE -> /host (read-only)"
     echo "🔌 MCP RPC chardev socket: $RPC_SOCK (chmod 0600 once QEMU creates it)"
     QEMU_MEMORY="${AGENTICOS_QEMU_MEMORY:-2G}"

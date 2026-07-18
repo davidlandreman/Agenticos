@@ -44,8 +44,11 @@ The VirtIO tablet requires `-device virtio-tablet-pci` in the QEMU command line.
 Modern GPU PCI device type 16 is discovered through cached PCI enumeration.
 Only explicitly understood features are negotiated. `scripts/qemu-compositor.sh`
 probes the exact `AGENTICOS_QEMU_BIN`: retained mode can request `virtio-vga`
-for 2D scanout, while GL device names are used only for `gpu`/`auto`. Presence
-of `virtio-vga-gl` alone never makes the kernel report acceleration.
+for 2D scanout, while GL device names are used only for `gpu`/`auto`. Plain 2D
+scanout is disabled by default on macOS because QEMU 11.0.1's Cocoa frontend
+can show a black window for an otherwise valid scanout; set
+`AGENTICOS_QEMU_2D=on` only for diagnostics. Presence of `virtio-vga-gl` alone
+never makes the kernel report acceleration.
 
 ## VirtIO DMA and network invariants
 

@@ -25,6 +25,7 @@ pub mod keyboard;
 pub mod cursor;
 pub mod compositor;
 pub mod renderer;
+pub mod theme;
 pub mod terminal_factory;
 
 pub use types::*;
@@ -226,6 +227,11 @@ pub trait Window: Send {
 
     fn clear_composition_dirty(&mut self) {
         self.base_mut().clear_composition_dirty();
+    }
+
+    /// Extra retained-surface space for non-interactive decorations.
+    fn decoration_insets(&self) -> Insets {
+        Insets::ZERO
     }
 
     /// Check if this window currently has focus

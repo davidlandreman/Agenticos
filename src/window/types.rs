@@ -10,9 +10,31 @@ pub const MIN_WINDOW_HEIGHT: u32 = 50;
 /// Minimum horizontal strip of the title bar that must remain on screen
 /// during a drag. Keeps the window grabbable for re-dragging.
 pub const MIN_TITLEBAR_VISIBLE: i32 = 80;
-/// Title bar height assumed by the drag clamp. Matches `FrameWindow`'s
-/// constant; revisit if other frame styles are added.
-pub const DRAG_CLAMP_TITLE_BAR_HEIGHT: i32 = 24;
+/// Insets around a logical window used to allocate retained decorations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Insets {
+    pub left: u32,
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+}
+
+impl Insets {
+    pub const ZERO: Self = Self::uniform(0);
+
+    pub const fn uniform(value: u32) -> Self {
+        Self { left: value, top: value, right: value, bottom: value }
+    }
+
+    pub fn expand(self, rect: Rect) -> Rect {
+        Rect::new(
+            rect.x.saturating_sub(self.left.min(i32::MAX as u32) as i32),
+            rect.y.saturating_sub(self.top.min(i32::MAX as u32) as i32),
+            rect.width.saturating_add(self.left).saturating_add(self.right),
+            rect.height.saturating_add(self.top).saturating_add(self.bottom),
+        )
+    }
+}
 
 /// Clamp a window's horizontal drag position so at least
 /// `MIN_TITLEBAR_VISIBLE` pixels of the title bar stay on screen.
@@ -36,7 +58,7 @@ pub fn clamp_drag_x(raw_x: i32, window_width: i32, screen_width: i32) -> i32 {
 /// screen. The title bar is always at the top of the window, so this
 /// keeps `[0, screen_height - title_bar_height]`.
 pub fn clamp_drag_y(raw_y: i32, screen_height: i32) -> i32 {
-    let max_y = screen_height - DRAG_CLAMP_TITLE_BAR_HEIGHT;
+    let max_y = screen_height - crate::window::theme::metrics().title_bar_height as i32;
     raw_y.clamp(0, max_y.max(0))
 }
 

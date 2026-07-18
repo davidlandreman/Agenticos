@@ -258,6 +258,11 @@ impl Compositor {
         self.dirty.is_dirty()
     }
 
+    /// Return the last pointer position recorded by the compositor.
+    pub const fn cursor_position(&self) -> (usize, usize) {
+        self.cursor_position
+    }
+
     /// Record that the cursor has moved.
     ///
     /// Returns true if the cursor actually moved. Does **not** mark the
