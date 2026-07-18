@@ -76,7 +76,10 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   (compat command `explorer`), `/host/GLGAME.ELF`, `/host/NOTEPAD.ELF`,
   `/host/PAINTING.ELF`, `/host/TASKMGR.ELF` (`taskmgr` + legacy
   `tasks` alias), and `/host/TCC.ELF` (TinyCC; both `tcc` and the `cc`
-  alias). The `GLAUNCH.ELF` GUI-applet list is empty today.
+  alias), plus `/host/LINKS.ELF` (Links 2.30; `links` and `links2`). Links is
+  text-mode IPv4/HTTP-only; HTTPS still needs a separate TLS trust-stack
+  integration even though cryptographic entropy is now available.
+  The `GLAUNCH.ELF` GUI-applet list is empty today.
 - `procfs.rs` — synthetic read-only `/proc` namespace, modeled on the
   `/bin` synthesis pattern. Linux-shaped files (`uptime`, `meminfo`,
   `stat`, `loadavg`, `net/dev`, `/proc/<pid>/{stat,status,cmdline,statm}`

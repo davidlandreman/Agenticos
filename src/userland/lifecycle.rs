@@ -716,7 +716,10 @@ pub fn wake_ring3_blocked_on_input(terminal_id: Option<crate::window::WindowId>)
         .ring3_blocked
         .iter()
         .filter_map(|(pid, reason)| {
-            if matches!(reason, Ring3BlockReason::WaitingForInput) {
+            if matches!(
+                reason,
+                Ring3BlockReason::WaitingForInput | Ring3BlockReason::WaitingForNetwork { .. }
+            ) {
                 Some(*pid)
             } else {
                 None
@@ -847,7 +850,12 @@ pub fn kill_ring3_processes_on_terminal(terminal_id: crate::window::WindowId) {
 /// follow-up wake after the lock is released (see
 /// `close_handler` / `dup2_handler`). Spin-deadlock-safe.
 pub fn wake_ring3_blocked_on_pipe_readable() {
-    wake_ring3_blocked_by(|r| matches!(r, Ring3BlockReason::WaitingForPipeRead));
+    wake_ring3_blocked_by(|r| {
+        matches!(
+            r,
+            Ring3BlockReason::WaitingForPipeRead | Ring3BlockReason::WaitingForNetwork { .. }
+        )
+    });
 }
 
 /// Wake every ring-3 process blocked on a pipe write. Called when a
@@ -856,7 +864,12 @@ pub fn wake_ring3_blocked_on_pipe_readable() {
 /// `try_lock` discipline matches
 /// [`wake_ring3_blocked_on_pipe_readable`].
 pub fn wake_ring3_blocked_on_pipe_writable() {
-    wake_ring3_blocked_by(|r| matches!(r, Ring3BlockReason::WaitingForPipeWrite));
+    wake_ring3_blocked_by(|r| {
+        matches!(
+            r,
+            Ring3BlockReason::WaitingForPipeWrite | Ring3BlockReason::WaitingForNetwork { .. }
+        )
+    });
 }
 
 /// Wake network waiters after a socket state change. Deadline expiration is

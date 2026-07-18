@@ -255,6 +255,9 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
             if handle.pipe().readers() == 0 {
                 return crate::userland::abi::EPIPE;
             }
+            if handle.nonblocking() {
+                return EAGAIN;
+            }
             unsafe {
                 crate::userland::switch::block_current_ring3_and_yield(
                     args,
@@ -413,6 +416,9 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                 if written > 0 {
                     return written as i64;
                 }
+                if handle.nonblocking() {
+                    return EAGAIN;
+                }
                 unsafe {
                     crate::userland::switch::block_current_ring3_and_yield(
                         args,
@@ -531,6 +537,9 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
             }
             if handle.pipe().writers() == 0 {
                 return 0; // EOF
+            }
+            if handle.nonblocking() {
+                return EAGAIN;
             }
             unsafe {
                 crate::userland::switch::block_current_ring3_and_yield(
@@ -2008,8 +2017,7 @@ pub fn pipe_handler(args: &mut SyscallArgs) -> i64 {
 ///
 /// Allocates a kernel pipe object and two fds — `pipefd[0]` for
 /// reading, `pipefd[1]` for writing. Both honor the `O_CLOEXEC` flag.
-/// `O_NONBLOCK` is ignored (the synchronous-fork model doesn't need
-/// blocking I/O semantics on pipes for short pipelines).
+/// `O_NONBLOCK` is stored on each endpoint's shared open-file description.
 pub fn pipe2_handler(args: &mut SyscallArgs) -> i64 {
     pipe2_common(args.rdi, args.rsi as u32)
 }
@@ -2021,11 +2029,15 @@ fn pipe2_common(fds_ptr: u64, flags: u32) -> i64 {
     if fds_ptr == 0 {
         return EFAULT;
     }
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return EINVAL;
+    }
     let cloexec = (flags & O_CLOEXEC) != 0;
+    let nonblocking = (flags & O_NONBLOCK) != 0;
 
     let pipe = Pipe::new();
-    let read_handle = PipeReadHandle::new(pipe.clone());
-    let write_handle = PipeWriteHandle::new(pipe);
+    let read_handle = PipeReadHandle::new(pipe.clone(), nonblocking);
+    let write_handle = PipeWriteHandle::new(pipe, nonblocking);
 
     // Allocate both fds atomically — if the second alloc fails, undo
     // the first by removing it before returning EMFILE. Without this,
@@ -2204,6 +2216,7 @@ const O_CLOEXEC: u32 = 0o2000000;
 /// access bit (`O_WRONLY=1`, `O_RDWR=2`) returns `-EROFS`.
 const O_ACCMODE: u32 = 0o3;
 const O_RDONLY: u32 = 0;
+const O_WRONLY: u32 = 0o1;
 const O_RDWR: u32 = 0o2;
 const O_NONBLOCK: u32 = 0o4000;
 const O_CREAT: u32 = 0o100;
@@ -3263,7 +3276,8 @@ pub fn dup2_handler(args: &mut SyscallArgs) -> i64 {
 
 /// `fcntl(fd, cmd, arg) -> int`. Implements just enough of the cmd
 /// surface for libc startup: F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD,
-/// F_SETFD, F_GETFL, F_SETFL (no-op).
+/// F_SETFD, F_GETFL, and F_SETFL. Socket and pipe nonblocking state lives
+/// on the shared open-file description so duplicated fds observe changes.
 pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
     let fd = args.rdi as i32;
     let cmd = args.rsi as i32;
@@ -3307,6 +3321,12 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
                     let nonblocking = crate::net::socket::nonblocking(handle.id()).unwrap_or(false);
                     (O_RDWR | if nonblocking { O_NONBLOCK } else { 0 }) as i64
                 }
+                Some(FdSlot::PipeRead(handle, _)) => {
+                    (O_RDONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+                }
+                Some(FdSlot::PipeWrite(handle, _)) => {
+                    (O_WRONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+                }
                 Some(_) => O_RDONLY as i64,
                 None => EBADF,
             }
@@ -3315,6 +3335,14 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
             Some(FdSlot::Socket { handle, .. }) => {
                 crate::net::socket::set_nonblocking(handle.id(), arg & O_NONBLOCK as u64 != 0)
                     .map_or_else(crate::userland::network_syscalls::map_socket_error, |_| 0)
+            }
+            Some(FdSlot::PipeRead(handle, _)) => {
+                handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
+                0
+            }
+            Some(FdSlot::PipeWrite(handle, _)) => {
+                handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
+                0
             }
             Some(_) => 0,
             None => EBADF,
@@ -4240,9 +4268,7 @@ pub fn uname_handler(args: &mut SyscallArgs) -> i64 {
 
 // ---------- U3: musl-init / zsh-startup syscalls ----------
 
-// poll/ppoll constants. POLLNVAL is the only one we generate when an
-// fd isn't valid; the others are just bit copies from `events` to
-// `revents` for valid stream fds.
+// poll/ppoll constants used by the shared descriptor-readiness snapshot.
 const POLLIN: i16 = 0x0001;
 const POLLOUT: i16 = 0x0004;
 const POLLERR: i16 = 0x0008;
@@ -4265,21 +4291,73 @@ struct PollFd {
 /// without restricting any realistic caller.
 const POLL_MAX_NFDS: u64 = 64;
 
+#[derive(Clone, Copy, Default)]
+struct FdReady {
+    readable: bool,
+    writable: bool,
+    error: bool,
+    hangup: bool,
+}
+
+/// Snapshot readiness without consuming data. `with_fd_slot` clones the
+/// handle while holding the process table and releases that lock before a
+/// socket readiness query takes the network lock.
+fn fd_readiness(fd: i32) -> Result<FdReady, i64> {
+    match with_fd_slot(fd).ok_or(EBADF)? {
+        FdSlot::Stdin => Ok(FdReady {
+            readable: crate::userland::stdin::queued_len_for_current_process() != 0,
+            ..FdReady::default()
+        }),
+        FdSlot::Stdout | FdSlot::Stderr => Ok(FdReady {
+            writable: true,
+            ..FdReady::default()
+        }),
+        FdSlot::Urandom { .. } => Ok(FdReady {
+            readable: true,
+            ..FdReady::default()
+        }),
+        FdSlot::File { .. }
+        | FdSlot::VirtualFile { .. }
+        | FdSlot::Directory { .. }
+        | FdSlot::VirtualBinDir { .. }
+        | FdSlot::VirtualDevDir { .. }
+        | FdSlot::VirtualDir { .. } => Ok(FdReady {
+            readable: true,
+            writable: true,
+            ..FdReady::default()
+        }),
+        FdSlot::PipeRead(handle, _) => {
+            let eof = handle.pipe().writers() == 0;
+            Ok(FdReady {
+                readable: handle.pipe().len() != 0 || eof,
+                hangup: eof,
+                ..FdReady::default()
+            })
+        }
+        FdSlot::PipeWrite(handle, _) => {
+            let no_readers = handle.pipe().readers() == 0;
+            Ok(FdReady {
+                writable: !no_readers && handle.pipe().has_capacity(),
+                error: no_readers,
+                ..FdReady::default()
+            })
+        }
+        FdSlot::Socket { handle, .. } => crate::net::socket::readiness(handle.id())
+            .map(|state| FdReady {
+                readable: state.readable,
+                writable: state.writable,
+                error: state.error,
+                hangup: state.hangup,
+            })
+            .map_err(crate::userland::network_syscalls::map_socket_error),
+    }
+}
+
 /// `poll(fds: *mut pollfd, nfds: nfds_t, timeout: int) -> int`
 ///
-/// Real-shaped: validate the user pollfd array (with checked
-/// multiplication of `nfds * size_of::<PollFd>()` to defeat overflow),
-/// then for each entry mark `revents` according to the fd's class:
-/// stdin/stdout/stderr report whatever events the caller asked for as
-/// "ready" (we have no real I/O wait — the subsequent read/write call
-/// is what blocks); valid open files and pipes report POLLIN/POLLOUT
-/// likewise; unknown fds get POLLNVAL set. Returns the count of pollfd
-/// entries with non-zero `revents`.
-///
-/// Timeout is ignored — every poll call returns immediately. zsh's ZLE
-/// uses poll for keytimeout disambiguation; without a real timer the
-/// best we can do is "always ready," which makes ZLE call read() and
-/// block there.
+/// Validates the user pollfd array, samples shared readiness for streams,
+/// files, pipes, and sockets, and parks the process until an input, pipe,
+/// socket, close, or timeout wakeup makes it worth sampling again.
 pub fn poll_handler(args: &mut SyscallArgs) -> i64 {
     let timeout_ms = args.rdx as i32;
     let timeout_ticks = if timeout_ms < 0 {
@@ -4292,8 +4370,8 @@ pub fn poll_handler(args: &mut SyscallArgs) -> i64 {
 
 /// `ppoll(fds, nfds, *timeout, *sigmask, sigsetsize) -> int`
 ///
-/// Linux-x86-64 ppoll. We ignore the timespec, sigmask, and sigsetsize;
-/// shape is identical to `poll` for our purposes.
+/// Linux-x86-64 ppoll. The timeout is honored; temporary signal masks are
+/// not implemented yet.
 pub fn ppoll_handler(args: &mut SyscallArgs) -> i64 {
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -4320,9 +4398,6 @@ pub fn ppoll_handler(args: &mut SyscallArgs) -> i64 {
 }
 
 fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Option<u64>) -> i64 {
-    if nfds == 0 {
-        return 0;
-    }
     if nfds > POLL_MAX_NFDS {
         return EINVAL;
     }
@@ -4339,7 +4414,6 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
         return e;
     }
     let mut ready = 0i64;
-    let mut has_socket = false;
     crate::net::poll_once();
     for index in 0..nfds {
         let address = fds_ptr + index * core::mem::size_of::<PollFd>() as u64;
@@ -4353,32 +4427,25 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
         let revents = if entry.fd < 0 {
             0
         } else {
-            match with_fd_slot(entry.fd) {
-                Some(FdSlot::Socket { handle, .. }) => {
-                    has_socket = true;
-                    match crate::net::socket::readiness(handle.id()) {
-                        Ok(state) => {
-                            let mut events = 0;
-                            if state.readable {
-                                events |= want & POLLIN;
-                            }
-                            if state.writable {
-                                events |= want & POLLOUT;
-                            }
-                            if state.error {
-                                events |= POLLERR;
-                            }
-                            if state.hangup {
-                                events |= POLLHUP;
-                            }
-                            events
-                        }
-                        Err(_) => POLLERR,
+            match fd_readiness(entry.fd) {
+                Ok(state) => {
+                    let mut events = 0;
+                    if state.readable {
+                        events |= want & POLLIN;
                     }
+                    if state.writable {
+                        events |= want & POLLOUT;
+                    }
+                    if state.error {
+                        events |= POLLERR;
+                    }
+                    if state.hangup {
+                        events |= POLLHUP;
+                    }
+                    events
                 }
-                Some(FdSlot::Urandom { .. }) => want & POLLIN,
-                Some(_) => want & (POLLIN | POLLOUT), // preserve existing behavior
-                None => POLLNVAL,
+                Err(EBADF) => POLLNVAL,
+                Err(_) => POLLERR,
             }
         };
         entry.revents = revents;
@@ -4389,14 +4456,126 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
             return e;
         }
     }
-    if ready != 0 || timeout_ticks == Some(0) || !has_socket {
-        if ready != 0 {
-            crate::userland::lifecycle::clear_network_wait();
-        }
+    if ready != 0 || timeout_ticks == Some(0) {
+        crate::userland::lifecycle::clear_network_wait();
         return ready;
     }
     let identity = fds_ptr ^ nfds.rotate_left(17);
     crate::userland::network_syscalls::block_poll(args, identity, timeout_ticks)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SelectTimeval {
+    seconds: i64,
+    microseconds: i64,
+}
+
+fn select_read_mask(pointer: u64, nfds: usize) -> Result<u64, i64> {
+    if pointer == 0 || nfds == 0 {
+        return Ok(0);
+    }
+    let value = crate::userland::usercopy::read_unaligned::<u64>(pointer)?;
+    let valid = if nfds == 64 {
+        u64::MAX
+    } else {
+        (1u64 << nfds) - 1
+    };
+    Ok(value & valid)
+}
+
+fn select_write_mask(pointer: u64, value: u64, nfds: usize) -> Result<(), i64> {
+    if pointer == 0 || nfds == 0 {
+        return Ok(());
+    }
+    crate::userland::usercopy::write_unaligned(pointer, &value)
+}
+
+/// Linux x86-64 `select(2)`. Links uses this as its central terminal, pipe,
+/// timer, and socket event loop.
+pub fn select_handler(args: &mut SyscallArgs) -> i64 {
+    let nfds_signed = args.rdi as i64;
+    if nfds_signed < 0 || nfds_signed as usize > crate::userland::fdtable::FD_TABLE_SIZE {
+        return EINVAL;
+    }
+    let nfds = nfds_signed as usize;
+    let read_in = match select_read_mask(args.rsi, nfds) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let write_in = match select_read_mask(args.rdx, nfds) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let except_in = match select_read_mask(args.r10, nfds) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+
+    let timeout_ticks = if args.r8 == 0 {
+        None
+    } else {
+        let timeout = match crate::userland::usercopy::read_unaligned::<SelectTimeval>(args.r8) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        if timeout.seconds < 0 || !(0..1_000_000).contains(&timeout.microseconds) {
+            return EINVAL;
+        }
+        let milliseconds = (timeout.seconds as u64)
+            .saturating_mul(1000)
+            .saturating_add((timeout.microseconds as u64 + 999) / 1000);
+        Some((milliseconds + 9) / 10)
+    };
+
+    crate::net::poll_once();
+    let requested = read_in | write_in | except_in;
+    let mut read_out = 0u64;
+    let mut write_out = 0u64;
+    let except_out = 0u64;
+    let mut ready = 0i64;
+    for fd in 0..nfds {
+        let bit = 1u64 << fd;
+        if requested & bit == 0 {
+            continue;
+        }
+        let state = match fd_readiness(fd as i32) {
+            Ok(state) => state,
+            Err(EBADF) => return EBADF,
+            Err(error) => return error,
+        };
+        if read_in & bit != 0 && (state.readable || state.error || state.hangup) {
+            read_out |= bit;
+            ready += 1;
+        }
+        if write_in & bit != 0 && (state.writable || state.error) {
+            write_out |= bit;
+            ready += 1;
+        }
+    }
+
+    if ready == 0 && timeout_ticks != Some(0) {
+        let identity = args.rsi
+            ^ args.rdx.rotate_left(11)
+            ^ args.r10.rotate_left(23)
+            ^ (nfds as u64).rotate_left(37);
+        // Diverges while blocked; returns only when the restart-stable
+        // absolute deadline has expired.
+        let _ = crate::userland::network_syscalls::block_poll(args, identity, timeout_ticks);
+    } else {
+        crate::userland::lifecycle::clear_network_wait();
+    }
+
+    if let Err(error) = select_write_mask(args.rsi, read_out, nfds) {
+        return error;
+    }
+    if let Err(error) = select_write_mask(args.rdx, write_out, nfds) {
+        return error;
+    }
+    if let Err(error) = select_write_mask(args.r10, except_out, nfds) {
+        return error;
+    }
+    ready
 }
 
 /// `pselect6(nfds, *readfds, *writefds, *exceptfds, *timeout, *sigmask) -> int`

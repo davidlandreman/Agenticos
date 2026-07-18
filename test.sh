@@ -40,9 +40,9 @@ at the start and/or end:
 Flags:
   --skip-userland     Skip building optional userland apps and hello-cpp
                       (mandatory committed compiler-compat, network, and
-                      BusyBox fixtures are still staged). Wins over
+                      prebuilt-managed fixtures are still staged). Wins over
                       --rebuild-userland if both are passed.
-  --rebuild-userland  Force rebuild of prebuilt-managed userland apps (zsh).
+  --rebuild-userland  Force rebuild of prebuilt-managed userland apps.
                       Default copies the committed userland/prebuilt/ELF into
                       host_share/. Equivalent: REBUILD_USERLAND=1 env.
   -l, --list          Print available modules and exit (no build/QEMU).
