@@ -17,18 +17,26 @@ ZLIB_URL      := https://zlib.net/fossils/zlib-$(ZLIB_VERSION).tar.gz
 PNG_VERSION   := 1.6.58
 PNG_SHA256    := 28eb403f51f0f7405249132cecfe82ea5c0ef97f1b32c5a65828814ae0d34775
 PNG_URL       := https://download.sourceforge.net/libpng/libpng-$(PNG_VERSION).tar.xz
+OPENSSL_VERSION := 3.5.7
+OPENSSL_SHA256  := a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
+OPENSSL_URL     := https://github.com/openssl/openssl/releases/download/openssl-$(OPENSSL_VERSION)/openssl-$(OPENSSL_VERSION).tar.gz
 
 OUT_DIR        := build
 TARBALLS_DIR   := $(OUT_DIR)/tarballs
 LINKS_TARBALL  := $(TARBALLS_DIR)/links-$(LINKS_VERSION).tar.bz2
 ZLIB_TARBALL   := $(TARBALLS_DIR)/zlib-$(ZLIB_VERSION).tar.gz
 PNG_TARBALL    := $(TARBALLS_DIR)/libpng-$(PNG_VERSION).tar.xz
+OPENSSL_TARBALL := $(TARBALLS_DIR)/openssl-$(OPENSSL_VERSION).tar.gz
 LINKS_SRC      := $(OUT_DIR)/links-$(LINKS_VERSION)
 ZLIB_SRC       := $(OUT_DIR)/zlib-$(ZLIB_VERSION)
 PNG_SRC        := $(OUT_DIR)/libpng-$(PNG_VERSION)
+OPENSSL_SRC    := $(OUT_DIR)/openssl-$(OPENSSL_VERSION)
 DEPS_PREFIX    := $(abspath $(OUT_DIR)/deps)
 ZLIB_LIB       := $(DEPS_PREFIX)/lib/libz.a
 PNG_LIB        := $(DEPS_PREFIX)/lib/libpng16.a
+OPENSSL_STAMP  := $(DEPS_PREFIX)/.openssl-$(OPENSSL_VERSION)-installed
+OPENSSL_SSL_LIB := $(DEPS_PREFIX)/lib/libssl.a
+OPENSSL_CRYPTO_LIB := $(DEPS_PREFIX)/lib/libcrypto.a
 LINKS_EXTRACTED := $(LINKS_SRC)/.agenticos-extracted
 LINKS_BUILT    := $(LINKS_SRC)/links
 BIN            := $(OUT_DIR)/links
@@ -39,7 +47,7 @@ RUST_SOURCES   := $(shell find driver-rs/src -type f) $(RUST_MANIFEST)
 RUST_TARGET    := $(abspath $(OUT_DIR)/rust-target)
 RUST_ARCHIVE   := $(RUST_TARGET)/x86_64-unknown-linux-musl/release/liblinks_agenticos_driver.a
 
-LINKS_CFLAGS   := -O2 -fno-pie -DAGENTICOS_NO_PTHREADS -DGRDRV_AGENTICOS
+LINKS_CFLAGS   := -O2 -fno-pie -DAGENTICOS_NO_PTHREADS -DAGENTICOS_SECURE_HTTPS -DAGENTICOS_SYSTEM_CA_ONLY -DGRDRV_AGENTICOS
 LINKS_CPPFLAGS := -I$(DEPS_PREFIX)/include
 LINKS_LDFLAGS  := -static -no-pie -L$(DEPS_PREFIX)/lib
 
@@ -48,7 +56,7 @@ LINKS_LDFLAGS  := -static -no-pie -L$(DEPS_PREFIX)/lib
 
 all: $(BIN)
 
-fetch: $(LINKS_TARBALL) $(ZLIB_TARBALL) $(PNG_TARBALL)
+fetch: $(LINKS_TARBALL) $(ZLIB_TARBALL) $(PNG_TARBALL) $(OPENSSL_TARBALL)
 
 $(TARBALLS_DIR):
 	mkdir -p $@
@@ -77,6 +85,13 @@ $(PNG_TARBALL): | $(TARBALLS_DIR)
 	  test "$$actual" = "$(PNG_SHA256)" || { echo "❌ libpng SHA256 mismatch: $$actual"; rm -f $@.tmp; exit 1; }
 	mv $@.tmp $@
 
+$(OPENSSL_TARBALL): | $(TARBALLS_DIR)
+	@echo "📥 Fetching openssl-$(OPENSSL_VERSION)..."
+	curl -fsSL --retry 3 --retry-all-errors --max-time 300 -o $@.tmp $(OPENSSL_URL)
+	@actual=$$(shasum -a 256 $@.tmp | awk '{print $$1}'); \
+	  test "$$actual" = "$(OPENSSL_SHA256)" || { echo "❌ OpenSSL SHA256 mismatch: $$actual"; rm -f $@.tmp; exit 1; }
+	mv $@.tmp $@
+
 $(ZLIB_LIB): $(ZLIB_TARBALL)
 	rm -rf $(ZLIB_SRC)
 	tar xzf $< -C $(OUT_DIR)
@@ -94,6 +109,26 @@ $(PNG_LIB): $(PNG_TARBALL) $(ZLIB_LIB)
 	    --disable-tools --disable-tests >/dev/null
 	$(MAKE) -C $(PNG_SRC) -j$(NPROC) >/dev/null
 	$(MAKE) -C $(PNG_SRC) install >/dev/null
+
+$(OPENSSL_STAMP): $(OPENSSL_TARBALL) Makefile
+	rm -rf $(OPENSSL_SRC)
+	tar xzf $< -C $(OUT_DIR)
+	@echo "🔐 Configuring OpenSSL $(OPENSSL_VERSION) (static, single-threaded TLS)..."
+	cd $(OPENSSL_SRC) && \
+	  CC=$(MUSL_CC) AR=$(MUSL_AR) RANLIB=$(MUSL_RANLIB) \
+	  perl Configure linux-x86_64 --prefix=$(DEPS_PREFIX) --libdir=lib --openssldir=/etc/ssl \
+	    -O2 -fno-pie no-shared no-module no-dso no-pinshared no-pic \
+	    no-threads no-async no-secure-memory no-apps no-tests no-docs \
+	    no-legacy no-fips no-engine no-quic no-zlib no-zlib-dynamic \
+	    no-autoload-config >/dev/null
+	$(MAKE) -C $(OPENSSL_SRC) -j$(NPROC) build_sw >/dev/null
+	$(MAKE) -C $(OPENSSL_SRC) install_dev >/dev/null
+	@test -f $(OPENSSL_SSL_LIB) && test -f $(OPENSSL_CRYPTO_LIB)
+	@grep -q 'OPENSSL_NO_AUTOLOAD_CONFIG' $(DEPS_PREFIX)/include/openssl/configuration.h
+	@grep -q 'OPENSSL_NO_DSO' $(DEPS_PREFIX)/include/openssl/configuration.h
+	@grep -q 'OPENSSL_NO_QUIC' $(DEPS_PREFIX)/include/openssl/configuration.h
+	@! grep -q 'OPENSSL_THREADS' $(DEPS_PREFIX)/include/openssl/configuration.h
+	@touch $@
 
 $(RUST_ARCHIVE): $(RUST_SOURCES)
 	@echo "🦀 Building no_std AgenticOS graphics driver..."
@@ -113,7 +148,7 @@ $(LINKS_EXTRACTED): $(LINKS_TARBALL) $(PATCHES) driver/agenticos.c
 	touch $(LINKS_SRC)/configure $(LINKS_SRC)/Makefile.in
 	@touch $@
 
-$(LINKS_BUILT): Makefile $(LINKS_EXTRACTED) $(ZLIB_LIB) $(PNG_LIB) $(RUST_ARCHIVE)
+$(LINKS_BUILT): Makefile $(LINKS_EXTRACTED) $(ZLIB_LIB) $(PNG_LIB) $(OPENSSL_STAMP) $(RUST_ARCHIVE)
 	@echo "🔨 Configuring links-$(LINKS_VERSION) (text + AgenticOS GUI)..."
 	cd $(LINKS_SRC) && \
 	  CC=$(MUSL_CC) AR=$(MUSL_AR) RANLIB=$(MUSL_RANLIB) \
@@ -123,7 +158,8 @@ $(LINKS_BUILT): Makefile $(LINKS_EXTRACTED) $(ZLIB_LIB) $(PNG_LIB) $(RUST_ARCHIV
 	    --enable-graphics --without-ipv6 --without-libevent --without-gpm \
 	    --without-x --without-svgalib --without-fb --without-directfb \
 	    --without-pmshell --without-windows --without-atheos --without-haiku --without-grx \
-	    --disable-png-pkgconfig --without-openmp --without-ssl --without-brotli --without-zstd \
+	    --disable-png-pkgconfig --without-openmp --disable-ssl-pkgconfig --with-ssl=$(DEPS_PREFIX) \
+	    --without-brotli --without-zstd \
 	    --without-bzip2 --without-lzma >/dev/null
 	@touch $(LINKS_SRC)/aclocal.m4 $(LINKS_SRC)/configure $(LINKS_SRC)/config.h.in \
 	  $(LINKS_SRC)/stamp-h.in $(LINKS_SRC)/Makefile.in
@@ -132,21 +168,29 @@ $(LINKS_BUILT): Makefile $(LINKS_EXTRACTED) $(ZLIB_LIB) $(PNG_LIB) $(RUST_ARCHIV
 	@# cannot silently reintroduce clone/futex requirements.
 	@grep -q 'defined(HAVE_PTHREADS) && !defined(AGENTICOS_NO_PTHREADS)' $(LINKS_SRC)/os_dep.c
 	@grep -q 'GRDRV_AGENTICOS' $(LINKS_SRC)/agenticos.c
+	@grep -q '^#define HAVE_OPENSSL 1' $(LINKS_SRC)/config.h
+	@grep -q '^#define HAVE_X509_CHECK_HOST 1' $(LINKS_SRC)/config.h
+	@grep -q '^#define HAVE_X509_CHECK_IP 1' $(LINKS_SRC)/config.h
+	@grep -q 'SSL_REJECT_INVALID_CERTIFICATE' $(LINKS_SRC)/default.c
+	@grep -q 'SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION)' $(LINKS_SRC)/https.c
+	@grep -q '#if !(defined(HAVE_X509_CHECK_HOST) && defined(HAVE_X509_CHECK_IP))' $(LINKS_SRC)/https.c
 	@echo "🔨 Building links-$(LINKS_VERSION)..."
 	rm -f $(LINKS_BUILT)
 	$(MAKE) -C $(LINKS_SRC) -j$(NPROC) \
 	  CC=$(MUSL_CC) CFLAGS="$(LINKS_CFLAGS)" CPPFLAGS="$(LINKS_CPPFLAGS)" \
 	  LDFLAGS="$(LINKS_LDFLAGS)" \
-	  LIBS="$(RUST_ARCHIVE) -lpng -lz -lm -lpthread" >/dev/null
+	  LIBS="$(RUST_ARCHIVE) -lpng -lz -lssl -lcrypto -lm -lpthread" >/dev/null
 
 $(BIN): $(LINKS_BUILT)
 	cp $< $@.tmp
 	$(MUSL_STRIP) --strip-all $@.tmp
+	@size=$$(wc -c < $@.tmp | tr -d ' '); \
+	  test "$$size" -lt 16777216 || { echo "❌ $@.tmp is $$size bytes; 16 MiB loader gate exceeded"; rm -f $@.tmp; exit 1; }
 	mv -f $@.tmp $@
 	@size=$$(wc -c < $@ | tr -d ' '); echo "✅ Built $@ ($$size bytes, stripped)"
 
 clean:
-	rm -rf $(LINKS_SRC) $(ZLIB_SRC) $(PNG_SRC) $(BIN)
+	rm -rf $(LINKS_SRC) $(ZLIB_SRC) $(PNG_SRC) $(OPENSSL_SRC) $(BIN)
 
 distclean:
 	rm -rf $(OUT_DIR)

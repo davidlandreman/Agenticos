@@ -1,0 +1,17 @@
+[ ca ]
+default_ca = signing_ca
+
+[ signing_ca ]
+database = @DATABASE@
+new_certs_dir = @NEW_CERTS@
+certificate = @CERTIFICATE@
+private_key = @PRIVATE_KEY@
+serial = @SERIAL@
+default_md = sha256
+default_days = 3650
+policy = signing_policy
+copy_extensions = copy
+unique_subject = no
+
+[ signing_policy ]
+commonName = supplied

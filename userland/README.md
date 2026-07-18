@@ -22,11 +22,12 @@ x86-64 boots may fall back to CPUID-gated, carry-checked RDRAND. There is no
 timer/input fallback, entropy pool, or kernel DRBG: if neither trusted source
 works, random calls and new process/network setup fail closed.
 
-This solves one TLS prerequisite only. BusyBox `wget` and the first browser
-remain HTTP-only until a separate milestone supplies a reviewed TLS stack,
-CA roots, hostname verification, and trusted-time policy. A hostile VMM can
-control both the virtual entropy device and virtual CPU and is outside the
-guest threat model.
+Links2 now consumes these random interfaces through a pinned static OpenSSL
+build. Its system trust store is a pinned Mozilla extraction imported as
+`/etc/ssl/cert.pem` only when the RTC wall clock is valid; invalid chains and
+hostnames are rejected by default. BusyBox `wget` remains HTTP-only. A hostile
+VMM can control both the virtual entropy device and virtual CPU and is outside
+the guest threat model.
 
 See the userland app platform plan at
 `docs/plans/2026-05-08-004-feat-userland-app-platform-plan.md` for the
@@ -109,10 +110,9 @@ resolve into multicall or direct binaries staged under `host_share/`:
   `userland/apps/tcc/README.md`.
 - **`LINKS.ELF` — Links 2.30** (`links` and `links2`). Interactive text-mode
   and native AgenticOS GUI browsing (Start → Programs → Web Browser) plus
-  `-dump` work over IPv4 HTTP with DNS. TLS is deliberately
-  disabled here; the entropy prerequisite has landed, while the TLS stack,
-  CA roots, hostname verification, and trusted-time policy remain a separate
-  follow-up. See
+  `-dump` work over IPv4 HTTP and HTTPS with DNS. HTTPS uses static OpenSSL,
+  the managed `/etc/ssl/cert.pem` trust store, TLS 1.2+, SNI, and strict
+  chain/hostname validation. See
   `userland/apps/links2/README.md`.
 
 See `src/userland/bin_namespace.rs` for the lists and the

@@ -159,7 +159,7 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - Bounded TCP/UDP/ICMP registry with shared socket FD lifetime and deferred close
 - Linux x86-64 `AF_INET` socket subset, blocking/nonblocking restart, and poll readiness
 - Hermetic restricted-QEMU static-musl resolver fixture plus BusyBox IPv4 `ping`, `nc`, `nslookup`, and HTTP `wget`
-- Poll-driven single interface; IPv6, TLS, offloads, and NIC IRQs remain future work
+- Poll-driven single interface; IPv6, offloads, and NIC IRQs remain future work
 
 #### Cryptographic Randomness and Linux Random Interfaces ✓
 - **Status**: Complete
@@ -167,7 +167,14 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - One fail-closed kernel broker for process `AT_RANDOM`, `getrandom(2)`, and read-only `/dev/urandom`
 - Cryptographic smoltcp seed and randomized ephemeral-port starting point
 - Finite VirtIO completion waits with failed queues quarantined and DMA retained
-- Entropy is a TLS prerequisite only; TLS/HTTPS remains deferred and browser/network tools stay HTTP-only
+- Links2 consumes the entropy path through pinned static OpenSSL; BusyBox `wget` remains HTTP-only
+
+#### Links2 HTTPS ✓
+- **Status**: Complete
+- Pinned static OpenSSL 3.5.7 with TLS 1.2 minimum and no runtime modules/configuration
+- Pinned Mozilla CA snapshot imported into `/etc/ssl/cert.pem` only with valid RTC time
+- Strict-by-default chain, validity, DNS-name, and numeric-IP verification with SNI
+- Hermetic restricted-QEMU positive and negative certificate coverage
 
 ### 🔄 Recent Architectural Improvements
 
@@ -416,7 +423,7 @@ agenticos/
 - [ ] Agent execution environment
 - [x] Basic IPv4 network stack
 - [x] DHCP-backed IPv4 DNS resolution
-- [ ] IPv6, TLS, and networked agent protocols
+- [ ] IPv6 and networked agent protocols
 - [ ] Full agent-based computing platform
 
 ## Technical Debt and Future Improvements
