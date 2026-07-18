@@ -71,7 +71,10 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   use VMA-aware user-copy validation. Unknown syscall numbers always return
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
-  to BusyBox or standalone ELFs: `/host/CALC.ELF`, `/host/CONTROL.ELF`
+  to BusyBox or standalone ELFs. BusyBox includes the procfs-backed `free`
+  and `top` monitors, VT `reset`, and `vi`; the namespace adds `vim` as an
+  alias that rewrites `argv[0]` to BusyBox's real `vi` applet. Standalone
+  entries include `/host/CALC.ELF`, `/host/CONTROL.ELF`
   (`control` + `settings` aliases), `/host/FILEMAN.ELF`
   (compat command `explorer`), `/host/GLGAME.ELF`, `/host/NOTEPAD.ELF`,
   `/host/PAINTING.ELF`, `/host/TASKMGR.ELF` (`taskmgr` + legacy

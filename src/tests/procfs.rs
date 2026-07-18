@@ -525,6 +525,36 @@ fn test_kernel_reaper_adopts_child_of_exited_parent() {
     remove_synthetic(PARENT);
 }
 
+/// The BusyBox config deliberately gates tools on kernel capability. Exercise
+/// the applets enabled when synthetic procfs, sysinfo, and VT reset support
+/// landed so a stale committed BB.ELF or missing ABI cannot masquerade as a
+/// successful namespace-only change.
+fn test_busybox_newly_supported_system_tools() {
+    let path = crate::userland::bin_namespace::BB_HOST_PATH;
+    assert!(
+        crate::fs::exists(path),
+        "mandatory fixture missing: {}",
+        path
+    );
+
+    for argv in [&["free"][..], &["top", "-b", "-n", "1"][..], &["reset"][..]] {
+        let result = crate::userland::launcher::launch_user_binary(path, argv, &["LANG=C"]);
+        crate::userland::abi::reset_unknown_syscall_trace();
+        crate::userland::abi::clear_user_va_bounds();
+
+        let (kind, code) =
+            result.unwrap_or_else(|error| panic!("BusyBox {:?} failed: {}", argv, error));
+        assert!(
+            matches!(kind, ExitKind::Cooperative),
+            "BusyBox {:?} exited via {:?} with code {}",
+            argv,
+            kind,
+            code,
+        );
+        assert_eq!(code, 0, "BusyBox {:?} failed with code {}", argv, code);
+    }
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_proc_classify,
@@ -543,5 +573,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_kill_any_pid,
         &test_sleeper_wake_at_deadline,
         &test_kernel_reaper_adopts_child_of_exited_parent,
+        &test_busybox_newly_supported_system_tools,
     ]
 }
