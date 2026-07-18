@@ -848,8 +848,77 @@ fn test_overlay_root_unlink_lower_creates_whiteout() {
     assert_eq!(content, "fresh");
 }
 
+// --- Seek-past-EOF with zero-fill (TinyCC plan U2) --------------------
+
+/// Seek past EOF on the overlay tmpfs, then write: the gap reads back
+/// as zeros and the size covers gap + payload. Linker-style writers
+/// (and musl stdio fseek on update streams) rely on this.
+fn test_seek_past_eof_tmpfs_zero_fill() {
+    let f = crate::fs::File::create("/u2-gap.bin").expect("create");
+    assert_eq!(f.write(b"abc").expect("head write"), 3);
+    assert_eq!(f.seek(100).expect("seek past EOF"), 100);
+    assert_eq!(f.write(b"xyz").expect("tail write"), 3);
+    assert_eq!(f.size(), 103);
+    drop(f);
+
+    let content = crate::fs::File::open_read("/u2-gap.bin")
+        .expect("reopen")
+        .read_to_vec()
+        .expect("read back");
+    assert_eq!(content.len(), 103);
+    assert_eq!(&content[..3], b"abc");
+    assert!(
+        content[3..100].iter().all(|&b| b == 0),
+        "gap must read back as zeros"
+    );
+    assert_eq!(&content[100..], b"xyz");
+    crate::fs::vfs::vfs_unlink("/u2-gap.bin").expect("cleanup");
+}
+
+/// Same on /data (FAT32, 512-byte clusters): the gap spans multiple
+/// freshly allocated clusters, which must be explicitly zeroed — the
+/// chain walk links them without writing their data.
+fn test_seek_past_eof_data_fat_zero_fill() {
+    let f = crate::fs::File::create("/data/u2-gap.bin").expect("create");
+    assert_eq!(f.write(b"head").expect("head write"), 4);
+    assert_eq!(f.seek(1500).expect("seek past EOF"), 1500);
+    assert_eq!(f.write(b"tail").expect("tail write"), 4);
+    assert_eq!(f.size(), 1504);
+    drop(f);
+
+    let content = crate::fs::File::open_read("/data/u2-gap.bin")
+        .expect("reopen")
+        .read_to_vec()
+        .expect("read back");
+    assert_eq!(content.len(), 1504);
+    assert_eq!(&content[..4], b"head");
+    assert!(
+        content[4..1500].iter().all(|&b| b == 0),
+        "FAT gap clusters must read back as zeros"
+    );
+    assert_eq!(&content[1500..], b"tail");
+    crate::fs::vfs::vfs_unlink("/data/u2-gap.bin").expect("cleanup");
+}
+
+/// Read-only mounts keep the historical rejection: seeking past EOF on
+/// a /host file still fails, and in-bounds seeks still work.
+fn test_seek_past_eof_readonly_rejected() {
+    let f = crate::fs::File::open_read("/host/NETTEST.ELF").expect("open /host fixture");
+    let size = f.size();
+    assert!(size > 0);
+    assert!(
+        f.seek(size + 10).is_err(),
+        "seek past EOF on a read-only mount must fail"
+    );
+    assert_eq!(f.seek(size).expect("seek to EOF is in bounds"), size);
+    assert_eq!(f.seek(0).expect("rewind"), 0);
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
+        &test_seek_past_eof_tmpfs_zero_fill,
+        &test_seek_past_eof_data_fat_zero_fill,
+        &test_seek_past_eof_readonly_rejected,
         &test_filesystem_basic_exists,
         &test_filesystem_metadata,
         &test_file_open_arial,

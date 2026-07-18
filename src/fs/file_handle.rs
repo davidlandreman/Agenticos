@@ -289,8 +289,12 @@ impl File {
     pub fn seek(&self, position: u64) -> FileResult<u64> {
         let mut inner = self.inner.lock();
 
-        // Check bounds
-        if position > inner.size {
+        // POSIX permits seeking past EOF; the gap zero-fills on the next
+        // write. Allowed only on writable filesystems (tmpfs overlay
+        // upper, /data FAT) — read-only mounts keep the historical
+        // rejection, and the concrete filesystem may still reject when
+        // the specific handle targets a read-only layer (overlay lower).
+        if position > inner.size && !crate::fs::vfs::vfs_is_writable(&inner.path) {
             return Err(FileError::SeekOutOfBounds);
         }
 
