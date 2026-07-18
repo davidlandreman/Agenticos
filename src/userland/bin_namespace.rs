@@ -10,7 +10,7 @@
 //! - **Direct apps** — standalone native ELFs: `CALC.ELF`,
 //!   `FILEMAN.ELF` (compat command `explorer`), `GLGAME.ELF`,
 //!   `NOTEPAD.ELF`, `PAINTING.ELF`, and `TASKMGR.ELF` (aliased as both
-//!   `taskmgr` and `tasks`).
+//!   `taskmgr` and `tasks`), plus the fourteen GNU binutils programs.
 //!
 //! The kernel exposes a single virtual `/bin` directory whose entries
 //! resolve into either binary based on which list the name belongs to.
@@ -63,6 +63,27 @@ pub const TCC_HOST_PATH: &str = "/host/TCC.ELF";
 /// Text-mode Links browser. Both command spellings resolve to one ELF.
 pub const LINKS_HOST_PATH: &str = "/host/LINKS.ELF";
 
+/// Resolve a GNU binutils command to its FAT-8.3-safe staged ELF path.
+fn binutils_host_path(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "addr2line" => "/host/ADDRLINE.ELF",
+        "ar" => "/host/AR.ELF",
+        "as" => "/host/AS.ELF",
+        "c++filt" => "/host/CPPFILT.ELF",
+        "elfedit" => "/host/ELFEDIT.ELF",
+        "ld" => "/host/LD.ELF",
+        "nm" => "/host/NM.ELF",
+        "objcopy" => "/host/OBJCOPY.ELF",
+        "objdump" => "/host/OBJDUMP.ELF",
+        "ranlib" => "/host/RANLIB.ELF",
+        "readelf" => "/host/READELF.ELF",
+        "size" => "/host/SIZE.ELF",
+        "strings" => "/host/STRINGS.ELF",
+        "strip" => "/host/STRIP.ELF",
+        _ => return None,
+    })
+}
+
 /// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
 /// MUST stay in sync with the match arms in
 /// [`crate::commands::gui_launch_table::spawn_by_name`]; a test in
@@ -77,10 +98,36 @@ pub const GUI_APPLETS: &[&str] = &[];
 /// `explorer` is the compatibility command for the ring-3 File Manager;
 /// `taskmgr` and `tasks` are aliases for the ring-3 Task Manager —
 /// `tasks` preserves the retired kernel app's name. `tcc` and `cc` are
-/// both TinyCC; `links` and `links2` are the Links text browser.
+/// both TinyCC; `links` and `links2` are the Links text browser. GNU
+/// binutils programs map one-to-one to the staged ELFs above.
 pub const DIRECT_APPLETS: &[&str] = &[
-    "calc", "cc", "control", "explorer", "glgame", "links", "links2", "notepad", "painting",
-    "settings", "taskmgr", "tasks", "tcc",
+    "addr2line",
+    "ar",
+    "as",
+    "c++filt",
+    "calc",
+    "cc",
+    "control",
+    "elfedit",
+    "explorer",
+    "glgame",
+    "ld",
+    "links",
+    "links2",
+    "nm",
+    "notepad",
+    "objcopy",
+    "objdump",
+    "painting",
+    "ranlib",
+    "readelf",
+    "settings",
+    "size",
+    "strings",
+    "strip",
+    "taskmgr",
+    "tasks",
+    "tcc",
 ];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
@@ -271,7 +318,6 @@ pub const APPLETS: &[&str] = &[
     "split",
     "start-stop-daemon",
     "stat",
-    "strings",
     "stty",
     "sum",
     "sv",
@@ -373,7 +419,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "notepad" => NOTEPAD_HOST_PATH,
         "painting" => PAINTING_HOST_PATH,
         "taskmgr" | "tasks" => TASKMGR_HOST_PATH,
-        _ => return None,
+        _ => binutils_host_path(canonical)?,
     };
     Some((path, canonical))
 }
@@ -719,6 +765,28 @@ mod tests_internal {
         let (path, applet) = apply_bin_rewrite("/bin/settings").expect("must resolve");
         assert_eq!(path, "/host/CONTROL.ELF");
         assert_eq!(applet, "settings");
+
+        for (name, expected) in [
+            ("addr2line", "/host/ADDRLINE.ELF"),
+            ("ar", "/host/AR.ELF"),
+            ("as", "/host/AS.ELF"),
+            ("c++filt", "/host/CPPFILT.ELF"),
+            ("elfedit", "/host/ELFEDIT.ELF"),
+            ("ld", "/host/LD.ELF"),
+            ("nm", "/host/NM.ELF"),
+            ("objcopy", "/host/OBJCOPY.ELF"),
+            ("objdump", "/host/OBJDUMP.ELF"),
+            ("ranlib", "/host/RANLIB.ELF"),
+            ("readelf", "/host/READELF.ELF"),
+            ("size", "/host/SIZE.ELF"),
+            ("strings", "/host/STRINGS.ELF"),
+            ("strip", "/host/STRIP.ELF"),
+        ] {
+            let (path, applet) = apply_bin_rewrite(&alloc::format!("/bin/{}", name))
+                .expect("binutils command must resolve");
+            assert_eq!(path, expected);
+            assert_eq!(applet, name);
+        }
     }
 
     fn test_apply_bin_rewrite_busybox_still_resolves() {
@@ -732,6 +800,8 @@ mod tests_internal {
     fn test_is_applet_covers_both_lists() {
         assert!(is_applet("ls"));
         assert!(is_applet("painting"));
+        assert!(is_applet("readelf"));
+        assert!(is_applet("strings"));
         assert!(!is_applet("not-a-real-applet"));
     }
 

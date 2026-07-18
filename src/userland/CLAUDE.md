@@ -45,7 +45,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   writes short-write at that bound instead (a blocked pipe/socket restarts
   the whole SYSCALL, so chunking would duplicate consumed bytes).
   `chmod`/`fchmod` are validated success no-ops (no permission bits on
-  FAT/tmpfs, no +x check in execve).
+  FAT/tmpfs, no +x check in execve). Native-tool compatibility includes
+  bounded `readv`, per-process `umask`, writable-fd `F_GETFL`, and
+  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` routed through the VFS.
 - `network_syscalls.rs` — finite Linux `AF_INET` socket ABI, sockaddr/iovec
   usercopy, blocking/restart behavior, and socket option mapping. Protocol
   state and buffers remain in `src/net/`.
@@ -76,7 +78,10 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   (compat command `explorer`), `/host/GLGAME.ELF`, `/host/NOTEPAD.ELF`,
   `/host/PAINTING.ELF`, `/host/TASKMGR.ELF` (`taskmgr` + legacy
   `tasks` alias), and `/host/TCC.ELF` (TinyCC; both `tcc` and the `cc`
-  alias), plus `/host/LINKS.ELF` (Links 2.30; `links` and `links2`). Links is
+  alias), plus `/host/LINKS.ELF` (Links 2.30; `links` and `links2`) and GNU
+  binutils 2.46.0 (`addr2line`, `ar`, `as`, `c++filt`, `elfedit`, `ld`, `nm`,
+  `objcopy`, `objdump`, `ranlib`, `readelf`, `size`, `strings`, `strip`). GNU
+  `strings` owns that name; the conflicting BusyBox applet is disabled. Links is
   text-mode IPv4/HTTP-only; HTTPS still needs a separate TLS trust-stack
   integration even though cryptographic entropy is now available.
   The `GLAUNCH.ELF` GUI-applet list is empty today.
@@ -112,6 +117,7 @@ Each process owns:
 - `signal_state` (dispositions + blocked mask, inherited across fork
   per POSIX; pending cleared per POSIX),
 - `fd_table` (cloned by value across fork),
+- `umask` (initialized to `0o022`, inherited by fork, preserved by exec),
 - `cwd`, a byte-granular `brk_current` and derived `brk_base`, plus an
   AddressSpace-owned VMA set (`mmap_next` is compatibility state only),
 - demand-grown stack bookkeeping (`stack_top`/`stack_bottom`/

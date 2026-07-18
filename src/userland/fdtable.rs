@@ -35,6 +35,9 @@ pub enum FdSlot {
     /// — today it has no effect, since there's no exec.
     File {
         handle: Arc<File>,
+        /// Linux open-file status flags returned by `fcntl(F_GETFL)`.
+        /// Access mode is immutable; `O_APPEND`/`O_NONBLOCK` may change.
+        status_flags: u32,
         cloexec: bool,
     },
     /// An opened directory. `cursor` is the per-fd index into the

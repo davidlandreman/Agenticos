@@ -437,6 +437,20 @@ pub fn vfs_symlink_metadata(
     filesystem.symlink_metadata(relative)
 }
 
+pub fn vfs_set_times(
+    path: &str,
+    accessed: Option<u64>,
+    modified: Option<u64>,
+) -> Result<(), FilesystemError> {
+    let (filesystem, relative) = get_vfs()
+        .find_filesystem(path)
+        .ok_or(FilesystemError::NotFound)?;
+    if filesystem.is_read_only() {
+        return Err(FilesystemError::ReadOnly);
+    }
+    filesystem.set_times(relative, accessed, modified)
+}
+
 pub fn vfs_read_link(path: &str) -> Result<alloc::vec::Vec<u8>, FilesystemError> {
     let (filesystem, relative) = get_vfs()
         .find_filesystem(path)

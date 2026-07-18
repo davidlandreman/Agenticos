@@ -93,6 +93,15 @@ impl Inode {
         put32(&mut self.raw, 12, now);
         put32(&mut self.raw, 16, now);
     }
+    fn set_accessed(&mut self, value: u32) {
+        put32(&mut self.raw, 8, value);
+    }
+    fn set_modified(&mut self, value: u32) {
+        put32(&mut self.raw, 16, value);
+    }
+    fn set_changed(&mut self, value: u32) {
+        put32(&mut self.raw, 12, value);
+    }
     fn set_dtime(&mut self, now: u32) {
         put32(&mut self.raw, 20, now);
     }
@@ -1679,6 +1688,26 @@ impl Filesystem for Ext2Filesystem<'_> {
             handle.position = size;
         }
         Ok(())
+    }
+
+    fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<u64>,
+        modified: Option<u64>,
+    ) -> Result<(), FilesystemError> {
+        let mut state = self.state.lock();
+        self.mark_dirty(&mut state)?;
+        let number = self.resolve_with_groups(path, &state.groups)?;
+        let mut inode = self.read_inode_with_groups(number, &state.groups)?;
+        if let Some(value) = accessed {
+            inode.set_accessed(value.min(u32::MAX as u64) as u32);
+        }
+        if let Some(value) = modified {
+            inode.set_modified(value.min(u32::MAX as u64) as u32);
+        }
+        inode.set_changed(Self::now());
+        self.write_inode(&inode, &state.groups)
     }
 
     fn sync_handle(&self, _handle: &FileHandle, _data_only: bool) -> Result<(), FilesystemError> {
