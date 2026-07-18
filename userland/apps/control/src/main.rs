@@ -302,17 +302,19 @@ impl ControlCenter {
     fn render_appearance(&mut self) {
         let (x, y, w) = self.content_rect();
         let gap = 12u32;
-        let tile_w = w.saturating_sub(gap * 2) / 3;
+        let count = THEME_TILES.len() as u32;
+        let tile_w = w.saturating_sub(gap * count.saturating_sub(1)) / count.max(1);
         let selected = self.snapshot.theme_preference;
-        let available_aero =
-            self.snapshot.theme_available_mask & runtime::THEME_AVAILABLE_AERO != 0;
+        let mask = self.snapshot.theme_available_mask;
+        let modern_available = mask & runtime::THEME_AVAILABLE_FUTURISM != 0;
         let canvas = self.window.canvas_mut();
         card(canvas, x, y, w, 230);
         canvas.draw_text(x + 18, y + 16, "Theme", TEXT);
-        for index in 0..3u32 {
+        for (index, tile) in THEME_TILES.iter().enumerate() {
             let tx = x + 16 + index as i32 * (tile_w as i32 + gap as i32);
             let tw = tile_w.saturating_sub(10);
-            let disabled = index == 2 && !available_aero;
+            let disabled = tile.availability_bit != 0 && mask & tile.availability_bit == 0;
+            let is_selected = selected == tile.pref;
             rounded_fill(
                 canvas,
                 tx,
@@ -320,33 +322,28 @@ impl ControlCenter {
                 tw,
                 142,
                 8,
-                if selected == index { ACCENT_SOFT } else { BG },
+                if is_selected { ACCENT_SOFT } else { BG },
             );
             canvas.rect(
                 tx,
                 y + 48,
                 tw,
                 142,
-                if selected == index { ACCENT } else { DIVIDER },
+                if is_selected { ACCENT } else { DIVIDER },
             );
-            draw_theme_preview(canvas, tx + 10, y + 60, tw.saturating_sub(20), index);
-            let label = match index {
-                0 => "Automatic",
-                1 => "Classic",
-                _ => "Aero Glass",
-            };
+            draw_theme_preview(canvas, tx + 10, y + 60, tw.saturating_sub(20), tile.pref);
             canvas.draw_text(
                 tx + 10,
                 y + 158,
-                label,
+                tile.label,
                 if disabled { 0xA0A5AD } else { TEXT },
             );
         }
-        if !available_aero {
+        if !modern_available {
             canvas.draw_text(
                 x + 18,
                 y + 202,
-                "Aero requires the retained compositor.",
+                "Futurism and Aero require the retained compositor.",
                 WARNING,
             );
         } else {
@@ -501,7 +498,7 @@ impl ControlCenter {
                 self.banner_warning = result == ApplyResult::SessionOnly;
             }
             Err(-95) => {
-                self.banner = String::from("Aero requires the retained compositor");
+                self.banner = String::from("This theme requires the retained compositor");
                 self.banner_warning = true;
             }
             Err(_) => {
@@ -696,15 +693,15 @@ impl ControlCenter {
             }
             Page::Appearance => {
                 let gap = 12u32;
-                let tile = cw.saturating_sub(gap * 2) / 3;
-                for index in 0..3u32 {
-                    let tx = cx + 16 + index as i32 * (tile as i32 + gap as i32);
-                    if point_in(x, y, tx, cy + 48, tile.saturating_sub(10), 142) {
-                        if index != 2
-                            || self.snapshot.theme_available_mask & runtime::THEME_AVAILABLE_AERO
-                                != 0
-                        {
-                            self.apply_theme(index);
+                let count = THEME_TILES.len() as u32;
+                let tile_w = cw.saturating_sub(gap * count.saturating_sub(1)) / count.max(1);
+                for (index, tile) in THEME_TILES.iter().enumerate() {
+                    let tx = cx + 16 + index as i32 * (tile_w as i32 + gap as i32);
+                    if point_in(x, y, tx, cy + 48, tile_w.saturating_sub(10), 142) {
+                        let available = tile.availability_bit == 0
+                            || self.snapshot.theme_available_mask & tile.availability_bit != 0;
+                        if available {
+                            self.apply_theme(tile.pref);
                         }
                     }
                 }
@@ -813,28 +810,59 @@ fn draw_page_icon(canvas: &mut Canvas, x: i32, y: i32, page: Page, color: u32) {
     }
 }
 
-fn draw_theme_preview(canvas: &mut Canvas, x: i32, y: i32, w: u32, kind: u32) {
-    let aero = kind == 2 || kind == 0;
-    let title = if aero { 0x8DC4EA } else { 0x000080 };
-    let face = if aero { 0xF0F0F0 } else { 0xC0C0C0 };
-    rounded_fill(canvas, x, y, w, 78, if aero { 7 } else { 0 }, face);
-    canvas.fill_rect(x + 2, y + 2, w.saturating_sub(4), 18, title);
+/// One Appearance tile. `availability_bit` of 0 means always available;
+/// otherwise the tile is enabled when the snapshot's
+/// `theme_available_mask` carries the bit.
+struct ThemeTile {
+    pref: u32,
+    label: &'static str,
+    availability_bit: u32,
+}
+
+/// Appearance tiles in display order. Automatic resolves to Futurism on
+/// modern renderers, so its preview mirrors the Futurism tile.
+const THEME_TILES: &[ThemeTile] = &[
+    ThemeTile {
+        pref: runtime::THEME_AUTO,
+        label: "Automatic",
+        availability_bit: 0,
+    },
+    ThemeTile {
+        pref: runtime::THEME_FUTURISM,
+        label: "Futurism",
+        availability_bit: runtime::THEME_AVAILABLE_FUTURISM,
+    },
+    ThemeTile {
+        pref: runtime::THEME_AERO,
+        label: "Aero Glass",
+        availability_bit: runtime::THEME_AVAILABLE_AERO,
+    },
+    ThemeTile {
+        pref: runtime::THEME_CLASSIC,
+        label: "Classic",
+        availability_bit: runtime::THEME_AVAILABLE_CLASSIC,
+    },
+];
+
+fn draw_theme_preview(canvas: &mut Canvas, x: i32, y: i32, w: u32, pref: u32) {
+    // Automatic previews as Futurism — the modern-renderer default.
+    let (title, face, radius, field_border, pill_fill, pill_border) = match pref {
+        runtime::THEME_CLASSIC => (0x000080, 0xC0C0C0, 0, 0x8A8A8A, 0xC0C0C0, 0x000000),
+        runtime::THEME_AERO => (0x8DC4EA, 0xF0F0F0, 7, 0x8A8A8A, 0xD8ECF8, 0x3C7FB1),
+        _ => (0x2A3862, 0xF7F9FC, 9, 0xD3DBE8, 0xDCE9FC, 0x3C8CF0),
+    };
+    rounded_fill(canvas, x, y, w, 78, radius, face);
+    if radius >= 9 {
+        // Futurism: rounded dark title bar with a soft-red close dot.
+        rounded_fill(canvas, x + 2, y + 2, w.saturating_sub(4), 18, 6, title);
+        canvas.fill_rect(x + w as i32 - 14, y + 8, 7, 6, 0xE8564A);
+    } else {
+        canvas.fill_rect(x + 2, y + 2, w.saturating_sub(4), 18, title);
+    }
     canvas.fill_rect(x + 10, y + 32, w.saturating_sub(20), 10, 0xFFFFFF);
-    canvas.rect(x + 10, y + 32, w.saturating_sub(20), 10, 0x8A8A8A);
-    canvas.fill_rect(
-        x + 10,
-        y + 52,
-        w / 2,
-        16,
-        if aero { 0xD8ECF8 } else { 0xC0C0C0 },
-    );
-    canvas.rect(
-        x + 10,
-        y + 52,
-        w / 2,
-        16,
-        if aero { 0x3C7FB1 } else { 0x000000 },
-    );
+    canvas.rect(x + 10, y + 32, w.saturating_sub(20), 10, field_border);
+    canvas.fill_rect(x + 10, y + 52, w / 2, 16, pill_fill);
+    canvas.rect(x + 10, y + 52, w / 2, 16, pill_border);
 }
 
 fn draw_rows(canvas: &mut Canvas, x: i32, y: i32, w: u32, title: &str, rows: &[(&str, String)]) {
@@ -862,10 +890,10 @@ fn renderer_name(value: u32) -> &'static str {
 }
 
 fn active_theme_name(value: u32) -> &'static str {
-    if value == runtime::THEME_AERO {
-        "Aero Glass"
-    } else {
-        "Classic"
+    match value {
+        runtime::THEME_AERO => "Aero Glass",
+        runtime::THEME_FUTURISM => "Futurism",
+        _ => "Classic",
     }
 }
 
@@ -873,6 +901,7 @@ fn requested_theme_name(value: u32) -> &'static str {
     match value {
         runtime::THEME_CLASSIC => "Classic",
         runtime::THEME_AERO => "Aero Glass",
+        runtime::THEME_FUTURISM => "Futurism",
         _ => "Automatic",
     }
 }

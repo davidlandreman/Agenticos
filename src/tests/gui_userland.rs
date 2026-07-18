@@ -297,6 +297,15 @@ fn test_theme_broadcast_targets_gui_owners_and_coalesces() {
     assert_eq!(event.window, 0);
     assert_eq!(event.payload[0], 1);
     assert_eq!(event.payload[1], 1);
+
+    // Futurism broadcasts as code 3 (ring-3 apps decode 3 => Futurism).
+    gui::broadcast_theme_changed(
+        crate::window::theme::ThemeKind::Futurism,
+        crate::window::theme::ThemeRequest::Futurism,
+    );
+    let event = gui::pop_event(pid).expect("futurism theme event");
+    assert_eq!(event.payload[0], 3);
+    assert_eq!(event.payload[1], 3);
     gui::reset_for_test();
 }
 

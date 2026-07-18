@@ -88,6 +88,7 @@ impl Demo {
         let theme_name = match theme::current() {
             theme::Theme::Classic => "classic",
             theme::Theme::Aero => "aero",
+            theme::Theme::Futurism => "futurism",
         };
         let header = alloc::format!("GUIDEMO.ELF - theme: {theme_name}");
         let swatch = self.swatch;

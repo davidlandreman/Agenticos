@@ -164,11 +164,21 @@ pub struct StartMenuWindow {
 impl StartMenuWindow {
     pub fn new_with_id(id: WindowId, origin: Point) -> Self {
         let root_height = Self::root_height();
+        let mut base = WindowBase::new_with_id(
+            id,
+            Rect::new(origin.x, origin.y, START_MENU_ROOT_WIDTH, root_height),
+        );
+        // Futurism frosts the menu surface with a backdrop blur; other
+        // themes composite it opaquely.
+        let effect = crate::window::theme::chrome_effect();
+        if effect != crate::graphics::scene::LayerEffect::None {
+            base.set_compositor_properties(crate::window::CompositorProperties {
+                effect,
+                ..crate::window::CompositorProperties::OPAQUE
+            });
+        }
         Self {
-            base: WindowBase::new_with_id(
-                id,
-                Rect::new(origin.x, origin.y, START_MENU_ROOT_WIDTH, root_height),
-            ),
+            base,
             root_origin: origin,
             programs_open: false,
             hover: None,

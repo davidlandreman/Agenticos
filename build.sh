@@ -58,7 +58,7 @@ if [ "$HELP" = true ]; then
     echo "                          Rendering: AGENTICOS_COMPOSITOR=legacy|retained|gpu|auto"
     echo "                          AGENTICOS_GPU_STRICT=1 refuses GPU fallback."
     echo "                          AGENTICOS_RENDER_STATS=1 logs per-stage frame cycles."
-    echo "                          AGENTICOS_THEME=classic|aero|auto (default auto)."
+    echo "                          AGENTICOS_THEME=classic|aero|futurism|auto (default auto)."
     echo "                          AGENTICOS_QEMU_2D=on forces plain VirtIO 2D scanout;"
     echo "                          auto (default) avoids its black Cocoa window on macOS."
     echo "                          AGENTICOS_QEMU_BIN selects one exact QEMU binary;"

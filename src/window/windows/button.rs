@@ -29,6 +29,11 @@ pub struct Button {
     /// greyed-out state and ignore `ButtonDown` / `ButtonUp` events
     /// (the click callback never fires).
     enabled: bool,
+    /// Taskbar-hosted button: painted through the chrome surface helpers
+    /// (frosted pill under Futurism, ordinary button otherwise).
+    taskbar_style: bool,
+    /// Accent-tinted chrome button (the Start button).
+    taskbar_accent: bool,
 }
 
 impl Button {
@@ -41,6 +46,8 @@ impl Button {
             on_click: None,
             default_button: false,
             enabled: true,
+            taskbar_style: false,
+            taskbar_accent: false,
         }
     }
 
@@ -64,6 +71,15 @@ impl Button {
             self.default_button = default_button;
             self.base.invalidate();
         }
+    }
+
+    /// Mark this button as taskbar chrome. Classic/Aero keep the ordinary
+    /// button surface; Futurism paints translucent rounded pills (the accent
+    /// pill is the Start button).
+    pub fn set_taskbar_style(&mut self, accent: bool) {
+        self.taskbar_style = true;
+        self.taskbar_accent = accent;
+        self.base.invalidate();
     }
 
     /// Set whether the button is enabled. When disabled, the button
@@ -129,7 +145,11 @@ impl Window for Button {
             ControlState::Normal
         };
 
-        controls::draw_button(device, bounds, state);
+        if self.taskbar_style {
+            controls::draw_task_button(device, bounds, state, self.taskbar_accent);
+        } else {
+            controls::draw_button(device, bounds, state);
+        }
 
         // Draw label centered
         if !self.label.is_empty() {
@@ -152,12 +172,17 @@ impl Window for Button {
 
             // Classic shifts the label down-right while pressed.
             let shift = controls::pressed_label_shift(state);
+            let color = if self.taskbar_style {
+                controls::task_button_text(state, self.taskbar_accent)
+            } else {
+                controls::button_text(state)
+            };
             device.draw_text(
                 text_x + shift,
                 text_y + shift,
                 &self.label,
                 font.as_font(),
-                controls::button_text(state),
+                color,
             );
         }
 

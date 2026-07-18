@@ -107,6 +107,26 @@ impl Window for FrameWindow {
         self.base.clear_needs_repaint();
     }
 
+    fn wants_paint_overlay(&self) -> bool {
+        theme::has_frame_overlay()
+    }
+
+    fn paint_overlay(&mut self, device: &mut dyn GraphicsDevice) {
+        if !self.base.visible() {
+            return;
+        }
+        let bounds = self.base.bounds();
+        theme::draw_frame_overlay(
+            &FrameChrome {
+                bounds,
+                title: &self.title,
+                active: self.active,
+                close_button_rect: theme::close_button_rect(bounds, theme::metrics()),
+            },
+            device,
+        );
+    }
+
     fn handle_event(&mut self, event: Event) -> EventResult {
         match event {
             Event::Focus(focus_event) => {

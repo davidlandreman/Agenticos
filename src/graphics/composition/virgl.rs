@@ -1803,7 +1803,12 @@ fn blur_shader_handles(radius: u16) -> Option<(u32, u32)> {
     }
 }
 
-fn gpu_backdrop_radius_supported(radius: u16) -> bool {
+/// Whether the qualified blur pipeline can honor a backdrop radius: every
+/// three-box pass must fit the prebuilt radius-1/radius-2 shader variants.
+/// Public so theme code and tests can pin their radii to this constraint —
+/// the engine rejects unsupported radii (`UnsupportedEffect`) rather than
+/// rendering sharp glass, which panics strict-GPU boots.
+pub fn gpu_backdrop_radius_supported(radius: u16) -> bool {
     backdrop_box_radii(radius)
         .into_iter()
         .all(|pass_radius| pass_radius <= 2)

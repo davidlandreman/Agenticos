@@ -86,6 +86,19 @@ pub trait Window: Send {
     /// already decided is needed.
     fn paint(&mut self, device: &mut dyn GraphicsDevice);
 
+    /// Whether this window needs [`Window::paint_overlay`] after its
+    /// children render. Checked per frame so runtime theme changes can turn
+    /// the pass on or off.
+    fn wants_paint_overlay(&self) -> bool {
+        false
+    }
+
+    /// Post-children paint pass, run with the same coordinate and clip
+    /// setup as `paint`. Themes use it to re-carve translucent geometry —
+    /// e.g. Futurism's rounded bottom corners — over pixels the content
+    /// child painted flush to the window edge.
+    fn paint_overlay(&mut self, _device: &mut dyn GraphicsDevice) {}
+
     /// Handle an event
     fn handle_event(&mut self, event: Event) -> EventResult;
 

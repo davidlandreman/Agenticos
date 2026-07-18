@@ -22,7 +22,7 @@ agenticos_configure_qemu() {
             ;;
     esac
     case "$strict" in 0|1) ;; *) echo "AGENTICOS_GPU_STRICT must be 0 or 1" >&2; return 2 ;; esac
-    case "$theme" in classic|aero|auto) ;; *) echo "Invalid AGENTICOS_THEME '$theme' (expected classic, aero, or auto)" >&2; return 2 ;; esac
+    case "$theme" in classic|aero|futurism|auto) ;; *) echo "Invalid AGENTICOS_THEME '$theme' (expected classic, aero, futurism, or auto)" >&2; return 2 ;; esac
     case "$virtio_2d" in auto|on|off) ;; *) echo "AGENTICOS_QEMU_2D must be auto, on, or off" >&2; return 2 ;; esac
     case "$gl_mode" in es|core) ;; *) echo "AGENTICOS_QEMU_GL must be es or core" >&2; return 2 ;; esac
     case "$render_stats" in 0|1) ;; *) echo "AGENTICOS_RENDER_STATS must be 0 or 1" >&2; return 2 ;; esac

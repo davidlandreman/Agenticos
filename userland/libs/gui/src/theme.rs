@@ -1,31 +1,72 @@
-//! Ring-3 mirror of the kernel's boot-selected control theme.
+//! Ring-3 mirror of the kernel's control theme.
 //!
-//! The kernel publishes the resolved theme as `/etc/theme` (`classic` or
-//! `aero`) during boot; this module reads it once, caches it, and exposes
+//! The kernel publishes the resolved theme as `/etc/theme` (`classic`,
+//! `aero`, or `futurism`); this module reads it once, caches it, and exposes
 //! the same control palette + surface helpers the kernel's
 //! `window::theme::controls` uses, adapted to the toolkit's opaque XRGB
-//! [`Canvas`]. Color values are normative in
-//! `docs/plans/2026-07-18-003-feat-theme-aware-controls-plan.md`.
+//! [`Canvas`]. Painters dispatch on the theme's [`Finish`] (its surface
+//! construction family) rather than on identity, mirroring the kernel's
+//! `ControlStyle`. Classic/Aero color values are normative in
+//! `docs/plans/2026-07-18-003-feat-theme-aware-controls-plan.md`; Futurism's
+//! in `docs/plans/2026-07-18-007-feat-futurism-theme-plan.md`.
 //!
 //! Missing or malformed `/etc/theme` degrades to Classic — apps never fail
-//! to start because of theming.
+//! to start because of theming, and an old binary meeting an unknown future
+//! theme token falls back safely.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::Canvas;
 
-/// The boot-selected theme.
+/// The active system theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
     Classic,
     Aero,
+    Futurism,
+}
+
+impl Theme {
+    /// Whether this is one of the modern (retained-compositor) themes.
+    pub fn is_modern(self) -> bool {
+        !matches!(self, Theme::Classic)
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Theme::Classic => 1,
+            Theme::Aero => 2,
+            Theme::Futurism => 3,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Theme> {
+        match code {
+            1 => Some(Theme::Classic),
+            2 => Some(Theme::Aero),
+            3 => Some(Theme::Futurism),
+            _ => None,
+        }
+    }
+}
+
+/// Surface-construction family used by the drawing helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finish {
+    /// Win98 raised/sunken bevels (Classic).
+    Bevel98,
+    /// Win7 rounded gradient glass (Aero).
+    GlassKd4,
+    /// Flat rounded surfaces with hairline borders (Futurism).
+    SoftRounded,
 }
 
 /// Visual state of a push-button-like control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonState {
     Normal,
-    /// Default / accent button (Aero: blue border + glow; Classic: black rim).
+    /// Default / accent button (Aero: blue border + glow; Classic: black
+    /// rim; Futurism: accent border + tinted fill).
     Hot,
     Pressed,
     Disabled,
@@ -85,6 +126,21 @@ const AERO_PALETTE: Palette = Palette {
     scrollbar_pressed: 0x7FB6D8,
 };
 
+const FUTURISM_PALETTE: Palette = Palette {
+    content_bg: 0xF7F9FC,
+    text: 0x1F2937,
+    disabled_text: 0x94A3B8,
+    border: 0xD3DBE8,
+    field_bg: 0xFFFFFF,
+    field_text: 0x1F2937,
+    selection_bg: 0xDCE9FC,
+    selection_text: 0x1D4ED8,
+    scrollbar_track: 0xEEF2F8,
+    scrollbar_thumb: 0xC3CEDF,
+    scrollbar_hot: 0x9EC3F5,
+    scrollbar_pressed: 0x7FA9E8,
+};
+
 // Classic (Win98) bevel constants, shared with the kernel classic theme.
 const BEVEL_HIGHLIGHT: u32 = 0xFFFFFF;
 const BEVEL_LIGHT: u32 = 0xDFDFDF;
@@ -109,37 +165,47 @@ const AERO_FIELD_BORDER: u32 = 0xABABAB;
 const AERO_MENU_BORDER: u32 = 0x979797;
 const AERO_SELECTION_BORDER: u32 = 0x26A0DA;
 
-/// 0 = not yet loaded, 1 = Classic, 2 = Aero.
+// Futurism constants (from the reference mock).
+const FUT_ACCENT: u32 = 0x3C8CF0;
+const FUT_BORDER: u32 = 0xD3DBE8;
+const FUT_BORDER_HOT: u32 = 0x9EC3F5;
+const FUT_BORDER_PRESSED: u32 = 0x7FA9E8;
+const FUT_BORDER_DISABLED: u32 = 0xE1E7F0;
+const FUT_FILL_NORMAL: u32 = 0xFFFFFF;
+const FUT_FILL_HOT: u32 = 0xF3F7FE;
+const FUT_FILL_PRESSED: u32 = 0xE4ECF8;
+const FUT_FILL_DISABLED: u32 = 0xF1F4F9;
+const FUT_MENU_SURFACE: u32 = 0xFAFBFE;
+const FUT_MENU_BORDER: u32 = 0xC9D2E4;
+const FUT_SELECTION_BORDER: u32 = 0x8FB7F2;
+
+/// 0 = not yet loaded; else `Theme::code()`.
 static THEME: AtomicU8 = AtomicU8::new(0);
 
 /// The active theme, loaded from `/etc/theme` on first use.
 pub fn current() -> Theme {
-    match THEME.load(Ordering::Acquire) {
-        1 => Theme::Classic,
-        2 => Theme::Aero,
-        _ => {
+    match Theme::from_code(THEME.load(Ordering::Acquire)) {
+        Some(theme) => theme,
+        None => {
             let theme = load();
-            THEME.store(
-                match theme {
-                    Theme::Classic => 1,
-                    Theme::Aero => 2,
-                },
-                Ordering::Release,
-            );
+            THEME.store(theme.code(), Ordering::Release);
             theme
         }
     }
 }
 
+/// The active theme's surface-construction family.
+pub fn finish() -> Finish {
+    match current() {
+        Theme::Classic => Finish::Bevel98,
+        Theme::Aero => Finish::GlassKd4,
+        Theme::Futurism => Finish::SoftRounded,
+    }
+}
+
 /// Force a specific theme (test / preview hook; normal apps never call this).
 pub fn set(theme: Theme) {
-    THEME.store(
-        match theme {
-            Theme::Classic => 1,
-            Theme::Aero => 2,
-        },
-        Ordering::Release,
-    );
+    THEME.store(theme.code(), Ordering::Release);
 }
 
 /// Apply a process-global theme notification before an app handles the event.
@@ -147,11 +213,8 @@ pub fn apply_system_event(event: &runtime::GuiEvent) -> bool {
     if event.kind != runtime::GUI_EVENT_THEME_CHANGED {
         return false;
     }
-    set(if event.payload[0] == 2 {
-        Theme::Aero
-    } else {
-        Theme::Classic
-    });
+    let code = u8::try_from(event.payload[0]).ok();
+    set(code.and_then(Theme::from_code).unwrap_or(Theme::Classic));
     true
 }
 
@@ -159,6 +222,7 @@ pub fn palette_for(theme: Theme) -> &'static Palette {
     match theme {
         Theme::Classic => &CLASSIC_PALETTE,
         Theme::Aero => &AERO_PALETTE,
+        Theme::Futurism => &FUTURISM_PALETTE,
     }
 }
 
@@ -176,10 +240,15 @@ fn load() -> Theme {
         return Theme::Classic;
     }
     let contents = &buffer[..count as usize];
-    if contents.starts_with(b"aero") {
-        Theme::Aero
-    } else {
-        Theme::Classic
+    let token = contents
+        .split(|&byte| byte == b'\n' || byte == b'\r' || byte == b' ' || byte == 0)
+        .next()
+        .unwrap_or(&[]);
+    match token {
+        b"futurism" => Theme::Futurism,
+        b"aero" => Theme::Aero,
+        // Unknown tokens degrade to Classic so stale binaries stay usable.
+        _ => Theme::Classic,
     }
 }
 
@@ -198,7 +267,7 @@ pub fn button_text(state: ButtonState) -> u32 {
 
 /// When a pressed control shifts its label down-right by 1px (Classic only).
 pub fn pressed_label_shift(state: ButtonState) -> i32 {
-    if current() == Theme::Classic && state == ButtonState::Pressed {
+    if finish() == Finish::Bevel98 && state == ButtonState::Pressed {
         1
     } else {
         0
@@ -228,11 +297,75 @@ fn aero_corner_inset(edge_distance: i32) -> i32 {
     }
 }
 
+/// Quantized radius-5 rounding used by Futurism's larger corner radii.
+fn soft_corner_inset(edge_distance: i32) -> i32 {
+    match edge_distance {
+        0 => 3,
+        1 => 2,
+        2 => 1,
+        _ => 0,
+    }
+}
+
+/// Fill a rect with rounded corners quantized by `inset`.
+fn fill_rounded_rect(
+    canvas: &mut Canvas,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    color: u32,
+    inset: fn(i32) -> i32,
+) {
+    let hi = h as i32;
+    let wi = w as i32;
+    for row in 0..hi {
+        let inset = inset(row.min(hi - 1 - row));
+        canvas.fill_rect(x + inset, y + row, (wi - 2 * inset).max(0) as u32, 1, color);
+    }
+}
+
+/// 1px border following the rounded boundary quantized by `inset`, including
+/// the diagonal step pixels that keep the corner contiguous.
+fn draw_rounded_outline(
+    canvas: &mut Canvas,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    color: u32,
+    inset: fn(i32) -> i32,
+) {
+    let hi = h as i32;
+    let wi = w as i32;
+    for row in 0..hi {
+        let row_inset = inset(row.min(hi - 1 - row));
+        if row == 0 || row == hi - 1 {
+            canvas.fill_rect(
+                x + row_inset,
+                y + row,
+                (wi - 2 * row_inset).max(0) as u32,
+                1,
+                color,
+            );
+        } else {
+            canvas.pixel(x + row_inset, y + row, color);
+            canvas.pixel(x + wi - 1 - row_inset, y + row, color);
+            let neighbor = inset((row - 1).min(hi - 2 - row));
+            if neighbor > row_inset {
+                canvas.pixel(x + neighbor, y + row, color);
+                canvas.pixel(x + wi - 1 - neighbor, y + row, color);
+            }
+        }
+    }
+}
+
 /// Paint a push-button surface (face + edges, no label).
 pub fn draw_button(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, state: ButtonState) {
-    match current() {
-        Theme::Classic => draw_classic_button(canvas, x, y, w, h, state),
-        Theme::Aero => draw_aero_button(canvas, x, y, w, h, state),
+    match finish() {
+        Finish::Bevel98 => draw_classic_button(canvas, x, y, w, h, state),
+        Finish::GlassKd4 => draw_aero_button(canvas, x, y, w, h, state),
+        Finish::SoftRounded => draw_futurism_button(canvas, x, y, w, h, state),
     }
 }
 
@@ -266,6 +399,38 @@ fn draw_bevel_rings(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, rings: 
         canvas.fill_rect(x + ring, y + ring, 1, side_h, *top_left);
         canvas.fill_rect(x + ring, y + h as i32 - 1 - ring, side_w, 1, *bottom_right);
         canvas.fill_rect(x + w as i32 - 1 - ring, y + ring, 1, side_h, *bottom_right);
+    }
+}
+
+/// Futurism flat rounded button: state-colored fill, hairline border, no
+/// gradient and no pressed label shift.
+fn draw_futurism_button(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, state: ButtonState) {
+    let (fill, border) = match state {
+        ButtonState::Normal => (FUT_FILL_NORMAL, FUT_BORDER),
+        ButtonState::Hot => (FUT_FILL_HOT, FUT_BORDER_HOT),
+        ButtonState::Pressed => (FUT_FILL_PRESSED, FUT_BORDER_PRESSED),
+        ButtonState::Disabled => (FUT_FILL_DISABLED, FUT_BORDER_DISABLED),
+    };
+    let wi = w as i32;
+    let hi = h as i32;
+    if wi < 8 || hi < 8 {
+        canvas.fill_rect(x, y, w, h, fill);
+        canvas.rect(x, y, w, h, border);
+        return;
+    }
+    fill_rounded_rect(canvas, x, y, w, h, fill, soft_corner_inset);
+    draw_rounded_outline(canvas, x, y, w, h, border, soft_corner_inset);
+    // Accent focus ring: a second inner border for the default button.
+    if state == ButtonState::Hot {
+        draw_rounded_outline(
+            canvas,
+            x + 1,
+            y + 1,
+            w.saturating_sub(2),
+            h.saturating_sub(2),
+            FUT_ACCENT,
+            aero_corner_inset,
+        );
     }
 }
 
@@ -316,27 +481,7 @@ fn draw_aero_button(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, state: 
     }
 
     // Border along the corner-rounded boundary.
-    for row in 0..hi {
-        let inset = aero_corner_inset(row.min(hi - 1 - row));
-        if row == 0 || row == hi - 1 {
-            canvas.fill_rect(
-                x + inset,
-                y + row,
-                (wi - 2 * inset).max(0) as u32,
-                1,
-                border,
-            );
-        } else {
-            canvas.pixel(x + inset, y + row, border);
-            canvas.pixel(x + wi - 1 - inset, y + row, border);
-            // Diagonal step pixels keep the rounded corner contiguous.
-            let neighbor = aero_corner_inset((row - 1).min(hi - 2 - row));
-            if neighbor > inset {
-                canvas.pixel(x + neighbor, y + row, border);
-                canvas.pixel(x + wi - 1 - neighbor, y + row, border);
-            }
-        }
-    }
+    draw_rounded_outline(canvas, x, y, w, h, border, aero_corner_inset);
 
     // Inner ring: highlight (normal), glow (hot), or inner shadow (pressed).
     let inner = match state {
@@ -369,8 +514,8 @@ fn draw_aero_button(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, state: 
 }
 
 /// Paint a data well (text field / list) background + border with focus
-/// feedback. Classic keeps its sunken bevel regardless of focus; Aero swaps
-/// the border for the blue focus ring.
+/// feedback. Classic keeps its sunken bevel regardless of focus; Aero and
+/// Futurism swap the border for the accent focus ring.
 pub fn draw_field(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, focused: bool) {
     canvas.fill_rect(x, y, w, h, palette().field_bg);
     draw_field_border(canvas, x, y, w, h, focused);
@@ -379,8 +524,8 @@ pub fn draw_field(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, focused: 
 /// Border-only variant for wells whose interior the widget paints itself
 /// (e.g. a list that fills rows first and borders last).
 pub fn draw_field_border(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, focused: bool) {
-    match current() {
-        Theme::Classic => {
+    match finish() {
+        Finish::Bevel98 => {
             draw_bevel_rings(
                 canvas,
                 x,
@@ -390,7 +535,7 @@ pub fn draw_field_border(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, fo
                 &[(BEVEL_SHADOW, BEVEL_HIGHLIGHT), (BEVEL_DARK, BEVEL_LIGHT)],
             );
         }
-        Theme::Aero => {
+        Finish::GlassKd4 => {
             canvas.rect(
                 x,
                 y,
@@ -403,22 +548,38 @@ pub fn draw_field_border(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32, fo
                 },
             );
         }
+        Finish::SoftRounded => {
+            canvas.rect(x, y, w, h, if focused { FUT_ACCENT } else { FUT_BORDER });
+        }
     }
 }
 
 /// Paint a selection / hover highlight band.
 pub fn draw_selection(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32) {
+    if finish() == Finish::SoftRounded && w >= 8 && h >= 8 {
+        fill_rounded_rect(
+            canvas,
+            x,
+            y,
+            w,
+            h,
+            palette().selection_bg,
+            aero_corner_inset,
+        );
+        draw_rounded_outline(canvas, x, y, w, h, FUT_SELECTION_BORDER, aero_corner_inset);
+        return;
+    }
     canvas.fill_rect(x, y, w, h, palette().selection_bg);
-    if current() == Theme::Aero {
+    if finish() == Finish::GlassKd4 {
         canvas.rect(x, y, w, h, AERO_SELECTION_BORDER);
     }
 }
 
 /// Paint a popup-menu surface: themed background plus popup border.
 pub fn draw_menu_surface(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32) {
-    canvas.fill_rect(x, y, w, h, palette().content_bg);
-    match current() {
-        Theme::Classic => {
+    match finish() {
+        Finish::Bevel98 => {
+            canvas.fill_rect(x, y, w, h, palette().content_bg);
             draw_bevel_rings(
                 canvas,
                 x,
@@ -428,8 +589,13 @@ pub fn draw_menu_surface(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32) {
                 &[(BEVEL_HIGHLIGHT, BEVEL_DARK), (BEVEL_LIGHT, BEVEL_SHADOW)],
             );
         }
-        Theme::Aero => {
+        Finish::GlassKd4 => {
+            canvas.fill_rect(x, y, w, h, palette().content_bg);
             canvas.rect(x, y, w, h, AERO_MENU_BORDER);
+        }
+        Finish::SoftRounded => {
+            canvas.fill_rect(x, y, w, h, FUT_MENU_SURFACE);
+            canvas.rect(x, y, w, h, FUT_MENU_BORDER);
         }
     }
 }
@@ -464,6 +630,8 @@ pub fn draw_scrollbar_part(
             };
             draw_bevel_rings(canvas, rect.x, rect.y, rect.w, rect.h, &rings);
         }
-        Theme::Aero => canvas.rect(rect.x, rect.y, rect.w, rect.h, palette().border),
+        Theme::Aero | Theme::Futurism => {
+            canvas.rect(rect.x, rect.y, rect.w, rect.h, palette().border)
+        }
     }
 }
