@@ -9,9 +9,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::window::{with_window_manager, WindowId, Rect, Window};
-use crate::window::windows::{FrameWindow, TerminalWindow};
 use crate::process::ProcessId;
+use crate::window::windows::{FrameWindow, TerminalWindow};
+use crate::window::{with_window_manager, Rect, Window, WindowId};
 
 /// Represents a terminal instance with its associated shell process
 #[derive(Debug, Clone, Copy)]
@@ -57,7 +57,8 @@ pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
         let (screen_width, screen_height) = wm.screen_dimensions();
 
         // Find the desktop window (root of active screen)
-        let desktop_id = wm.get_active_screen()
+        let desktop_id = wm
+            .get_active_screen()
             .and_then(|s| s.root_window)
             .ok_or("No desktop window found")?;
 
@@ -85,7 +86,8 @@ pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
             content_area.height,
         );
         // Use new_with_id to ensure the terminal uses the ID from WindowManager
-        let mut terminal_window = Box::new(TerminalWindow::new_with_id(terminal_id, terminal_bounds));
+        let mut terminal_window =
+            Box::new(TerminalWindow::new_with_id(terminal_id, terminal_bounds));
         terminal_window.set_parent(Some(frame_id));
 
         // Set the terminal as the frame's content
@@ -123,14 +125,17 @@ pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
             shell_pid: None,
             number: terminal_number,
         })
-    }).ok_or("Window manager not initialized")??;
+    })
+    .ok_or("Window manager not initialized")??;
 
     // Store the instance
     TERMINAL_INSTANCES.lock().push(instance);
 
     crate::debug_info!(
         "Terminal factory: Created terminal {} (frame={:?}, terminal={:?})",
-        terminal_number, instance.frame_id, instance.terminal_id
+        terminal_number,
+        instance.frame_id,
+        instance.terminal_id
     );
 
     Ok(instance)
@@ -161,9 +166,12 @@ pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
     // window's grid. Without this, `TIOCGWINSZ` would report the
     // default 80×24 even for windows that render a different grid —
     // and vi / less would wrap to the wrong column.
-    if let Some((rows, cols)) =
-        crate::window::with_window_manager(|wm| wm.window_registry.get(&terminal_id).and_then(|w| w.grid_size()))
-            .flatten()
+    if let Some((rows, cols)) = crate::window::with_window_manager(|wm| {
+        wm.window_registry
+            .get(&terminal_id)
+            .and_then(|w| w.grid_size())
+    })
+    .flatten()
     {
         crate::window::terminal::sync_terminal_winsize(terminal_id, rows, cols);
     }
@@ -180,7 +188,8 @@ pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
 
     crate::debug_info!(
         "Terminal factory: zsh spawned for terminal {} with PID {:?}",
-        instance.number, pid
+        instance.number,
+        pid
     );
 
     Ok(instance)
@@ -232,11 +241,7 @@ fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
                 &TERMINAL_SHELL_ENV,
             ) {
                 Ok((kind, code)) => {
-                    let msg = alloc::format!(
-                        "[zsh exited: kind={:?}, code={}]",
-                        kind,
-                        code,
-                    );
+                    let msg = alloc::format!("[zsh exited: kind={:?}, code={}]", kind, code,);
                     // Surface to BOTH serial (debug) and the terminal
                     // window so the user can see + capture diagnostics.
                     crate::debug_error!("Terminal factory: {}", msg);
@@ -246,10 +251,7 @@ fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
                 Err(msg) => {
                     crate::println!("zsh failed to launch: {}", msg);
                     crate::debug_error!("Terminal factory: zsh launch failed: {}", msg);
-                    let banner = alloc::format!(
-                        "\n[zsh launch failed: {}]\n",
-                        msg,
-                    );
+                    let banner = alloc::format!("\n[zsh launch failed: {}]\n", msg,);
                     crate::window::terminal::write_to_terminal_id(terminal_id, &banner);
                 }
             }

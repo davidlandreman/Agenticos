@@ -103,8 +103,7 @@ impl PciDevice {
         let command = self.read_config(0x04);
         self.write_config(0x04, command | 0x02);
     }
-
-    }
+}
 
 /// PCI Base Address Register types
 #[derive(Debug, Clone, Copy)]
@@ -259,8 +258,6 @@ pub fn enumerate_devices_cached() -> Vec<PciDevice> {
     }
     cache.as_ref().cloned().unwrap_or_default()
 }
-
-
 
 // VirtIO vendor ID
 pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;

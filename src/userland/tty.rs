@@ -61,7 +61,6 @@ pub fn is_echo() -> bool {
     snapshot().is_echo()
 }
 
-
 /// Winsize for the current process's pty. Derived from the
 /// hosting TerminalWindow's grid when that window is bound; falls back
 /// to the legacy pty's defaults otherwise.

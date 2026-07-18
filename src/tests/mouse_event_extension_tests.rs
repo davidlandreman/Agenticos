@@ -26,7 +26,10 @@ use crate::window::{
 // ---------------------------------------------------------------------------
 
 fn test_scroll_variant_constructs_and_destructures() {
-    let ev = MouseEventType::Scroll { delta_x: 0, delta_y: -3 };
+    let ev = MouseEventType::Scroll {
+        delta_x: 0,
+        delta_y: -3,
+    };
     match ev {
         MouseEventType::Scroll { delta_x, delta_y } => {
             assert_eq!(delta_x, 0);
@@ -116,12 +119,20 @@ fn test_ensure_visible_variant_constructs() {
 struct StubDevice;
 
 impl GraphicsDevice for StubDevice {
-    fn width(&self) -> usize { 1280 }
-    fn height(&self) -> usize { 720 }
-    fn color_depth(&self) -> ColorDepth { ColorDepth::Bit32 }
+    fn width(&self) -> usize {
+        1280
+    }
+    fn height(&self) -> usize {
+        720
+    }
+    fn color_depth(&self) -> ColorDepth {
+        ColorDepth::Bit32
+    }
     fn clear(&mut self, _color: Color) {}
     fn draw_pixel(&mut self, _x: i32, _y: i32, _color: Color) {}
-    fn read_pixel(&self, _x: i32, _y: i32) -> Color { Color::BLACK }
+    fn read_pixel(&self, _x: i32, _y: i32) -> Color {
+        Color::BLACK
+    }
     fn draw_line(&mut self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _color: Color) {}
     fn draw_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
     fn fill_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
@@ -151,8 +162,12 @@ impl RecordingWindow {
 }
 
 impl Window for RecordingWindow {
-    fn base(&self) -> &crate::window::windows::base::WindowBase { &self.base }
-    fn base_mut(&mut self) -> &mut crate::window::windows::base::WindowBase { &mut self.base }
+    fn base(&self) -> &crate::window::windows::base::WindowBase {
+        &self.base
+    }
+    fn base_mut(&mut self) -> &mut crate::window::windows::base::WindowBase {
+        &mut self.base
+    }
     fn paint(&mut self, _device: &mut dyn GraphicsDevice) {}
     fn handle_event(&mut self, event: Event) -> EventResult {
         if let Event::Mouse(m) = event {
@@ -162,7 +177,9 @@ impl Window for RecordingWindow {
             EventResult::Ignored
         }
     }
-    fn can_focus(&self) -> bool { true }
+    fn can_focus(&self) -> bool {
+        true
+    }
 }
 
 fn test_route_mouse_event_preserves_modifiers() {

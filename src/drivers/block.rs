@@ -3,7 +3,7 @@
 /// Trait for block devices (storage devices that read/write in blocks)
 pub trait BlockDevice {
     /// Read blocks from the device
-    /// 
+    ///
     /// # Arguments
     /// * `block` - Starting block number (LBA)
     /// * `count` - Number of blocks to read
@@ -11,7 +11,7 @@ pub trait BlockDevice {
     fn read_blocks(&self, block: u64, count: u32, buffer: &mut [u8]) -> Result<(), &'static str>;
 
     /// Write blocks to the device
-    /// 
+    ///
     /// # Arguments
     /// * `block` - Starting block number (LBA)
     /// * `count` - Number of blocks to write

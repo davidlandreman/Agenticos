@@ -221,11 +221,11 @@ pub unsafe fn active_offset_page_table(phys_offset: VirtAddr) -> OffsetPageTable
 /// Returns None if the address is not mapped
 pub fn translate_virt_to_phys(virt_addr: u64) -> Option<u64> {
     crate::mm::memory::with_memory_mapper(|mapper| {
-            mapper
-                .translate_addr(VirtAddr::new(virt_addr))
-                .map(|phys| phys.as_u64())
-        })
-        .flatten()
+        mapper
+            .translate_addr(VirtAddr::new(virt_addr))
+            .map(|phys| phys.as_u64())
+    })
+    .flatten()
 }
 
 pub struct MemoryMapper {

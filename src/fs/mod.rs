@@ -1,15 +1,15 @@
-pub mod filesystem;
-pub mod partition;
-pub mod vfs;
 pub mod fat;
-pub mod tmpfs;
-pub mod overlay;
-pub mod fs_manager;
 pub mod file_handle;
+pub mod filesystem;
+pub mod fs_manager;
+pub mod overlay;
+pub mod partition;
+pub mod tmpfs;
+pub mod vfs;
 
-pub use filesystem::{FilesystemType, detect_filesystem};
-pub use partition::{PartitionBlockDevice, read_partitions};
-pub use file_handle::{File, Directory};
+pub use file_handle::{Directory, File};
+pub use filesystem::{detect_filesystem, FilesystemType};
+pub use partition::{read_partitions, PartitionBlockDevice};
 
 // Convenience functions
 pub use fs_manager::exists;

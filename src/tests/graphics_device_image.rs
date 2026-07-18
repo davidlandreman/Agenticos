@@ -40,18 +40,30 @@ impl GridDevice {
 }
 
 impl GraphicsDevice for GridDevice {
-    fn width(&self) -> usize { self.width }
-    fn height(&self) -> usize { self.height }
-    fn color_depth(&self) -> ColorDepth { ColorDepth::Bit32 }
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+    fn color_depth(&self) -> ColorDepth {
+        ColorDepth::Bit32
+    }
 
     fn clear(&mut self, color: Color) {
-        for px in self.pixels.iter_mut() { *px = color; }
+        for px in self.pixels.iter_mut() {
+            *px = color;
+        }
     }
 
     fn draw_pixel(&mut self, x: i32, y: i32, color: Color) {
-        if x < 0 || y < 0 { return; }
+        if x < 0 || y < 0 {
+            return;
+        }
         let (x, y) = (x as usize, y as usize);
-        if x >= self.width || y >= self.height { return; }
+        if x >= self.width || y >= self.height {
+            return;
+        }
         if let Some(clip) = self.clip {
             if (x as i32) < clip.x
                 || (y as i32) < clip.y
@@ -65,9 +77,13 @@ impl GraphicsDevice for GridDevice {
     }
 
     fn read_pixel(&self, x: i32, y: i32) -> Color {
-        if x < 0 || y < 0 { return Color::BLACK; }
+        if x < 0 || y < 0 {
+            return Color::BLACK;
+        }
         let (x, y) = (x as usize, y as usize);
-        if x >= self.width || y >= self.height { return Color::BLACK; }
+        if x >= self.width || y >= self.height {
+            return Color::BLACK;
+        }
         self.pixels[y * self.width + x]
     }
 
@@ -75,7 +91,9 @@ impl GraphicsDevice for GridDevice {
     fn draw_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
     fn fill_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
 
-    fn set_clip_rect(&mut self, rect: Option<Rect>) { self.clip = rect; }
+    fn set_clip_rect(&mut self, rect: Option<Rect>) {
+        self.clip = rect;
+    }
     fn flush(&mut self) {}
 }
 
@@ -86,21 +104,35 @@ struct CoordImage {
 }
 
 impl CoordImage {
-    fn new(width: usize, height: usize) -> Self { Self { width, height } }
+    fn new(width: usize, height: usize) -> Self {
+        Self { width, height }
+    }
 }
 
 impl Image for CoordImage {
-    fn width(&self) -> usize { self.width }
-    fn height(&self) -> usize { self.height }
-    fn format(&self) -> ImageFormat { ImageFormat::Bmp }
-    fn pixel_format(&self) -> PixelFormat { PixelFormat::Rgb888 }
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+    fn format(&self) -> ImageFormat {
+        ImageFormat::Bmp
+    }
+    fn pixel_format(&self) -> PixelFormat {
+        PixelFormat::Rgb888
+    }
 
     fn get_pixel(&self, x: usize, y: usize) -> Option<Color> {
-        if x >= self.width || y >= self.height { return None; }
+        if x >= self.width || y >= self.height {
+            return None;
+        }
         Some(Color::new(x as u8 + 1, y as u8 + 1, 0xAA))
     }
 
-    fn get_pixel_data(&self) -> &[u8] { &[] }
+    fn get_pixel_data(&self) -> &[u8] {
+        &[]
+    }
 }
 
 // -- draw_image (1:1) -----------------------------------------------------

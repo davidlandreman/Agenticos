@@ -187,7 +187,9 @@ impl LfnAccumulator {
         // Total chars = scan from the start for the first 0x0000
         // terminator. Padding past the terminator is 0xFFFF. If no
         // terminator, the name fills all received slots exactly.
-        let max = (self.total_slots as usize).saturating_mul(13).min(MAX_LFN_CHARS);
+        let max = (self.total_slots as usize)
+            .saturating_mul(13)
+            .min(MAX_LFN_CHARS);
         let mut len = max;
         for i in 0..max {
             if self.chars[i] == 0x0000 {
@@ -340,7 +342,10 @@ pub fn encode_lfn_slot(
 /// 8.3 stub.
 ///
 /// Returns `None` if the name is empty or doesn't fit (>20 slots).
-pub fn encode_lfn_run(name_utf8: &str, sfn_short_11: &[u8; 11]) -> Option<alloc::vec::Vec<[u8; 32]>> {
+pub fn encode_lfn_run(
+    name_utf8: &str,
+    sfn_short_11: &[u8; 11],
+) -> Option<alloc::vec::Vec<[u8; 32]>> {
     let slot_count = lfn_slot_count(name_utf8);
     if slot_count == 0 || slot_count > 20 {
         return None;
@@ -414,7 +419,23 @@ pub fn generate_short_name(long_name: &str, next_n: u32) -> [u8; 11] {
         let b = c as u32;
         let u = if b < 128 {
             let ch = c.to_ascii_uppercase() as u8;
-            if matches!(ch, b'+' | b',' | b';' | b'=' | b'[' | b']' | b'/' | b'\\' | b':' | b'"' | b'*' | b'?' | b'<' | b'>' | b'|') {
+            if matches!(
+                ch,
+                b'+' | b','
+                    | b';'
+                    | b'='
+                    | b'['
+                    | b']'
+                    | b'/'
+                    | b'\\'
+                    | b':'
+                    | b'"'
+                    | b'*'
+                    | b'?'
+                    | b'<'
+                    | b'>'
+                    | b'|'
+            ) {
                 b'_'
             } else {
                 ch
@@ -428,7 +449,24 @@ pub fn generate_short_name(long_name: &str, next_n: u32) -> [u8; 11] {
         let b = c as u32;
         let u = if b < 128 {
             let ch = c.to_ascii_uppercase() as u8;
-            if matches!(ch, b'+' | b',' | b';' | b'=' | b'[' | b']' | b'/' | b'\\' | b':' | b'"' | b'*' | b'?' | b'<' | b'>' | b'|' | b'.') {
+            if matches!(
+                ch,
+                b'+' | b','
+                    | b';'
+                    | b'='
+                    | b'['
+                    | b']'
+                    | b'/'
+                    | b'\\'
+                    | b':'
+                    | b'"'
+                    | b'*'
+                    | b'?'
+                    | b'<'
+                    | b'>'
+                    | b'|'
+                    | b'.'
+            ) {
                 b'_'
             } else {
                 ch
@@ -444,7 +482,9 @@ pub fn generate_short_name(long_name: &str, next_n: u32) -> [u8; 11] {
     suffix.push(b'~');
     let mut n_str: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut nn = next_n.max(1);
-    if nn == 0 { n_str.push(b'0'); }
+    if nn == 0 {
+        n_str.push(b'0');
+    }
     while nn > 0 {
         n_str.push(b'0' + (nn % 10) as u8);
         nn /= 10;
@@ -499,7 +539,24 @@ pub fn fits_short_name(long_name: &str) -> bool {
         }
         let b = c as u8;
         if !(b.is_ascii_alphanumeric()
-            || matches!(b, b'_' | b'~' | b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'(' | b')' | b'-' | b'@' | b'^' | b'`' | b'{' | b'}'))
+            || matches!(
+                b,
+                b'_' | b'~'
+                    | b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'-'
+                    | b'@'
+                    | b'^'
+                    | b'`'
+                    | b'{'
+                    | b'}'
+            ))
         {
             return false;
         }
@@ -525,13 +582,11 @@ pub fn format_short_name_with_case(entry: &DirectoryEntry, out: &mut [u8; 13]) -
     // Special case for entries whose first byte is `0x05` (encoded
     // 0xE5 — see FAT spec). Restore to 0xE5 for display. This rarely
     // shows up in practice but is part of the on-disk format.
-    let name_iter = entry.name.iter().enumerate().map(|(i, &b)| {
-        if i == 0 && b == 0x05 {
-            0xE5
-        } else {
-            b
-        }
-    });
+    let name_iter = entry
+        .name
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| if i == 0 && b == 0x05 { 0xE5 } else { b });
     for b in name_iter {
         if b == b' ' {
             break;
@@ -539,7 +594,11 @@ pub fn format_short_name_with_case(entry: &DirectoryEntry, out: &mut [u8; 13]) -
         if pos >= 8 {
             break;
         }
-        out[pos] = if lcase_base { b.to_ascii_lowercase() } else { b };
+        out[pos] = if lcase_base {
+            b.to_ascii_lowercase()
+        } else {
+            b
+        };
         pos += 1;
     }
 
@@ -841,7 +900,9 @@ mod tests {
         acc.push_slot(lfn);
 
         let mut out = [0u8; MAX_LFN_UTF8];
-        let n = acc.decode(stub, &mut out).expect("surrogate pair must decode");
+        let n = acc
+            .decode(stub, &mut out)
+            .expect("surrogate pair must decode");
         // UTF-8 encoding of U+1F600 is 0xF0 0x9F 0x98 0x80
         assert_eq!(&out[..n], &[0xF0, 0x9F, 0x98, 0x80]);
     }
@@ -861,7 +922,6 @@ mod tests {
             &test_decode_accepts_surrogate_pair,
         ]
     }
-
 }
 
 #[cfg(feature = "test")]

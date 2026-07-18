@@ -1,12 +1,12 @@
 //! IDE/ATA disk driver for x86_64
-//! 
+//!
 //! This driver implements PIO mode access to IDE/ATA hard drives.
 //! It supports the primary and secondary IDE channels with master/slave drives.
 
-use x86_64::instructions::port::{PortReadOnly, PortWriteOnly};
-use spin::Mutex;
-use core::sync::atomic::{AtomicBool, Ordering};
 use crate::drivers::block::BlockDevice;
+use core::sync::atomic::{AtomicBool, Ordering};
+use spin::Mutex;
+use x86_64::instructions::port::{PortReadOnly, PortWriteOnly};
 
 /// IDE/ATA register port offsets
 #[derive(Debug, Clone, Copy)]
@@ -14,13 +14,13 @@ use crate::drivers::block::BlockDevice;
 pub enum IdeRegister {
     Data = 0x00,
     #[expect(dead_code, reason = "intentional kernel API surface")]
-    ErrorFeatures = 0x01,    // Error when reading, Features when writing
+    ErrorFeatures = 0x01, // Error when reading, Features when writing
     SectorCount = 0x02,
     LbaLow = 0x03,
     LbaMid = 0x04,
     LbaHigh = 0x05,
     DriveSelect = 0x06,
-    StatusCommand = 0x07,    // Status when reading, Command when writing
+    StatusCommand = 0x07, // Status when reading, Command when writing
 }
 
 /// IDE status register bits
@@ -76,8 +76,7 @@ impl IdeChannel {
             IdeChannel::Secondary => 0x376,
         }
     }
-
-    }
+}
 
 /// IDE drive (Master or Slave)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -262,7 +261,7 @@ impl IdeController {
             (IdeChannel::Secondary, IdeDrive::Slave) => &self.secondary_slave,
         }
     }
-    
+
     /// Get disk information (public interface)
     pub fn get_disk_info(&self, channel: IdeChannel, drive: IdeDrive) -> Option<([u8; 40], u64)> {
         let disk = self.get_disk_mut(channel, drive).lock();
@@ -291,7 +290,6 @@ unsafe fn ide_write_register(channel: IdeChannel, register: IdeRegister, value: 
     port.write(value);
 }
 
-
 /// Helper function to write to the device control register
 unsafe fn ide_write_device_control(channel: IdeChannel, value: u8) {
     let port = channel.control_port();
@@ -312,7 +310,11 @@ unsafe fn wait_ready(channel: IdeChannel) -> Result<(), &'static str> {
         }
     }
     let final_status = ide_read_register(channel, IdeRegister::StatusCommand);
-    crate::debug_warn!("[ide] wait_ready timeout, channel={:?}, status={:#04x}", channel, final_status);
+    crate::debug_warn!(
+        "[ide] wait_ready timeout, channel={:?}, status={:#04x}",
+        channel,
+        final_status
+    );
     Err("IDE drive timeout waiting for ready")
 }
 
@@ -324,7 +326,11 @@ unsafe fn wait_drq(channel: IdeChannel) -> Result<(), &'static str> {
             return Ok(());
         }
         if status & IdeStatus::Error as u8 != 0 {
-            crate::debug_warn!("[ide] wait_drq error bit set, channel={:?}, status={:#04x}", channel, status);
+            crate::debug_warn!(
+                "[ide] wait_drq error bit set, channel={:?}, status={:#04x}",
+                channel,
+                status
+            );
             return Err("IDE drive error");
         }
         // Small delay
@@ -333,7 +339,11 @@ unsafe fn wait_drq(channel: IdeChannel) -> Result<(), &'static str> {
         }
     }
     let final_status = ide_read_register(channel, IdeRegister::StatusCommand);
-    crate::debug_warn!("[ide] wait_drq timeout, channel={:?}, status={:#04x}", channel, final_status);
+    crate::debug_warn!(
+        "[ide] wait_drq timeout, channel={:?}, status={:#04x}",
+        channel,
+        final_status
+    );
     Err("IDE drive timeout waiting for data request")
 }
 
@@ -341,7 +351,7 @@ unsafe fn wait_drq(channel: IdeChannel) -> Result<(), &'static str> {
 unsafe fn ide_read_data(channel: IdeChannel, buffer: &mut [u16]) {
     let port = channel.base_port() + IdeRegister::Data as u16;
     let mut port: PortReadOnly<u16> = PortReadOnly::new(port);
-    
+
     for word in buffer.iter_mut() {
         *word = port.read();
     }
@@ -351,7 +361,7 @@ unsafe fn ide_read_data(channel: IdeChannel, buffer: &mut [u16]) {
 unsafe fn ide_write_data(channel: IdeChannel, buffer: &[u16]) {
     let port = channel.base_port() + IdeRegister::Data as u16;
     let mut port: PortWriteOnly<u16> = PortWriteOnly::new(port);
-    
+
     for &word in buffer.iter() {
         port.write(word);
     }
@@ -387,15 +397,19 @@ impl IdeController {
     unsafe fn detect_drive(&self, channel: IdeChannel, drive: IdeDrive) {
         // Select the drive
         ide_write_register(channel, IdeRegister::DriveSelect, drive.select_value(false));
-        
+
         // Small delay for drive selection
         for _ in 0..400 {
             core::hint::spin_loop();
         }
 
         // Send identify command
-        ide_write_register(channel, IdeRegister::StatusCommand, IdeCommand::Identify as u8);
-        
+        ide_write_register(
+            channel,
+            IdeRegister::StatusCommand,
+            IdeCommand::Identify as u8,
+        );
+
         // Check if drive exists
         let status = ide_read_register(channel, IdeRegister::StatusCommand);
         if status == 0 || status == 0xFF {
@@ -467,9 +481,16 @@ impl IdeController {
         }
 
         // Log the detected drive
-        crate::debug_info!("IDE: Detected {} {} - Model: {}, Sectors: {}, LBA: {}, LBA48: {}",
-            match channel { IdeChannel::Primary => "Primary", IdeChannel::Secondary => "Secondary" },
-            match drive { IdeDrive::Master => "Master", IdeDrive::Slave => "Slave" },
+        crate::debug_info!(
+            "IDE: Detected {} {} - Model: {}, Sectors: {}, LBA: {}, LBA48: {}",
+            match channel {
+                IdeChannel::Primary => "Primary",
+                IdeChannel::Secondary => "Secondary",
+            },
+            match drive {
+                IdeDrive::Master => "Master",
+                IdeDrive::Slave => "Slave",
+            },
             disk.model_string().trim(),
             disk.total_sectors,
             disk.supports_lba,
@@ -478,7 +499,14 @@ impl IdeController {
     }
 
     /// Read sectors from a disk using PIO mode
-    pub fn read_sectors(&self, channel: IdeChannel, drive: IdeDrive, lba: u64, count: u8, buffer: &mut [u8]) -> Result<(), &'static str> {
+    pub fn read_sectors(
+        &self,
+        channel: IdeChannel,
+        drive: IdeDrive,
+        lba: u64,
+        count: u8,
+        buffer: &mut [u8],
+    ) -> Result<(), &'static str> {
         if count == 0 || count > 128 {
             return Err("Invalid sector count");
         }
@@ -515,35 +543,49 @@ impl IdeController {
             // Select drive and addressing mode
             if use_lba48 {
                 // LBA48 mode
-                ide_write_register(channel, IdeRegister::DriveSelect, 
-                    drive.select_value(true) | ((lba >> 24) & 0x0F) as u8);
-                
+                ide_write_register(
+                    channel,
+                    IdeRegister::DriveSelect,
+                    drive.select_value(true) | ((lba >> 24) & 0x0F) as u8,
+                );
+
                 // Send high-order bytes
                 ide_write_register(channel, IdeRegister::SectorCount, 0);
                 ide_write_register(channel, IdeRegister::LbaLow, (lba >> 24) as u8);
                 ide_write_register(channel, IdeRegister::LbaMid, (lba >> 32) as u8);
                 ide_write_register(channel, IdeRegister::LbaHigh, (lba >> 40) as u8);
-                
+
                 // Send low-order bytes
                 ide_write_register(channel, IdeRegister::SectorCount, count);
                 ide_write_register(channel, IdeRegister::LbaLow, lba as u8);
                 ide_write_register(channel, IdeRegister::LbaMid, (lba >> 8) as u8);
                 ide_write_register(channel, IdeRegister::LbaHigh, (lba >> 16) as u8);
-                
+
                 // Send command
-                ide_write_register(channel, IdeRegister::StatusCommand, IdeCommand::ReadPioExt as u8);
+                ide_write_register(
+                    channel,
+                    IdeRegister::StatusCommand,
+                    IdeCommand::ReadPioExt as u8,
+                );
             } else {
                 // LBA28 mode
-                ide_write_register(channel, IdeRegister::DriveSelect,
-                    drive.select_value(true) | ((lba >> 24) & 0x0F) as u8);
-                
+                ide_write_register(
+                    channel,
+                    IdeRegister::DriveSelect,
+                    drive.select_value(true) | ((lba >> 24) & 0x0F) as u8,
+                );
+
                 ide_write_register(channel, IdeRegister::SectorCount, count);
                 ide_write_register(channel, IdeRegister::LbaLow, lba as u8);
                 ide_write_register(channel, IdeRegister::LbaMid, (lba >> 8) as u8);
                 ide_write_register(channel, IdeRegister::LbaHigh, (lba >> 16) as u8);
-                
+
                 // Send command
-                ide_write_register(channel, IdeRegister::StatusCommand, IdeCommand::ReadPio as u8);
+                ide_write_register(
+                    channel,
+                    IdeRegister::StatusCommand,
+                    IdeCommand::ReadPio as u8,
+                );
             }
 
             // Read sectors
@@ -571,7 +613,14 @@ impl IdeController {
     }
 
     /// Write sectors to a disk using PIO mode
-    pub fn write_sectors(&self, channel: IdeChannel, drive: IdeDrive, lba: u64, count: u8, buffer: &[u8]) -> Result<(), &'static str> {
+    pub fn write_sectors(
+        &self,
+        channel: IdeChannel,
+        drive: IdeDrive,
+        lba: u64,
+        count: u8,
+        buffer: &[u8],
+    ) -> Result<(), &'static str> {
         if count == 0 || count > 128 {
             return Err("Invalid sector count");
         }
@@ -608,35 +657,49 @@ impl IdeController {
             // Select drive and addressing mode
             if use_lba48 {
                 // LBA48 mode
-                ide_write_register(channel, IdeRegister::DriveSelect,
-                    drive.select_value(true) | ((lba >> 24) & 0x0F) as u8);
-                
+                ide_write_register(
+                    channel,
+                    IdeRegister::DriveSelect,
+                    drive.select_value(true) | ((lba >> 24) & 0x0F) as u8,
+                );
+
                 // Send high-order bytes
                 ide_write_register(channel, IdeRegister::SectorCount, 0);
                 ide_write_register(channel, IdeRegister::LbaLow, (lba >> 24) as u8);
                 ide_write_register(channel, IdeRegister::LbaMid, (lba >> 32) as u8);
                 ide_write_register(channel, IdeRegister::LbaHigh, (lba >> 40) as u8);
-                
+
                 // Send low-order bytes
                 ide_write_register(channel, IdeRegister::SectorCount, count);
                 ide_write_register(channel, IdeRegister::LbaLow, lba as u8);
                 ide_write_register(channel, IdeRegister::LbaMid, (lba >> 8) as u8);
                 ide_write_register(channel, IdeRegister::LbaHigh, (lba >> 16) as u8);
-                
+
                 // Send command
-                ide_write_register(channel, IdeRegister::StatusCommand, IdeCommand::WritePioExt as u8);
+                ide_write_register(
+                    channel,
+                    IdeRegister::StatusCommand,
+                    IdeCommand::WritePioExt as u8,
+                );
             } else {
                 // LBA28 mode
-                ide_write_register(channel, IdeRegister::DriveSelect,
-                    drive.select_value(true) | ((lba >> 24) & 0x0F) as u8);
-                
+                ide_write_register(
+                    channel,
+                    IdeRegister::DriveSelect,
+                    drive.select_value(true) | ((lba >> 24) & 0x0F) as u8,
+                );
+
                 ide_write_register(channel, IdeRegister::SectorCount, count);
                 ide_write_register(channel, IdeRegister::LbaLow, lba as u8);
                 ide_write_register(channel, IdeRegister::LbaMid, (lba >> 8) as u8);
                 ide_write_register(channel, IdeRegister::LbaHigh, (lba >> 16) as u8);
-                
+
                 // Send command
-                ide_write_register(channel, IdeRegister::StatusCommand, IdeCommand::WritePio as u8);
+                ide_write_register(
+                    channel,
+                    IdeRegister::StatusCommand,
+                    IdeCommand::WritePio as u8,
+                );
             }
 
             // Write sectors
@@ -648,8 +711,8 @@ impl IdeController {
                 // Prepare 256 words (512 bytes) from buffer
                 let offset = sector as usize * 512;
                 for i in 0..256 {
-                    word_buffer[i] = buffer[offset + i * 2] as u16
-                        | ((buffer[offset + i * 2 + 1] as u16) << 8);
+                    word_buffer[i] =
+                        buffer[offset + i * 2] as u16 | ((buffer[offset + i * 2 + 1] as u16) << 8);
                 }
 
                 // Write data
@@ -691,13 +754,13 @@ impl BlockDevice for IdeBlockDevice {
         while remaining > 0 {
             let sectors_to_read = core::cmp::min(remaining, 128) as u8;
             let end_offset = buffer_offset + (sectors_to_read as usize * 512);
-            
+
             IDE_CONTROLLER.read_sectors(
                 self.channel,
                 self.drive,
                 current_lba,
                 sectors_to_read,
-                &mut buffer[buffer_offset..end_offset]
+                &mut buffer[buffer_offset..end_offset],
             )?;
 
             remaining -= sectors_to_read as u32;
@@ -717,13 +780,13 @@ impl BlockDevice for IdeBlockDevice {
         while remaining > 0 {
             let sectors_to_write = core::cmp::min(remaining, 128) as u8;
             let end_offset = buffer_offset + (sectors_to_write as usize * 512);
-            
+
             IDE_CONTROLLER.write_sectors(
                 self.channel,
                 self.drive,
                 current_lba,
                 sectors_to_write,
-                &buffer[buffer_offset..end_offset]
+                &buffer[buffer_offset..end_offset],
             )?;
 
             remaining -= sectors_to_write as u32;

@@ -1,9 +1,9 @@
-use crate::fs::filesystem::{
-    Filesystem, FilesystemError, FilesystemStats, DirectoryEntry, DirectoryIterator,
-    FileHandle, FileMode, FileType, FileAttributes
-};
 use crate::fs::fat::filesystem::FatFilesystem as FatFs;
 use crate::fs::fat::types::{ClusterId, FatType};
+use crate::fs::filesystem::{
+    DirectoryEntry, DirectoryIterator, FileAttributes, FileHandle, FileMode, FileType, Filesystem,
+    FilesystemError, FilesystemStats,
+};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -82,15 +82,15 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
     fn name(&self) -> &str {
         match self.inner.fat_type() {
             FatType::Fat12 => "FAT12",
-            FatType::Fat16 => "FAT16", 
+            FatType::Fat16 => "FAT16",
             FatType::Fat32 => "FAT32",
         }
     }
-    
+
     fn is_read_only(&self) -> bool {
         !self.writable
     }
-    
+
     fn stats(&self) -> Result<FilesystemStats, FilesystemError> {
         // This would require additional methods on FatFilesystem
         // For now, return dummy values
@@ -102,7 +102,7 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
             free_inodes: 0,
         })
     }
-    
+
     fn read_dir(&self, path: &str) -> Result<DirectoryIterator<'_>, FilesystemError> {
         // Validate the path can be resolved as a directory before
         // returning an iterator. The legacy `DirectoryIterator` only
@@ -114,7 +114,10 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
         }
     }
 
-    fn enumerate_dir(&self, path: &str) -> Result<alloc::vec::Vec<DirectoryEntry>, FilesystemError> {
+    fn enumerate_dir(
+        &self,
+        path: &str,
+    ) -> Result<alloc::vec::Vec<DirectoryEntry>, FilesystemError> {
         // Resolve the path to a directory cluster (or root) and then
         // walk the entries via the long-name-aware walker so the
         // returned `DirectoryEntry.name` carries the decoded VFAT LFN
@@ -164,17 +167,21 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
 
         Ok(entries)
     }
-    
+
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError> {
         match self.inner.find_file_with_long_name(path) {
             Ok((fat_file, long_name, long_len)) => {
                 let mut entry = DirectoryEntry {
                     name: [0; 256],
                     name_len: 0,
-                    file_type: if fat_file.is_directory { FileType::Directory } else { FileType::File },
+                    file_type: if fat_file.is_directory {
+                        FileType::Directory
+                    } else {
+                        FileType::File
+                    },
                     size: fat_file.size as u64,
                     attributes: FileAttributes {
-                        read_only: false,  // Would need to parse FAT attributes
+                        read_only: false, // Would need to parse FAT attributes
                         hidden: false,
                         system: false,
                         archive: false,
@@ -191,7 +198,7 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
             Err(_) => Err(FilesystemError::NotFound),
         }
     }
-    
+
     fn open(&self, path: &str, mode: FileMode) -> Result<FileHandle, FilesystemError> {
         // Read-only fast path: no writable intent.
         if !mode.write && !mode.create && !mode.truncate {
@@ -228,12 +235,13 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
                     // tombstone-or-detach before freeing — here we
                     // detach by zeroing the SFN's first_cluster and
                     // size BEFORE freeing the chain.
-                    let (parent, leaf) = self.inner.resolve_parent(path)
-                        .map_err(map_fat_err)?;
+                    let (parent, leaf) = self.inner.resolve_parent(path).map_err(map_fat_err)?;
                     if fh.first_cluster.0 >= 2 {
-                        self.inner.update_sfn_size_and_cluster(parent, leaf, ClusterId(0), 0)
+                        self.inner
+                            .update_sfn_size_and_cluster(parent, leaf, ClusterId(0), 0)
                             .map_err(map_fat_err)?;
-                        self.inner.free_cluster_chain(fh.first_cluster)
+                        self.inner
+                            .free_cluster_chain(fh.first_cluster)
                             .map_err(map_fat_err)?;
                     }
                     (ClusterId(0), 0u64)
@@ -253,12 +261,15 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
         let (parent, leaf) = self.inner.resolve_parent(path).map_err(map_fat_err)?;
         let handle_id = self.alloc_handle_id();
         let mut tbl = self.open_writes.lock();
-        tbl.insert(handle_id, OpenWrite {
-            parent_cluster: parent,
-            leaf: alloc::string::ToString::to_string(leaf),
-            first_cluster,
-            size,
-        });
+        tbl.insert(
+            handle_id,
+            OpenWrite {
+                parent_cluster: parent,
+                leaf: alloc::string::ToString::to_string(leaf),
+                first_cluster,
+                size,
+            },
+        );
         Ok(FileHandle {
             inode: handle_id,
             position: if mode.append { size } else { 0 },
@@ -266,7 +277,7 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
             mode,
         })
     }
-    
+
     fn close(&self, handle: &mut FileHandle) -> Result<(), FilesystemError> {
         if self.is_write_handle(handle.inode) {
             let mut tbl = self.open_writes.lock();
@@ -274,7 +285,7 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
         }
         Ok(())
     }
-    
+
     fn read(&self, handle: &mut FileHandle, buffer: &mut [u8]) -> Result<usize, FilesystemError> {
         if handle.position >= handle.size {
             return Ok(0);
@@ -335,7 +346,7 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
             Err(_) => Err(FilesystemError::IoError),
         }
     }
-    
+
     fn write(&self, handle: &mut FileHandle, buffer: &[u8]) -> Result<usize, FilesystemError> {
         if !self.writable {
             return Err(FilesystemError::ReadOnly);
@@ -348,12 +359,21 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
         let (parent_cluster, leaf, first_cluster_in) = {
             let tbl = self.open_writes.lock();
             let entry = tbl.get(&handle.inode).ok_or(FilesystemError::IoError)?;
-            (entry.parent_cluster, entry.leaf.clone(), entry.first_cluster)
+            (
+                entry.parent_cluster,
+                entry.leaf.clone(),
+                entry.first_cluster,
+            )
         };
         let mut new_first_cluster = first_cluster_in;
         let bytes_written = self
             .inner
-            .write_file_at(first_cluster_in, handle.position, buffer, &mut new_first_cluster)
+            .write_file_at(
+                first_cluster_in,
+                handle.position,
+                buffer,
+                &mut new_first_cluster,
+            )
             .map_err(map_fat_err)?;
         let new_size = (handle.position + bytes_written as u64).max(handle.size);
         // Update the SFN to reflect new size and (possibly new)
@@ -373,16 +393,16 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
         handle.size = new_size;
         Ok(bytes_written)
     }
-    
+
     fn seek(&self, handle: &mut FileHandle, position: u64) -> Result<u64, FilesystemError> {
         if position > handle.size {
             return Err(FilesystemError::InvalidPath);
         }
-        
+
         handle.position = position;
         Ok(position)
     }
-    
+
     fn mkdir(&self, _path: &str) -> Result<(), FilesystemError> {
         // mkdir on FAT is deferred to a follow-up — needs `.`/`..`
         // entry generation and parent-link wiring. Until then,

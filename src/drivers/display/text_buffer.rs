@@ -3,10 +3,10 @@
 //! current default font.
 
 use crate::graphics::color::Color;
+use crate::graphics::fonts::core_font::get_default_font;
 use bootloader_api::info::{FrameBuffer, PixelFormat};
 use core::fmt;
 use spin::Mutex;
-use crate::graphics::fonts::core_font::get_default_font;
 
 const BACKGROUND_COLOR: Color = Color::BLACK;
 
@@ -179,9 +179,14 @@ impl TextBuffer {
         }
 
         let last_row_y = (self.text_rows - 1) * self.line_height;
-        self.fill_rect(0, last_row_y, self.width, self.line_height, BACKGROUND_COLOR);
+        self.fill_rect(
+            0,
+            last_row_y,
+            self.width,
+            self.line_height,
+            BACKGROUND_COLOR,
+        );
     }
-
 }
 
 impl fmt::Write for TextBuffer {
@@ -194,7 +199,6 @@ impl fmt::Write for TextBuffer {
 }
 
 static TEXT_BUFFER: Mutex<Option<TextBuffer>> = Mutex::new(None);
-
 
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;

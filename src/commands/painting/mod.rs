@@ -38,13 +38,9 @@ impl BouncingShape {
         Self {
             x_fixed: x as i64 * FIXED_ONE,
             y_fixed: y as i64 * FIXED_ONE,
-            velocity_x_per_tick: dx_per_frame as i64
-                * INTENDED_FRAMES_PER_SECOND
-                * FIXED_ONE
+            velocity_x_per_tick: dx_per_frame as i64 * INTENDED_FRAMES_PER_SECOND * FIXED_ONE
                 / TIMER_HZ,
-            velocity_y_per_tick: dy_per_frame as i64
-                * INTENDED_FRAMES_PER_SECOND
-                * FIXED_ONE
+            velocity_y_per_tick: dy_per_frame as i64 * INTENDED_FRAMES_PER_SECOND * FIXED_ONE
                 / TIMER_HZ,
             width,
             height,
@@ -178,7 +174,13 @@ impl Window for PaintingCanvasWindow {
 
         // The compositor supplies the clip. Repainting the background and all
         // shapes is therefore correct both for full and incremental frames.
-        device.fill_rect(bounds.x, bounds.y, bounds.width, bounds.height, Color::BLACK);
+        device.fill_rect(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            Color::BLACK,
+        );
         for shape in &shapes {
             device.fill_rect(
                 bounds.x + shape.x(),
@@ -212,7 +214,9 @@ impl PaintingProcess {
 impl RunnableProcess for PaintingProcess {
     fn run(&mut self) {
         let result = window::with_window_manager(|wm| {
-            let desktop_id = wm.get_active_screen().and_then(|screen| screen.root_window)?;
+            let desktop_id = wm
+                .get_active_screen()
+                .and_then(|screen| screen.root_window)?;
 
             let frame_id = wm.create_window(Some(desktop_id));
             let mut frame = FrameWindow::new(frame_id, "Painting");
@@ -322,9 +326,13 @@ fn test_animation_damage_contains_old_and_new_shape_bounds() {
 fn test_animation_damage_accumulates_until_paint() {
     let mut state = PaintingState::new(396, 272);
     state.advance(2);
-    let first = state.pending_dirty.expect("first update should create damage");
+    let first = state
+        .pending_dirty
+        .expect("first update should create damage");
     state.advance(2);
-    let accumulated = state.pending_dirty.expect("second update should retain damage");
+    let accumulated = state
+        .pending_dirty
+        .expect("second update should retain damage");
 
     assert!(rect_contains_rect(accumulated, first));
 }

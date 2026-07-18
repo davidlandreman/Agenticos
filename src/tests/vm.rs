@@ -42,8 +42,7 @@ fn test_protect_splits_and_requires_full_coverage() {
 
 fn test_top_down_gap_search_and_overlap_rejection() {
     let mut set = VmaSet::new();
-    set.insert(anon(0x800000, 0x900000, VmProt::READ))
-        .unwrap();
+    set.insert(anon(0x800000, 0x900000, VmProt::READ)).unwrap();
     assert_eq!(set.find_gap_top_down(0x3000, 0x1000000), Ok(0xffd000));
     assert_eq!(
         set.insert(anon(0x8ff000, 0x901000, VmProt::READ)),
@@ -63,13 +62,7 @@ fn test_reserved_kernel_slots_and_wrap_are_rejected() {
         .unwrap_err(),
         VmError::ReservedRange
     );
-    assert!(Vma::new(
-        u64::MAX & !0xfff,
-        0,
-        VmProt::READ,
-        VmaBacking::Anonymous,
-    )
-    .is_err());
+    assert!(Vma::new(u64::MAX & !0xfff, 0, VmProt::READ, VmaBacking::Anonymous,).is_err());
 }
 
 pub fn get_tests() -> &'static [&'static dyn Testable] {

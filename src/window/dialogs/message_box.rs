@@ -59,8 +59,8 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
 
         // Choose icon color based on type
         let _icon_color = match msg_type {
-            MessageBoxType::Info => Color::new(0, 120, 215),    // Blue
-            MessageBoxType::Error => Color::new(220, 20, 60),   // Crimson
+            MessageBoxType::Info => Color::new(0, 120, 215), // Blue
+            MessageBoxType::Error => Color::new(220, 20, 60), // Crimson
         };
 
         // Padding wraps the root VBox; insets give breathing room.
@@ -162,8 +162,8 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
         crate::process::yield_if_needed();
 
         // Check if window still exists
-        let exists = with_window_manager(|wm| wm.window_registry.contains_key(&frame_id))
-            .unwrap_or(false);
+        let exists =
+            with_window_manager(|wm| wm.window_registry.contains_key(&frame_id)).unwrap_or(false);
 
         if !exists {
             break;
@@ -188,7 +188,6 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
 pub fn show_info(title: &str, message: &str) {
     show_message(title, message, MessageBoxType::Info);
 }
-
 
 /// Show an error message
 pub fn show_error(title: &str, message: &str) {

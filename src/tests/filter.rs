@@ -40,10 +40,7 @@ pub fn init() {
     let trimmed = unsafe {
         let buf = &*core::ptr::addr_of!(FILTER_BUF);
         let slice = &buf[..len];
-        let end = slice
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(slice.len());
+        let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
         let mut e = end;
         while e > 0 && matches!(slice[e - 1], b' ' | b'\t' | b'\r' | b'\n') {
             e -= 1;

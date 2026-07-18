@@ -18,8 +18,7 @@ impl CursorQueue {
     pub fn new(queue: Virtqueue) -> Self {
         Self { queue }
     }
-
-    }
+}
 
 impl ControlQueue {
     pub fn new(queue: Virtqueue) -> Self {

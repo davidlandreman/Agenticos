@@ -164,7 +164,7 @@ impl Surface {
     pub fn pixels(&self) -> &[PremulArgb] {
         &self.pixels
     }
-        #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn damage(&self) -> &[Rect] {
         &self.damage
     }
@@ -200,7 +200,6 @@ impl Surface {
         let start = y as usize * self.desc.width as usize;
         Some(&self.pixels[start..start + self.desc.width as usize])
     }
-
 
     pub fn clear(&mut self, rect: Rect, pixel: PremulArgb) {
         let Some(rect) = self.clip(rect) else {

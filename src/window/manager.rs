@@ -172,7 +172,6 @@ impl WindowManager {
         }
     }
 
-
     // Screen management
 
     /// Create a new screen with the specified mode
@@ -902,15 +901,26 @@ impl WindowManager {
 
         let regions: Vec<Rect> = self.compositor.dirty.dirty_regions().collect();
         let roots = self.collect_layer_roots();
-        let decorated_roots: Vec<(WindowId, Rect)> = roots.iter().map(|(id, bounds)| {
-            let insets = self.window_registry.get(id)
-                .map(|window| window.decoration_insets()).unwrap_or_default();
-            (*id, insets.expand(*bounds))
-        }).collect();
+        let decorated_roots: Vec<(WindowId, Rect)> = roots
+            .iter()
+            .map(|(id, bounds)| {
+                let insets = self
+                    .window_registry
+                    .get(id)
+                    .map(|window| window.decoration_insets())
+                    .unwrap_or_default();
+                (*id, insets.expand(*bounds))
+            })
+            .collect();
         let root_ids: Vec<WindowId> = roots.iter().map(|(id, _)| *id).collect();
         retained.retain_roots(&root_ids);
         let mut compose_regions = regions.clone();
-        let screen_bounds = Rect::new(0, 0, self.graphics_device.width() as u32, self.graphics_device.height() as u32);
+        let screen_bounds = Rect::new(
+            0,
+            0,
+            self.graphics_device.width() as u32,
+            self.graphics_device.height() as u32,
+        );
 
         // Cursor motion is composition/presentation damage, not surface
         // repaint damage. Recompose the old footprint to erase the previous
@@ -939,7 +949,11 @@ impl WindowManager {
                 Self::add_present_region(&mut compose_regions, *bounds, screen_bounds);
             } else if let Some(previous) = previous {
                 if previous != *bounds {
-                    Self::add_present_region(&mut compose_regions, previous.union(bounds), screen_bounds);
+                    Self::add_present_region(
+                        &mut compose_regions,
+                        previous.union(bounds),
+                        screen_bounds,
+                    );
                 }
             }
             let subtree_dirty = self.subtree_needs_repaint(*root, &root_ids);
@@ -987,11 +1001,17 @@ impl WindowManager {
                     (bounds.x, bounds.y),
                     (self.graphics_device.width(), self.graphics_device.height()),
                 );
-                windows_rasterized = windows_rasterized.saturating_add(
-                    self.render_layer_tree_in_region(
-                        *root, repaint, 0, 0, &root_ids, *root, *bounds, &mut canvas,
-                    ) as u64,
-                );
+                windows_rasterized =
+                    windows_rasterized.saturating_add(self.render_layer_tree_in_region(
+                        *root,
+                        repaint,
+                        0,
+                        0,
+                        &root_ids,
+                        *root,
+                        *bounds,
+                        &mut canvas,
+                    ) as u64);
                 surface_pixels_updated = surface_pixels_updated.saturating_add(local.area());
             }
         }
@@ -1142,7 +1162,11 @@ impl WindowManager {
         }
 
         let mut painted = 0;
-        let paint_bounds = if window_id == layer_root { root_paint_bounds } else { bounds };
+        let paint_bounds = if window_id == layer_root {
+            root_paint_bounds
+        } else {
+            bounds
+        };
         if let Some(clip) = paint_bounds.intersection(&region) {
             let original = window.bounds();
             window.set_bounds_no_invalidate(bounds);
@@ -1202,9 +1226,13 @@ impl WindowManager {
         for &rect in damage {
             Self::add_present_region(&mut expanded, rect, screen);
             for layer in &scene.layers {
-                let crate::graphics::scene::LayerEffect::BackdropSample { radius } = layer.effect else { continue };
+                let crate::graphics::scene::LayerEffect::BackdropSample { radius } = layer.effect
+                else {
+                    continue;
+                };
                 let halo = crate::graphics::scene::inflate_rect(rect, radius as u32);
-                if let Some(affected) = halo.intersection(&layer.output_bounds())
+                if let Some(affected) = halo
+                    .intersection(&layer.output_bounds())
                     .and_then(|value| value.intersection(&layer.clip_rect))
                 {
                     Self::add_present_region(&mut expanded, affected, screen);
@@ -1740,7 +1768,8 @@ impl WindowManager {
                         break;
                     } else if local_y >= border && local_y < border + title_height {
                         let local_button = crate::window::theme::close_button_rect(
-                            Rect::new(0, 0, bounds.width, bounds.height), metrics,
+                            Rect::new(0, 0, bounds.width, bounds.height),
+                            metrics,
                         );
                         if local_button.contains_point(Point::new(local_x, local_y)) {
                             target_window = Some(window_id);

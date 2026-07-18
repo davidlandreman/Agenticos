@@ -12,12 +12,10 @@ use spin::Mutex;
 
 use crate::fs::File;
 use crate::process::RunnableProcess;
-use crate::window::dialogs::{show_error, show_info, show_save_dialog};
 use crate::window::dialogs::{open_file_dialog, poll_file_dialog};
+use crate::window::dialogs::{show_error, show_info, show_save_dialog};
 use crate::window::windows::scroll_view::ScrollView;
-use crate::window::windows::{
-    FrameWindow, MenuBar, MenuItemDef, TextEditor, MENU_BAR_HEIGHT,
-};
+use crate::window::windows::{FrameWindow, MenuBar, MenuItemDef, TextEditor, MENU_BAR_HEIGHT};
 use crate::window::{with_window_manager, Rect, Window, WindowId};
 
 /// Unique ID for each notepad instance
@@ -95,9 +93,7 @@ pub struct NotepadProcess {
 
 impl NotepadProcess {
     pub fn new_with_args(args: Vec<String>) -> Self {
-        Self {
-            args,
-        }
+        Self { args }
     }
 }
 
@@ -176,7 +172,11 @@ impl RunnableProcess for NotepadProcess {
                     MenuItemDef::item_with_shortcut("Copy", "Ctrl+C", menu_ids::EDIT_COPY),
                     MenuItemDef::item_with_shortcut("Paste", "Ctrl+V", menu_ids::EDIT_PASTE),
                     MenuItemDef::separator(),
-                    MenuItemDef::item_with_shortcut("Select All", "Ctrl+A", menu_ids::EDIT_SELECT_ALL),
+                    MenuItemDef::item_with_shortcut(
+                        "Select All",
+                        "Ctrl+A",
+                        menu_ids::EDIT_SELECT_ALL
+                    ),
                 ],
             );
 
@@ -211,7 +211,8 @@ impl RunnableProcess for NotepadProcess {
             // the viewport origin; the ScrollView will rewrite this to
             // the full content rect during paint.
             let editor_id = wm.create_window(Some(scroll_id));
-            let editor_local_bounds = Rect::new(0, 0, viewport_bounds.width, viewport_bounds.height);
+            let editor_local_bounds =
+                Rect::new(0, 0, viewport_bounds.width, viewport_bounds.height);
             let mut editor = TextEditor::new_with_id(editor_id, editor_local_bounds);
             editor.set_parent(Some(scroll_id));
             // Seed the ScrollView's content size with the editor's
@@ -292,7 +293,10 @@ impl RunnableProcess for NotepadProcess {
             // Check for pending dialog results
             let pending_dialog = {
                 let states = NOTEPAD_STATES.lock();
-                states.get(&notepad_id).map(|s| s.pending_dialog).unwrap_or(PendingDialog::None)
+                states
+                    .get(&notepad_id)
+                    .map(|s| s.pending_dialog)
+                    .unwrap_or(PendingDialog::None)
             };
 
             if pending_dialog != PendingDialog::None {
@@ -508,7 +512,10 @@ fn load_file(notepad_id: usize, _editor_id: WindowId, path: &str) {
                 crate::println!("Loaded file: {} ({} bytes)", path, content.len());
             }
             Err(e) => {
-                show_error("Error Opening File", &format!("Could not read file: {:?}", e));
+                show_error(
+                    "Error Opening File",
+                    &format!("Could not read file: {:?}", e),
+                );
             }
         },
         Err(e) => {

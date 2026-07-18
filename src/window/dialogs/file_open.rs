@@ -5,12 +5,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::fs::Directory;
 use crate::fs::filesystem::FileType;
+use crate::fs::Directory;
 use crate::graphics::color::Color;
 use crate::window::windows::dialog::{
-    clear_dialog_state, close_dialog_with_result, get_dialog_result, is_dialog_open,
-    set_dialog_state, DialogResult, get_dialog_id,
+    clear_dialog_state, close_dialog_with_result, get_dialog_id, get_dialog_result, is_dialog_open,
+    set_dialog_state, DialogResult,
 };
 use crate::window::windows::{
     Button, Column, ContainerWindow, FrameWindow, HBox, Label, MultiColumnList, Padding, SizeHint,
@@ -229,8 +229,8 @@ pub fn poll_file_dialog() -> Option<Option<String>> {
         // Check if the dialog window still exists
         let dialog_id = get_dialog_id();
         if let Some(id) = dialog_id {
-            let exists = with_window_manager(|wm| wm.window_registry.contains_key(&id))
-                .unwrap_or(false);
+            let exists =
+                with_window_manager(|wm| wm.window_registry.contains_key(&id)).unwrap_or(false);
             if !exists {
                 // Window was closed (e.g., by close button)
                 close_dialog_with_result(DialogResult::Cancel);
@@ -261,7 +261,6 @@ pub fn poll_file_dialog() -> Option<Option<String>> {
         _ => Some(None),
     }
 }
-
 
 /// Get list of files from a directory
 fn get_file_list(path: &str) -> Vec<(String, String, String)> {

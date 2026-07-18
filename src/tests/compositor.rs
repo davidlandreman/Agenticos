@@ -117,7 +117,10 @@ fn test_many_rects_above_threshold_trip_full_repaint() {
     for i in 0..11 {
         mgr.mark_dirty(Rect::new(0, (i * stripe_h) as i32, W, stripe_h));
     }
-    assert!(mgr.needs_full_repaint(), "11 non-overlapping stripes (~91% area) should trip threshold");
+    assert!(
+        mgr.needs_full_repaint(),
+        "11 non-overlapping stripes (~91% area) should trip threshold"
+    );
 }
 
 fn test_bounding_box_agrees_with_iterator_partial() {
@@ -125,7 +128,9 @@ fn test_bounding_box_agrees_with_iterator_partial() {
     mgr.clear();
     mgr.mark_dirty(Rect::new(10, 20, 30, 40));
     mgr.mark_dirty(Rect::new(200, 100, 50, 50));
-    let bbox = mgr.bounding_box().expect("partial dirty should have a bbox");
+    let bbox = mgr
+        .bounding_box()
+        .expect("partial dirty should have a bbox");
     // bbox encloses both rects: x in [10, 250), y in [20, 150)
     assert_eq!(bbox, Rect::new(10, 20, 240, 130));
     let rects = collect_dirty(&mgr);

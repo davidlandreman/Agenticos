@@ -88,7 +88,10 @@ mod tests_internal {
     }
 
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
-        &[&test_every_gui_applet_dispatches, &test_unknown_name_is_enoent]
+        &[
+            &test_every_gui_applet_dispatches,
+            &test_unknown_name_is_enoent,
+        ]
     }
 }
 

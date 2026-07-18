@@ -8,9 +8,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use super::pcb::{ProcessControlBlock, ProcessState, BlockReason, WakeEvents};
-use super::process::ProcessId;
 use super::context::CpuContext;
+use super::pcb::{BlockReason, ProcessControlBlock, ProcessState, WakeEvents};
+use super::process::ProcessId;
 use super::stack::free_stack;
 
 /// Default time slice in timer ticks
@@ -116,7 +116,11 @@ impl Scheduler {
         // Initialize activity tick so watchdog doesn't immediately kill new processes
         pcb.last_activity_tick = crate::arch::x86_64::interrupts::get_timer_ticks();
 
-        crate::debug_info!("Scheduler: Spawning process '{}' with PID {:?}", pcb.name, pid);
+        crate::debug_info!(
+            "Scheduler: Spawning process '{}' with PID {:?}",
+            pcb.name,
+            pid
+        );
 
         self.processes.insert(pid, pcb);
         self.ready_queue.push_back(pid);
@@ -217,7 +221,11 @@ impl Scheduler {
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 pcb.state = ProcessState::Blocked;
                 pcb.block_reason = Some(reason);
-                crate::debug_info!("Scheduler: Blocked process {:?} for {:?}", current_pid, reason);
+                crate::debug_info!(
+                    "Scheduler: Blocked process {:?} for {:?}",
+                    current_pid,
+                    reason
+                );
             }
             // Clear current - schedule will pick next
             self.current = None;
@@ -397,7 +405,8 @@ impl Scheduler {
     ///
     /// Returns lightweight ProcessInfo structs suitable for a task manager UI.
     pub fn get_process_list(&self) -> Vec<ProcessInfo> {
-        self.processes.values()
+        self.processes
+            .values()
             .map(|pcb| ProcessInfo {
                 pid: pcb.pid,
                 name: pcb.name.clone(),
@@ -450,7 +459,11 @@ impl Scheduler {
                 pcb.wake_at_tick = Some(wake_tick);
                 pcb.wake_events = WakeEvents::TIMER;
 
-                crate::debug_trace!("Scheduler: Process {:?} sleeping until tick {}", pid, wake_tick);
+                crate::debug_trace!(
+                    "Scheduler: Process {:?} sleeping until tick {}",
+                    pid,
+                    wake_tick
+                );
             }
 
             // Add to sleep queue
@@ -469,7 +482,8 @@ impl Scheduler {
     /// * `current_tick` - The current timer tick count
     pub fn check_sleep_queue(&mut self, current_tick: u64) {
         // Collect expired entries (wake_tick <= current_tick)
-        let expired_ticks: Vec<u64> = self.sleep_queue
+        let expired_ticks: Vec<u64> = self
+            .sleep_queue
             .range(..=current_tick)
             .map(|(tick, _)| *tick)
             .collect();
@@ -529,5 +543,4 @@ impl Scheduler {
 
         self.wake_from_sleep(pid, signal);
     }
-
 }

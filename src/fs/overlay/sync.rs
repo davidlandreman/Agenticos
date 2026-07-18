@@ -67,7 +67,11 @@ fn crc32_ieee(data: &[u8]) -> u32 {
         for i in 0..256u32 {
             let mut c = i;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB88320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             t[i as usize] = c;
         }
@@ -173,8 +177,7 @@ pub fn serialize_upper(upper: &Tmpfs) -> Vec<u8> {
     }
     let crc = crc32_ieee(&inner);
 
-    let mut out: Vec<u8> =
-        Vec::with_capacity(MAGIC.len() + 1 + 4 + inner.len());
+    let mut out: Vec<u8> = Vec::with_capacity(MAGIC.len() + 1 + 4 + inner.len());
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
     out.extend_from_slice(&crc.to_le_bytes());
@@ -228,7 +231,9 @@ pub fn deserialize_blob(blob: &[u8]) -> Result<Vec<Entry>, &'static str> {
                 if p + 4 > inner.len() {
                     return Err("truncated data_len");
                 }
-                let data_len = u32::from_le_bytes([inner[p], inner[p + 1], inner[p + 2], inner[p + 3]]) as usize;
+                let data_len =
+                    u32::from_le_bytes([inner[p], inner[p + 1], inner[p + 2], inner[p + 3]])
+                        as usize;
                 p += 4;
                 if p + data_len > inner.len() {
                     return Err("truncated data");
@@ -255,22 +260,29 @@ fn read_pointer() -> u8 {
         Ok(f) => {
             let mut buf = [0u8; 1];
             let _ = f.read(&mut buf);
-            if buf[0] == b'1' { 1 } else { 0 }
+            if buf[0] == b'1' {
+                1
+            } else {
+                0
+            }
         }
         Err(_) => 0,
     }
 }
 
 fn write_pointer(slot: u8) -> Result<(), FilesystemError> {
-    let f = crate::fs::File::create(PTR_PATH)
-        .map_err(|_| FilesystemError::IoError)?;
+    let f = crate::fs::File::create(PTR_PATH).map_err(|_| FilesystemError::IoError)?;
     let byte = if slot == 1 { b"1" } else { b"0" };
     f.write(byte).map_err(|_| FilesystemError::IoError)?;
     Ok(())
 }
 
 fn slot_path(slot: u8) -> &'static str {
-    if slot == 1 { SLOT1_PATH } else { SLOT0_PATH }
+    if slot == 1 {
+        SLOT1_PATH
+    } else {
+        SLOT0_PATH
+    }
 }
 
 /// Flush the overlay's upper-layer tmpfs to `/data`. Writes to the
@@ -285,7 +297,9 @@ pub fn flush_upper_to_disk(upper: &Tmpfs) -> Result<(), FilesystemError> {
     let f = crate::fs::File::create(path).map_err(|_| FilesystemError::IoError)?;
     let mut written = 0;
     while written < blob.len() {
-        let n = f.write(&blob[written..]).map_err(|_| FilesystemError::IoError)?;
+        let n = f
+            .write(&blob[written..])
+            .map_err(|_| FilesystemError::IoError)?;
         if n == 0 {
             return Err(FilesystemError::DiskFull);
         }

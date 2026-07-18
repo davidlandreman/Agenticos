@@ -76,7 +76,7 @@ fn main() {
         let assets_dir = manifest_dir.join("assets");
         if assets_dir.exists() {
             eprintln!("Adding assets to disk image...");
-            
+
             // Read the assets directory and add each file
             if let Ok(entries) = std::fs::read_dir(&assets_dir) {
                 for entry in entries.flatten() {
@@ -85,7 +85,7 @@ fn main() {
                             let file_name = entry.file_name().to_string_lossy().to_string();
                             let source_path = entry.path();
                             let dest_path = format!("/{file_name}");
-                            
+
                             eprintln!("  Adding {dest_path}");
                             builder.set_file(dest_path.clone(), source_path);
                         }
@@ -93,14 +93,14 @@ fn main() {
                 }
             }
         }
-        
+
         // create a BIOS disk image
         let bios_path = out_dir.join("bios.img");
         builder.create_bios_image(&bios_path).unwrap();
-        
+
         // Create a new builder for UEFI (builders are consumed on use)
         let mut uefi_builder = bootloader::DiskImageBuilder::new(kernel);
-        
+
         // Add assets to UEFI image too
         if assets_dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&assets_dir) {
@@ -110,14 +110,14 @@ fn main() {
                             let file_name = entry.file_name().to_string_lossy().to_string();
                             let source_path = entry.path();
                             let dest_path = format!("/assets/{file_name}");
-                            
+
                             uefi_builder.set_file(dest_path, source_path);
                         }
                     }
                 }
             }
         }
-        
+
         // create a UEFI disk image
         let uefi_path = out_dir.join("uefi.img");
         uefi_builder.create_uefi_image(&uefi_path).unwrap();

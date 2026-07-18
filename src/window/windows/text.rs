@@ -1,11 +1,11 @@
 //! Text window for grid-based text rendering
 
-use alloc::{vec, vec::Vec};
-use alloc::string::ToString;
-use crate::window::{Window, Rect, Event, EventResult, GraphicsDevice};
+use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
-use super::base::WindowBase;
+use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window};
+use alloc::string::ToString;
+use alloc::{vec, vec::Vec};
 
 /// A character cell in the text grid
 #[derive(Clone, Copy)]
@@ -58,7 +58,11 @@ impl TextWindow {
     pub fn process_console_output(&mut self) {
         let (lines, pending) = crate::window::console::take_output();
         if !lines.is_empty() || !pending.is_empty() {
-            crate::debug_info!("TextWindow: Processing {} lines and pending: '{}'", lines.len(), pending);
+            crate::debug_info!(
+                "TextWindow: Processing {} lines and pending: '{}'",
+                lines.len(),
+                pending
+            );
 
             // Suppress invalidation during console output processing
             // This prevents re-invalidation during paint
@@ -80,7 +84,7 @@ impl TextWindow {
             // The dirty_cells tracking will handle what needs updating
         }
     }
-    
+
     /// Create a new text window with a specific ID
     pub fn new_with_id(id: crate::window::WindowId, bounds: Rect) -> Self {
         let font = get_default_font();
@@ -124,17 +128,17 @@ impl TextWindow {
     /// Write a character at the cursor position
     pub fn write_char(&mut self, ch: char) {
         crate::debug_trace!("TextWindow::write_char called with '{}'", ch);
-        
+
         if ch == '\n' {
             self.newline();
             return;
         }
-        
+
         if ch == '\r' {
             self.cursor_x = 0;
             return;
         }
-        
+
         if self.cursor_x < self.cols && self.cursor_y < self.rows {
             crate::debug_trace!("Writing '{}' at ({}, {})", ch, self.cursor_x, self.cursor_y);
             self.buffer[self.cursor_y][self.cursor_x] = CharCell {
@@ -142,7 +146,7 @@ impl TextWindow {
                 fg_color: self.current_fg,
                 bg_color: self.current_bg,
             };
-            
+
             // Track this cell as dirty for incremental updates
             if self.incremental_updates {
                 self.dirty_cells.push((self.cursor_x, self.cursor_y));
@@ -153,7 +157,7 @@ impl TextWindow {
                     self.dirty_cells.clear();
                 }
             }
-            
+
             self.cursor_x += 1;
 
             if self.cursor_x >= self.cols {
@@ -166,30 +170,35 @@ impl TextWindow {
                 crate::debug_trace!("Window invalidated after write_char");
             }
         } else {
-            crate::debug_warn!("Cursor out of bounds: ({}, {}) max: ({}, {})", 
-                self.cursor_x, self.cursor_y, self.cols, self.rows);
+            crate::debug_warn!(
+                "Cursor out of bounds: ({}, {}) max: ({}, {})",
+                self.cursor_x,
+                self.cursor_y,
+                self.cols,
+                self.rows
+            );
         }
     }
-    
+
     /// Write a string at the cursor position
     pub fn write_str(&mut self, s: &str) {
         for ch in s.chars() {
             self.write_char(ch);
         }
     }
-    
+
     /// Move to a new line
     pub fn newline(&mut self) {
         self.cursor_x = 0;
         self.cursor_y += 1;
-        
+
         if self.cursor_y >= self.rows {
             // Scroll up
             self.scroll_up();
             self.cursor_y = self.rows - 1;
         }
     }
-    
+
     /// Scroll the buffer up by one line
     fn scroll_up(&mut self) {
         // Remove first line and add empty line at bottom
@@ -202,7 +211,7 @@ impl TextWindow {
             self.base.invalidate();
         }
     }
-    
+
     /// Clear the text window
 
     /// Grid dimensions in cells: `Some((rows, cols))`. Returned as
@@ -241,12 +250,12 @@ impl TextWindow {
             self.base.invalidate();
         }
     }
-    
+
     /// Get current cursor position
     pub fn cursor_position(&self) -> (usize, usize) {
         (self.cursor_x, self.cursor_y)
     }
-    
+
     /// Set cursor position
     pub fn set_cursor_position(&mut self, x: usize, y: usize) {
         if x < self.cols && y < self.rows {
@@ -257,8 +266,7 @@ impl TextWindow {
             }
         }
     }
-    
-    }
+}
 
 impl Window for TextWindow {
     fn base(&self) -> &WindowBase {
@@ -283,7 +291,11 @@ impl Window for TextWindow {
 
         // Only reallocate if dimensions actually changed
         let old_rows = self.buffer.len();
-        let old_cols = if old_rows > 0 { self.buffer[0].len() } else { 0 };
+        let old_cols = if old_rows > 0 {
+            self.buffer[0].len()
+        } else {
+            0
+        };
 
         if new_rows != old_rows || new_cols != old_cols {
             // Create new buffer and preserve existing content
@@ -320,21 +332,30 @@ impl Window for TextWindow {
         if !self.visible() {
             return;
         }
-        
+
         crate::debug_trace!("TextWindow::paint - bounds: {:?}", self.bounds());
-        crate::debug_trace!("TextWindow buffer size: {}x{}, cursor at ({}, {})", 
-            self.cols, self.rows, self.cursor_x, self.cursor_y);
-        
+        crate::debug_trace!(
+            "TextWindow buffer size: {}x{}, cursor at ({}, {})",
+            self.cols,
+            self.rows,
+            self.cursor_x,
+            self.cursor_y
+        );
+
         // REMOVED: Console output processing - this should be done elsewhere,
         // not on every paint! This was causing the prompt to be reprinted
         // every time the window was painted.
-        
+
         let bounds = self.bounds();
         let font = get_default_font();
-        
+
         // Check if we can do incremental update
-        crate::debug_trace!("TextWindow paint: incremental_updates={}, dirty_cells={}, needs_repaint={}",
-            self.incremental_updates, self.dirty_cells.len(), self.base.needs_repaint());
+        crate::debug_trace!(
+            "TextWindow paint: incremental_updates={}, dirty_cells={}, needs_repaint={}",
+            self.incremental_updates,
+            self.dirty_cells.len(),
+            self.base.needs_repaint()
+        );
 
         // Choose paint mode. The Window::paint contract requires us to
         // produce correct pixels for everything in the device's clip.
@@ -351,12 +372,14 @@ impl Window for TextWindow {
         // there can be narrower than our bounds and contain pixels that
         // were just overwritten by the desktop, so only a full repaint
         // produces correct output.
-        let can_incremental = self.incremental_updates
-            && self.base.needs_repaint()
-            && !self.dirty_cells.is_empty();
+        let can_incremental =
+            self.incremental_updates && self.base.needs_repaint() && !self.dirty_cells.is_empty();
 
         if can_incremental {
-            crate::debug_info!("TextWindow: Incremental update for {} dirty cells", self.dirty_cells.len());
+            crate::debug_info!(
+                "TextWindow: Incremental update for {} dirty cells",
+                self.dirty_cells.len()
+            );
 
             // Compute the bounding cell range covered by the changes
             // (and the cursor cell when focused). This is the same range
@@ -418,7 +441,13 @@ impl Window for TextWindow {
                         }
 
                         if cell.ch != ' ' {
-                            device.draw_text(x, y, &cell.ch.to_string(), font.as_font(), cell.fg_color);
+                            device.draw_text(
+                                x,
+                                y,
+                                &cell.ch.to_string(),
+                                font.as_font(),
+                                cell.fg_color,
+                            );
                         }
                     }
                 }
@@ -483,9 +512,16 @@ impl Window for TextWindow {
                 // Draw character
                 if cell.ch != ' ' {
                     char_count += 1;
-                    if row < 15 {  // Log more chars for debugging
-                        crate::debug_trace!("Drawing '{}' at screen ({}, {}) buffer ({}, {})",
-                            cell.ch, x, y, col, row);
+                    if row < 15 {
+                        // Log more chars for debugging
+                        crate::debug_trace!(
+                            "Drawing '{}' at screen ({}, {}) buffer ({}, {})",
+                            cell.ch,
+                            x,
+                            y,
+                            col,
+                            row
+                        );
                     }
                     device.draw_text(x, y, &cell.ch.to_string(), font.as_font(), cell.fg_color);
                 }

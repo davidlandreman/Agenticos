@@ -360,9 +360,9 @@ extern "x86-interrupt" fn page_fault_handler(
         debug_trace!("Page fault in {} region at {:?}", region, accessed_addr);
 
         // Try to handle the page fault
-        if let Some(result) = crate::mm::memory::with_memory_mapper(|mapper| {
-            mapper.handle_page_fault(accessed_addr)
-        }) {
+        if let Some(result) =
+            crate::mm::memory::with_memory_mapper(|mapper| mapper.handle_page_fault(accessed_addr))
+        {
             if let Err(e) = result {
                 debug_error!("Failed to handle page fault: {:?}", e);
                 panic!("Failed to allocate memory for {}", region);

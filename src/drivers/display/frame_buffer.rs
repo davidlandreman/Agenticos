@@ -1,7 +1,7 @@
+use crate::graphics::color::Color;
 use bootloader_api::info::{FrameBuffer, PixelFormat};
 use core::fmt;
 use core::ptr;
-use crate::graphics::color::Color;
 
 pub struct FrameBufferWriter {
     framebuffer: &'static mut FrameBuffer,
@@ -15,7 +15,6 @@ const CHAR_HEIGHT: usize = 16;
 const LINE_SPACING: usize = 2;
 
 impl FrameBufferWriter {
-
     /// Owned snapshot of the framebuffer's current bytes plus metadata.
     /// In direct mode this is uncached MMIO; expect it to be slower than
     /// reading from DRAM. The caller (typically `screenshot`) should drop
@@ -23,7 +22,7 @@ impl FrameBufferWriter {
 
     pub fn new(framebuffer: &'static mut FrameBuffer) -> Self {
         use crate::debug_debug;
-        
+
         debug_debug!("Creating new FrameBufferWriter...");
         let mut writer = Self {
             framebuffer,
@@ -42,7 +41,7 @@ impl FrameBufferWriter {
         self.x_pos = 0;
         self.y_pos = 0;
     }
-    
+
     pub fn get_pixel(&self, x: usize, y: usize) -> Color {
         if x >= self.width() || y >= self.height() {
             return Color::BLACK;
@@ -55,27 +54,21 @@ impl FrameBufferWriter {
         let pixel_buffer = self.framebuffer.buffer();
 
         match info.pixel_format {
-            PixelFormat::Rgb => {
-                Color::new(
-                    pixel_buffer[pixel_offset],
-                    pixel_buffer[pixel_offset + 1],
-                    pixel_buffer[pixel_offset + 2],
-                )
-            }
-            PixelFormat::Bgr => {
-                Color::new(
-                    pixel_buffer[pixel_offset + 2],
-                    pixel_buffer[pixel_offset + 1],
-                    pixel_buffer[pixel_offset],
-                )
-            }
-            _ => {
-                Color::new(
-                    pixel_buffer[pixel_offset + 2],
-                    pixel_buffer[pixel_offset + 1],
-                    pixel_buffer[pixel_offset],
-                )
-            }
+            PixelFormat::Rgb => Color::new(
+                pixel_buffer[pixel_offset],
+                pixel_buffer[pixel_offset + 1],
+                pixel_buffer[pixel_offset + 2],
+            ),
+            PixelFormat::Bgr => Color::new(
+                pixel_buffer[pixel_offset + 2],
+                pixel_buffer[pixel_offset + 1],
+                pixel_buffer[pixel_offset],
+            ),
+            _ => Color::new(
+                pixel_buffer[pixel_offset + 2],
+                pixel_buffer[pixel_offset + 1],
+                pixel_buffer[pixel_offset],
+            ),
         }
     }
 
@@ -86,7 +79,6 @@ impl FrameBufferWriter {
     pub fn height(&self) -> usize {
         self.framebuffer.info().height
     }
-
 
     pub fn draw_pixel(&mut self, x: usize, y: usize, color: Color) {
         if x >= self.width() || y >= self.height() {
@@ -131,7 +123,7 @@ impl FrameBufferWriter {
             let char_index = ch as usize;
             if char_index < 128 {
                 let char_data = &FONT_8X16[char_index * 16..][..16];
-                
+
                 for (row, &byte) in char_data.iter().enumerate() {
                     for col in 0..8 {
                         if (byte >> (7 - col)) & 1 == 1 {
@@ -179,24 +171,26 @@ impl FrameBufferWriter {
         let stride = info.stride;
         let scroll_height = CHAR_HEIGHT + LINE_SPACING;
         let height = info.height;
-        
+
         let copy_height = height - scroll_height;
         let copy_size = copy_height * stride * bytes_per_pixel;
-        
+
         let buffer = self.framebuffer.buffer_mut();
-        
+
         unsafe {
             ptr::copy(
-                buffer.as_ptr().add(scroll_height * stride * bytes_per_pixel),
+                buffer
+                    .as_ptr()
+                    .add(scroll_height * stride * bytes_per_pixel),
                 buffer.as_mut_ptr(),
                 copy_size,
             );
         }
-        
+
         let clear_start = copy_height * stride * bytes_per_pixel;
         let clear_size = scroll_height * stride * bytes_per_pixel;
         buffer[clear_start..clear_start + clear_size].fill(0);
-        
+
         self.y_pos -= scroll_height;
     }
 }

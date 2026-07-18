@@ -29,10 +29,7 @@ pub struct ToolResult {
 
 impl ToolResult {
     pub fn json_only(json: String) -> Self {
-        ToolResult {
-            json,
-            binary: None,
-        }
+        ToolResult { json, binary: None }
     }
 
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]

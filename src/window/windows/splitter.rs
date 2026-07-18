@@ -182,22 +182,12 @@ impl Splitter {
         match self.orientation {
             SplitterOrientation::Vertical => {
                 let first = Rect::new(b.x, b.y, pos, b.height);
-                let second = Rect::new(
-                    b.x + pos as i32 + strip as i32,
-                    b.y,
-                    second_size,
-                    b.height,
-                );
+                let second = Rect::new(b.x + pos as i32 + strip as i32, b.y, second_size, b.height);
                 (first, second)
             }
             SplitterOrientation::Horizontal => {
                 let first = Rect::new(b.x, b.y, b.width, pos);
-                let second = Rect::new(
-                    b.x,
-                    b.y + pos as i32 + strip as i32,
-                    b.width,
-                    second_size,
-                );
+                let second = Rect::new(b.x, b.y + pos as i32 + strip as i32, b.width, second_size);
                 (first, second)
             }
         }
@@ -221,7 +211,9 @@ impl Splitter {
             return;
         }
         let lo = self.first_min;
-        let hi = total.saturating_sub(self.second_min).saturating_sub(DIVIDER_WIDTH);
+        let hi = total
+            .saturating_sub(self.second_min)
+            .saturating_sub(DIVIDER_WIDTH);
         if self.divider_position < lo {
             self.divider_position = lo;
         } else if self.divider_position > hi {
@@ -361,10 +353,7 @@ impl Window for Splitter {
                     // `MouseEvent::position` in the event module and the
                     // way `route_mouse_event` translates it. Use that
                     // directly for the divider hit-test.
-                    if self.local_point_on_divider(
-                        mouse_event.position.x,
-                        mouse_event.position.y,
-                    ) {
+                    if self.local_point_on_divider(mouse_event.position.x, mouse_event.position.y) {
                         self.pressed = true;
                         EventResult::Handled
                     } else {
@@ -373,10 +362,7 @@ impl Window for Splitter {
                 }
                 MouseEventType::Move => {
                     if self.pressed {
-                        self.move_divider_to(
-                            mouse_event.position.x,
-                            mouse_event.position.y,
-                        );
+                        self.move_divider_to(mouse_event.position.x, mouse_event.position.y);
                         EventResult::Handled
                     } else {
                         EventResult::Propagate

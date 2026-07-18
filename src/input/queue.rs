@@ -132,7 +132,6 @@ impl InputQueue {
 
         Some(event)
     }
-
 }
 
 // SAFETY: InputQueue uses atomic operations for all shared state

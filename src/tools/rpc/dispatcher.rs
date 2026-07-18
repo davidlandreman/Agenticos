@@ -11,8 +11,8 @@ use serde::Deserialize;
 
 use crate::debug_warn;
 use crate::drivers::serial;
-use crate::tools::{registry, ToolError, ToolResult};
 use crate::tools::rpc::framing::{read_frame, write_frame, FrameError};
+use crate::tools::{registry, ToolError, ToolResult};
 
 #[derive(Deserialize)]
 struct RpcRequest<'a> {
@@ -58,7 +58,12 @@ fn handle_frame(com: &serial::Com2, header_bytes: &[u8]) {
     let req: RpcRequest = match serde_json::from_slice(header_bytes) {
         Ok(r) => r,
         Err(e) => {
-            write_err(com, None, "bad_request", &format!("malformed header: {}", e));
+            write_err(
+                com,
+                None,
+                "bad_request",
+                &format!("malformed header: {}", e),
+            );
             return;
         }
     };
@@ -74,15 +79,17 @@ fn handle_frame(com: &serial::Com2, header_bytes: &[u8]) {
 
     // Resolve args to a JSON string the tool can parse. RawValue gives us
     // verbatim bytes; default to "{}" when absent.
-    let args_json: &str = req
-        .args
-        .map(|raw| raw.get())
-        .unwrap_or("{}");
+    let args_json: &str = req.args.map(|raw| raw.get()).unwrap_or("{}");
 
     let reg = match registry() {
         Some(r) => r,
         None => {
-            write_err(com, id, "registry_uninitialized", "tool registry not initialized");
+            write_err(
+                com,
+                id,
+                "registry_uninitialized",
+                "tool registry not initialized",
+            );
             return;
         }
     };

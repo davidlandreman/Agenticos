@@ -11,15 +11,15 @@
 //! becomes selected and `on_right_click(row_index, global_position)` is
 //! invoked, matching the prior contract.
 
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
+use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
 use crate::window::event::MouseEventType;
 use crate::window::selection::{ArrowDirection, ClickMods, Selection, SelectionMode};
 use crate::window::{Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId};
-use super::base::WindowBase;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Callback invoked when the user changes the selection.
 pub type MultiColumnSelectionCallback = Box<dyn FnMut(&Selection) + Send>;
@@ -246,7 +246,8 @@ impl MultiColumnList {
             return;
         }
         let before = self.selection.clone();
-        self.selection.arrow(direction, self.rows.len(), mods, self.selection_mode);
+        self.selection
+            .arrow(direction, self.rows.len(), mods, self.selection_mode);
         if before != self.selection {
             self.base.invalidate();
             if let Some(ref mut callback) = self.on_select {
@@ -295,7 +296,13 @@ impl Window for MultiColumnList {
         let padding: i32 = 4;
 
         // Draw header row
-        device.fill_rect(x + 1, y + 1, width.saturating_sub(2), self.header_height as u32, self.header_bg_color);
+        device.fill_rect(
+            x + 1,
+            y + 1,
+            width.saturating_sub(2),
+            self.header_height as u32,
+            self.header_bg_color,
+        );
 
         let mut col_x = x + 1;
         for column in &self.columns {
@@ -318,7 +325,13 @@ impl Window for MultiColumnList {
 
         // Draw separator line below header
         let header_bottom = y + header_h;
-        device.draw_line(x + 1, header_bottom, x + width as i32 - 2, header_bottom, Color::GRAY);
+        device.draw_line(
+            x + 1,
+            header_bottom,
+            x + width as i32 - 2,
+            header_bottom,
+            Color::GRAY,
+        );
 
         // Draw all data rows. When embedded in ScrollView, the active clip
         // rect limits visible pixels.
@@ -388,7 +401,8 @@ impl Window for MultiColumnList {
                         if let Some(index) = self.y_to_row_index(mouse_event.position.y) {
                             crate::debug_info!(
                                 "MultiColumnList: hit row index={}, on_activate present={}",
-                                index, self.on_activate.is_some()
+                                index,
+                                self.on_activate.is_some()
                             );
                             let was_selected = self.selection.is_selected(index);
                             let mods = ClickMods::new(
@@ -403,13 +417,11 @@ impl Window for MultiColumnList {
                             //      row (matches "single-click open" mode).
                             // Modifier-driven toggles (ctrl-click) skip
                             // activation in both branches.
-                            let now =
-                                crate::arch::x86_64::interrupts::get_timer_ticks();
+                            let now = crate::arch::x86_64::interrupts::get_timer_ticks();
                             let is_double_click = self.last_click_row == Some(index)
                                 && now.saturating_sub(self.last_click_tick) < 50;
                             let still_selected = self.selection.is_selected(index);
-                            let activate_via_reclick =
-                                was_selected && still_selected;
+                            let activate_via_reclick = was_selected && still_selected;
                             crate::debug_info!(
                                 "MultiColumnList: was_selected={} still_selected={} double_click={} reclick={}",
                                 was_selected, still_selected, is_double_click, activate_via_reclick

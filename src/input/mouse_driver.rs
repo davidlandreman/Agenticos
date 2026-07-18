@@ -163,8 +163,7 @@ impl MouseDriver {
             None
         }
     }
-
-    }
+}
 
 impl Default for MouseDriver {
     fn default() -> Self {

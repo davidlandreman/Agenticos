@@ -37,7 +37,11 @@ fn test_measure_text_sums_advances() {
     for ch in "hello".chars() {
         sum += font.glyph(ch).map(|g| g.advance).unwrap_or(cell_w);
     }
-    assert_eq!(sum, 5 * cell_w, "5 monospace chars must sum to 5 * cell_width");
+    assert_eq!(
+        sum,
+        5 * cell_w,
+        "5 monospace chars must sum to 5 * cell_width"
+    );
 }
 
 fn test_glyph_coverage_has_antialiasing() {
@@ -58,8 +62,14 @@ fn test_glyph_coverage_has_antialiasing() {
             any_partial = true;
         }
     }
-    assert!(any_opaque, "'A' has no fully-opaque pixels — rasterizer broken?");
-    assert!(any_partial, "'A' has no partial-coverage pixels — AA disabled?");
+    assert!(
+        any_opaque,
+        "'A' has no fully-opaque pixels — rasterizer broken?"
+    );
+    assert!(
+        any_partial,
+        "'A' has no partial-coverage pixels — AA disabled?"
+    );
 }
 
 fn test_embedded_fallback_has_full_ascii() {

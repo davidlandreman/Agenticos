@@ -1,4 +1,4 @@
-use crate::fs::fat::types::{FatType, FatError};
+use crate::fs::fat::types::{FatError, FatType};
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
@@ -59,52 +59,52 @@ pub struct BootSector {
 
 impl BootSector {
     pub const BOOT_SIGNATURE: u16 = 0xAA55;
-    
+
     pub fn from_bytes(data: &[u8; 512]) -> Result<&Self, FatError> {
         let boot_sector = unsafe { &*(data.as_ptr() as *const Self) };
-        
+
         if boot_sector.boot_signature != Self::BOOT_SIGNATURE {
             return Err(FatError::InvalidBootSector);
         }
-        
+
         Ok(boot_sector)
     }
-    
+
     pub fn fat_type(&self) -> Result<FatType, FatError> {
         // Validate basic parameters
         if self.bpb.bytes_per_sector == 0 || self.bpb.sectors_per_cluster == 0 {
             return Err(FatError::InvalidBootSector);
         }
-        
-        let root_dir_sectors = ((self.bpb.root_entries as u32 * 32) 
-            + (self.bpb.bytes_per_sector as u32 - 1)) 
+
+        let root_dir_sectors = ((self.bpb.root_entries as u32 * 32)
+            + (self.bpb.bytes_per_sector as u32 - 1))
             / self.bpb.bytes_per_sector as u32;
-            
+
         let fat_sectors = if self.bpb.sectors_per_fat_16 != 0 {
             self.bpb.sectors_per_fat_16 as u32
         } else {
             self.fat32_ext().sectors_per_fat_32
         };
-        
+
         let total_sectors = if self.bpb.total_sectors_16 != 0 {
             self.bpb.total_sectors_16 as u32
         } else {
             self.bpb.total_sectors_32
         };
-        
+
         let overhead_sectors = self.bpb.reserved_sectors as u32
             + (self.bpb.num_fats as u32 * fat_sectors)
             + root_dir_sectors;
-            
+
         // Check for invalid FAT filesystem (overhead exceeds total sectors)
         if overhead_sectors >= total_sectors {
             return Err(FatError::InvalidBootSector);
         }
-        
+
         let data_sectors = total_sectors - overhead_sectors;
-                
+
         let count_of_clusters = data_sectors / self.bpb.sectors_per_cluster as u32;
-        
+
         if count_of_clusters < 4085 {
             Ok(FatType::Fat12)
         } else if count_of_clusters < 65525 {
@@ -113,32 +113,29 @@ impl BootSector {
             Ok(FatType::Fat32)
         }
     }
-    
 
     pub fn fat32_ext(&self) -> &Fat32ExtBootRecord {
         unsafe { &*(self.fat_specific.as_ptr() as *const Fat32ExtBootRecord) }
     }
-    
+
     pub fn first_data_sector(&self) -> u32 {
-        let root_dir_sectors = ((self.bpb.root_entries as u32 * 32) 
-            + (self.bpb.bytes_per_sector as u32 - 1)) 
+        let root_dir_sectors = ((self.bpb.root_entries as u32 * 32)
+            + (self.bpb.bytes_per_sector as u32 - 1))
             / self.bpb.bytes_per_sector as u32;
-            
+
         let fat_sectors = if self.bpb.sectors_per_fat_16 != 0 {
             self.bpb.sectors_per_fat_16 as u32
         } else {
             self.fat32_ext().sectors_per_fat_32
         };
-        
+
         self.bpb.reserved_sectors as u32
             + (self.bpb.num_fats as u32 * fat_sectors)
             + root_dir_sectors
     }
-    
 
     pub fn root_dir_sectors(&self) -> u32 {
-        ((self.bpb.root_entries as u32 * 32) 
-            + (self.bpb.bytes_per_sector as u32 - 1)) 
+        ((self.bpb.root_entries as u32 * 32) + (self.bpb.bytes_per_sector as u32 - 1))
             / self.bpb.bytes_per_sector as u32
     }
 }

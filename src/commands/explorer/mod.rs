@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
+use crate::graphics::color::Color;
 use crate::process::RunnableProcess;
 use crate::window::dialogs::show_error;
 use crate::window::windows::tree_view::NodeId;
@@ -36,7 +37,6 @@ use crate::window::windows::{
     Splitter, StatusBar, Toolbar, TreeView, VBox,
 };
 use crate::window::{with_window_manager, Rect, Window, WindowId};
-use crate::graphics::color::Color;
 
 use self::dir_model::{format_size, format_type, parent_path, read_directory, DirEntry, EntryKind};
 use self::dispatch::{dispatch_open, OpenAction};
@@ -113,9 +113,7 @@ pub struct ExplorerProcess {
 
 impl ExplorerProcess {
     pub fn new_with_args(args: Vec<String>) -> Self {
-        Self {
-            args,
-        }
+        Self { args }
     }
 }
 
@@ -190,7 +188,8 @@ impl RunnableProcess for ExplorerProcess {
                     .unwrap_or(false);
                 crate::debug_info!(
                     "explorer: main loop iter={} pending={}",
-                    iter_count, has_pending
+                    iter_count,
+                    has_pending
                 );
             }
 
@@ -552,14 +551,8 @@ fn handle_list_activate(explorer_id: usize, idx: usize) {
             // inside `with_window_manager` for event routing. Re-entering
             // would deadlock — so we defer to the main loop via the
             // pending-action queue.
-            crate::debug_info!(
-                "explorer: queueing NavigateTo({})",
-                entry.full_path
-            );
-            set_pending_action(
-                explorer_id,
-                ExplorerAction::NavigateTo(entry.full_path),
-            );
+            crate::debug_info!("explorer: queueing NavigateTo({})", entry.full_path);
+            set_pending_action(explorer_id, ExplorerAction::NavigateTo(entry.full_path));
         }
         EntryKind::File { .. } => {
             // Spawn the handler synchronously. `execute_command` only
@@ -568,10 +561,7 @@ fn handle_list_activate(explorer_id: usize, idx: usize) {
             // callback (which holds WINDOW_MANAGER) is safe and avoids
             // the queue path that the main loop would otherwise have
             // to drain.
-            crate::debug_info!(
-                "explorer: opening {} synchronously",
-                entry.full_path
-            );
+            crate::debug_info!("explorer: opening {} synchronously", entry.full_path);
             open_file(&entry.full_path);
         }
     }
@@ -633,10 +623,7 @@ fn load_current_directory(explorer_id: usize) {
     let entries = match read_directory(&path) {
         Ok(v) => v,
         Err(e) => {
-            show_error(
-                "Cannot open",
-                &format!("Cannot open `{}`: {}", path, e),
-            );
+            show_error("Cannot open", &format!("Cannot open `{}`: {}", path, e));
             return;
         }
     };
@@ -888,18 +875,14 @@ fn open_file(path: &str) {
             // Launch the ELF on a fresh kernel process so explorer's UI
             // loop doesn't block for the user binary's lifetime.
             let owned_path = alloc::string::String::from(path);
-            crate::process::spawn_process(
-                alloc::string::String::from("run"),
-                None,
-                move || {
-                    let argv = [owned_path.as_str()];
-                    if let Err(msg) =
-                        crate::userland::launcher::launch_user_binary(&owned_path, &argv, &[])
-                    {
-                        crate::debug_warn!("explorer: launch failed: {}", msg);
-                    }
-                },
-            );
+            crate::process::spawn_process(alloc::string::String::from("run"), None, move || {
+                let argv = [owned_path.as_str()];
+                if let Err(msg) =
+                    crate::userland::launcher::launch_user_binary(&owned_path, &argv, &[])
+                {
+                    crate::debug_warn!("explorer: launch failed: {}", msg);
+                }
+            });
         }
         OpenAction::Unsupported(ext) => {
             let body = if ext.is_empty() {

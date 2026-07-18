@@ -37,19 +37,31 @@ impl FakeDevice {
 }
 
 impl GraphicsDevice for FakeDevice {
-    fn width(&self) -> usize { self.width }
-    fn height(&self) -> usize { self.height }
-    fn color_depth(&self) -> ColorDepth { ColorDepth::Bit32 }
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+    fn color_depth(&self) -> ColorDepth {
+        ColorDepth::Bit32
+    }
     fn clear(&mut self, _color: Color) {}
     fn draw_pixel(&mut self, _x: i32, _y: i32, _color: Color) {}
-    fn read_pixel(&self, _x: i32, _y: i32) -> Color { Color::BLACK }
+    fn read_pixel(&self, _x: i32, _y: i32) -> Color {
+        Color::BLACK
+    }
     fn draw_line(&mut self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _color: Color) {}
     fn draw_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
     fn fill_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
     fn set_clip_rect(&mut self, _rect: Option<Rect>) {}
     fn flush(&mut self) {}
-    fn pixel_format(&self) -> PixelFormat { self.pixel_format }
-    fn bytes_per_pixel(&self) -> usize { self.bytes_per_pixel }
+    fn pixel_format(&self) -> PixelFormat {
+        self.pixel_format
+    }
+    fn bytes_per_pixel(&self) -> usize {
+        self.bytes_per_pixel
+    }
 }
 
 /// Solid-color 1x1 BMP whose pixel is RGB (0xAA, 0xBB, 0xCC).
@@ -93,14 +105,14 @@ fn test_desktop_opts_in_to_backing_store() {
 
 fn test_paint_into_backing_store_allocates_and_rasterizes_wallpaper() {
     let bounds = Rect::new(0, 0, 100, 50);
-    let mut desktop = DesktopWindow::new_with_wallpaper(
-        WindowId::new(), bounds, tiny_bmp(),
-    );
+    let mut desktop = DesktopWindow::new_with_wallpaper(WindowId::new(), bounds, tiny_bmp());
     let device = FakeDevice::bgr(800, 600);
 
     desktop.paint_into_backing_store(&device);
 
-    let buf = desktop.backing_store().expect("backing store should exist after rasterize");
+    let buf = desktop
+        .backing_store()
+        .expect("backing store should exist after rasterize");
     assert_eq!(buf.width, 100);
     assert_eq!(buf.height, 50);
     assert_eq!(buf.pixel_format, PixelFormat::Bgr);
@@ -136,7 +148,9 @@ fn test_paint_into_backing_store_solid_fallback_when_no_wallpaper() {
 fn test_paint_into_backing_store_falls_back_on_malformed_wallpaper() {
     let bounds = Rect::new(0, 0, 32, 16);
     let mut desktop = DesktopWindow::new_with_wallpaper(
-        WindowId::new(), bounds, vec![0xFFu8; 16],  // garbage too short to parse
+        WindowId::new(),
+        bounds,
+        vec![0xFFu8; 16], // garbage too short to parse
     );
     let device = FakeDevice::bgr(800, 600);
 
@@ -151,23 +165,24 @@ fn test_paint_into_backing_store_falls_back_on_malformed_wallpaper() {
 
 fn test_rasterization_clears_needs_repaint() {
     let bounds = Rect::new(0, 0, 32, 16);
-    let mut desktop = DesktopWindow::new_with_wallpaper(
-        WindowId::new(), bounds, tiny_bmp(),
-    );
+    let mut desktop = DesktopWindow::new_with_wallpaper(WindowId::new(), bounds, tiny_bmp());
     let device = FakeDevice::bgr(800, 600);
 
-    assert!(desktop.needs_repaint(), "fresh desktop needs initial repaint");
+    assert!(
+        desktop.needs_repaint(),
+        "fresh desktop needs initial repaint"
+    );
     desktop.paint_into_backing_store(&device);
-    assert!(!desktop.needs_repaint(),
+    assert!(
+        !desktop.needs_repaint(),
         "rasterizing into the backing store satisfies the repaint contract — \
-         the compositor only re-rasterizes when needs_repaint becomes true again");
+         the compositor only re-rasterizes when needs_repaint becomes true again"
+    );
 }
 
 fn test_invalidate_re_arms_rasterization() {
     let bounds = Rect::new(0, 0, 32, 16);
-    let mut desktop = DesktopWindow::new_with_wallpaper(
-        WindowId::new(), bounds, tiny_bmp(),
-    );
+    let mut desktop = DesktopWindow::new_with_wallpaper(WindowId::new(), bounds, tiny_bmp());
     let device = FakeDevice::bgr(800, 600);
 
     desktop.paint_into_backing_store(&device);
@@ -178,9 +193,8 @@ fn test_invalidate_re_arms_rasterization() {
 }
 
 fn test_resize_replaces_backing_store() {
-    let mut desktop = DesktopWindow::new_with_wallpaper(
-        WindowId::new(), Rect::new(0, 0, 32, 16), tiny_bmp(),
-    );
+    let mut desktop =
+        DesktopWindow::new_with_wallpaper(WindowId::new(), Rect::new(0, 0, 32, 16), tiny_bmp());
     let device = FakeDevice::bgr(800, 600);
 
     desktop.paint_into_backing_store(&device);

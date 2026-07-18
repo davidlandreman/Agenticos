@@ -22,9 +22,7 @@ use crate::window::event::{
 use crate::window::types::Point;
 use crate::window::windows::scroll_view::ScrollView;
 use crate::window::windows::text_editor::TextEditor;
-use crate::window::{
-    ColorDepth, GraphicsDevice, Rect, ScreenMode, Window, WindowManager,
-};
+use crate::window::{ColorDepth, GraphicsDevice, Rect, ScreenMode, Window, WindowManager};
 
 // ---------------------------------------------------------------------------
 // Synthetic event helpers
@@ -63,12 +61,20 @@ fn char_dims() -> (usize, usize) {
 struct StubDevice;
 
 impl GraphicsDevice for StubDevice {
-    fn width(&self) -> usize { 1280 }
-    fn height(&self) -> usize { 720 }
-    fn color_depth(&self) -> ColorDepth { ColorDepth::Bit32 }
+    fn width(&self) -> usize {
+        1280
+    }
+    fn height(&self) -> usize {
+        720
+    }
+    fn color_depth(&self) -> ColorDepth {
+        ColorDepth::Bit32
+    }
     fn clear(&mut self, _color: Color) {}
     fn draw_pixel(&mut self, _x: i32, _y: i32, _color: Color) {}
-    fn read_pixel(&self, _x: i32, _y: i32) -> Color { Color::BLACK }
+    fn read_pixel(&self, _x: i32, _y: i32) -> Color {
+        Color::BLACK
+    }
     fn draw_line(&mut self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _color: Color) {}
     fn draw_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
     fn fill_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
@@ -240,10 +246,7 @@ fn test_arrow_down_through_manager_scrolls_enclosing_scroll_view() {
 
     // Editor as the ScrollView's content.
     let editor_id = wm.create_window(Some(sv_id));
-    let mut editor = TextEditor::new_with_id(
-        editor_id,
-        Rect::new(0, 0, 200, (5 * ch) as u32),
-    );
+    let mut editor = TextEditor::new_with_id(editor_id, Rect::new(0, 0, 200, (5 * ch) as u32));
     editor.set_parent(Some(sv_id));
     editor.set_text("a\nb\nc\nd\ne");
 
@@ -342,7 +345,10 @@ fn test_long_line_h_scroll_advances_scroll_x() {
     editor.set_text(&long_line);
 
     let (cw_total, ch_total) = editor.content_size();
-    assert!(cw_total > 5 * cw as u32, "content width should exceed viewport");
+    assert!(
+        cw_total > 5 * cw as u32,
+        "content width should exceed viewport"
+    );
     sv.set_content_size(cw_total, ch_total);
 
     // Feed a horizontal-scroll event.
@@ -356,7 +362,10 @@ fn test_long_line_h_scroll_advances_scroll_x() {
         buttons: MouseButtons::default(),
         modifiers: KeyModifiers::default(),
     }));
-    assert!(sv.scroll_x() > 0, "h-scroll wheel should move scroll_x forward");
+    assert!(
+        sv.scroll_x() > 0,
+        "h-scroll wheel should move scroll_x forward"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 //! Window System for AgenticOS
-//! 
+//!
 //! This module provides a hierarchical window-based graphics system that supports
 //! both GUI and text-based interfaces through a unified abstraction.
 
@@ -10,35 +10,35 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-pub mod types;
+pub mod adapters;
+pub mod compositor;
+pub mod console;
+pub mod cursor;
+pub mod dialogs;
 pub mod event;
 pub mod graphics;
-pub mod manager;
-pub mod screen;
-pub mod adapters;
-pub mod selection;
-pub mod windows;
-pub mod dialogs;
-pub mod terminal;
-pub mod console;
 pub mod keyboard;
-pub mod cursor;
-pub mod compositor;
+pub mod manager;
 pub mod renderer;
-pub mod theme;
+pub mod screen;
+pub mod selection;
+pub mod terminal;
 pub mod terminal_factory;
+pub mod theme;
+pub mod types;
+pub mod windows;
 
-pub use types::*;
 pub use event::*;
 pub use manager::*;
 pub use screen::*;
+pub use types::*;
 
 // Re-export commonly used types
-pub use self::types::{WindowId, ScreenId, Rect, Point};
 pub use self::event::{Event, EventResult};
 pub use self::graphics::{GraphicsDevice, WindowBuffer};
 #[allow(unused_imports)]
-pub use self::selection::{Selection, SelectionMode, ClickMods};
+pub use self::selection::{ClickMods, Selection, SelectionMode};
+pub use self::types::{Point, Rect, ScreenId, WindowId};
 
 // =====================================================================
 // Default widget palette
@@ -92,8 +92,7 @@ pub const PALETTE_HIGHLIGHT_TEXT: crate::graphics::color::Color =
     crate::graphics::color::Color::WHITE;
 
 /// Default text color on light backgrounds.
-pub const PALETTE_TEXT: crate::graphics::color::Color =
-    crate::graphics::color::Color::BLACK;
+pub const PALETTE_TEXT: crate::graphics::color::Color = crate::graphics::color::Color::BLACK;
 
 /// Filled portion of a `ProgressBar` — matches the highlight color.
 #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
@@ -439,9 +438,6 @@ where
     // _guard dropped here, restoring interrupt state
 }
 
-
-
-
 /// Path of the bundled default wallpaper on the FAT root. The basename is
 /// 8.3-compliant — see `src/fs/CLAUDE.md` for the FAT layer's filename limit.
 pub const DEFAULT_WALLPAPER_PATH: &str = "/WALLPAPR.BMP";
@@ -471,14 +467,14 @@ pub fn load_default_wallpaper() -> Option<Vec<u8>> {
     match file.read(&mut bytes) {
         Ok(_) => Some(bytes),
         Err(_) => {
-            crate::debug_info!("Failed to read wallpaper bytes from {}", DEFAULT_WALLPAPER_PATH);
+            crate::debug_info!(
+                "Failed to read wallpaper bytes from {}",
+                DEFAULT_WALLPAPER_PATH
+            );
             None
         }
     }
 }
-
-
-
 
 /// Process any pending terminal output.
 ///

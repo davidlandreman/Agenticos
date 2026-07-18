@@ -8,9 +8,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::graphics::fonts::core_font::get_default_font;
 use crate::lib::arc::Arc;
 use crate::lib::test_utils::Testable;
-use crate::window::event::{
-    Event, KeyModifiers, MouseButtons, MouseEvent, MouseEventType,
-};
+use crate::window::event::{Event, KeyModifiers, MouseButtons, MouseEvent, MouseEventType};
 use crate::window::types::Point;
 use crate::window::windows::path_bar::PathBar;
 use crate::window::{Rect, Window};
@@ -128,10 +126,7 @@ fn test_hover_sets_hover_index() {
 
     // Hover should mark the bar as needing repaint.
     let _ = bar.handle_event(move_to(Point::new(hover_x, 12)));
-    assert!(
-        bar.needs_repaint(),
-        "hover should invalidate the bar"
-    );
+    assert!(bar.needs_repaint(), "hover should invalidate the bar");
 
     // Verify the same x maps to segment "b" via a click.
     let _ = bar.handle_event(click_at(Point::new(hover_x, 12)));
@@ -225,10 +220,7 @@ fn test_overflow_truncates_leading_segments() {
     let click_x = (OVERFLOW_INDICATOR_WIDTH + w_h / 2) as i32;
     let _ = bar.handle_event(click_at(Point::new(click_x, 12)));
     assert_eq!(counter.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        captured.lock().clone().as_deref(),
-        Some("/a/b/c/d/e/f/g/h")
-    );
+    assert_eq!(captured.lock().clone().as_deref(), Some("/a/b/c/d/e/f/g/h"));
 }
 
 fn test_hover_over_overflow_token_does_not_set_hover() {

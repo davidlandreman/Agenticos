@@ -1,13 +1,13 @@
 //! Text input widget for editable text
 
-use alloc::boxed::Box;
-use alloc::string::String;
+use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
-use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice};
 use crate::window::event::{KeyCode, MouseEventType};
 use crate::window::keyboard::keycode_to_char;
-use super::base::WindowBase;
+use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
+use alloc::boxed::Box;
+use alloc::string::String;
 
 /// Callback type for text change events
 pub type TextChangeCallback = Box<dyn FnMut(&str) + Send>;
@@ -171,7 +171,13 @@ impl Window for TextInput {
             // Draw a vertical line as cursor
             if cursor_x < x + width as i32 - padding {
                 let cursor_color = self.text_color;
-                device.draw_line(cursor_x, text_y, cursor_x, text_y + char_height - 1, cursor_color);
+                device.draw_line(
+                    cursor_x,
+                    text_y,
+                    cursor_x,
+                    text_y + char_height - 1,
+                    cursor_color,
+                );
             }
         }
 

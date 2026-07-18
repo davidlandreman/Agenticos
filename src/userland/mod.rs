@@ -27,7 +27,6 @@ pub mod vm;
 
 use core::arch::naked_asm;
 
-
 use crate::userland::image::UserImage;
 use crate::userland::lifecycle::ExitKind;
 

@@ -29,15 +29,15 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use x86_64::VirtAddr;
 
+use crate::fs::File;
+use crate::lib::arc::Arc;
 use crate::mm::paging::{
-    UserPerms, USER_LOAD_BASE, USER_MMAP_BASE, USER_STACK_GUARD_PAGES,
-    USER_STACK_INITIAL_PAGES, USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP, USER_TCB_VA,
-    USER_TLS_IMAGE_VA, USER_VA_RANGE_END, USER_VA_RANGE_START,
+    UserPerms, USER_LOAD_BASE, USER_MMAP_BASE, USER_STACK_GUARD_PAGES, USER_STACK_INITIAL_PAGES,
+    USER_STACK_MAX_GROWTH_PAGES, USER_STACK_TOP, USER_TCB_VA, USER_TLS_IMAGE_VA, USER_VA_RANGE_END,
+    USER_VA_RANGE_START,
 };
 use crate::userland::error::LoaderError;
 use crate::userland::image::UserImage;
-use crate::fs::File;
-use crate::lib::arc::Arc;
 
 // ---------- ELF64 constants ----------
 
@@ -172,7 +172,6 @@ fn read_at<T: Copy>(bytes: &[u8], off: u64) -> Result<T, LoaderError> {
     let p = bytes.as_ptr().wrapping_add(off_usize) as *const T;
     Ok(unsafe { core::ptr::read_unaligned(p) })
 }
-
 
 /// Translate ELF p_flags into a `UserPerms` profile (D11 NX/WX hygiene).
 fn perms_for_p_flags(flags: u32) -> UserPerms {

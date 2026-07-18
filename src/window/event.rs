@@ -1,26 +1,96 @@
 //! Event system for the window manager
 
-use super::types::{WindowId, Point, Rect};
+use super::types::{Point, Rect, WindowId};
 
 /// Key codes for keyboard events
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyCode {
     // Letters
-    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
     // Numbers
-    Key0, Key1, Key2, Key3, Key4, Key5, Key6, Key7, Key8, Key9,
+    Key0,
+    Key1,
+    Key2,
+    Key3,
+    Key4,
+    Key5,
+    Key6,
+    Key7,
+    Key8,
+    Key9,
     // Special keys
-    Escape, Enter, Space, Tab, Backspace, Delete,
-    Left, Right, Up, Down,
-    Home, End, PageUp, PageDown, Insert,
+    Escape,
+    Enter,
+    Space,
+    Tab,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
     // Modifiers
-    LeftShift, RightShift, LeftCtrl, RightCtrl, LeftAlt, RightAlt,
+    LeftShift,
+    RightShift,
+    LeftCtrl,
+    RightCtrl,
+    LeftAlt,
+    RightAlt,
     // Function keys
-    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
     // Punctuation
-    Comma, Period, Slash, Semicolon, Quote, 
-    LeftBracket, RightBracket, Backslash,
-    Minus, Equals, Backtick,
+    Comma,
+    Period,
+    Slash,
+    Semicolon,
+    Quote,
+    LeftBracket,
+    RightBracket,
+    Backslash,
+    Minus,
+    Equals,
+    Backtick,
     // Other
     Unknown,
 }
@@ -107,7 +177,10 @@ pub enum MouseEventType {
     /// Scroll wheel event. `delta_x` is horizontal scroll (positive = right),
     /// `delta_y` is vertical scroll (positive = down). Units match the scroll
     /// source — for now, "lines" of text per tick.
-    Scroll { delta_x: i32, delta_y: i32 },
+    Scroll {
+        delta_x: i32,
+        delta_y: i32,
+    },
 }
 
 /// Mouse button state

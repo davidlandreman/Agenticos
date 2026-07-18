@@ -127,10 +127,7 @@ fn test_multi_select_full_click_sequence() {
 
     // Shift-click on row 4 → Range { anchor: 1, end: 4 }
     let _ = list.handle_event(click_at(Point::new(5, 4 * 16 + 4), true, false));
-    assert_eq!(
-        list.selection(),
-        &Selection::Range { anchor: 1, end: 4 }
-    );
+    assert_eq!(list.selection(), &Selection::Range { anchor: 1, end: 4 });
 
     // Ctrl-click on row 0 → Multi({0, 1, 2, 3, 4})
     let _ = list.handle_event(click_at(Point::new(5, 0 + 4), false, true));
@@ -166,10 +163,7 @@ fn test_shift_arrow_down_extends_range_in_multi_mode() {
 
     let _ = list.handle_event(key_event(KeyCode::Down, true));
     // anchor preserved at 1, end advances to 2
-    assert_eq!(
-        list.selection(),
-        &Selection::Range { anchor: 1, end: 2 }
-    );
+    assert_eq!(list.selection(), &Selection::Range { anchor: 1, end: 2 });
 }
 
 // ---------------------------------------------------------------------------
@@ -316,9 +310,14 @@ fn test_mcl_right_click_preserves_global_position_under_scroll_view() {
     let global = Point::new(40, 100);
     let _ = mcl.handle_event(right_click_at(global, global));
 
-    let captured = CAPTURED.lock().expect("right-click callback should have fired");
+    let captured = CAPTURED
+        .lock()
+        .expect("right-click callback should have fired");
     assert_eq!(captured.0, 7, "row index should be 7");
-    assert_eq!(captured.1, global, "global position should be preserved verbatim");
+    assert_eq!(
+        captured.1, global,
+        "global position should be preserved verbatim"
+    );
 }
 
 // ---------------------------------------------------------------------------

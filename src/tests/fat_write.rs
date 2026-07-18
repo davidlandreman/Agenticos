@@ -12,7 +12,7 @@
 //! diverge between two writers in the same boot.
 
 use crate::debug_info;
-use crate::drivers::ide::{IDE_CONTROLLER, IdeBlockDevice, IdeChannel, IdeDrive};
+use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
 use crate::fs::fat::boot_sector::BootSector;
 use crate::fs::fat::fat_table::FatTable;
 use crate::fs::fat::types::ClusterId;
@@ -104,7 +104,11 @@ fn test_fat_write_entry_mirrors_both_fats() {
     let value = match fat_type {
         crate::fs::fat::types::FatType::Fat12 => {
             let raw = u16::from_le_bytes([sector[off_in_sector], sector[off_in_sector + 1]]);
-            if target.0 & 1 == 1 { (raw >> 4) as u32 } else { (raw & 0x0FFF) as u32 }
+            if target.0 & 1 == 1 {
+                (raw >> 4) as u32
+            } else {
+                (raw & 0x0FFF) as u32
+            }
         }
         crate::fs::fat::types::FatType::Fat16 => {
             u16::from_le_bytes([sector[off_in_sector], sector[off_in_sector + 1]]) as u32
@@ -118,11 +122,16 @@ fn test_fat_write_entry_mirrors_both_fats() {
             ]) & 0x0FFFFFFF
         }
     };
-    assert_eq!(value, 0xBEEF & match fat_type {
-        crate::fs::fat::types::FatType::Fat12 => 0x0FFF,
-        crate::fs::fat::types::FatType::Fat16 => 0xFFFF,
-        crate::fs::fat::types::FatType::Fat32 => 0x0FFFFFFF,
-    }, "second FAT copy must mirror the first");
+    assert_eq!(
+        value,
+        0xBEEF
+            & match fat_type {
+                crate::fs::fat::types::FatType::Fat12 => 0x0FFF,
+                crate::fs::fat::types::FatType::Fat16 => 0xFFFF,
+                crate::fs::fat::types::FatType::Fat32 => 0x0FFFFFFF,
+            },
+        "second FAT copy must mirror the first"
+    );
 
     table.write_entry(target, original).expect("restore");
 }
@@ -191,9 +200,13 @@ fn test_fat_extend_chain_then_free() {
 
     let c1 = table.find_free_cluster(ClusterId(150), 1024).expect("c1");
     table.write_entry(c1, ClusterId(eoc)).expect("mark c1 EOC");
-    let c2 = table.find_free_cluster(ClusterId(c1.0 + 1), 1024).expect("c2");
+    let c2 = table
+        .find_free_cluster(ClusterId(c1.0 + 1), 1024)
+        .expect("c2");
     table.write_entry(c2, ClusterId(eoc)).expect("mark c2 EOC");
-    let c3 = table.find_free_cluster(ClusterId(c2.0 + 1), 1024).expect("c3");
+    let c3 = table
+        .find_free_cluster(ClusterId(c2.0 + 1), 1024)
+        .expect("c3");
     table.write_entry(c3, ClusterId(eoc)).expect("mark c3 EOC");
 
     // Link c1 -> c2 -> c3 -> EOC.
@@ -225,7 +238,7 @@ fn test_fat_extend_chain_then_free() {
 // (snapshot=on means writes are discarded at QEMU exit, so each
 // test boot starts clean).
 
-use crate::fs::fat::lfn::{generate_short_name, lfn_slot_count, fits_short_name};
+use crate::fs::fat::lfn::{fits_short_name, generate_short_name, lfn_slot_count};
 
 fn unlink_if_present(path: &str) {
     if crate::fs::exists(path) {

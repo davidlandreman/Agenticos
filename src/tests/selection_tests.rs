@@ -6,9 +6,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use crate::lib::test_utils::Testable;
-use crate::window::selection::{
-    ArrowDirection, ClickMods, Selection, SelectionMode,
-};
+use crate::window::selection::{ArrowDirection, ClickMods, Selection, SelectionMode};
 
 fn collect(sel: &Selection) -> Vec<usize> {
     sel.iter().collect()
@@ -161,10 +159,20 @@ fn test_arrow_up_clamps_at_zero() {
 
 fn test_plain_arrow_moves_index() {
     let mut sel = Selection::Single(2);
-    sel.arrow(ArrowDirection::Down, 10, ClickMods::NONE, SelectionMode::Multi);
+    sel.arrow(
+        ArrowDirection::Down,
+        10,
+        ClickMods::NONE,
+        SelectionMode::Multi,
+    );
     assert_eq!(sel, Selection::Single(3));
 
-    sel.arrow(ArrowDirection::Up, 10, ClickMods::NONE, SelectionMode::Multi);
+    sel.arrow(
+        ArrowDirection::Up,
+        10,
+        ClickMods::NONE,
+        SelectionMode::Multi,
+    );
     assert_eq!(sel, Selection::Single(2));
 }
 

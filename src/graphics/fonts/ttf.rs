@@ -90,7 +90,8 @@ impl TtfFont {
             .unwrap_or((px_size as u32).max(1) / 2)
             .max(1);
 
-        let mut ascii_slots: [GlyphSlot; NUM_ASCII] = core::array::from_fn(|_| GlyphSlot::default());
+        let mut ascii_slots: [GlyphSlot; NUM_ASCII] =
+            core::array::from_fn(|_| GlyphSlot::default());
         for i in 0..NUM_ASCII {
             let ch = char::from_u32(FIRST_ASCII + i as u32).unwrap();
             ascii_slots[i] = rasterize_glyph(&face, scale, ch);
@@ -130,7 +131,9 @@ impl Font for TtfFont {
     fn glyph(&self, ch: char) -> Option<Glyph<'_>> {
         let code = ch as u32;
         if (FIRST_ASCII..FIRST_ASCII + NUM_ASCII as u32).contains(&code) {
-            return Some(Self::slot_glyph(&self.ascii_slots[(code - FIRST_ASCII) as usize]));
+            return Some(Self::slot_glyph(
+                &self.ascii_slots[(code - FIRST_ASCII) as usize],
+            ));
         }
 
         // Lazy path: rasterize, store in extras as a Box so the slot's address

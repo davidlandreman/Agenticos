@@ -50,13 +50,7 @@ pub trait Perform {
     /// `ignore` is true if the sequence overflowed our parameter or
     /// intermediate buffers (the spec says to silently absorb such
     /// sequences).
-    fn csi_dispatch(
-        &mut self,
-        params: &[u16],
-        intermediates: &[u8],
-        ignore: bool,
-        final_byte: u8,
-    ) {
+    fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], ignore: bool, final_byte: u8) {
     }
 
     /// An OSC sequence — the entire payload between `ESC ]` and the
@@ -186,7 +180,7 @@ impl Vte {
                     // an intermediate "OSC ESC" state. We collapse that
                     // into a flag.
                     self.state = State::Escape; // placeholder; will be
-                    // overridden by the next byte
+                                                // overridden by the next byte
                     self.osc_end(perform, /*bell_terminated=*/ false);
                     self.clear_sequence();
                     return;
@@ -737,7 +731,9 @@ mod tests {
         let evts = run(&bytes);
         assert_eq!(evts.len(), 1);
         match &evts[0] {
-            Event::Csi { ignore, final_byte, .. } => {
+            Event::Csi {
+                ignore, final_byte, ..
+            } => {
                 assert!(ignore, "expected ignore flag on overflow");
                 assert_eq!(*final_byte, b'm');
             }
@@ -827,7 +823,9 @@ mod tests {
             .collect();
         assert_eq!(csi_events.len(), 1);
         match csi_events[0] {
-            Event::Csi { params, final_byte, .. } => {
+            Event::Csi {
+                params, final_byte, ..
+            } => {
                 assert_eq!(params.as_slice(), &[2]);
                 assert_eq!(*final_byte, b'J');
             }

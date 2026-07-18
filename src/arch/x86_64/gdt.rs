@@ -16,9 +16,9 @@
 //   0x28  TSS         (system descriptor, occupies two GDT slots)
 
 use lazy_static::lazy_static;
-use x86_64::VirtAddr;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
+use x86_64::VirtAddr;
 
 /// IST entry index used by the double-fault handler.
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
@@ -51,7 +51,6 @@ lazy_static! {
         };
         tss
     };
-
     static ref GDT: (GlobalDescriptorTable, Selectors) = {
         let mut gdt = GlobalDescriptorTable::new();
         let kernel_code = gdt.add_entry(Descriptor::kernel_code_segment());
@@ -131,7 +130,7 @@ pub unsafe fn set_kernel_rsp0(rsp0: VirtAddr) {
 /// particular before the IDT is loaded with handlers that reference IST entries
 /// or before any ring-0/ring-3 transition can occur.
 pub fn init() {
-    use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
+    use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
     use x86_64::instructions::tables::load_tss;
 
     GDT.0.load();

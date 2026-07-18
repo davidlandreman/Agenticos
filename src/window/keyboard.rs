@@ -2,8 +2,6 @@
 
 use super::event::{KeyCode, KeyModifiers};
 
-
-
 /// Convert KeyCode to a character (if possible)
 pub fn keycode_to_char(key_code: KeyCode, modifiers: KeyModifiers) -> Option<char> {
     match key_code {
@@ -34,7 +32,7 @@ pub fn keycode_to_char(key_code: KeyCode, modifiers: KeyModifiers) -> Option<cha
         KeyCode::X => Some(if modifiers.shift { 'X' } else { 'x' }),
         KeyCode::Y => Some(if modifiers.shift { 'Y' } else { 'y' }),
         KeyCode::Z => Some(if modifiers.shift { 'Z' } else { 'z' }),
-        
+
         // Numbers
         KeyCode::Key0 => Some(if modifiers.shift { ')' } else { '0' }),
         KeyCode::Key1 => Some(if modifiers.shift { '!' } else { '1' }),
@@ -46,12 +44,12 @@ pub fn keycode_to_char(key_code: KeyCode, modifiers: KeyModifiers) -> Option<cha
         KeyCode::Key7 => Some(if modifiers.shift { '&' } else { '7' }),
         KeyCode::Key8 => Some(if modifiers.shift { '*' } else { '8' }),
         KeyCode::Key9 => Some(if modifiers.shift { '(' } else { '9' }),
-        
+
         // Special characters
         KeyCode::Space => Some(' '),
         KeyCode::Enter => Some('\n'),
         KeyCode::Tab => Some('\t'),
-        
+
         // Punctuation
         KeyCode::Comma => Some(if modifiers.shift { '<' } else { ',' }),
         KeyCode::Period => Some(if modifiers.shift { '>' } else { '.' }),
@@ -64,7 +62,7 @@ pub fn keycode_to_char(key_code: KeyCode, modifiers: KeyModifiers) -> Option<cha
         KeyCode::Minus => Some(if modifiers.shift { '_' } else { '-' }),
         KeyCode::Equals => Some(if modifiers.shift { '+' } else { '=' }),
         KeyCode::Backtick => Some(if modifiers.shift { '~' } else { '`' }),
-        
+
         // Other keys don't produce characters
         _ => None,
     }
@@ -83,9 +81,9 @@ impl KeyboardState {
         // For scancode set 2, we need to handle modifiers differently
         // For now, we'll track make codes only (not handling break codes yet)
         match scancode {
-            0x12 | 0x59 => self.modifiers.shift = true,  // Left/Right Shift pressed
-            0x14 => self.modifiers.ctrl = true,          // Left Ctrl pressed
-            0x11 => self.modifiers.alt = true,           // Left Alt pressed
+            0x12 | 0x59 => self.modifiers.shift = true, // Left/Right Shift pressed
+            0x14 => self.modifiers.ctrl = true,         // Left Ctrl pressed
+            0x11 => self.modifiers.alt = true,          // Left Alt pressed
             // TODO: Handle break codes (0xF0 prefix) to clear modifiers
             _ => {}
         }

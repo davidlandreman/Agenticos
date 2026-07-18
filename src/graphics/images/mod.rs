@@ -1,5 +1,5 @@
-pub mod image;
 pub mod bmp;
+pub mod image;
 
-pub use image::Image;
 pub use bmp::BmpImage;
+pub use image::Image;

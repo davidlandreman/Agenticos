@@ -1,16 +1,13 @@
 //! Terminal window with input handling capabilities
 
+use super::base::WindowBase;
+use super::text::TextWindow;
+use crate::window::event::KeyCode;
+use crate::window::{keyboard::keycode_to_char, Event, EventResult, GraphicsDevice, Rect, Window};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem;
-use crate::window::{
-    Window, Rect, Event, EventResult, GraphicsDevice,
-    keyboard::keycode_to_char,
-};
-use crate::window::event::KeyCode;
-use super::base::WindowBase;
-use super::text::TextWindow;
 
 /// Callback type for when input is received
 pub type InputCallback = Box<dyn FnMut(String) + Send>;
@@ -64,7 +61,11 @@ impl TerminalWindow {
         // Force invalidation to ensure initial paint
         text_window.invalidate();
 
-        crate::debug_info!("TerminalWindow created with id={:?}, bounds: {:?}", id, bounds);
+        crate::debug_info!(
+            "TerminalWindow created with id={:?}, bounds: {:?}",
+            id,
+            bounds
+        );
 
         // Initialize the Vte + Screen pair sized to the TextWindow's
         // grid. The Screen is the source of truth for what's displayed;
@@ -122,9 +123,17 @@ impl TerminalWindow {
         // Reposition the screen cursor to the input start, then erase
         // to end of line — preserves SGR state on the cells.
         self.feed_bytes(b"\x1b[");
-        push_u16_decimal(&mut self.vte, &mut self.screen, (self.input_start_row + 1) as u16);
+        push_u16_decimal(
+            &mut self.vte,
+            &mut self.screen,
+            (self.input_start_row + 1) as u16,
+        );
         self.feed_bytes(b";");
-        push_u16_decimal(&mut self.vte, &mut self.screen, (self.input_start_col + 1) as u16);
+        push_u16_decimal(
+            &mut self.vte,
+            &mut self.screen,
+            (self.input_start_col + 1) as u16,
+        );
         self.feed_bytes(b"H\x1b[K");
     }
 
@@ -135,7 +144,7 @@ impl TerminalWindow {
         self.input_buffer.push_str(new_input);
         self.feed_bytes(new_input.as_bytes());
     }
-    
+
     /// Process any pending console output
 
     /// Drain pending slave-output through the Vte parser into the
@@ -207,13 +216,19 @@ impl TerminalWindow {
     }
 
     fn text_window_rows(&self) -> usize {
-        self.text_window.grid_size_opt().map(|(r, _)| r as usize).unwrap_or(0)
+        self.text_window
+            .grid_size_opt()
+            .map(|(r, _)| r as usize)
+            .unwrap_or(0)
     }
 
     fn text_window_cols(&self) -> usize {
-        self.text_window.grid_size_opt().map(|(_, c)| c as usize).unwrap_or(0)
+        self.text_window
+            .grid_size_opt()
+            .map(|(_, c)| c as usize)
+            .unwrap_or(0)
     }
-    
+
     /// Handle a backspace key press
     fn handle_backspace(&mut self) {
         if !self.input_buffer.is_empty() {
@@ -228,7 +243,11 @@ impl TerminalWindow {
     /// Handle enter key press
     fn handle_enter(&mut self) {
         let input = mem::take(&mut self.input_buffer);
-        crate::debug_info!("Terminal: Enter pressed, input='{}' (len={})", input, input.len());
+        crate::debug_info!(
+            "Terminal: Enter pressed, input='{}' (len={})",
+            input,
+            input.len()
+        );
         self.feed_bytes(b"\r\n");
 
         // Add to history if not empty
@@ -265,7 +284,7 @@ impl TerminalWindow {
         self.input_start_col = col;
         self.input_start_row = row;
     }
-    
+
     /// Handle up arrow (previous history)
     fn handle_up_arrow(&mut self) {
         if self.history_index > 0 {
@@ -274,7 +293,7 @@ impl TerminalWindow {
             self.replace_input(&history_entry);
         }
     }
-    
+
     /// Handle down arrow (next history)
     fn handle_down_arrow(&mut self) {
         if self.history_index < self.history.len() {
@@ -361,7 +380,7 @@ impl Window for TerminalWindow {
             crate::debug_trace!("Updated input position to ({}, {})", col, row);
         }
     }
-    
+
     fn handle_event(&mut self, event: Event) -> EventResult {
         // Mouse-wheel scrolling drives the Screen's scrollback view.
         // Skip when alt-screen is active (TUIs own the wheel — vi /
@@ -384,7 +403,11 @@ impl Window for TerminalWindow {
         // to scroll the host's view.
         if let Event::Keyboard(kbd) = &event {
             if kbd.pressed && kbd.modifiers.shift && !kbd.modifiers.ctrl && !kbd.modifiers.alt {
-                let lines: isize = self.text_window.grid_size_opt().map(|(r, _)| r as isize).unwrap_or(24);
+                let lines: isize = self
+                    .text_window
+                    .grid_size_opt()
+                    .map(|(r, _)| r as isize)
+                    .unwrap_or(24);
                 match kbd.key_code {
                     KeyCode::PageUp => {
                         self.screen.scroll_view(lines.saturating_sub(2));
@@ -416,10 +439,8 @@ impl Window for TerminalWindow {
                 if crate::userland::stdin::is_active_for_terminal(tid)
                     && !crate::userland::tty::is_canonical_for_terminal(tid)
                 {
-                    let bytes = encode_keystroke_for_raw_mode(
-                        kbd_event.key_code,
-                        kbd_event.modifiers,
-                    );
+                    let bytes =
+                        encode_keystroke_for_raw_mode(kbd_event.key_code, kbd_event.modifiers);
                     if !bytes.is_empty() {
                         crate::userland::stdin::push_bytes_for_terminal(tid, &bytes);
                         if crate::userland::tty::is_echo_for_terminal(tid) {
@@ -460,15 +481,21 @@ impl Window for TerminalWindow {
 
                             // Log current cursor position
                             let (cur_col, cur_row) = self.text_window.cursor_position();
-                            crate::debug_trace!("Current cursor at ({}, {}), input starts at ({}, {})",
-                                cur_col, cur_row, self.input_start_col, self.input_start_row);
+                            crate::debug_trace!(
+                                "Current cursor at ({}, {}), input starts at ({}, {})",
+                                cur_col,
+                                cur_row,
+                                self.input_start_col,
+                                self.input_start_row
+                            );
 
                             // Phase 3: when a user is active and ECHO is
                             // off in canonical mode (e.g. password
                             // prompt), accept the byte but don't paint it.
                             self.input_buffer.push(ch);
-                            let echo_to_screen = !crate::userland::stdin::is_active_for_terminal(tid)
-                                || crate::userland::tty::is_echo_for_terminal(tid);
+                            let echo_to_screen =
+                                !crate::userland::stdin::is_active_for_terminal(tid)
+                                    || crate::userland::tty::is_echo_for_terminal(tid);
                             if echo_to_screen {
                                 let mut buf = [0u8; 4];
                                 let s = ch.encode_utf8(&mut buf);

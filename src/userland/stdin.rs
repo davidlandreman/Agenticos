@@ -38,7 +38,9 @@ pub fn is_active_for_terminal(terminal_id: WindowId) -> bool {
 /// process blocked in `read(0)` bound to that terminal. Silently drops
 /// bytes when no pty exists or the queue is full.
 pub fn push_bytes_for_terminal(terminal_id: WindowId, bytes: &[u8]) {
-    let Some(master) = pty::master_for_terminal(terminal_id) else { return; };
+    let Some(master) = pty::master_for_terminal(terminal_id) else {
+        return;
+    };
     let pushed = master.push_input(bytes);
     if pushed {
         crate::userland::lifecycle::wake_ring3_blocked_on_input(Some(terminal_id));
@@ -50,7 +52,9 @@ pub fn is_active_for_current_process() -> bool {
 }
 
 pub fn pop_into_for_current_process(dst: &mut [u8]) -> usize {
-    let Some(slave) = current_slave() else { return 0; };
+    let Some(slave) = current_slave() else {
+        return 0;
+    };
     slave.read(dst)
 }
 
@@ -76,7 +80,9 @@ pub fn is_active() -> bool {
 
 #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn push_bytes(bytes: &[u8]) {
-    let Some(master) = pty::legacy_master() else { return; };
+    let Some(master) = pty::legacy_master() else {
+        return;
+    };
     let pushed = master.push_input(bytes);
     if pushed {
         crate::userland::lifecycle::wake_ring3_blocked_on_input(None);
@@ -85,7 +91,9 @@ pub fn push_bytes(bytes: &[u8]) {
 
 #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn pop_into(dst: &mut [u8]) -> usize {
-    let Some(slave) = pty::legacy_slave() else { return 0; };
+    let Some(slave) = pty::legacy_slave() else {
+        return 0;
+    };
     slave.read(dst)
 }
 

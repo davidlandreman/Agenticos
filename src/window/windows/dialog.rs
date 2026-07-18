@@ -61,13 +61,9 @@ pub fn is_dialog_open() -> bool {
 /// Get the dialog result (if dialog has closed)
 pub fn get_dialog_result() -> Option<DialogResult> {
     let state = DIALOG_STATE.lock();
-    state.as_ref().and_then(|s| {
-        if !s.is_open {
-            s.result.clone()
-        } else {
-            None
-        }
-    })
+    state
+        .as_ref()
+        .and_then(|s| if !s.is_open { s.result.clone() } else { None })
 }
 
 /// Clear the dialog state

@@ -245,7 +245,6 @@ impl PtyInner {
         }
         out
     }
-
 }
 
 // ---------------------------------------------------------------------
@@ -386,35 +385,38 @@ pub fn is_active_for_terminal(terminal_id: WindowId) -> bool {
 /// Look up the master for a known terminal. Returns `None` when no pty
 /// is registered for that id.
 pub fn master_for_terminal(terminal_id: WindowId) -> Option<PtyMaster> {
-    REGISTRY.lock().get(&Some(terminal_id)).map(|inner| PtyMaster {
-        inner: inner.clone(),
-    })
+    REGISTRY
+        .lock()
+        .get(&Some(terminal_id))
+        .map(|inner| PtyMaster {
+            inner: inner.clone(),
+        })
 }
 
 /// Look up the slave handle for a terminal id. Same Arc as the master.
 pub fn slave_for_terminal(terminal_id: WindowId) -> Option<PtySlave> {
-    REGISTRY.lock().get(&Some(terminal_id)).map(|inner| PtySlave {
-        inner: inner.clone(),
-    })
+    REGISTRY
+        .lock()
+        .get(&Some(terminal_id))
+        .map(|inner| PtySlave {
+            inner: inner.clone(),
+        })
 }
 
 /// Install the `None`-keyed legacy queue, used by tests and by ring-3
 /// processes that don't have a terminal yet. The defaults are 80×24.
 pub fn install_legacy() {
-    REGISTRY
-        .lock()
-        .entry(None)
-        .or_insert_with(|| {
-            Arc::new(Mutex::new(PtyInner::new(
-                // The None-keyed pty isn't tied to any window — store a
-                // placeholder id (which the keyboard waker path won't
-                // ever fire on, since input only flows through a real
-                // terminal).
-                crate::window::WindowId(0),
-                config::DEFAULT_ROWS,
-                config::DEFAULT_COLS,
-            )))
-        });
+    REGISTRY.lock().entry(None).or_insert_with(|| {
+        Arc::new(Mutex::new(PtyInner::new(
+            // The None-keyed pty isn't tied to any window — store a
+            // placeholder id (which the keyboard waker path won't
+            // ever fire on, since input only flows through a real
+            // terminal).
+            crate::window::WindowId(0),
+            config::DEFAULT_ROWS,
+            config::DEFAULT_COLS,
+        )))
+    });
 }
 
 pub fn clear_legacy() {
@@ -427,18 +429,16 @@ pub fn is_active_legacy() -> bool {
 
 /// Slave handle for the legacy `None`-keyed pty. Used by tests.
 pub fn legacy_slave() -> Option<PtySlave> {
-    REGISTRY
-        .lock()
-        .get(&None)
-        .map(|inner| PtySlave { inner: inner.clone() })
+    REGISTRY.lock().get(&None).map(|inner| PtySlave {
+        inner: inner.clone(),
+    })
 }
 
 /// Slave handle for the legacy `None`-keyed pty. Used by tests.
 pub fn legacy_master() -> Option<PtyMaster> {
-    REGISTRY
-        .lock()
-        .get(&None)
-        .map(|inner| PtyMaster { inner: inner.clone() })
+    REGISTRY.lock().get(&None).map(|inner| PtyMaster {
+        inner: inner.clone(),
+    })
 }
 
 // ---------------------------------------------------------------------

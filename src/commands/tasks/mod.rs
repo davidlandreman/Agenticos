@@ -3,14 +3,14 @@
 //! Displays running processes with metrics and allows killing processes
 //! via a right-click context menu.
 
-use crate::process::{RunnableProcess, ProcessId, ProcessState};
-use crate::window::{self, Window, WindowId, Rect, Point};
-use crate::window::windows::{ContainerWindow, FrameWindow, MultiColumnList, Column, MenuWindow};
 use crate::graphics::color::Color;
-use alloc::{vec, vec::Vec, string::String, boxed::Box, format};
+use crate::process::{ProcessId, ProcessState, RunnableProcess};
+use crate::window::windows::{Column, ContainerWindow, FrameWindow, MenuWindow, MultiColumnList};
+use crate::window::{self, Point, Rect, Window, WindowId};
 use alloc::collections::BTreeMap;
-use spin::Mutex;
+use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
 
 /// Heap size for memory % calculation (100 MiB)
 const TOTAL_HEAP_SIZE: usize = 100 * 1024 * 1024;
@@ -56,8 +56,8 @@ static TASKS_STATES: Mutex<BTreeMap<usize, TasksState>> = Mutex::new(BTreeMap::n
 /// Pending action for deferred execution (avoids deadlocks)
 enum PendingAction {
     ShowContextMenu(usize, usize, Point), // (tasks_id, row_index, position)
-    KillProcess(usize),                    // (tasks_id)
-    CloseContextMenu(usize),               // (tasks_id)
+    KillProcess(usize),                   // (tasks_id)
+    CloseContextMenu(usize),              // (tasks_id)
 }
 
 /// Pending action queue
@@ -108,7 +108,9 @@ fn show_context_menu(tasks_id: usize, row_index: usize, position: Point) {
         }
     }
 
-    let Some(selected_pid) = selected_pid else { return };
+    let Some(selected_pid) = selected_pid else {
+        return;
+    };
 
     // Don't allow killing the current process (the task manager itself)
     let current_pid = crate::process::SCHEDULER.lock().current();
@@ -118,8 +120,7 @@ fn show_context_menu(tasks_id: usize, row_index: usize, position: Point) {
 
     // Create context menu
     let menu_id = window::with_window_manager(|wm| {
-        let desktop_id = wm.get_active_screen()
-            .and_then(|s| s.root_window)?;
+        let desktop_id = wm.get_active_screen().and_then(|s| s.root_window)?;
 
         let menu_id = wm.create_window(Some(desktop_id));
         let menu_width = 120;
@@ -307,7 +308,11 @@ fn refresh_process_list(tasks_id: usize) {
         // Set right-click callback
         let local_tasks_id = tasks_id;
         new_list.on_right_click(move |row_index, position| {
-            queue_action(PendingAction::ShowContextMenu(local_tasks_id, row_index, position));
+            queue_action(PendingAction::ShowContextMenu(
+                local_tasks_id,
+                row_index,
+                position,
+            ));
         });
 
         // Register new list
@@ -351,13 +356,17 @@ impl RunnableProcess for TasksProcess {
         // Create frame + container + list window
         let result = window::with_window_manager(|wm| {
             // Get the desktop window
-            let desktop_id = wm.get_active_screen()
-                .and_then(|s| s.root_window)?;
+            let desktop_id = wm.get_active_screen().and_then(|s| s.root_window)?;
 
             // Create frame window
             let frame_id = wm.create_window(Some(desktop_id));
             let mut frame = FrameWindow::new(frame_id, "Task Manager");
-            frame.set_bounds(Rect::new(100 + offset, 50 + offset, frame_width, frame_height));
+            frame.set_bounds(Rect::new(
+                100 + offset,
+                50 + offset,
+                frame_width,
+                frame_height,
+            ));
             frame.set_parent(Some(desktop_id));
 
             // Create container as content
@@ -395,7 +404,11 @@ impl RunnableProcess for TasksProcess {
             // Set right-click callback
             let local_tasks_id = tasks_id;
             list.on_right_click(move |row_index, position| {
-                queue_action(PendingAction::ShowContextMenu(local_tasks_id, row_index, position));
+                queue_action(PendingAction::ShowContextMenu(
+                    local_tasks_id,
+                    row_index,
+                    position,
+                ));
             });
 
             // Register windows
@@ -487,9 +500,9 @@ impl RunnableProcess for TasksProcess {
             crate::process::yield_if_needed();
 
             // Check if window still exists
-            let exists = window::with_window_manager(|wm| {
-                wm.window_registry.contains_key(&frame_id)
-            }).unwrap_or(false);
+            let exists =
+                window::with_window_manager(|wm| wm.window_registry.contains_key(&frame_id))
+                    .unwrap_or(false);
 
             if !exists {
                 break;

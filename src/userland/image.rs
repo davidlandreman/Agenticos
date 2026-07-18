@@ -214,7 +214,9 @@ impl UserImage {
     }
 
     pub fn elf_backing(&self, start: u64) -> Option<&ElfBacking> {
-        self.elf_backings.iter().find(|backing| backing.start == start)
+        self.elf_backings
+            .iter()
+            .find(|backing| backing.start == start)
     }
 
     /// Total user pages mapped (PT_LOAD + stack). Test-visible.

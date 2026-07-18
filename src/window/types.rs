@@ -1,7 +1,7 @@
 //! Common types used throughout the window system
 
-use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::graphics::scene::{LayerEffect, Transform2D};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Minimum window width for resizing
 pub const MIN_WINDOW_WIDTH: u32 = 100;
@@ -23,15 +23,24 @@ impl Insets {
     pub const ZERO: Self = Self::uniform(0);
 
     pub const fn uniform(value: u32) -> Self {
-        Self { left: value, top: value, right: value, bottom: value }
+        Self {
+            left: value,
+            top: value,
+            right: value,
+            bottom: value,
+        }
     }
 
     pub fn expand(self, rect: Rect) -> Rect {
         Rect::new(
             rect.x.saturating_sub(self.left.min(i32::MAX as u32) as i32),
             rect.y.saturating_sub(self.top.min(i32::MAX as u32) as i32),
-            rect.width.saturating_add(self.left).saturating_add(self.right),
-            rect.height.saturating_add(self.top).saturating_add(self.bottom),
+            rect.width
+                .saturating_add(self.left)
+                .saturating_add(self.right),
+            rect.height
+                .saturating_add(self.top)
+                .saturating_add(self.bottom),
         )
     }
 }
@@ -114,17 +123,22 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Rect { x, y, width, height }
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
-    
+
     /// Check if a point is inside this rectangle
     pub fn contains_point(&self, point: Point) -> bool {
-        point.x >= self.x 
+        point.x >= self.x
             && point.x < self.x + self.width as i32
-            && point.y >= self.y 
+            && point.y >= self.y
             && point.y < self.y + self.height as i32
     }
-    
+
     /// Check if this rectangle intersects with another
     pub fn intersects(&self, other: &Rect) -> bool {
         self.x < other.x + other.width as i32
@@ -132,7 +146,7 @@ impl Rect {
             && self.y < other.y + other.height as i32
             && self.y + self.height as i32 > other.y
     }
-    
+
     /// Calculate the intersection of two rectangles
     pub fn intersection(&self, other: &Rect) -> Option<Rect> {
         if !self.intersects(other) {
@@ -287,7 +301,9 @@ impl CompositorProperties {
 }
 
 impl Default for CompositorProperties {
-    fn default() -> Self { Self::OPAQUE }
+    fn default() -> Self {
+        Self::OPAQUE
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,8 +329,7 @@ pub struct WindowLayout {
     pub dirty: bool,
 }
 
-impl WindowLayout {
-    }
+impl WindowLayout {}
 
 /// Which edge of a window is being resized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

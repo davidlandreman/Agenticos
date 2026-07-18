@@ -255,7 +255,6 @@ impl BootInfoFrameAllocator {
         self.stats.free -= 1;
     }
 
-
     fn set_allocated(&mut self, index: usize, allocated: bool) {
         let mask = 1u64 << (index % 64);
         if allocated {

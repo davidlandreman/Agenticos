@@ -1,13 +1,13 @@
 //! Menu window for popup menus (like Start menu)
 
+use super::base::WindowBase;
+use crate::graphics::color::Color;
+use crate::graphics::fonts::core_font::get_default_font;
+use crate::window::event::MouseEventType;
+use crate::window::{Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::graphics::color::Color;
-use crate::graphics::fonts::core_font::get_default_font;
-use crate::window::{Window, WindowId, Rect, Point, Event, EventResult, GraphicsDevice};
-use crate::window::event::MouseEventType;
-use super::base::WindowBase;
 
 /// Height of each menu item in pixels
 pub const MENU_ITEM_HEIGHT: u32 = 24;
@@ -151,13 +151,7 @@ impl Window for MenuWindow {
 
             // Draw hover background if this item is hovered
             if self.hover_index == Some(i) {
-                device.fill_rect(
-                    x + 2,
-                    item_y,
-                    width - 4,
-                    item_height,
-                    self.hover_bg_color,
-                );
+                device.fill_rect(x + 2, item_y, width - 4, item_height, self.hover_bg_color);
             }
 
             // Draw item text
@@ -225,5 +219,4 @@ impl Window for MenuWindow {
             _ => EventResult::Ignored,
         }
     }
-
 }

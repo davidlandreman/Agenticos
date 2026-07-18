@@ -214,10 +214,7 @@ impl TreeView {
 
     /// Returns whether the given node is currently expanded.
     pub fn is_expanded(&self, id: NodeId) -> bool {
-        self.nodes
-            .get(id)
-            .map(|n| n.expanded)
-            .unwrap_or(false)
+        self.nodes.get(id).map(|n| n.expanded).unwrap_or(false)
     }
 
     /// Borrow the underlying selection state. Indices are in
@@ -372,8 +369,12 @@ impl TreeView {
             return;
         }
         let before = self.selection.clone();
-        self.selection
-            .arrow(direction, self.visible_rows.len(), mods, self.selection_mode);
+        self.selection.arrow(
+            direction,
+            self.visible_rows.len(),
+            mods,
+            self.selection_mode,
+        );
         if before != self.selection {
             self.base.invalidate();
         }
@@ -553,13 +554,7 @@ impl Window for TreeView {
             if node.has_children {
                 let cell_x = x + depth_px;
                 let cell_y = row_y + (row_height - DISCLOSURE_PX) / 2;
-                self.draw_disclosure_triangle(
-                    device,
-                    cell_x,
-                    cell_y,
-                    node.expanded,
-                    fg,
-                );
+                self.draw_disclosure_triangle(device, cell_x, cell_y, node.expanded, fg);
             }
 
             // Draw label after the disclosure cell.
@@ -616,9 +611,7 @@ impl Window for TreeView {
                             // (not the row index — callers want the
                             // stable node identity, not the ephemeral
                             // visible-row position).
-                            if let Some(nid) =
-                                self.visible_rows.get(row).copied()
-                            {
+                            if let Some(nid) = self.visible_rows.get(row).copied() {
                                 if let Some(ref mut callback) = self.on_select {
                                     callback(nid);
                                 }

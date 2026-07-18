@@ -204,12 +204,20 @@ fn test_scroll_to_clamps_above_max() {
 struct StubDevice;
 
 impl GraphicsDevice for StubDevice {
-    fn width(&self) -> usize { 1280 }
-    fn height(&self) -> usize { 720 }
-    fn color_depth(&self) -> ColorDepth { ColorDepth::Bit32 }
+    fn width(&self) -> usize {
+        1280
+    }
+    fn height(&self) -> usize {
+        720
+    }
+    fn color_depth(&self) -> ColorDepth {
+        ColorDepth::Bit32
+    }
     fn clear(&mut self, _color: Color) {}
     fn draw_pixel(&mut self, _x: i32, _y: i32, _color: Color) {}
-    fn read_pixel(&self, _x: i32, _y: i32) -> Color { Color::BLACK }
+    fn read_pixel(&self, _x: i32, _y: i32) -> Color {
+        Color::BLACK
+    }
     fn draw_line(&mut self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _color: Color) {}
     fn draw_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
     fn fill_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
@@ -238,8 +246,12 @@ impl RecordingWindow {
 }
 
 impl Window for RecordingWindow {
-    fn base(&self) -> &crate::window::windows::base::WindowBase { &self.base }
-    fn base_mut(&mut self) -> &mut crate::window::windows::base::WindowBase { &mut self.base }
+    fn base(&self) -> &crate::window::windows::base::WindowBase {
+        &self.base
+    }
+    fn base_mut(&mut self) -> &mut crate::window::windows::base::WindowBase {
+        &mut self.base
+    }
     fn paint(&mut self, _device: &mut dyn GraphicsDevice) {}
     fn handle_event(&mut self, event: Event) -> EventResult {
         if let Event::Mouse(m) = event {
@@ -250,7 +262,9 @@ impl Window for RecordingWindow {
             EventResult::Ignored
         }
     }
-    fn can_focus(&self) -> bool { true }
+    fn can_focus(&self) -> bool {
+        true
+    }
 }
 
 /// A recording window that *also* identifies itself as a `ScrollView`
@@ -270,8 +284,12 @@ impl RecordingScrollView {
 }
 
 impl Window for RecordingScrollView {
-    fn base(&self) -> &crate::window::windows::base::WindowBase { &self.base }
-    fn base_mut(&mut self) -> &mut crate::window::windows::base::WindowBase { &mut self.base }
+    fn base(&self) -> &crate::window::windows::base::WindowBase {
+        &self.base
+    }
+    fn base_mut(&mut self) -> &mut crate::window::windows::base::WindowBase {
+        &mut self.base
+    }
     fn paint(&mut self, _device: &mut dyn GraphicsDevice) {}
     fn handle_event(&mut self, event: Event) -> EventResult {
         if let Event::Mouse(m) = event {
@@ -282,8 +300,12 @@ impl Window for RecordingScrollView {
             EventResult::Ignored
         }
     }
-    fn can_focus(&self) -> bool { true }
-    fn is_scroll_view(&self) -> bool { true }
+    fn can_focus(&self) -> bool {
+        true
+    }
+    fn is_scroll_view(&self) -> bool {
+        true
+    }
 }
 
 fn make_wm() -> WindowManager {
@@ -561,9 +583,7 @@ fn test_non_scroll_events_unaffected_by_scroll_view_ancestor() {
         modifiers: KeyModifiers::default(),
     };
     wm.route_mouse_event(up);
-    let received = LAST_RECEIVED
-        .lock()
-        .expect("child should receive ButtonUp");
+    let received = LAST_RECEIVED.lock().expect("child should receive ButtonUp");
     assert_eq!(received.0, child_id);
     assert_eq!(received.1.event_type, MouseEventType::ButtonUp);
 }

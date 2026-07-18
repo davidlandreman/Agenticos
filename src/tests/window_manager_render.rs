@@ -18,11 +18,11 @@ use bootloader_api::info::PixelFormat;
 use crate::graphics::color::Color;
 use crate::lib::arc::Arc;
 use crate::lib::test_utils::Testable;
+use crate::window::windows::base::WindowBase;
 use crate::window::{
     ColorDepth, Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowBuffer, WindowId,
     WindowManager,
 };
-use crate::window::windows::base::WindowBase;
 
 // ---- RecordingDevice ----------------------------------------------------
 
@@ -75,7 +75,11 @@ impl RecordedState {
     /// a single fill keyed on its `paint_color`, so this answers "which paints
     /// of window-X happened, and under what clip rect?").
     pub fn fills_with_color(&self, color: Color) -> Vec<RecordedFill> {
-        self.fills.iter().copied().filter(|f| f.color == color).collect()
+        self.fills
+            .iter()
+            .copied()
+            .filter(|f| f.color == color)
+            .collect()
     }
 }
 
@@ -89,30 +93,47 @@ impl RecordingDevice {
     /// Construct a paired device + shared state handle. Tests give the device
     /// to the `WindowManager`; the state handle stays in the test for
     /// inspection.
-    pub fn new_paired(width: usize, height: usize)
-        -> (Self, Arc<Mutex<RecordedState>>)
-    {
+    pub fn new_paired(width: usize, height: usize) -> (Self, Arc<Mutex<RecordedState>>) {
         let state = Arc::new(Mutex::new(RecordedState::new()));
-        let dev = Self { width, height, state: state.clone() };
+        let dev = Self {
+            width,
+            height,
+            state: state.clone(),
+        };
         (dev, state)
     }
 }
 
 impl GraphicsDevice for RecordingDevice {
-    fn width(&self) -> usize { self.width }
-    fn height(&self) -> usize { self.height }
-    fn color_depth(&self) -> ColorDepth { ColorDepth::Bit32 }
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+    fn color_depth(&self) -> ColorDepth {
+        ColorDepth::Bit32
+    }
 
     fn clear(&mut self, _color: Color) {}
     fn draw_pixel(&mut self, _x: i32, _y: i32, _color: Color) {}
-    fn read_pixel(&self, _x: i32, _y: i32) -> Color { Color::BLACK }
+    fn read_pixel(&self, _x: i32, _y: i32) -> Color {
+        Color::BLACK
+    }
     fn draw_line(&mut self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _color: Color) {}
     fn draw_rect(&mut self, _x: i32, _y: i32, _width: u32, _height: u32, _color: Color) {}
 
     fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
         let mut s = self.state.lock();
         let clip = s.clip;
-        s.fills.push(RecordedFill { clip, x, y, width, height, color });
+        s.fills.push(RecordedFill {
+            clip,
+            x,
+            y,
+            width,
+            height,
+            color,
+        });
     }
 
     fn set_clip_rect(&mut self, rect: Option<Rect>) {
@@ -127,8 +148,12 @@ impl GraphicsDevice for RecordingDevice {
         self.state.lock().presented_batches.push(regions.to_vec());
     }
 
-    fn pixel_format(&self) -> PixelFormat { PixelFormat::Bgr }
-    fn bytes_per_pixel(&self) -> usize { 4 }
+    fn pixel_format(&self) -> PixelFormat {
+        PixelFormat::Bgr
+    }
+    fn bytes_per_pixel(&self) -> usize {
+        4
+    }
 
     fn blit_buffer(&mut self, x: i32, y: i32, buffer: &WindowBuffer) {
         let mut s = self.state.lock();
@@ -169,7 +194,8 @@ impl TestWindow {
     pub fn new(id: WindowId, bounds: Rect, paint_color: Color) -> Self {
         Self {
             base_field: WindowBase::new_with_id(id, bounds),
-            id, bounds,
+            id,
+            bounds,
             parent: None,
             children: Vec::new(),
             visible: true,
@@ -186,25 +212,47 @@ impl TestWindow {
 }
 
 impl Window for TestWindow {
-    fn base(&self) -> &WindowBase { &self.base_field }
-    fn base_mut(&mut self) -> &mut WindowBase { &mut self.base_field }
-    fn id(&self) -> WindowId { self.id }
-    fn bounds(&self) -> Rect { self.bounds }
+    fn base(&self) -> &WindowBase {
+        &self.base_field
+    }
+    fn base_mut(&mut self) -> &mut WindowBase {
+        &mut self.base_field
+    }
+    fn id(&self) -> WindowId {
+        self.id
+    }
+    fn bounds(&self) -> Rect {
+        self.bounds
+    }
     fn set_bounds(&mut self, bounds: Rect) {
         self.bounds = bounds;
         self.needs_repaint = true;
     }
-    fn set_bounds_no_invalidate(&mut self, bounds: Rect) { self.bounds = bounds; }
-    fn visible(&self) -> bool { self.visible }
-    fn set_visible(&mut self, v: bool) { self.visible = v; }
-    fn parent(&self) -> Option<WindowId> { self.parent }
-    fn children(&self) -> &[WindowId] { &self.children }
-    fn set_parent(&mut self, p: Option<WindowId>) { self.parent = p; }
+    fn set_bounds_no_invalidate(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+    }
+    fn visible(&self) -> bool {
+        self.visible
+    }
+    fn set_visible(&mut self, v: bool) {
+        self.visible = v;
+    }
+    fn parent(&self) -> Option<WindowId> {
+        self.parent
+    }
+    fn children(&self) -> &[WindowId] {
+        &self.children
+    }
+    fn set_parent(&mut self, p: Option<WindowId>) {
+        self.parent = p;
+    }
     fn add_child(&mut self, c: WindowId) {
         self.children.retain(|&x| x != c);
         self.children.push(c);
     }
-    fn remove_child(&mut self, c: WindowId) { self.children.retain(|&x| x != c); }
+    fn remove_child(&mut self, c: WindowId) {
+        self.children.retain(|&x| x != c);
+    }
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         self.paint_count += 1;
         device.fill_rect(
@@ -216,14 +264,28 @@ impl Window for TestWindow {
         );
         self.needs_repaint = false;
     }
-    fn needs_repaint(&self) -> bool { self.needs_repaint }
-    fn invalidate(&mut self) { self.needs_repaint = true; }
-    fn handle_event(&mut self, _event: Event) -> EventResult { EventResult::Ignored }
-    fn can_focus(&self) -> bool { self.focusable }
-    fn has_focus(&self) -> bool { self.focused }
-    fn set_focus(&mut self, f: bool) { self.focused = f; }
+    fn needs_repaint(&self) -> bool {
+        self.needs_repaint
+    }
+    fn invalidate(&mut self) {
+        self.needs_repaint = true;
+    }
+    fn handle_event(&mut self, _event: Event) -> EventResult {
+        EventResult::Ignored
+    }
+    fn can_focus(&self) -> bool {
+        self.focusable
+    }
+    fn has_focus(&self) -> bool {
+        self.focused
+    }
+    fn set_focus(&mut self, f: bool) {
+        self.focused = f;
+    }
 
-    fn wants_backing_store(&self) -> bool { self.opts_in_to_backing_store }
+    fn wants_backing_store(&self) -> bool {
+        self.opts_in_to_backing_store
+    }
 
     fn paint_into_backing_store(&mut self, device: &dyn GraphicsDevice) {
         self.rasterize_count += 1;
@@ -273,7 +335,11 @@ fn paint_count_for(state: &RecordedState, color: Color) -> usize {
 }
 
 fn blit_count_for(state: &RecordedState, w: usize, h: usize) -> usize {
-    state.blits.iter().filter(|b| b.buffer_width == w && b.buffer_height == h).count()
+    state
+        .blits
+        .iter()
+        .filter(|b| b.buffer_width == w && b.buffer_height == h)
+        .count()
 }
 
 // ---- Helpers ------------------------------------------------------------
@@ -281,9 +347,7 @@ fn blit_count_for(state: &RecordedState, w: usize, h: usize) -> usize {
 /// Build a `WindowManager` whose graphics device is a `RecordingDevice` of
 /// the given dimensions. Returns the manager and a handle on the device's
 /// shared state so the test can inspect what was drawn.
-fn make_manager(width: u32, height: u32)
-    -> (WindowManager, Arc<Mutex<RecordedState>>)
-{
+fn make_manager(width: u32, height: u32) -> (WindowManager, Arc<Mutex<RecordedState>>) {
     let (device, state) = RecordingDevice::new_paired(width as usize, height as usize);
     (WindowManager::new(Box::new(device)), state)
 }
@@ -300,7 +364,11 @@ fn build_simple_scene(
     wm.switch_screen(screen_id);
 
     let root_id = wm.create_window(None);
-    let mut root = Box::new(TestWindow::new(root_id, root_bounds, Color::new(10, 10, 10)));
+    let mut root = Box::new(TestWindow::new(
+        root_id,
+        root_bounds,
+        Color::new(10, 10, 10),
+    ));
     root.focusable = false;
     wm.set_window_impl(root_id, root);
 
@@ -348,12 +416,17 @@ fn test_top_level_dirty_marks_at_absolute_bounds() {
     // so absolute == local. Either way the dirty rect should land at
     // (100, 50, 200, 150).
     let child_id = *wm.window_registry.keys().nth(1).unwrap();
-    if let Some(w) = wm.window_registry.get_mut(&child_id) { w.invalidate(); }
+    if let Some(w) = wm.window_registry.get_mut(&child_id) {
+        w.invalidate();
+    }
 
     wm.test_mark_dirty_for_invalidated_windows();
     let dirty: Vec<Rect> = wm.test_dirty_regions();
-    assert!(dirty.iter().any(|r| *r == Rect::new(100, 50, 200, 150)),
-        "expected dirty at (100, 50, 200, 150), got {:?}", dirty);
+    assert!(
+        dirty.iter().any(|r| *r == Rect::new(100, 50, 200, 150)),
+        "expected dirty at (100, 50, 200, 150), got {:?}",
+        dirty
+    );
 }
 
 fn test_nested_child_dirty_marks_at_parent_offset() {
@@ -364,35 +437,57 @@ fn test_nested_child_dirty_marks_at_parent_offset() {
 
     // Root at (0, 0).
     let root_id = wm.create_window(None);
-    let mut root = Box::new(TestWindow::new(root_id, Rect::new(0, 0, 800, 600), Color::BLACK));
+    let mut root = Box::new(TestWindow::new(
+        root_id,
+        Rect::new(0, 0, 800, 600),
+        Color::BLACK,
+    ));
     root.focusable = false;
     wm.set_window_impl(root_id, root);
-    if let Some(screen) = wm.get_active_screen_mut() { screen.set_root_window(root_id); }
+    if let Some(screen) = wm.get_active_screen_mut() {
+        screen.set_root_window(root_id);
+    }
 
     // Parent at (100, 50) under root.
     let parent_id = wm.create_window(Some(root_id));
-    let mut parent = Box::new(TestWindow::new(parent_id, Rect::new(100, 50, 400, 300), Color::WHITE));
+    let mut parent = Box::new(TestWindow::new(
+        parent_id,
+        Rect::new(100, 50, 400, 300),
+        Color::WHITE,
+    ));
     parent.set_parent(Some(root_id));
     wm.set_window_impl(parent_id, parent);
 
     // Grandchild at LOCAL (10, 20) under parent => absolute (110, 70).
     let child_id = wm.create_window(Some(parent_id));
-    let mut child = Box::new(TestWindow::new(child_id, Rect::new(10, 20, 50, 40), Color::WHITE));
+    let mut child = Box::new(TestWindow::new(
+        child_id,
+        Rect::new(10, 20, 50, 40),
+        Color::WHITE,
+    ));
     child.set_parent(Some(parent_id));
     wm.set_window_impl(child_id, child);
 
     quiesce(&mut wm);
 
-    if let Some(w) = wm.window_registry.get_mut(&child_id) { w.invalidate(); }
+    if let Some(w) = wm.window_registry.get_mut(&child_id) {
+        w.invalidate();
+    }
 
     wm.test_mark_dirty_for_invalidated_windows();
     let dirty = wm.test_dirty_regions();
     // The pre-fix bug would have marked (10, 20, 50, 40) (local). The fix
     // marks the absolute (110, 70, 50, 40).
-    assert!(dirty.iter().any(|r| *r == Rect::new(110, 70, 50, 40)),
-        "expected dirty at absolute (110, 70, 50, 40), got {:?}", dirty);
-    assert!(!dirty.iter().any(|r| *r == Rect::new(10, 20, 50, 40)),
-        "must not mark at local-only coords (10, 20, 50, 40); got {:?}", dirty);
+    assert!(
+        dirty.iter().any(|r| *r == Rect::new(110, 70, 50, 40)),
+        "expected dirty at absolute (110, 70, 50, 40), got {:?}",
+        dirty
+    );
+    assert!(
+        !dirty.iter().any(|r| *r == Rect::new(10, 20, 50, 40)),
+        "must not mark at local-only coords (10, 20, 50, 40); got {:?}",
+        dirty
+    );
 }
 
 fn test_two_children_at_distinct_absolute_positions() {
@@ -405,7 +500,9 @@ fn test_two_children_at_distinct_absolute_positions() {
     quiesce(&mut wm);
 
     for cid in &child_ids {
-        if let Some(w) = wm.window_registry.get_mut(cid) { w.invalidate(); }
+        if let Some(w) = wm.window_registry.get_mut(cid) {
+            w.invalidate();
+        }
     }
 
     wm.test_mark_dirty_for_invalidated_windows();
@@ -431,8 +528,16 @@ fn test_clean_window_does_not_register_dirty() {
 
 // ---- U4 tests: skip-paint + dirty-clip ---------------------------------
 
-const ROOT_COLOR: Color = Color { red: 10, green: 10, blue: 10 };
-const CHILD0_COLOR: Color = Color { red: 100, green: 0, blue: 0 };
+const ROOT_COLOR: Color = Color {
+    red: 10,
+    green: 10,
+    blue: 10,
+};
+const CHILD0_COLOR: Color = Color {
+    red: 100,
+    green: 0,
+    blue: 0,
+};
 
 fn test_skip_paint_when_ancestor_chain_misses_dirty() {
     // The full skip-paint benefit depends on the entire ancestor chain
@@ -452,7 +557,9 @@ fn test_skip_paint_when_ancestor_chain_misses_dirty() {
     // Non-full-screen root.
     let root_id = wm.create_window(None);
     let mut root = Box::new(TestWindow::new(
-        root_id, Rect::new(200, 200, 200, 200), ROOT_COLOR,
+        root_id,
+        Rect::new(200, 200, 200, 200),
+        ROOT_COLOR,
     ));
     root.focusable = false;
     wm.set_window_impl(root_id, root);
@@ -463,7 +570,9 @@ fn test_skip_paint_when_ancestor_chain_misses_dirty() {
     // Child inside the non-full-screen root.
     let child_id = wm.create_window(Some(root_id));
     let mut child = Box::new(TestWindow::new(
-        child_id, Rect::new(50, 50, 30, 30), CHILD0_COLOR,
+        child_id,
+        Rect::new(50, 50, 30, 30),
+        CHILD0_COLOR,
     ));
     child.set_parent(Some(root_id));
     wm.set_window_impl(child_id, child);
@@ -526,7 +635,9 @@ fn test_full_repaint_clips_to_window_bounds() {
     // contract.
     let ids: Vec<WindowId> = wm.window_registry.keys().cloned().collect();
     for id in ids {
-        if let Some(w) = wm.window_registry.get_mut(&id) { w.invalidate(); }
+        if let Some(w) = wm.window_registry.get_mut(&id) {
+            w.invalidate();
+        }
     }
 
     wm.test_render_active_screen();
@@ -548,8 +659,8 @@ fn test_clean_child_outside_dirty_skips_when_parent_paints() {
     let (mut wm, state) = make_manager(800, 600);
     let _ = build_simple_scene(
         &mut wm,
-        Rect::new(0, 0, 800, 600),       // root: full screen
-        &[Rect::new(50, 50, 80, 80)],    // child: (50, 50, 80, 80)
+        Rect::new(0, 0, 800, 600),    // root: full screen
+        &[Rect::new(50, 50, 80, 80)], // child: (50, 50, 80, 80)
     );
     quiesce(&mut wm);
     state.lock().reset();
@@ -562,7 +673,10 @@ fn test_clean_child_outside_dirty_skips_when_parent_paints() {
     wm.test_render_active_screen();
 
     let s = state.lock();
-    assert!(!s.fills_with_color(ROOT_COLOR).is_empty(), "root should paint");
+    assert!(
+        !s.fills_with_color(ROOT_COLOR).is_empty(),
+        "root should paint"
+    );
     assert!(
         s.fills_with_color(CHILD0_COLOR).is_empty(),
         "child whose bounds don't intersect dirty must NOT paint — the \
@@ -581,7 +695,11 @@ fn test_drag_tick_marks_bounds_union_not_full_repaint() {
 
     // Root at (0, 0) full-screen — dragged windows are top-level children.
     let root_id = wm.create_window(None);
-    let mut root = Box::new(TestWindow::new(root_id, Rect::new(0, 0, 800, 600), ROOT_COLOR));
+    let mut root = Box::new(TestWindow::new(
+        root_id,
+        Rect::new(0, 0, 800, 600),
+        ROOT_COLOR,
+    ));
     root.focusable = false;
     wm.set_window_impl(root_id, root);
     if let Some(screen) = wm.get_active_screen_mut() {
@@ -591,7 +709,9 @@ fn test_drag_tick_marks_bounds_union_not_full_repaint() {
     // Frame to drag at (100, 100, 400, 300).
     let frame_id = wm.create_window(Some(root_id));
     let mut frame = Box::new(TestWindow::new(
-        frame_id, Rect::new(100, 100, 400, 300), CHILD0_COLOR,
+        frame_id,
+        Rect::new(100, 100, 400, 300),
+        CHILD0_COLOR,
     ));
     frame.set_parent(Some(root_id));
     wm.set_window_impl(frame_id, frame);
@@ -601,11 +721,7 @@ fn test_drag_tick_marks_bounds_union_not_full_repaint() {
     // Pretend the user grabbed the title bar at (150, 110) and the frame's
     // origin was (100, 100); this matches what start_drag_if_on_title_bar
     // would record for a real click on the title bar.
-    wm.test_force_drag_state(
-        frame_id,
-        Point::new(150, 110),
-        Point::new(100, 100),
-    );
+    wm.test_force_drag_state(frame_id, Point::new(150, 110), Point::new(100, 100));
 
     // Mouse moves 20 px right with left button still held → drag tick.
     wm.test_handle_dragging(170, 110, 0x01);
@@ -629,10 +745,11 @@ fn test_drag_tick_marks_bounds_union_not_full_repaint() {
     let union = Rect::new(100, 100, 420, 300);
     let dirty = wm.test_dirty_regions();
     assert!(
-        dirty.iter().any(|r| *r == union || (r.x <= union.x
-            && r.y <= union.y
-            && r.x + r.width as i32 >= union.x + union.width as i32
-            && r.y + r.height as i32 >= union.y + union.height as i32)),
+        dirty.iter().any(|r| *r == union
+            || (r.x <= union.x
+                && r.y <= union.y
+                && r.x + r.width as i32 >= union.x + union.width as i32
+                && r.y + r.height as i32 >= union.y + union.height as i32)),
         "expected dirty rects to cover {:?}, got {:?}",
         union,
         dirty
@@ -646,7 +763,11 @@ fn test_drag_tick_with_no_position_change_does_nothing() {
     wm.switch_screen(screen_id);
 
     let root_id = wm.create_window(None);
-    let mut root = Box::new(TestWindow::new(root_id, Rect::new(0, 0, 800, 600), ROOT_COLOR));
+    let mut root = Box::new(TestWindow::new(
+        root_id,
+        Rect::new(0, 0, 800, 600),
+        ROOT_COLOR,
+    ));
     root.focusable = false;
     wm.set_window_impl(root_id, root);
     if let Some(screen) = wm.get_active_screen_mut() {
@@ -655,7 +776,9 @@ fn test_drag_tick_with_no_position_change_does_nothing() {
 
     let frame_id = wm.create_window(Some(root_id));
     let mut frame = Box::new(TestWindow::new(
-        frame_id, Rect::new(100, 100, 400, 300), CHILD0_COLOR,
+        frame_id,
+        Rect::new(100, 100, 400, 300),
+        CHILD0_COLOR,
     ));
     frame.set_parent(Some(root_id));
     wm.set_window_impl(frame_id, frame);
@@ -684,14 +807,18 @@ fn test_opt_in_window_blits_instead_of_painting() {
     wm.switch_screen(screen_id);
 
     // Non-full-screen scene root.
-    let root_id = install_test_window(
-        &mut wm, None, Rect::new(0, 0, 200, 200), ROOT_COLOR, false,
-    );
-    if let Some(screen) = wm.get_active_screen_mut() { screen.set_root_window(root_id); }
+    let root_id = install_test_window(&mut wm, None, Rect::new(0, 0, 200, 200), ROOT_COLOR, false);
+    if let Some(screen) = wm.get_active_screen_mut() {
+        screen.set_root_window(root_id);
+    }
 
     // Opt-in child at (50, 50, 100, 100).
     let child_id = install_test_window(
-        &mut wm, Some(root_id), Rect::new(50, 50, 100, 100), CHILD0_COLOR, true,
+        &mut wm,
+        Some(root_id),
+        Rect::new(50, 50, 100, 100),
+        CHILD0_COLOR,
+        true,
     );
 
     quiesce(&mut wm);
@@ -700,13 +827,18 @@ fn test_opt_in_window_blits_instead_of_painting() {
     // Mark dirty intersecting both root and child.
     wm.test_mark_dirty(Rect::new(60, 60, 80, 80));
     // Simulate fresh content in child so the rasterize+blit path runs.
-    if let Some(w) = wm.window_registry.get_mut(&child_id) { w.invalidate(); }
+    if let Some(w) = wm.window_registry.get_mut(&child_id) {
+        w.invalidate();
+    }
     wm.test_render_active_screen();
 
     let s = state.lock();
 
     // Root is non-opt-in → goes through paint() and emits a fill_rect.
-    assert!(paint_count_for(&s, ROOT_COLOR) >= 1, "non-opt-in root paints");
+    assert!(
+        paint_count_for(&s, ROOT_COLOR) >= 1,
+        "non-opt-in root paints"
+    );
 
     // Child is opt-in → does NOT emit a fill_rect (paint() not called) and
     // produces a blit instead.
@@ -739,26 +871,37 @@ fn test_opt_in_skips_rasterization_when_content_unchanged() {
     let screen_id = wm.create_screen(ScreenMode::Gui);
     wm.switch_screen(screen_id);
 
-    let root_id = install_test_window(
-        &mut wm, None, Rect::new(0, 0, 200, 200), ROOT_COLOR, false,
-    );
-    if let Some(screen) = wm.get_active_screen_mut() { screen.set_root_window(root_id); }
+    let root_id = install_test_window(&mut wm, None, Rect::new(0, 0, 200, 200), ROOT_COLOR, false);
+    if let Some(screen) = wm.get_active_screen_mut() {
+        screen.set_root_window(root_id);
+    }
 
     let child_id = install_test_window(
-        &mut wm, Some(root_id), Rect::new(50, 50, 100, 100), CHILD0_COLOR, true,
+        &mut wm,
+        Some(root_id),
+        Rect::new(50, 50, 100, 100),
+        CHILD0_COLOR,
+        true,
     );
 
     // Render once with the child invalidated so it rasterizes.
-    if let Some(w) = wm.window_registry.get_mut(&child_id) { w.invalidate(); }
+    if let Some(w) = wm.window_registry.get_mut(&child_id) {
+        w.invalidate();
+    }
     wm.test_clear_dirty();
     wm.test_mark_dirty(Rect::new(50, 50, 100, 100));
     wm.test_render_active_screen();
 
     // First-render rasterize_count should be 1.
-    let first_count = wm.window_registry
+    let first_count = wm
+        .window_registry
         .get(&child_id)
         .and_then(|w| w.backing_store().map(|b| (b.width, b.height)));
-    assert_eq!(first_count, Some((100, 100)), "child rasterized at first render");
+    assert_eq!(
+        first_count,
+        Some((100, 100)),
+        "child rasterized at first render"
+    );
 
     // Now reset, mark a new dirty rect that intersects child but child is
     // NOT invalidated — simulates a cursor moving over child or a sibling
@@ -797,16 +940,22 @@ fn test_opt_in_window_invalidate_re_rasterizes() {
     let screen_id = wm.create_screen(ScreenMode::Gui);
     wm.switch_screen(screen_id);
 
-    let root_id = install_test_window(
-        &mut wm, None, Rect::new(0, 0, 200, 200), ROOT_COLOR, false,
-    );
-    if let Some(screen) = wm.get_active_screen_mut() { screen.set_root_window(root_id); }
+    let root_id = install_test_window(&mut wm, None, Rect::new(0, 0, 200, 200), ROOT_COLOR, false);
+    if let Some(screen) = wm.get_active_screen_mut() {
+        screen.set_root_window(root_id);
+    }
 
     let child_id = install_test_window(
-        &mut wm, Some(root_id), Rect::new(50, 50, 100, 100), CHILD0_COLOR, true,
+        &mut wm,
+        Some(root_id),
+        Rect::new(50, 50, 100, 100),
+        CHILD0_COLOR,
+        true,
     );
 
-    if let Some(w) = wm.window_registry.get_mut(&child_id) { w.invalidate(); }
+    if let Some(w) = wm.window_registry.get_mut(&child_id) {
+        w.invalidate();
+    }
     wm.test_mark_dirty(Rect::new(50, 50, 100, 100));
     wm.test_render_active_screen();
 
@@ -814,7 +963,9 @@ fn test_opt_in_window_invalidate_re_rasterizes() {
     assert!(!wm.window_registry.get(&child_id).unwrap().needs_repaint());
 
     // Invalidate again.
-    if let Some(w) = wm.window_registry.get_mut(&child_id) { w.invalidate(); }
+    if let Some(w) = wm.window_registry.get_mut(&child_id) {
+        w.invalidate();
+    }
     assert!(wm.window_registry.get(&child_id).unwrap().needs_repaint());
 
     state.lock().reset();
@@ -854,7 +1005,9 @@ fn test_render_presents_dirty_region_and_cursor_footprint() {
         batch,
     );
     assert!(
-        batch.iter().any(|rect| rect.contains_point(Point::new(400, 300))),
+        batch
+            .iter()
+            .any(|rect| rect.contains_point(Point::new(400, 300))),
         "expected cursor footprint in presentation batch, got {:?}",
         batch,
     );

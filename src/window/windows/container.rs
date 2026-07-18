@@ -1,8 +1,8 @@
 //! Container window that can hold child windows
 
-use crate::window::{Window, WindowId, Rect, Event, EventResult, GraphicsDevice};
-use crate::graphics::color::Color;
 use super::base::WindowBase;
+use crate::graphics::color::Color;
+use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 
 /// A window that can contain other windows
 pub struct ContainerWindow {
@@ -29,7 +29,7 @@ impl ContainerWindow {
             background_color: crate::window::PALETTE_CONTENT_BG,
         }
     }
-    
+
     /// Set the background color
     pub fn set_background_color(&mut self, color: Color) {
         self.background_color = color;
