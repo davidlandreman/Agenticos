@@ -4614,20 +4614,20 @@ fn test_remove_process_cleans_ring3_queues() {
     assert!(crate::userland::lifecycle::peek_next_ring3().is_none());
 }
 
-/// next_runnable prefers a ring-3 process when one is ready, falling
-/// back to the kernel-thread scheduler (idle) otherwise. This is the
-/// load-bearing decision the U5 timer ISR will consult.
-fn test_next_runnable_prefers_ring3() {
+/// The compatibility decision view preserves the entity tag selected from the
+/// same queue and falls back to idle when that queue is empty.
+fn test_next_runnable_uses_unified_queue() {
+    use crate::process::entity::EntityId;
     use crate::process::scheduler::{Runnable, Scheduler};
-    clear_ring3_queues();
     let mut sched = Scheduler::new();
     sched.init();
 
-    crate::userland::lifecycle::mark_ring3_ready(70);
+    sched.register_user(70).unwrap();
+    sched.make_ready(EntityId::UserProcess(70), None).unwrap();
     let pick = sched.next_runnable();
     assert_eq!(pick, Runnable::RingThree(70));
 
-    // No more ring-3 ready — falls back to kernel-thread (idle PCB).
+    // No more ready entities — fall back to the idle PCB.
     let pick = sched.next_runnable();
     assert!(matches!(pick, Runnable::KernelThread(_)));
 }
@@ -4644,7 +4644,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_wake_ring3_blocked_on_child_any,
         &test_wake_ring3_blocked_on_child_specific,
         &test_remove_process_cleans_ring3_queues,
-        &test_next_runnable_prefers_ring3,
+        &test_next_runnable_uses_unified_queue,
         &test_has_children_returns_false_when_no_children,
         &test_has_children_sees_live_child,
         &test_has_children_sees_zombie_child,

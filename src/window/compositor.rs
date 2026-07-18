@@ -9,36 +9,20 @@
 //! sees a frozen desktop until the ring-3 process voluntarily yields
 //! (syscall block, exit).
 //!
-//! U10 moves the input + render path into its own kernel thread spawned
-//! at boot. The kernel-thread scheduler round-robins it alongside other
-//! kernel threads (the terminal launchers, future workers) AND U5's
-//! timer ISR splits ring-3 slices via `try_preempt_ring3`. So the
-//! compositor gets CPU even while a ring-3 process is busy:
-//!
-//! - Ring-3 runs for one timer tick.
-//! - Timer at CPL=3 → `try_preempt_ring3` checks ring3_ready. If
-//!   another ring-3 is queued, switch. Otherwise iretq back.
-//! - Eventually the CPL=0 kernel-thread scheduler gets a slice (when
-//!   ring-3 syscalls or yields). `try_run_scheduled_processes` picks
-//!   the compositor; it processes input + renders + yields.
+//! The compositor is a kernel entity in the same queue as ring-3 processes.
+//! PIT preemption therefore rotates directly between user work, compositor,
+//! network, and other workers without a main-loop handoff.
 //!
 //! ## What stays in the main loop
 //!
-//! - Preemption check + watchdog (low-latency housekeeping).
-//! - `try_run_scheduled_processes` (the kernel-thread scheduler tick).
-//! - `save_kernel_and_resume_ring3` (the U8 ring-3 dispatcher).
+//! - Watchdog housekeeping.
+//! - Initial/idle dispatch through the unified selector.
 //! - `hlt` for true CPU idle.
 //!
-//! ## Why `process_expired_sleeps` runs here
-//!
-//! Ring-3 `nanosleep` deadlines are expired from this loop, not only the main
-//! loop. Under U10 the main loop is the idle task and barely runs once this
-//! compositor thread is always ready, so a self-timed ring-3 animation
-//! (`PAINTING.ELF`) that blocks in `nanosleep` each frame would be woken only
-//! every few seconds. The compositor is scheduled every round-robin revolution,
-//! so waking sleepers here gives them frame-cadence resumption. Dispatch of the
-//! woken process is already fast (`scheduler::next_runnable` pops `ring3_ready`
-//! on every context switch).
+//! The compositor is deadline-driven through the shared scheduler timer. It
+//! blocks for one PIT tick after each bounded pass and is woken with a two-tick
+//! dispatch contract. Timer expiration is owned by `timer-service`, never by
+//! this rendering loop.
 //!
 //! ## The BinaryLoadGuard interaction
 //!
@@ -77,14 +61,6 @@ pub fn run() {
     let using_virtio = crate::drivers::mouse::is_virtio_tablet();
 
     loop {
-        // Expire ring-3 `nanosleep` deadlines here, not just in the kernel
-        // main loop: under U10 the main loop is the idle task and barely runs
-        // once other kernel threads (this compositor) are always ready, so a
-        // self-timed ring-3 animation loop would only get woken every few
-        // seconds. The compositor is scheduled every round-robin revolution,
-        // so waking sleepers here gives them frame-cadence resumption.
-        crate::userland::lifecycle::process_expired_sleeps();
-
         let user_active = crate::userland::lifecycle::binary_load_in_progress();
 
         // Input processing — skip while a binary is being loaded so the
@@ -125,10 +101,11 @@ pub fn run() {
             crate::window::render_frame();
         }
 
-        // Yield. With round-robin scheduling, the compositor gets one
-        // slice per scheduler revolution. When idle (no dirty
-        // regions), each iteration is cheap — early-exits inside
-        // process_terminal_output and render_frame.
-        crate::process::yield_current();
+        // A one-tick cadence bounds input/render latency while allowing the
+        // thread to leave the run queue completely between passes.
+        crate::process::sleep_ticks_with_contract(
+            1,
+            Some(crate::process::entity::LatencyContract::new(2)),
+        );
     }
 }

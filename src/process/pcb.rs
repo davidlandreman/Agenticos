@@ -21,6 +21,7 @@ impl WakeEvents {
     /// No events
     pub const NONE: Self = Self(0);
     /// Timer expired (for timed sleeps)
+    #[expect(dead_code, reason = "legacy event bit retained for task diagnostics")]
     pub const TIMER: Self = Self(1 << 0);
     /// Input available (keyboard/stdin)
     pub const INPUT: Self = Self(1 << 1);
@@ -96,6 +97,8 @@ pub enum BlockReason {
     /// in the ring-3 exit path (`long_jump_to_run_or_halt`).
     /// The `u32` payload is the ring-3 PID being awaited.
     WaitingForRing3Exit(u32),
+    /// Deferred timer heap has no due work.
+    WaitingForTimerWork,
 }
 
 /// Process Control Block - complete state for a process

@@ -56,6 +56,8 @@ pub mod progress_bar_tests;
 #[cfg(feature = "test")]
 pub mod retained_scene;
 #[cfg(feature = "test")]
+pub mod scheduler;
+#[cfg(feature = "test")]
 pub mod scroll_view_tests;
 #[cfg(feature = "test")]
 pub mod selection_tests;
@@ -171,6 +173,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("desktop_backing_store", desktop_backing_store::get_tests),
     ("surface_alpha", surface_alpha::get_tests),
     ("retained_scene", retained_scene::get_tests),
+    ("scheduler", scheduler::get_tests),
     ("composition_cpu", composition_cpu::get_tests),
     ("compositor_selection", compositor_selection::get_tests),
     ("window_theme", window_theme::get_tests),

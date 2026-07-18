@@ -147,15 +147,20 @@ fn wake_ring3_blocked_on_gui_event(pid: u32) {
     if pid == KERNEL_PID {
         return;
     }
-    let mut table = PROCESS_TABLE.lock();
-    if matches!(
-        table.ring3_blocked.get(&pid),
-        Some(Ring3BlockReason::WaitingForGuiEvent)
-    ) {
-        table.ring3_blocked.remove(&pid);
-        if !table.ring3_ready.iter().any(|candidate| *candidate == pid) {
-            table.ring3_ready.push_back(pid);
+    let should_wake = {
+        let mut table = PROCESS_TABLE.lock();
+        if matches!(
+            table.ring3_blocked.get(&pid),
+            Some(Ring3BlockReason::WaitingForGuiEvent)
+        ) {
+            table.ring3_blocked.remove(&pid);
+            true
+        } else {
+            false
         }
+    };
+    if should_wake {
+        crate::userland::lifecycle::mark_ring3_ready(pid);
     }
 }
 
