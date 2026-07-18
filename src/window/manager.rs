@@ -229,6 +229,12 @@ impl WindowManager {
 
     /// Destroy a window and all of its descendants.
     pub fn destroy_window(&mut self, id: WindowId) {
+        // If this window (or one of its descendants, via the recursion
+        // below) is a terminal, kill its ring-3 process tree first so
+        // closing the window doesn't orphan zsh and its children. No-op
+        // for non-terminal windows.
+        crate::window::terminal_factory::on_window_destroyed(id);
+
         // Snapshot children first (since registry is mutated below).
         let children: Vec<WindowId> = self
             .window_registry
