@@ -1,7 +1,12 @@
-//! VirtIO-GPU 2D control/scanout foundation.
+//! VirtIO-GPU 2D presentation and qualified VirGL 3D transport.
 //!
-//! The 2D device is a presenter, not a composition accelerator. VirGL is not
-//! exposed until a capset-gated alpha/readback smoke test succeeds.
+//! VirGL is exposed to the retained compositor only after capset, clear,
+//! premultiplied-alpha/readback, and repeated-lifecycle qualification gates.
+
+#![expect(
+    dead_code,
+    reason = "some VirtIO-GPU transport operations are reserved for diagnostics"
+)]
 
 use alloc::vec::Vec;
 
@@ -13,6 +18,7 @@ use crate::window::Rect;
 
 mod control;
 pub mod protocol;
+pub mod virgl;
 
 use control::{ControlQueue, CursorQueue};
 use protocol::*;
@@ -23,10 +29,20 @@ pub enum GpuError {
     Features,
     Queue(VirtqueueError),
     ShortResponse,
+    LongResponse,
+    ResponseLength { expected: usize, actual: usize },
     Response(u32),
     NoScanout,
     InvalidRect,
     SizeOverflow,
+    VirglUnavailable,
+    TooManyCapsets(u32),
+    CapsetTooLarge(u32),
+    UnsupportedCapset,
+    InvalidCommandStream,
+    InvalidResource,
+    ReadbackMismatch,
+    FenceMismatch { expected: u64, actual: u64 },
 }
 
 pub struct ScanoutResource {
@@ -38,13 +54,22 @@ pub struct ScanoutResource {
     active: bool,
 }
 
+/// Fixed 64x64 ARGB cursor resource owned by the dedicated cursor queue.
+pub struct CursorResource {
+    resource_id: u32,
+    scanout_id: u32,
+    backing: Vec<u8>,
+    live: bool,
+}
+
 pub struct VirtioGpu {
     device: VirtioDevice,
     control: ControlQueue,
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     cursor: CursorQueue,
     features: u32,
     next_resource_id: u32,
+    next_context_id: u32,
+    next_fence_id: u64,
 }
 
 impl VirtioGpu {
@@ -59,7 +84,10 @@ impl VirtioGpu {
     pub fn new(pci_device: PciDevice) -> Result<Self, GpuError> {
         let device = VirtioDevice::new(pci_device).ok_or(GpuError::Device)?;
         let (features, _) = device
-            .init_with_features(VIRTIO_GPU_F_VIRGL | VIRTIO_GPU_F_EDID, 1)
+            .init_with_features(
+                VIRTIO_GPU_F_VIRGL | VIRTIO_GPU_F_EDID | VIRTIO_GPU_F_CONTEXT_INIT,
+                1,
+            )
             .ok_or(GpuError::Features)?;
         let control = device.setup_queue(0).ok_or(GpuError::Device)?;
         let cursor = device.setup_queue(1).ok_or(GpuError::Device)?;
@@ -70,10 +98,11 @@ impl VirtioGpu {
             cursor: CursorQueue::new(cursor),
             features,
             next_resource_id: 1,
+            next_context_id: 1,
+            next_fence_id: 1,
         })
     }
 
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn virgl_advertised(&self) -> bool {
         self.features & VIRTIO_GPU_F_VIRGL != 0
     }
@@ -226,6 +255,124 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Upload and install the standard 64x64 VirtIO-GPU hardware cursor.
+    /// `pixels` are premultiplied ARGB words; little-endian storage is the
+    /// B8G8R8A8 byte layout required by the device.
+    pub fn create_cursor(
+        &mut self,
+        scanout_id: u32,
+        x: u32,
+        y: u32,
+        pixels: &[u32],
+    ) -> Result<CursorResource, GpuError> {
+        const SIDE: u32 = 64;
+        const PIXELS: usize = (SIDE * SIDE) as usize;
+        if pixels.len() != PIXELS {
+            return Err(GpuError::InvalidResource);
+        }
+        let resource_id = self.next_resource_id;
+        self.next_resource_id = resource_id.checked_add(1).ok_or(GpuError::SizeOverflow)?;
+        self.control.submit_nodata(&ResourceCreate2d {
+            header: CtrlHeader::command(CMD_RESOURCE_CREATE_2D),
+            resource_id,
+            format: FORMAT_B8G8R8A8_UNORM,
+            width: SIDE,
+            height: SIDE,
+        })?;
+
+        let mut backing = alloc::vec![0u8; PIXELS * 4];
+        for (bytes, pixel) in backing.chunks_exact_mut(4).zip(pixels.iter().copied()) {
+            bytes.copy_from_slice(&pixel.to_le_bytes());
+        }
+        if let Err(error) = self.attach_backing(resource_id, &backing) {
+            let _ = self.unref(resource_id);
+            return Err(error);
+        }
+        let upload = TransferToHost2d {
+            header: CtrlHeader::command(CMD_TRANSFER_TO_HOST_2D),
+            rect: GpuRect {
+                x: 0,
+                y: 0,
+                width: SIDE,
+                height: SIDE,
+            },
+            offset: 0,
+            resource_id,
+            padding: 0,
+        };
+        if let Err(error) = self.control.submit_nodata(&upload) {
+            let _ = self.detach_backing(resource_id);
+            let _ = self.unref(resource_id);
+            return Err(error);
+        }
+        if let Err(error) = self.cursor.submit_nodata(&UpdateCursor {
+            header: CtrlHeader::command(CMD_UPDATE_CURSOR),
+            position: CursorPosition {
+                scanout_id,
+                x,
+                y,
+                padding: 0,
+            },
+            resource_id,
+            hot_x: 0,
+            hot_y: 0,
+            padding: 0,
+        }) {
+            let _ = self.detach_backing(resource_id);
+            let _ = self.unref(resource_id);
+            return Err(error);
+        }
+        Ok(CursorResource {
+            resource_id,
+            scanout_id,
+            backing,
+            live: true,
+        })
+    }
+
+    pub fn move_cursor(&mut self, cursor: &CursorResource, x: u32, y: u32) -> Result<(), GpuError> {
+        if !cursor.live {
+            return Err(GpuError::InvalidResource);
+        }
+        self.cursor.submit_nodata(&MoveCursor {
+            header: CtrlHeader::command(CMD_MOVE_CURSOR),
+            position: CursorPosition {
+                scanout_id: cursor.scanout_id,
+                x,
+                y,
+                padding: 0,
+            },
+            resource_id: cursor.resource_id,
+            hot_x: 0,
+            hot_y: 0,
+            padding: 0,
+        })
+    }
+
+    pub fn destroy_cursor(&mut self, cursor: &mut CursorResource) -> Result<(), GpuError> {
+        if !cursor.live {
+            return Ok(());
+        }
+        self.cursor.submit_nodata(&UpdateCursor {
+            header: CtrlHeader::command(CMD_UPDATE_CURSOR),
+            position: CursorPosition {
+                scanout_id: cursor.scanout_id,
+                x: 0,
+                y: 0,
+                padding: 0,
+            },
+            resource_id: 0,
+            hot_x: 0,
+            hot_y: 0,
+            padding: 0,
+        })?;
+        self.detach_backing(cursor.resource_id)?;
+        self.unref(cursor.resource_id)?;
+        cursor.backing.clear();
+        cursor.live = false;
+        Ok(())
+    }
+
     fn unref(&mut self, resource_id: u32) -> Result<(), GpuError> {
         self.control.submit_nodata(&ResourceRef {
             header: CtrlHeader::command(CMD_RESOURCE_UNREF),
@@ -237,6 +384,6 @@ impl VirtioGpu {
     /// Reset the whole device after a malformed response/timeout so VGA
     /// compatibility can resume instead of leaving a stale scanout active.
     pub fn reset(self) {
-        self.device.reset();
+        let _ = self.device.reset();
     }
 }

@@ -1,5 +1,7 @@
 //! Cursor rendering with background save/restore
 
+use alloc::vec::Vec;
+
 use super::{GraphicsDevice, Rect};
 use crate::graphics::color::Color;
 
@@ -95,6 +97,32 @@ impl CursorRenderer {
             CURSOR_BUFFER_SIZE as u32,
             CURSOR_BUFFER_SIZE as u32,
         )
+    }
+
+    /// Standard VirtIO-GPU cursor image. Pixels are premultiplied ARGB words;
+    /// transparent storage outside the pointer lets the host compositor place
+    /// it without touching the scanout texture.
+    pub fn hardware_argb_64() -> Vec<u32> {
+        const SIDE: usize = 64;
+        const TRANSPARENT: u32 = 0;
+        const BLACK: u32 = 0xff00_0000;
+        const WHITE: u32 = 0xffff_ffff;
+        let mut pixels = alloc::vec![TRANSPARENT; SIDE * SIDE];
+        let mut set = |x: i32, y: i32, color: u32| {
+            if x >= 0 && y >= 0 && x < SIDE as i32 && y < SIDE as i32 {
+                pixels[y as usize * SIDE + x as usize] = color;
+            }
+        };
+        for &(x, y) in CURSOR_PIXELS {
+            set(x - 1, y, BLACK);
+            set(x + 1, y, BLACK);
+            set(x, y - 1, BLACK);
+            set(x, y + 1, BLACK);
+        }
+        for &(x, y) in CURSOR_PIXELS {
+            set(x, y, WHITE);
+        }
+        pixels
     }
 
     /// Save background pixels at the cursor position before drawing.

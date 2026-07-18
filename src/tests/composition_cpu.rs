@@ -43,6 +43,26 @@ fn test_half_red_over_blue_oracle() {
     );
 }
 
+fn test_stage_stats_report_composition_without_gpu_work() {
+    let id = SurfaceId(1);
+    let mut surfaces = BTreeMap::new();
+    surfaces.insert(
+        id,
+        solid_surface(4, 4, PremulArgb::from_rgba(10, 20, 30, 255)),
+    );
+    let mut scene = SceneFrame::new(4, 4);
+    scene.push(Layer::opaque(id, Rect::new(0, 0, 4, 4)));
+    let mut engine = CpuCompositionEngine::new(4, 4).unwrap();
+    let stats = engine
+        .compose(&scene, &surfaces, &[Rect::new(0, 0, 4, 4)])
+        .unwrap();
+    assert_eq!(stats.texture_bytes_uploaded, 0);
+    assert_eq!(stats.texture_upload_cycles, 0);
+    assert_eq!(stats.fence_wait_cycles, 0);
+    assert_eq!(stats.backdrop_blur_cycles, 0);
+    assert_eq!(stats.output_pixels_damaged, 16);
+}
+
 fn test_damage_preserves_untouched_output() {
     let id = SurfaceId(1);
     let mut surfaces = BTreeMap::new();
@@ -182,6 +202,7 @@ fn test_backdrop_damage_uses_current_neighborhood() {
 pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
     &[
         &test_half_red_over_blue_oracle,
+        &test_stage_stats_report_composition_without_gpu_work,
         &test_damage_preserves_untouched_output,
         &test_layer_opacity,
         &test_backdrop_blur_uniform_is_identity,
