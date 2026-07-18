@@ -3462,6 +3462,15 @@ pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
     let mut remaining = count;
     let mut total: u64 = 0;
     let mut error: Option<i64> = None;
+    // Match write(2)/writev(2): stdout and stderr belong to the issuing
+    // process's terminal, not the legacy global print target. BusyBox cat
+    // reaches this path for regular files, so routing through crate::print!
+    // would report a successful copy while drawing outside the terminal.
+    let dest_terminal = if matches!(&out, Out::StdoutErr) {
+        crate::userland::lifecycle::with_current_group(|p| p.terminal_id)
+    } else {
+        None
+    };
 
     while remaining > 0 {
         let want = core::cmp::min(remaining as usize, CHUNK);
@@ -3478,7 +3487,10 @@ pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
         let written = match &out {
             Out::StdoutErr => {
                 let s = alloc::string::String::from_utf8_lossy(&buf[..n]);
-                crate::print!("{}", s);
+                match dest_terminal {
+                    Some(tid) => crate::window::terminal::write_to_terminal_id(tid, &s),
+                    None => crate::print!("{}", s),
+                }
                 n
             }
             Out::File(handle) => match handle.write(&buf[..n]) {
