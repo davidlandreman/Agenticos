@@ -28,6 +28,7 @@
 //! caret blink (U5), bracketed paste (U7).
 
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -155,6 +156,10 @@ pub struct Screen {
     /// device attributes, …). Drained by the PTY in U6.
     replies: Vec<u8>,
 
+    /// Most recent OSC 0/2 window-title request. The hosting terminal window
+    /// drains this and applies it to its enclosing frame.
+    pending_title: Option<String>,
+
     /// True when the alt-screen buffer is active. While set, scrollback
     /// is not appended to and `\x1b[?1049l` is the way back.
     using_alt: bool,
@@ -205,6 +210,7 @@ impl Screen {
             cursor_shape: CursorShape::Block,
             last_col_pending: false,
             replies: Vec::new(),
+            pending_title: None,
             using_alt: false,
             stashed: None,
             scrollback: VecDeque::new(),
@@ -249,6 +255,11 @@ impl Screen {
     /// inspect them.
     pub fn take_replies(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.replies)
+    }
+
+    /// Drain the latest OSC 0/2 window-title request.
+    pub fn take_title(&mut self) -> Option<String> {
+        self.pending_title.take()
     }
 
     /// Renderer-ready caret snapshot. Reflects current row/col,
@@ -1071,9 +1082,22 @@ impl Perform for Screen {
         }
     }
 
-    fn osc_dispatch(&mut self, _data: &[u8], _bell_terminated: bool) {
-        // OSC dispatch (window title etc.) is consumed by a higher
-        // layer in U6 / U9. Screen ignores it.
+    fn osc_dispatch(&mut self, data: &[u8], _bell_terminated: bool) {
+        let Some(separator) = data.iter().position(|&byte| byte == b';') else {
+            return;
+        };
+        if !matches!(&data[..separator], b"0" | b"2") {
+            return;
+        }
+        let Ok(title) = core::str::from_utf8(&data[separator + 1..]) else {
+            return;
+        };
+        let sanitized: String = title
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(256)
+            .collect();
+        self.pending_title = Some(sanitized);
     }
 }
 
@@ -1131,6 +1155,7 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &tests::test_caret_reflects_visibility_and_shape,
         &tests::test_caret_tracks_cursor_position,
         &tests::test_last_painted_cursor_acknowledge,
+        &tests::test_osc_title_request,
     ]
 }
 
@@ -1160,6 +1185,15 @@ mod tests {
         assert_eq!(s.cell(0, 0).ch, 'h');
         assert_eq!(s.cell(0, 4).ch, 'o');
         assert_eq!(s.cursor(), (0, 5));
+    }
+
+    pub(super) fn test_osc_title_request() {
+        let mut s = Screen::new(2, 10);
+        feed(&mut s, b"\x1b]0;Terminal - echo hello\x07");
+        assert_eq!(s.take_title().as_deref(), Some("Terminal - echo hello"));
+
+        feed(&mut s, b"\x1b]1;ignored\x07");
+        assert_eq!(s.take_title(), None);
     }
 
     pub(super) fn test_lf_advances_row() {

@@ -93,7 +93,7 @@ All windows derive from `WindowBase` for consistent parent-child tracking.
 Boot lands in GUI mode:
 
 - `DesktopWindow` (full-screen). Reads `/WALLPAPR.BMP` from the FAT root via `window::load_default_wallpaper` during `init_guishell`; on success, the BMP is stretched to the full screen via `GraphicsDevice::draw_image_scaled`. Missing or malformed wallpaper degrades to the legacy solid-blue fill — never panics.
-- `FrameWindow` titled "AgenticOS Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller).
+- `FrameWindow` titled "Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller). After command submission, its title shows `Terminal - ` followed by the first 40 characters of the command.
 - `TerminalWindow` inside the frame.
 - Bottom taskbar with a Start button, dynamically-sized frame buttons, and a
   recessed right-side UTC date/time tray. Start opens the classic menu;

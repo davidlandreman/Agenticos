@@ -2,10 +2,13 @@
 
 use super::base::WindowBase;
 use crate::graphics::color::Color;
-use crate::graphics::fonts::core_font::get_default_font;
+use crate::graphics::fonts::core_font::get_terminal_font;
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window};
 use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
+
+/// Breathing room between the terminal's character grid and its content well.
+const CONTENT_PADDING: usize = 8;
 
 /// A character cell in the text grid
 #[derive(Clone, Copy)]
@@ -87,13 +90,13 @@ impl TextWindow {
 
     /// Create a new text window with a specific ID
     pub fn new_with_id(id: crate::window::WindowId, bounds: Rect) -> Self {
-        let font = get_default_font();
+        let font = get_terminal_font();
         let char_width = font.cell_width() as usize;
         let char_height = font.line_height() as usize;
 
         // Calculate grid dimensions
-        let cols = (bounds.width as usize) / char_width;
-        let rows = (bounds.height as usize) / char_height;
+        let cols = (bounds.width as usize).saturating_sub(CONTENT_PADDING * 2) / char_width;
+        let rows = (bounds.height as usize).saturating_sub(CONTENT_PADDING * 2) / char_height;
 
         // Initialize buffer
         let buffer = vec![vec![CharCell::default(); cols]; rows];
@@ -283,11 +286,13 @@ impl Window for TextWindow {
         self.base.set_bounds(bounds);
         // Recalculate grid dimensions when bounds change
         let bounds = self.base.bounds();
-        let font = crate::graphics::fonts::core_font::get_default_font();
+        let font = get_terminal_font();
         self.char_width = font.cell_width() as usize;
         self.char_height = font.line_height() as usize;
-        let new_cols = bounds.width as usize / self.char_width;
-        let new_rows = bounds.height as usize / self.char_height;
+        let new_cols =
+            (bounds.width as usize).saturating_sub(CONTENT_PADDING * 2) / self.char_width;
+        let new_rows =
+            (bounds.height as usize).saturating_sub(CONTENT_PADDING * 2) / self.char_height;
 
         // Only reallocate if dimensions actually changed
         let old_rows = self.buffer.len();
@@ -347,7 +352,7 @@ impl Window for TextWindow {
         // every time the window was painted.
 
         let bounds = self.bounds();
-        let font = get_default_font();
+        let font = get_terminal_font();
 
         // Check if we can do incremental update
         crate::debug_trace!(
@@ -414,16 +419,17 @@ impl Window for TextWindow {
                 // Repaint the bounding rect background first so any
                 // unchanged-cells whose pixels were just clobbered by
                 // wallpaper get the dark-grey terminal background back.
-                let fill_x = bounds.x + (min_col * self.char_width) as i32;
-                let fill_y = bounds.y + (min_row * self.char_height) as i32;
+                let fill_x = bounds.x + CONTENT_PADDING as i32 + (min_col * self.char_width) as i32;
+                let fill_y =
+                    bounds.y + CONTENT_PADDING as i32 + (min_row * self.char_height) as i32;
                 let fill_w = ((max_col_excl - min_col) * self.char_width) as u32;
                 let fill_h = ((max_row_excl - min_row) * self.char_height) as u32;
                 device.fill_rect(fill_x, fill_y, fill_w, fill_h, Color::new(32, 32, 32));
 
                 for row in min_row..max_row_excl {
                     for col in min_col..max_col_excl {
-                        let x = bounds.x + (col * self.char_width) as i32;
-                        let y = bounds.y + (row * self.char_height) as i32;
+                        let x = bounds.x + CONTENT_PADDING as i32 + (col * self.char_width) as i32;
+                        let y = bounds.y + CONTENT_PADDING as i32 + (row * self.char_height) as i32;
                         let cell = &self.buffer[row][col];
 
                         // Cells with bg == BLACK use the default
@@ -455,8 +461,12 @@ impl Window for TextWindow {
                 self.dirty_cells.clear();
 
                 if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
-                    let cursor_x = bounds.x + (self.cursor_x * self.char_width) as i32;
-                    let cursor_y = bounds.y + (self.cursor_y * self.char_height) as i32;
+                    let cursor_x = bounds.x
+                        + CONTENT_PADDING as i32
+                        + (self.cursor_x * self.char_width) as i32;
+                    let cursor_y = bounds.y
+                        + CONTENT_PADDING as i32
+                        + (self.cursor_y * self.char_height) as i32;
 
                     device.fill_rect(
                         cursor_x,
@@ -495,8 +505,8 @@ impl Window for TextWindow {
         // Render each character
         for (row, line) in self.buffer.iter().enumerate() {
             for (col, cell) in line.iter().enumerate() {
-                let x = bounds.x + (col * self.char_width) as i32;
-                let y = bounds.y + (row * self.char_height) as i32;
+                let x = bounds.x + CONTENT_PADDING as i32 + (col * self.char_width) as i32;
+                let y = bounds.y + CONTENT_PADDING as i32 + (row * self.char_height) as i32;
 
                 // Draw background if not black
                 if cell.bg_color != Color::BLACK {
@@ -532,8 +542,10 @@ impl Window for TextWindow {
 
         // Draw cursor if focused
         if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {
-            let cursor_x = bounds.x + (self.cursor_x * self.char_width) as i32;
-            let cursor_y = bounds.y + (self.cursor_y * self.char_height) as i32;
+            let cursor_x =
+                bounds.x + CONTENT_PADDING as i32 + (self.cursor_x * self.char_width) as i32;
+            let cursor_y =
+                bounds.y + CONTENT_PADDING as i32 + (self.cursor_y * self.char_height) as i32;
 
             // Draw cursor as a filled rectangle
             device.fill_rect(
@@ -591,8 +603,8 @@ impl Window for TextWindow {
         }
 
         Some(Rect::new(
-            (min_col * self.char_width) as i32,
-            (min_row * self.char_height) as i32,
+            (CONTENT_PADDING + min_col * self.char_width) as i32,
+            (CONTENT_PADDING + min_row * self.char_height) as i32,
             ((max_col_excl - min_col) * self.char_width) as u32,
             ((max_row_excl - min_row) * self.char_height) as u32,
         ))

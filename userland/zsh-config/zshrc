@@ -17,3 +17,10 @@ DEFAULT_USER=root
 # /root lives in the writable overlay. Run `sync` to persist history and a
 # user-created /root/.zshrc across reboots.
 source /etc/zsh/agnoster.zsh-theme 2>/dev/null || PS1='%F{green}%~%f %# '
+
+# Keep the terminal frame associated with the command zsh actually accepted.
+# preexec receives the final ZLE-edited command, including history expansion.
+_agenticos_terminal_title_preexec() {
+  print -rn -- $'\e]0;Terminal - '"${1[1,40]}"$'\a'
+}
+add-zsh-hook preexec _agenticos_terminal_title_preexec
