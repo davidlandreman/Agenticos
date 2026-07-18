@@ -34,7 +34,7 @@ AgenticOS is a modular monolithic kernel targeting x86-64. Kernel subsystems run
 
 ### Not Yet Implemented
 - **Agent Runtime**: The core vision
-- **Advanced Networking**: No DNS lookup, IPv6, TLS, or NIC interrupts
+- **Advanced Networking**: No IPv6, TLS, or NIC interrupts
 - **Advanced Features**: No SMP or full POSIX surface
 
 ### Module Organization
@@ -92,8 +92,9 @@ The initialization sequence is centralized in `kernel.rs`:
 2. **Interrupts** - Set up interrupt descriptor table
 3. **Memory manager** - Initialize physical memory management
 4. **Scheduler** - Initialize kernel/ring-3 scheduling
-5. **Network** - Discover modern VirtIO-net and start the poll worker when present
-6. **Storage/display/desktop** - Mount filesystems and start the GUI
+5. **Storage** - Mount filesystems and initialize the managed runtime `/etc`
+6. **Network/display/desktop** - Discover modern VirtIO-net after VFS setup,
+   start its poll worker when present, and start the GUI
 
 ## IPv4 Networking (`drivers/virtio/net.rs`, `net/`, `userland/`)
 
@@ -104,7 +105,7 @@ The first network vertical slice is intentionally bounded:
    page-contained RX/TX DMA pools and tokenized queues.
 3. smoltcp 0.12 provides Ethernet, ARP, IPv4, DHCPv4, ICMP, UDP, and TCP.
 4. A kernel-owned DHCP socket installs the dynamic address/default route and
-   retains up to three offered DNS servers as read-only metadata.
+   publishes up to three offered DNS servers atomically to `/etc/resolv.conf`.
 5. The AgenticOS socket registry imposes fixed socket and per-socket buffer
    limits and exposes stable IDs through shared FD handles.
 6. The ring-3 ABI implements the finite Linux `AF_INET` socket subset plus
@@ -119,8 +120,9 @@ network and process-table locks never overlap or survive the yield.
 Interactive QEMU uses user-mode NAT and usually leases `10.0.2.15` with
 gateway/host alias `10.0.2.2`; `AGENTICOS_NETWORK=off` provides a nonfatal
 no-NIC boot. Tests use `restrict=on` and repository-owned guest-forwarded
-services. IPv6, DNS resolution, TLS, fragmentation, offloads, multiple NICs,
-and interface configuration are deferred.
+services, with deterministic `/etc/hosts` aliases for hostname tests. IPv6,
+TLS, fragmentation, offloads, multiple NICs, and interface configuration are
+deferred.
 
 ## Architecture-Specific Code (`arch/`)
 
@@ -512,8 +514,8 @@ The panic handler (`panic.rs`) provides:
    - Inter-agent communication
 
 2. **Networking follow-ups**
-   - DNS and resolver ownership
    - IPv6 and interrupt-driven receive
+   - TLS and certificate/time ownership
    - Agent-to-agent protocols and remote execution
 
 3. **Distributed Features**

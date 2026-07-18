@@ -1,12 +1,14 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #define ECHO_ADDRESS "10.0.2.100"
@@ -72,8 +74,84 @@ static int recv_all(int fd, uint8_t *data, size_t length) {
     return 0;
 }
 
+static int sendmsg_two_all(int fd, const uint8_t *first, size_t first_length,
+                           const uint8_t *second, size_t second_length) {
+    size_t offset = 0;
+    const size_t total = first_length + second_length;
+    while (offset < total) {
+        struct iovec iov[2];
+        size_t iov_count;
+        if (offset < first_length) {
+            iov[0].iov_base = (void *)(first + offset);
+            iov[0].iov_len = first_length - offset;
+            iov[1].iov_base = (void *)second;
+            iov[1].iov_len = second_length;
+            iov_count = 2;
+        } else {
+            iov[0].iov_base = (void *)(second + offset - first_length);
+            iov[0].iov_len = total - offset;
+            iov_count = 1;
+        }
+        struct msghdr message = {.msg_iov = iov, .msg_iovlen = iov_count};
+        ssize_t written = sendmsg(fd, &message, 0);
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written <= 0) {
+            return -1;
+        }
+        offset += (size_t)written;
+    }
+    return 0;
+}
+
+static int recvmsg_two_all(int fd, uint8_t *first, size_t first_length,
+                           uint8_t *second, size_t second_length) {
+    size_t offset = 0;
+    const size_t total = first_length + second_length;
+    while (offset < total) {
+        struct iovec iov[2];
+        size_t iov_count;
+        if (offset < first_length) {
+            iov[0].iov_base = first + offset;
+            iov[0].iov_len = first_length - offset;
+            iov[1].iov_base = second;
+            iov[1].iov_len = second_length;
+            iov_count = 2;
+        } else {
+            iov[0].iov_base = second + offset - first_length;
+            iov[0].iov_len = total - offset;
+            iov_count = 1;
+        }
+        struct msghdr message = {.msg_iov = iov, .msg_iovlen = iov_count};
+        ssize_t received = recvmsg(fd, &message, 0);
+        if (received < 0 && errno == EINTR) {
+            continue;
+        }
+        if (received <= 0) {
+            return -1;
+        }
+        offset += (size_t)received;
+    }
+    return 0;
+}
+
 int main(void) {
     PROGRESS("start");
+
+    struct addrinfo hints = {0};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *addresses = NULL;
+    CHECK(getaddrinfo("localhost", NULL, &hints, &addresses) == 0, 11,
+          "getaddrinfo localhost");
+    CHECK(addresses != NULL && addresses->ai_family == AF_INET &&
+              ((const struct sockaddr_in *)addresses->ai_addr)->sin_addr.s_addr ==
+                  htonl(INADDR_LOOPBACK),
+          12, "localhost address");
+    freeaddrinfo(addresses);
+    PROGRESS("resolver-ok");
+
     errno = 0;
     int invalid = socket(AF_INET6, SOCK_STREAM, 0);
     CHECK(invalid == -1 && errno == EAFNOSUPPORT, 10, "invalid family errno");
@@ -93,6 +171,13 @@ int main(void) {
 
     struct pollfd udp_poll = {.fd = udp, .events = POLLIN, .revents = 0};
     CHECK(poll(&udp_poll, 1, 0) == 0 && udp_poll.revents == 0, 24, "UDP empty poll");
+    struct pollfd resolver_poll[2] = {
+        {.fd = -1, .events = POLLIN, .revents = POLLERR},
+        {.fd = udp, .events = POLLIN, .revents = 0},
+    };
+    CHECK(poll(resolver_poll, 2, 0) == 0 && resolver_poll[0].revents == 0 &&
+              resolver_poll[1].revents == 0,
+          120, "negative poll fd ignored");
     uint8_t scratch[8];
     CHECK(recv(udp, scratch, sizeof(scratch), 0) == -1 && errno == EAGAIN, 25, "UDP EAGAIN");
 
@@ -185,6 +270,24 @@ int main(void) {
     PROGRESS("send-ok");
     CHECK(recv_all(tcp, inbound, sizeof(inbound)) == 0, 51, "framed receive");
     CHECK(memcmp(outbound, inbound, sizeof(outbound)) == 0, 52, "echo mismatch");
+
+    enum { MESSAGE_PAYLOAD_SIZE = 64 };
+    uint8_t message_header[4] = {0, 0, 0, MESSAGE_PAYLOAD_SIZE};
+    uint8_t message_payload[MESSAGE_PAYLOAD_SIZE];
+    uint8_t echoed_header[sizeof(message_header)];
+    uint8_t echoed_payload[sizeof(message_payload)];
+    for (size_t index = 0; index < sizeof(message_payload); index++) {
+        message_payload[index] = (uint8_t)(0xa5u ^ index);
+    }
+    CHECK(sendmsg_two_all(tcp, message_header, sizeof(message_header), message_payload,
+                          sizeof(message_payload)) == 0,
+          54, "sendmsg iovecs");
+    CHECK(recvmsg_two_all(tcp, echoed_header, sizeof(echoed_header), echoed_payload,
+                          sizeof(echoed_payload)) == 0,
+          55, "recvmsg iovecs");
+    CHECK(memcmp(message_header, echoed_header, sizeof(message_header)) == 0 &&
+              memcmp(message_payload, echoed_payload, sizeof(message_payload)) == 0,
+          56, "sendmsg echo mismatch");
     CHECK(shutdown(tcp, SHUT_WR) == 0, 53, "clean shutdown");
     close(tcp);
 

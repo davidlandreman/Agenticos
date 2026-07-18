@@ -16,7 +16,7 @@ See `docs/ai-context-conventions.md` for the convention in detail (when to add a
 
 AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. This project implements a bare-metal OS from scratch with the eventual goal of supporting agent-based computing capabilities.
 
-**Current State**: The OS has memory management, writable overlay/data filesystems, display/graphics, preemptive kernel and ring-3 scheduling, and a Linux static-musl process platform. A window system provides hierarchical window management, event routing, and mouse support. The OS boots into a GUI desktop; clicking Start → Terminal opens a windowed terminal that launches ring-3 `zsh` (`/host/ZSH.ELF`) directly as its shell. A static BusyBox (`BB.ELF`) provides core utilities plus numeric-address `ping`, `nc`, and HTTP-only `wget` through the virtual `/bin/<applet>` namespace. A single-interface, polling-driven IPv4 stack uses modern VirtIO-net + smoltcp for DHCPv4, ICMP, UDP, and TCP. DNS servers are recorded but name lookup, IPv6, TLS, and interrupt-driven NIC I/O are deferred. The "Agentic" runtime is not yet implemented.
+**Current State**: The OS has memory management, writable overlay/data filesystems, display/graphics, preemptive kernel and ring-3 scheduling, and a Linux static-musl process platform. A window system provides hierarchical window management, event routing, and mouse support. The OS boots into a GUI desktop; clicking Start → Terminal opens a windowed terminal that launches ring-3 `zsh` (`/host/ZSH.ELF`) directly as its shell. A static BusyBox (`BB.ELF`) provides core utilities plus `ping`, `nc`, `nslookup`, and HTTP-only `wget` through the virtual `/bin/<applet>` namespace. A single-interface, polling-driven IPv4 stack uses modern VirtIO-net + smoltcp for DHCPv4, ICMP, UDP, TCP, and DHCP-backed musl name resolution through a kernel-managed `/etc`. IPv6, TLS, and interrupt-driven NIC I/O are deferred. The "Agentic" runtime is not yet implemented.
 
 The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.
 
@@ -110,7 +110,7 @@ These are cross-cutting (not subsystem-local). Subsystem-specific known issues l
 3. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
 4. **Global State** — Heavy use of `static mut` and `lazy_static`.
 5. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.
-6. **Network scope is deliberately small** — One polling modern VirtIO NIC, IPv4 and numeric addresses only; DNS lookup, IPv6, TLS, and NIC interrupts are follow-ups.
+6. **Network scope is deliberately small** — One polling modern VirtIO NIC with IPv4 and DHCP-backed DNS; IPv6, TLS, and NIC interrupts are follow-ups.
 
 ### Areas Needing Refactoring
 1. **Graphics Subsystem** — Complex relationships between display modules. (Detail in `src/graphics/CLAUDE.md`.)

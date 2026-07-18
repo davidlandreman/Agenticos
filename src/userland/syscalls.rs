@@ -36,7 +36,7 @@ use crate::userland::abi::{
     ESPIPE, EXDEV, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
-use crate::userland::path::{apply_fs_rewrite, copy_user_cstr, normalize_path};
+use crate::userland::path::{copy_user_cstr, normalize_path};
 use alloc::string::String;
 use alloc::vec;
 use x86_64::structures::paging::PageTableFlags;
@@ -1227,11 +1227,8 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    // Normalize once; both the /bin namespace rewrite and the /etc
-    // rewrite need the canonical form. The rewrites are mutually
-    // exclusive in practice (one matches /bin/<applet>, the other
-    // /etc/<name>) but the ordering still matters for security: `..`
-    // segments MUST be collapsed before either prefix check.
+    // Normalize once before the /bin namespace rewrite. `..` segments must
+    // be collapsed before the prefix check.
     let normalized_path = crate::userland::lifecycle::with_current_process(|p| {
         crate::userland::path::normalize_path(&p.cwd, &raw_path)
     });
@@ -1246,13 +1243,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     let bin_applet = bin_rewrite.map(|(_, n)| n);
     let resolved_path = match bin_rewrite {
         Some((host_path, _)) => String::from(host_path),
-        None => {
-            // U4: same `/etc/...` rewrite that resolve_user_path applies — if
-            // someone ever does `execve("/etc/something")` it lands at the
-            // FAT-staged location. Cosmetic for execve in practice (zsh
-            // execs binaries under /HOST/, not /etc/), but consistent.
-            crate::userland::path::apply_fs_rewrite(&normalized_path)
-        }
+        None => normalized_path,
     };
     let argv_strings: Vec<String> = match copy_user_cstr_array(argv_ptr) {
         Ok(v) => v,
@@ -2102,15 +2093,10 @@ fn map_fs_err(err: &crate::fs::fs_manager::FsError) -> i64 {
 }
 
 /// Resolve a user path string against the active CWD into a normalized
-/// kernel-side string, then apply the U4 `/etc/...` rewrite so musl's
-/// `getpwuid_r` and friends find files staged under `host_share/ETC/`.
-/// The rewrite runs AFTER `normalize_path` per the security finding —
-/// `..` segments must be collapsed before the prefix check or
-/// `/etc/../etc/shadow` could bypass the allowlist.
+/// kernel-side string. Runtime `/etc` lives in the root overlay.
 fn resolve_user_path(ptr: u64) -> Result<String, i64> {
     let raw = copy_user_cstr(ptr)?;
-    let normalized = with_cwd(|cwd| normalize_path(cwd, &raw));
-    Ok(apply_fs_rewrite(&normalized))
+    Ok(with_cwd(|cwd| normalize_path(cwd, &raw)))
 }
 
 /// Coarse monotonic clock — `timer_ticks * 10ms`. Wall-clock equivalence
@@ -2153,6 +2139,9 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
         use crate::userland::bin_namespace::{apply_bin_rewrite, is_bin_dir};
         if is_bin_dir(&path) || apply_bin_rewrite(&path).is_some() {
             return EPERM;
+        }
+        if crate::userland::etc::is_managed_path(&path) {
+            return EROFS;
         }
         if !crate::fs::vfs::vfs_is_writable(&path) {
             return EROFS;
@@ -2270,12 +2259,22 @@ fn bin_namespace_mutation_check(path: &str) -> Option<i64> {
     None
 }
 
+/// Kernel-owned `/etc` entries may be read normally but namespace mutations
+/// are rejected. Callers pass normalized paths from `resolve_user_path`, so
+/// `.`/`..` aliases cannot bypass this component-bounded check.
+fn managed_etc_mutation_check(path: &str) -> Option<i64> {
+    crate::userland::etc::is_managed_path(path).then_some(EPERM)
+}
+
 pub fn mkdir_handler(args: &mut SyscallArgs) -> i64 {
     let path = match resolve_user_path(args.rdi) {
         Ok(p) => p,
         Err(e) => return e,
     };
     if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = managed_etc_mutation_check(&path) {
         return e;
     }
     match crate::fs::vfs::vfs_mkdir(&path) {
@@ -2309,6 +2308,9 @@ pub fn rmdir_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(e) = bin_namespace_mutation_check(&path) {
         return e;
     }
+    if let Some(e) = managed_etc_mutation_check(&path) {
+        return e;
+    }
     if path == "/" {
         return EBUSY;
     }
@@ -2324,6 +2326,9 @@ pub fn unlink_handler(args: &mut SyscallArgs) -> i64 {
         Err(e) => return e,
     };
     if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = managed_etc_mutation_check(&path) {
         return e;
     }
     match crate::fs::vfs::vfs_unlink(&path) {
@@ -2343,6 +2348,9 @@ pub fn unlinkat_handler(args: &mut SyscallArgs) -> i64 {
         Err(e) => return e,
     };
     if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = managed_etc_mutation_check(&path) {
         return e;
     }
     // AT_REMOVEDIR = 0x200
@@ -2375,6 +2383,12 @@ pub fn rename_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = bin_namespace_mutation_check(&new) {
+        return e;
+    }
+    if let Some(e) = managed_etc_mutation_check(&old) {
+        return e;
+    }
+    if let Some(e) = managed_etc_mutation_check(&new) {
         return e;
     }
     match crate::fs::vfs::vfs_rename(&old, &new) {
@@ -2419,6 +2433,9 @@ pub fn ftruncate_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
         Some(_) | None => return EBADF,
     };
+    if crate::userland::etc::is_managed_path(&handle.path()) {
+        return EROFS;
+    }
     // Use File::write through seek + write to (re)size the file. The
     // Filesystem trait doesn't expose truncate as a method yet
     // (deferred to Phase C plan); for tmpfs the open-handle table
@@ -2461,6 +2478,9 @@ pub fn truncate_handler(args: &mut SyscallArgs) -> i64 {
     let new_size = args.rsi;
     if let Some(e) = bin_namespace_mutation_check(&path) {
         return e;
+    }
+    if crate::userland::etc::is_managed_path(&path) {
+        return EROFS;
     }
     if !crate::fs::vfs::vfs_is_writable(&path) {
         return EROFS;
@@ -3564,31 +3584,37 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
             Err(e) => return e,
         };
         let want = entry.events;
-        let revents = match with_fd_slot(entry.fd) {
-            Some(FdSlot::Socket { handle, .. }) => {
-                has_socket = true;
-                match crate::net::socket::readiness(handle.id()) {
-                    Ok(state) => {
-                        let mut events = 0;
-                        if state.readable {
-                            events |= want & POLLIN;
+        // Linux ignores negative descriptors in a pollfd array. musl's DNS
+        // resolver uses fd=-1 for inactive per-query TCP fallback slots.
+        let revents = if entry.fd < 0 {
+            0
+        } else {
+            match with_fd_slot(entry.fd) {
+                Some(FdSlot::Socket { handle, .. }) => {
+                    has_socket = true;
+                    match crate::net::socket::readiness(handle.id()) {
+                        Ok(state) => {
+                            let mut events = 0;
+                            if state.readable {
+                                events |= want & POLLIN;
+                            }
+                            if state.writable {
+                                events |= want & POLLOUT;
+                            }
+                            if state.error {
+                                events |= POLLERR;
+                            }
+                            if state.hangup {
+                                events |= POLLHUP;
+                            }
+                            events
                         }
-                        if state.writable {
-                            events |= want & POLLOUT;
-                        }
-                        if state.error {
-                            events |= POLLERR;
-                        }
-                        if state.hangup {
-                            events |= POLLHUP;
-                        }
-                        events
+                        Err(_) => POLLERR,
                     }
-                    Err(_) => POLLERR,
                 }
+                Some(_) => want & (POLLIN | POLLOUT), // preserve existing behavior
+                None => POLLNVAL,
             }
-            Some(_) => want & (POLLIN | POLLOUT), // preserve existing behavior
-            None => POLLNVAL,
         };
         entry.revents = revents;
         if revents != 0 {

@@ -150,11 +150,11 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - **Status**: Complete (bounded first release)
 - Modern VirtIO-net PCI driver with page-safe DMA pools and checked tokenized queues
 - Pinned `no_std` smoltcp 0.12 for Ethernet/ARP/IPv4/DHCPv4/ICMP/UDP/TCP
-- Kernel-owned DHCP address/default-route configuration and DNS metadata snapshot
+- Kernel-owned DHCP address/default-route configuration and atomic managed `/etc/resolv.conf`
 - Bounded TCP/UDP/ICMP registry with shared socket FD lifetime and deferred close
 - Linux x86-64 `AF_INET` socket subset, blocking/nonblocking restart, and poll readiness
-- Hermetic restricted-QEMU static-musl fixture plus BusyBox numeric IPv4 `ping`, `nc`, and HTTP `wget`
-- Poll-driven single interface; DNS lookup, IPv6, TLS, offloads, and NIC IRQs remain future work
+- Hermetic restricted-QEMU static-musl resolver fixture plus BusyBox IPv4 `ping`, `nc`, `nslookup`, and HTTP `wget`
+- Poll-driven single interface; IPv6, TLS, offloads, and NIC IRQs remain future work
 
 ### 🔄 Recent Architectural Improvements
 
@@ -223,7 +223,8 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
 - **8.3 Network Stack** ✓ (basic IPv4 slice complete)
   - ✓ Modern VirtIO-net, DHCPv4, ICMP, UDP, and TCP
   - ✓ Ring-3 Linux socket ABI and selected BusyBox applets
-  - **TODO**: DNS/IPv6/TLS and interrupt-driven receive
+  - ✓ DHCP-backed DNS through kernel-managed `/etc` and the musl resolver
+  - **TODO**: IPv6/TLS and interrupt-driven receive
   - **TODO**: Networked agent communication
 
 ## Development Guidelines
@@ -401,7 +402,8 @@ agenticos/
 - [ ] System call interface
 - [ ] Agent execution environment
 - [x] Basic IPv4 network stack
-- [ ] DNS, IPv6, TLS, and networked agent protocols
+- [x] DHCP-backed IPv4 DNS resolution
+- [ ] IPv6, TLS, and networked agent protocols
 - [ ] Full agent-based computing platform
 
 ## Technical Debt and Future Improvements

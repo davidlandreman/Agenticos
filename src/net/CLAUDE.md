@@ -10,6 +10,8 @@ FD table, syscall ABI, or hardware drivers.
   read-only configuration/counter snapshots.
 - `stack.rs` — smoltcp `Interface`/`SocketSet`, kernel-owned DHCPv4 socket,
   dynamic address/default-route installation.
+- `resolver_config.rs` — renders DHCP DNS state and atomically publishes the
+  kernel-managed `/etc/resolv.conf` after releasing the network lock.
 - `socket.rs` — bounded TCP/UDP/ICMP registry, ephemeral ports, readiness,
   options, and deferred final-close handling.
 - `abi.rs` — AgenticOS-owned IPv4 sockaddr representation.
@@ -18,9 +20,9 @@ FD table, syscall ABI, or hardware drivers.
 - `../userland/network_syscalls.rs` — Linux x86-64 socket ABI and usercopy.
 
 Delivered scope is Ethernet/ARP/IPv4/DHCPv4/ICMP/UDP/TCP, one modern
-VirtIO-net interface, MTU 1500, and numeric IPv4 userland. IPv6, DNS lookup,
+VirtIO-net interface, MTU 1500, and DHCP-backed musl name resolution. IPv6,
 TLS, interface mutation, fragmentation, offloads, multiqueue, and NIC IRQs are
-not implemented. DHCP DNS servers are retained as metadata only.
+not implemented.
 
 ## Load-bearing rules
 
@@ -43,6 +45,8 @@ not implemented. DHCP DNS servers are retained as metadata only.
   the re-fired operation must re-check its exact socket.
 - DHCP owns the interface address and route. Userland must not synthesize
   `ifconfig`, `route`, or `udhcpc` behavior.
+- DHCP resolver publication must happen after dropping `NETWORK`; `/etc` is a
+  kernel-owned runtime namespace and userland mutation attempts fail.
 - Production boot never waits for DHCP. Bounded synchronous wait helpers are
   test-only.
 
@@ -70,5 +74,6 @@ cargo check
 
 `network` covers queue ownership and bounded registry/DHCP behavior.
 `network_userland` runs the committed static-musl fixture and BusyBox
-`ping`/`nc`/HTTP-only `wget` against QEMU-local services. Every booted wait
-must have a PIT-tick deadline; missing committed fixtures are failures.
+`ping`/`nc`/HTTP-only `wget` hostname paths against QEMU-local services.
+Every booted wait must have a PIT-tick deadline; missing committed fixtures
+are failures.

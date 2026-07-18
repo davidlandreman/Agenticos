@@ -15,12 +15,12 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 - **Filesystem**: FAT12/16/32 VFS, writable `/data`, and persistent overlay writes
 - **Input**: VirtIO tablet (seamless in QEMU) with PS/2 fallback
 - **Graphics**: Framebuffer with double buffering, multiple fonts, BMP images
-- **Networking**: Modern VirtIO-net, DHCPv4, ICMP, UDP, TCP, Linux socket FDs, and numeric-address BusyBox `ping`/`nc`/HTTP `wget`
+- **Networking**: Modern VirtIO-net, DHCPv4, DHCP-backed DNS resolution, ICMP, UDP, TCP, Linux socket FDs, and BusyBox `ping`/`nc`/`nslookup`/HTTP `wget`
 
 ### Not Yet Implemented
 
 - SMP and a general async runtime
-- DNS lookup, IPv6, TLS, and interrupt-driven network I/O
+- IPv6, TLS, and interrupt-driven network I/O
 - Agent runtime
 
 ## Building
@@ -60,9 +60,10 @@ AGENTICOS_NETWORK=off ./build.sh
 ```
 
 Interactive QEMU uses user-mode NAT and normally leases `10.0.2.15` with
-gateway/host alias `10.0.2.2`. Userland networking is currently numeric IPv4
-only. Tests use `restrict=on` plus repository-owned local forwarding endpoints,
-so they cannot reach the host LAN or public Internet.
+gateway/host alias `10.0.2.2`; DHCP-provided DNS servers populate the managed
+`/etc/resolv.conf`. Tests use `restrict=on` plus repository-owned local
+forwarding endpoints and deterministic `/etc/hosts` aliases, so they cannot
+reach the host LAN or public Internet.
 
 ### Host Folder Mount
 
