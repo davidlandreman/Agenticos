@@ -122,7 +122,12 @@ impl MessageBox {
         let canvas = self.window.canvas_mut();
         canvas.clear(COLOR_PANEL);
         for (index, line) in lines.iter().enumerate() {
-            canvas.draw_text(MARGIN, MARGIN + index as i32 * LINE_HEIGHT, line, COLOR_TEXT);
+            canvas.draw_text(
+                MARGIN,
+                MARGIN + index as i32 * LINE_HEIGHT,
+                line,
+                COLOR_TEXT,
+            );
         }
         self.affirmative.draw(canvas, true);
         if let Some(negative) = self.negative.as_ref() {
@@ -139,21 +144,17 @@ impl MessageBox {
                 self.relayout();
                 self.render();
             }
-            runtime::GUI_EVENT_KEY if event.payload[3] != 0 => {
-                match event.payload[0] {
-                    runtime::KEY_ENTER => {
-                        return DialogStatus::Done(Some(self.affirmative_choice()))
-                    }
-                    runtime::KEY_ESCAPE => {
-                        return DialogStatus::Done(if self.negative.is_some() {
-                            Some(self.negative_choice())
-                        } else {
-                            None
-                        })
-                    }
-                    _ => {}
+            runtime::GUI_EVENT_KEY if event.payload[3] != 0 => match event.payload[0] {
+                runtime::KEY_ENTER => return DialogStatus::Done(Some(self.affirmative_choice())),
+                runtime::KEY_ESCAPE => {
+                    return DialogStatus::Done(if self.negative.is_some() {
+                        Some(self.negative_choice())
+                    } else {
+                        None
+                    })
                 }
-            }
+                _ => {}
+            },
             runtime::GUI_EVENT_MOUSE if event.payload[3] == runtime::GUI_MOUSE_DOWN => {
                 let x = event.payload[0] as i32;
                 let y = event.payload[1] as i32;

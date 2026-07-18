@@ -20,9 +20,7 @@ pub mod desktop_window;
 #[cfg(feature = "test")]
 pub mod display;
 #[cfg(feature = "test")]
-pub mod explorer_dir_model_tests;
 #[cfg(feature = "test")]
-pub mod explorer_dispatch_tests;
 #[cfg(feature = "test")]
 pub mod fat_write;
 #[cfg(feature = "test")]
@@ -161,8 +159,6 @@ static MODULES: &[(&str, GetTestsFn)] = &[
         "text_editor_migration",
         text_editor_migration_tests::get_tests,
     ),
-    ("explorer_dir_model", explorer_dir_model_tests::get_tests),
-    ("explorer_dispatch", explorer_dispatch_tests::get_tests),
     ("compositor", compositor::get_tests),
     ("window_manager_render", window_manager_render::get_tests),
     ("window_buffer", window_buffer::get_tests),

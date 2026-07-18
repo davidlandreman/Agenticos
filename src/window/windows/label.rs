@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Label widget for displaying static text
 
 use super::base::WindowBase;

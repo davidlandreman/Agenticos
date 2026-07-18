@@ -86,7 +86,7 @@ fn test_menu_model_order_and_geometry() {
             action: StartMenuAction::ShutDown
         }
     ));
-    assert_eq!(START_MENU_PROGRAM_ITEMS.len(), 4);
+    assert_eq!(START_MENU_PROGRAM_ITEMS.len(), 5);
     assert_eq!(StartMenuWindow::root_height(), 172);
     assert_eq!(
         StartMenuWindow::maximum_width(),
@@ -117,7 +117,7 @@ fn test_enabled_and_disabled_dispatch() {
     menu.on_select(|action| *LAST_ACTION.lock() = Some(action));
 
     menu.handle_event(mouse(MouseEventType::Move, root_row_center(0)));
-    let calc = program_row_center(3);
+    let calc = program_row_center(4);
     menu.handle_event(mouse(MouseEventType::ButtonDown, calc));
     menu.handle_event(mouse(MouseEventType::ButtonUp, calc));
     assert_eq!(*LAST_ACTION.lock(), Some(StartMenuAction::Calc));

@@ -21,6 +21,9 @@ pub const O_DIRECTORY: u32 = 0o200000;
 pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
 pub const SEEK_END: i32 = 2;
+pub const F_OK: u32 = 0;
+pub const X_OK: u32 = 1;
+pub const WNOHANG: u32 = 1;
 
 pub const GUI_ABI_VERSION: u32 = 1;
 pub const GUI_PIXEL_FORMAT_XRGB8888: u32 = 1;
@@ -49,6 +52,8 @@ pub const KEY_HOME: u32 = 47;
 pub const KEY_END: u32 = 48;
 pub const KEY_PAGE_UP: u32 = 49;
 pub const KEY_PAGE_DOWN: u32 = 50;
+pub const KEY_F2: u32 = 59;
+pub const KEY_F5: u32 = 62;
 
 const NR_READ: u64 = 0;
 const NR_WRITE: u64 = 1;
@@ -56,10 +61,17 @@ const NR_CLOSE: u64 = 3;
 const NR_FSTAT: u64 = 5;
 const NR_LSEEK: u64 = 8;
 const NR_BRK: u64 = 12;
+const NR_ACCESS: u64 = 21;
 const NR_NANOSLEEP: u64 = 35;
+const NR_FORK: u64 = 57;
+const NR_EXECVE: u64 = 59;
+const NR_WAIT4: u64 = 61;
+const NR_RMDIR: u64 = 84;
+const NR_SYNC: u64 = 162;
 const NR_EXIT_GROUP: u64 = 231;
 const NR_GETDENTS64: u64 = 217;
 const NR_OPENAT: u64 = 257;
+const NR_NEWFSTATAT: u64 = 262;
 const NR_FTRUNCATE: u64 = 77;
 const NR_RENAME: u64 = 82;
 const NR_MKDIR: u64 = 83;
@@ -69,6 +81,7 @@ const NR_GUI_WIN_CREATE: u64 = 5001;
 const NR_GUI_WIN_PRESENT: u64 = 5002;
 const NR_GUI_NEXT_EVENT: u64 = 5003;
 const NR_GUI_WIN_DESTROY: u64 = 5004;
+const NR_GUI_WIN_SET_TITLE: u64 = 5005;
 
 #[inline]
 unsafe fn syscall0(number: u64) -> i64 {
@@ -183,6 +196,22 @@ pub fn fstat(fd: i32, stat: &mut LinuxStat) -> i64 {
     unsafe { syscall2(NR_FSTAT, fd as u64, stat as *mut _ as u64) }
 }
 
+pub fn newfstatat(dirfd: i32, path: &[u8], stat: &mut LinuxStat, flags: u32) -> i64 {
+    unsafe {
+        syscall4(
+            NR_NEWFSTATAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            stat as *mut _ as u64,
+            flags as u64,
+        )
+    }
+}
+
+pub fn access(path: &[u8], mode: u32) -> i64 {
+    unsafe { syscall2(NR_ACCESS, path.as_ptr() as u64, mode as u64) }
+}
+
 pub fn getdents64(fd: i32, buffer: &mut [u8]) -> i64 {
     unsafe {
         syscall3(
@@ -200,6 +229,10 @@ pub fn mkdir(path: &[u8], mode: u32) -> i64 {
 
 pub fn unlink(path: &[u8]) -> i64 {
     unsafe { syscall1(NR_UNLINK, path.as_ptr() as u64) }
+}
+
+pub fn rmdir(path: &[u8]) -> i64 {
+    unsafe { syscall1(NR_RMDIR, path.as_ptr() as u64) }
 }
 
 pub fn rename(old_path: &[u8], new_path: &[u8]) -> i64 {
@@ -235,6 +268,37 @@ pub fn nanosleep(request: &Timespec, remaining: Option<&mut Timespec>) -> i64 {
 
 pub fn brk(address: usize) -> i64 {
     unsafe { syscall1(NR_BRK, address as u64) }
+}
+
+pub fn sync() -> i64 {
+    unsafe { syscall0(NR_SYNC) }
+}
+
+pub fn fork() -> i64 {
+    unsafe { syscall0(NR_FORK) }
+}
+
+pub fn execve(path: &[u8], argv: &[*const u8], envp: &[*const u8]) -> i64 {
+    unsafe {
+        syscall3(
+            NR_EXECVE,
+            path.as_ptr() as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        )
+    }
+}
+
+pub fn wait4(pid: i32, status: Option<&mut u32>, options: u32) -> i64 {
+    unsafe {
+        syscall4(
+            NR_WAIT4,
+            pid as u64,
+            status.map_or(0, |value| value as *mut _ as u64),
+            options as u64,
+            0,
+        )
+    }
 }
 
 pub unsafe fn exit(code: i64) -> ! {
@@ -294,6 +358,17 @@ pub fn gui_next_event(event: &mut GuiEvent, flags: u64) -> i64 {
 
 pub fn gui_win_destroy(handle: u32) -> i64 {
     unsafe { syscall1(NR_GUI_WIN_DESTROY, handle as u64) }
+}
+
+pub fn gui_win_set_title(handle: u32, title: &str) -> i64 {
+    unsafe {
+        syscall3(
+            NR_GUI_WIN_SET_TITLE,
+            handle as u64,
+            title.as_ptr() as u64,
+            title.len() as u64,
+        )
+    }
 }
 
 #[repr(C)]

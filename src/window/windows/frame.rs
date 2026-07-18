@@ -39,6 +39,12 @@ impl FrameWindow {
         self.base.invalidate();
     }
 
+    pub fn set_title(&mut self, title: &str) {
+        self.title.clear();
+        self.title.push_str(title);
+        self.base.invalidate();
+    }
+
     pub fn content_area(&self) -> Rect {
         let metrics = theme::metrics();
         let border = metrics.border_width;
@@ -105,5 +111,9 @@ impl Window for FrameWindow {
     }
     fn window_title(&self) -> Option<&str> {
         Some(&self.title)
+    }
+
+    fn as_frame_window_mut(&mut self) -> Option<&mut FrameWindow> {
+        Some(self)
     }
 }
