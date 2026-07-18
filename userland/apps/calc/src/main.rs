@@ -15,8 +15,8 @@ use alloc::format;
 use alloc::string::String;
 
 use gui::{
-    Canvas, Window, GUI_EVENT_CLOSE, GUI_EVENT_FOCUS_CHANGE, GUI_EVENT_KEY, GUI_EVENT_MOUSE,
-    GUI_EVENT_RESIZE, GUI_MOUSE_DOWN,
+    Canvas, Window, FONT_CELL_WIDTH, FONT_LINE_HEIGHT, GUI_EVENT_CLOSE, GUI_EVENT_FOCUS_CHANGE,
+    GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE, GUI_MOUSE_DOWN,
 };
 
 // ---------------------------------------------------------------------------
@@ -348,9 +348,9 @@ impl Calculator {
         // Display well and right-aligned value.
         let well_w = GRID_W as u32;
         canvas.fill_rect(origin_x, PADDING, well_w, DISPLAY_HEIGHT as u32, COLOR_WELL);
-        let text_w = display.len() as i32 * 8;
+        let text_w = display.chars().count() as i32 * FONT_CELL_WIDTH;
         let text_x = (origin_x + GRID_W - 6 - text_w).max(origin_x + 4);
-        let text_y = PADDING + (DISPLAY_HEIGHT - 8) / 2;
+        let text_y = PADDING + (DISPLAY_HEIGHT - FONT_LINE_HEIGHT) / 2;
         canvas.draw_text(text_x, text_y, &display, COLOR_WHITE);
 
         // Buttons.
@@ -377,9 +377,9 @@ fn draw_button(canvas: &mut Canvas, rect: (i32, i32, i32, i32), label: &str, col
     canvas.horizontal_line(x, y + h - 1, w as u32, COLOR_BEVEL_DARK);
     canvas.vertical_line(x + w - 1, y, h as u32, COLOR_BEVEL_DARK);
 
-    let text_w = label.len() as i32 * 8;
+    let text_w = label.chars().count() as i32 * FONT_CELL_WIDTH;
     let label_x = x + (w - text_w) / 2;
-    let label_y = y + (h - 8) / 2;
+    let label_y = y + (h - FONT_LINE_HEIGHT) / 2;
     canvas.draw_text(label_x, label_y, label, COLOR_WHITE);
 }
 

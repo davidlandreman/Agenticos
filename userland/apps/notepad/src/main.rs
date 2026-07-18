@@ -10,13 +10,14 @@ use alloc::vec::Vec;
 
 use dialogs::{DialogStatus, FileDialog, MessageBox, MessageChoice, Modal, ModalOutcome};
 use gui::{
-    next_boundary, previous_boundary, theme, Canvas, MenuBar, Window, GUI_EVENT_CLOSE,
-    GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE, GUI_MOUSE_DOWN, GUI_MOUSE_SCROLL,
+    next_boundary, previous_boundary, theme, Canvas, MenuBar, Window, FONT_CELL_WIDTH,
+    FONT_LINE_HEIGHT, GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
+    GUI_MOUSE_DOWN, GUI_MOUSE_SCROLL,
 };
 
 const FILE_ITEMS: &[&str] = &["New", "Open...", "Save", "Save As...", "Exit"];
 const STATUS_HEIGHT: u32 = 18;
-const LINE_HEIGHT: u32 = 10;
+const LINE_HEIGHT: u32 = FONT_LINE_HEIGHT as u32 + 2;
 
 struct Editor {
     text: String,
@@ -174,15 +175,21 @@ impl Editor {
             if line >= self.first_line {
                 let visible_line = line - self.first_line;
                 let y = top as i32 + visible_line as i32 * LINE_HEIGHT as i32 + 1;
-                if y + 8 >= bottom as i32 {
+                if y + FONT_LINE_HEIGHT >= bottom as i32 {
                     break;
                 }
-                let x = 4 + column as i32 * 8;
+                let x = 4 + column as i32 * FONT_CELL_WIDTH;
                 if selected
                     .map(|(start, end)| index >= start && index < end)
                     .unwrap_or(false)
                 {
-                    canvas.fill_rect(x, y - 1, 8, LINE_HEIGHT, palette.selection_bg);
+                    canvas.fill_rect(
+                        x,
+                        y - 1,
+                        FONT_CELL_WIDTH as u32,
+                        LINE_HEIGHT,
+                        palette.selection_bg,
+                    );
                     canvas.draw_char(x, y, character, palette.selection_text);
                 } else {
                     canvas.draw_char(x, y, character, palette.field_text);
@@ -196,9 +203,9 @@ impl Editor {
                 let y = top as i32 + (cursor_line - self.first_line) as i32 * LINE_HEIGHT as i32;
                 if y + LINE_HEIGHT as i32 <= bottom as i32 {
                     canvas.vertical_line(
-                        4 + cursor_column as i32 * 8,
+                        4 + cursor_column as i32 * FONT_CELL_WIDTH,
                         y + 1,
-                        9,
+                        FONT_LINE_HEIGHT as u32,
                         palette.field_text,
                     );
                 }
@@ -424,7 +431,7 @@ impl Notepad {
             }
         } else if y >= MenuBar::HEIGHT as i32 {
             let row = ((y - MenuBar::HEIGHT as i32) / LINE_HEIGHT as i32).max(0) as usize;
-            let column = ((x - 4) / 8).max(0) as usize;
+            let column = ((x - 4) / FONT_CELL_WIDTH).max(0) as usize;
             self.editor.click(row, column);
         }
         false

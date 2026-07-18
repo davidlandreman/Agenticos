@@ -31,7 +31,7 @@ userland/
 ├── build-support/      # shared per-binary linker-argument helper
 ├── runtime/            # syscall ABI, startup parsing, brk allocator, GUI events
 ├── libs/
-│   ├── gui/            # Window, Canvas, bitmap text, menus, widgets, dir listing
+│   ├── gui/            # Window, Canvas, system TTF text, menus, widgets, dir listing
 │   ├── gl/             # bounded fixed-function OpenGL-style VirGL frontend
 │   └── dialogs/        # FileDialog, MessageBox, ColorPicker modal compositions
 └── apps/

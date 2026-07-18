@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 use dialogs::{DialogStatus, MessageBox, MessageChoice, Modal, ModalOutcome};
-use gui::{Canvas, TextField, Window};
+use gui::{Canvas, TextField, Window, FONT_CELL_WIDTH};
 
 const INITIAL_W: u32 = 920;
 const INITIAL_H: u32 = 580;
@@ -501,7 +501,7 @@ impl FileManager {
                 prefix.push('/');
             }
             prefix.push_str(component);
-            let width = (component.chars().count() as i32 * 8 + 22).clamp(54, 150);
+            let width = (component.chars().count() as i32 * FONT_CELL_WIDTH + 22).clamp(54, 150);
             if x + width > right {
                 break;
             }
@@ -1716,7 +1716,7 @@ fn context_hit(menu_x: i32, menu_y: i32, x: i32, y: i32) -> Option<usize> {
 }
 
 fn draw_clipped(canvas: &mut Canvas, x: i32, y: i32, text: &str, width: i32, color: u32) {
-    let chars = (width / 8).max(1) as usize;
+    let chars = (width / FONT_CELL_WIDTH).max(1) as usize;
     if text.chars().count() <= chars {
         canvas.draw_text(x, y, text, color);
     } else if chars > 3 {
