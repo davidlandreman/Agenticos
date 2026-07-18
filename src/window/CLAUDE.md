@@ -10,6 +10,8 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `event.rs` — keyboard, mouse, and window events.
 - `graphics.rs` — `GraphicsDevice` trait that abstracts rendering targets.
 - `manager.rs` — `WindowManager`. Coordinates windows and screens. Owns `render_window_tree_with_offset`, which performs parent-child coordinate transformation.
+  Left-button routing captures the pressed window through motion and release,
+  so draggable controls continue receiving events outside their hit bounds.
 - `renderer/` — boot policy and two real renderer siblings. `legacy` preserves
   the dirty framebuffer/cursor path; `retained` rasterizes the desktop and each
   visible top-level subtree into separate premultiplied surfaces, builds a flat
