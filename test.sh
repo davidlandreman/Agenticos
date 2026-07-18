@@ -104,16 +104,13 @@ echo "Building and running kernel tests..."
 HOST_SHARE_STAGE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
 mkdir -p "$HOST_SHARE_STAGE"
 
-# U4: same /etc staging as build.sh — the e2e zsh test path needs
-# /etc/passwd resolvable from inside the guest.
-mkdir -p "$HOST_SHARE_STAGE/ETC"
-printf 'root:x:0:0::/root:/bin/zsh\n' > "$HOST_SHARE_STAGE/ETC/PASSWD"
-printf 'root:x:0:\n'                  > "$HOST_SHARE_STAGE/ETC/GROUP"
-
 REPO_ROOT="$(pwd)"
 export REPO_ROOT HOST_SHARE_STAGE
 # shellcheck source=userland/stage-lib.sh
 . "$REPO_ROOT/userland/stage-lib.sh"
+# Stage the read-only zsh configuration source tree. The kernel imports it
+# into its managed runtime /etc after mounting the host share.
+stage_zsh_config || exit 1
 # Test fixtures remain mandatory even with --skip-userland; optional apps and
 # prebuilt-managed interactive programs retain soft-fail staging semantics.
 stage_userland test "$SKIP_USERLAND" || {

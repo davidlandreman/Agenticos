@@ -195,6 +195,49 @@ pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
     Ok(instance)
 }
 
+/// Called by the window manager when a window is destroyed (e.g. the
+/// user clicked a terminal frame's close button). If `window_id` is a
+/// terminal frame or the terminal content window itself, tear down the
+/// terminal's entire ring-3 process tree (`zsh` and everything it
+/// forked — `ping`, `nc`, etc.) and drop the tracked `TerminalInstance`.
+///
+/// Without this, closing the window only removed the window from the
+/// registry; the ring-3 zsh and its children kept running as orphans,
+/// still time-sliced by the scheduler and still writing to a terminal
+/// whose window no longer exists.
+///
+/// Safe (and cheap) to call for any window: non-terminal windows have no
+/// matching `TerminalInstance`, so it is a no-op. Idempotent — the
+/// instance is removed on the first matching call, so the recursive
+/// `destroy_window` pass over the frame's children finds nothing to do.
+pub fn on_window_destroyed(window_id: WindowId) {
+    // Find and remove the matching instance (a terminal is destroyed via
+    // its frame, but match the content window too for robustness).
+    let instance = {
+        let mut instances = TERMINAL_INSTANCES.lock();
+        instances
+            .iter()
+            .position(|i| i.frame_id == window_id || i.terminal_id == window_id)
+            .map(|pos| instances.remove(pos))
+    };
+    let Some(instance) = instance else {
+        return;
+    };
+
+    crate::debug_info!(
+        "Terminal factory: closing terminal {} (frame={:?}, terminal={:?}) — killing its ring-3 processes",
+        instance.number,
+        instance.frame_id,
+        instance.terminal_id
+    );
+
+    // Kill zsh + every process it forked. They all share this
+    // terminal_id (inherited across fork), and this also wakes the
+    // blocked kernel launcher thread so it returns from
+    // `launch_user_binary` instead of hanging forever.
+    crate::userland::lifecycle::kill_ring3_processes_on_terminal(instance.terminal_id);
+}
+
 /// FAT path the kernel loads when launching the default shell. Staged
 /// from `userland/prebuilt/ZSH.ELF` by `build.sh` / `test.sh`.
 pub(crate) const ZSH_HOST_PATH: &str = "/host/ZSH.ELF";
@@ -210,7 +253,7 @@ pub(crate) const TERMINAL_SHELL_ENV: [&str; 8] = [
     "SHELL=/bin/zsh",
     "TERM=xterm-256color",
     "COLORTERM=truecolor",
-    "LANG=C",
+    "LANG=C.UTF-8",
 ];
 
 /// Spawn a kernel wrapper thread that owns the blocking lifetime of a
@@ -253,9 +296,11 @@ fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
             // agnoster pick the right terminfo behavior — the matching
             // parser support lives in `src/terminal/` (see the plan
             // `docs/plans/2026-05-24-001-feat-terminal-ansi-vt-pty-and-caret-plan.md`).
-            // HOME/USER/LOGNAME/SHELL match the staged /etc/passwd
-            // entry. COLORTERM=truecolor unlocks 24-bit-color code
-            // paths in modern programs.
+            // HOME/USER/LOGNAME/SHELL match the kernel-managed /etc/passwd
+            // entry. LANG=C.UTF-8 keeps zsh's multibyte prompt-width
+            // accounting aligned with the terminal's Unicode cell grid.
+            // COLORTERM=truecolor unlocks 24-bit-color code paths in modern
+            // programs.
             let argv = [ZSH_HOST_PATH];
             match crate::userland::launcher::launch_user_binary(
                 ZSH_HOST_PATH,

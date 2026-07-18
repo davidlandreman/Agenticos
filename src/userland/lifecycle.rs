@@ -615,6 +615,75 @@ pub fn raise_signal_on_terminal(terminal_id: crate::window::WindowId, sig: i32) 
     }
 }
 
+/// Force-terminate every ring-3 process bound to `terminal_id` — a shell
+/// and everything it forked, since children inherit the parent's
+/// `terminal_id` across `fork` (`fork_handler` in `syscalls.rs`). Called
+/// by the window-close path so closing a terminal window tears down its
+/// process tree (`zsh` + `ping` + …) instead of orphaning it.
+///
+/// This deliberately bypasses the signal machinery: default-disposition
+/// signals (SIGKILL/SIGHUP) are left pending and never acted on today
+/// (see `SignalState::consume_deliverable`), and the cooperative-exit
+/// path must run on the dying process's own kernel stack. Instead we
+/// remove each `Process` from the table and drop it, which frees its
+/// `AddressSpace`, `KernelStack`, and fd table.
+///
+/// Safety: the caller runs on a kernel thread (the compositor / window
+/// manager), so none of the target ring-3 processes are executing on
+/// their kernel stacks right now — a blocked or ready ring-3 process has
+/// its live state in `saved_user_state`, and its kernel stack holds only
+/// an abandoned frame that the next SYSCALL entry would overwrite. See
+/// the U8 notes in `src/userland/CLAUDE.md`.
+///
+/// After removing the processes, wakes any kernel launcher thread that
+/// was blocked in `wait_for_ring3_exit` on one of them (mirroring the
+/// normal exit path) so it unblocks and returns from
+/// `launch_user_binary`. Its `release_active_image` then finds the
+/// process already gone and reclaims nothing — that path tolerates a
+/// missing entry precisely for this case.
+pub fn kill_ring3_processes_on_terminal(terminal_id: crate::window::WindowId) {
+    // Snapshot the victim PIDs under the table lock, then release it
+    // before removing/dropping any `Process`: `remove_process` takes the
+    // lock itself, and `AddressSpace::drop` touches the global memory
+    // mapper — neither must run while we hold `PROCESS_TABLE`.
+    let victims: alloc::vec::Vec<u32> = {
+        let g = PROCESS_TABLE.lock();
+        g.by_pid
+            .iter()
+            .filter(|(pid, p)| **pid != KERNEL_PID && p.terminal_id == Some(terminal_id))
+            .map(|(pid, _)| *pid)
+            .collect()
+    };
+
+    if victims.is_empty() {
+        return;
+    }
+
+    for pid in &victims {
+        // `remove_process` yanks the PID out of `by_pid`,
+        // `ring3_ready`, and `ring3_blocked`, and clears
+        // `current_user_pid` if it matched. Dropping the returned
+        // `Process` frees its address space, kernel stack, and fds.
+        if let Some(process) = remove_process(*pid) {
+            drop(process);
+        }
+    }
+
+    // Unblock the launcher kernel thread(s) parked on these ring-3 pids'
+    // exit so they return from `launch_user_binary` instead of hanging.
+    let mut sched = crate::process::scheduler::SCHEDULER.lock();
+    for pid in &victims {
+        sched.wake_threads_waiting_for_ring3_exit(*pid);
+    }
+    drop(sched);
+
+    crate::debug_info!(
+        "kill_ring3_processes_on_terminal: terminated {} ring-3 process(es) for {:?}",
+        victims.len(),
+        terminal_id
+    );
+}
+
 /// Wake every ring-3 process blocked on a pipe read. Called when a
 /// pipe write appends bytes or when the last writer drops (so blocked
 /// readers can observe EOF). Conservative — any pipe event wakes every

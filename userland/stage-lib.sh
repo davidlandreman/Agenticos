@@ -15,6 +15,51 @@ _stage_atomic_copy() {
     cp "$src" "$tmp" && mv -f "$tmp" "$dst"
 }
 
+# Stage the committed global zsh configuration and pruned function library.
+# The kernel imports this read-only source tree into its managed runtime /etc.
+stage_zsh_config() {
+    local source_dir="$REPO_ROOT/userland/zsh-config"
+    local etc_dir="$HOST_SHARE_STAGE/ETC"
+    local zsh_dir="$etc_dir/ZSH"
+    local functions_dir="$zsh_dir/FUNCTIONS"
+    local required source_file count=0
+
+    for required in \
+        zshrc \
+        agnoster.zsh-theme \
+        functions/promptinit \
+        functions/colors \
+        functions/add-zsh-hook \
+        functions/is-at-least \
+        functions/vcs_info
+    do
+        if [ ! -f "$source_dir/$required" ]; then
+            echo "Missing required zsh config artifact: $source_dir/$required" >&2
+            return 1
+        fi
+    done
+
+    mkdir -p "$functions_dir"
+    _stage_atomic_copy "$source_dir/zshrc" "$etc_dir/ZSHRC"
+    _stage_atomic_copy "$source_dir/agnoster.zsh-theme" "$zsh_dir/agnoster.zsh-theme"
+
+    local manifest_tmp="$zsh_dir/.FUNCTIONS.MANIFEST.tmp.$$"
+    : > "$manifest_tmp"
+    for source_file in "$source_dir"/functions/*; do
+        [ -f "$source_file" ] || continue
+        _stage_atomic_copy "$source_file" "$functions_dir/${source_file##*/}"
+        printf '%s\n' "${source_file##*/}" >> "$manifest_tmp"
+        count=$((count + 1))
+    done
+    if [ "$count" -eq 0 ]; then
+        rm -f "$manifest_tmp"
+        echo "No zsh functions found under $source_dir/functions" >&2
+        return 1
+    fi
+    mv -f "$manifest_tmp" "$zsh_dir/FUNCTIONS.MANIFEST"
+    echo "Staged runtime /etc zsh sources: zshrc, agnoster, and $count functions"
+}
+
 _readelf_command() {
     local candidate
     for candidate in "${MUSL_CC:-x86_64-linux-musl-gcc}" "${MUSL_GXX:-x86_64-linux-musl-g++}"; do

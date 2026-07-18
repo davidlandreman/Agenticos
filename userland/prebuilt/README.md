@@ -7,6 +7,12 @@ these into `host_share/` by default, so a fresh clone reaches a working
 zsh prompt without the `x86_64-linux-musl-cross` toolchain installed
 and without an outbound network fetch.
 
+Zsh's toolchain-independent companion artifacts live next door under
+`userland/zsh-config/`: `/etc/zshrc`, the vendored agnoster theme, and a
+pruned zsh 5.9 function library. They are committed and staged on every build,
+including `test.sh --skip-userland`; rebuilding zsh refreshes the function
+copies from the same pinned source tarball.
+
 ## What lives here
 
 | File | Source | Ship kind | Notes |
@@ -30,11 +36,11 @@ that affects the binary output for one of the apps above:
 - patches under `userland/apps/<app>/patches/` (if any)
 - pinned tarball SHA256 changes
 
-Refresh workflow:
+Refresh workflow (also refreshes `userland/zsh-config/functions/`):
 
 ```sh
 ./userland/refresh-prebuilt.sh           # rebuilds all prebuilt-managed apps
-git add userland/prebuilt/<NAME>.ELF userland/apps/<app>/
+git add userland/prebuilt/<NAME>.ELF userland/apps/<app>/ userland/zsh-config/
 git commit -m "userland(<app>): <change>; refresh prebuilt"
 ```
 

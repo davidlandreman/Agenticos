@@ -73,9 +73,6 @@ pub fn init(boot_info: &'static mut BootInfo) {
     debug_info!("[boot] scheduler");
     crate::process::init_scheduler();
 
-    debug_info!("[boot] network");
-    crate::net::init();
-
     // Linux ABI syscall surface (write/exit_group, plus the broader set in
     // U9) is dispatched directly from `userland::abi::syscall_dispatch` —
     // no per-syscall registration needed.
@@ -91,6 +88,15 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // the overlay's upper-layer tmpfs from any persistent state.
     // No-op when /data is missing or has no prior sync.
     restore_overlay_upper_from_data();
+
+    debug_info!("[boot] managed /etc");
+    crate::userland::etc::init();
+
+    // Networking publishes DHCP-owned resolver state into the now-mounted
+    // root overlay. Production boot remains asynchronous and never waits for
+    // a lease.
+    debug_info!("[boot] network");
+    crate::net::init();
 
     if let Some(rsdp_addr) = rsdp_addr {
         debug_debug!("RSDP address: 0x{:016x}", rsdp_addr);

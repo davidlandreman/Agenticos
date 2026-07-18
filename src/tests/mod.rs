@@ -106,6 +106,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("basic", basic::get_tests),
     ("memory", memory::get_tests),
     ("network", network::get_tests),
+    ("resolver", crate::net::resolver_tests),
     ("network_userland", network_userland::get_tests),
     ("display", display::get_tests),
     ("interrupts", interrupts::get_tests),
@@ -123,6 +124,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("compiler_compat", compiler_compat::get_tests),
     ("userland_switch", userland_switch::get_tests),
     ("path", crate::userland::path::path_tests),
+    ("etc", crate::userland::etc::etc_tests),
     (
         "bin_namespace",
         crate::userland::bin_namespace::bin_namespace_tests,

@@ -66,8 +66,8 @@ an outbound network fetch.
 The kernel exposes a single virtual `/bin` directory whose entries
 resolve into multicall or direct binaries staged under `host_share/`:
 
-- **`BB.ELF` — BusyBox** (core utilities plus numeric IPv4 `ping`, `nc`,
-  and HTTP-only `wget`; DNS, IPv6, and TLS are not available).
+- **`BB.ELF` — BusyBox** (core utilities plus IPv4 `ping`, `nc`, `nslookup`,
+  and HTTP-only `wget`; IPv6 and TLS are not available).
 - **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`painting`, `calc`,
   `tasks`, `explorer`).
 - **`NOTEPAD.ELF` — direct standalone ring-3 application** (`notepad`).

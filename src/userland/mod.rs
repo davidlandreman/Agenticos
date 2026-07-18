@@ -7,6 +7,7 @@ pub mod abi;
 pub mod address_space;
 pub mod bin_namespace;
 pub mod error;
+pub mod etc;
 pub mod fdtable;
 pub mod gui;
 pub mod gui_syscalls;
@@ -509,13 +510,26 @@ pub fn release_active_image() -> (
 ) {
     let pair = match crate::userland::lifecycle::current_user_pid() {
         Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID => {
-            let mut process = crate::userland::lifecycle::remove_process(pid)
-                .expect("current_user_pid set but entry missing from process table");
-            let img = process.image.take();
-            let aspace = process.address_space.take();
-            // Heap-backed fields (fd_table, cwd, kernel_stack, signal_state)
-            // are released when `process` drops at the end of this block.
-            (img, aspace)
+            match crate::userland::lifecycle::remove_process(pid) {
+                Some(mut process) => {
+                    let img = process.image.take();
+                    let aspace = process.address_space.take();
+                    // Heap-backed fields (fd_table, cwd, kernel_stack,
+                    // signal_state) are released when `process` drops at the
+                    // end of this block.
+                    (img, aspace)
+                }
+                None => {
+                    // The process was already force-removed out of band —
+                    // e.g. the window-close path
+                    // (`kill_ring3_processes_on_terminal`) tore down this
+                    // terminal's tree while its launcher thread was blocked.
+                    // Its AddressSpace / KernelStack were already reclaimed
+                    // there; just clear the dangling current pointer.
+                    crate::userland::lifecycle::set_current_user_pid(None);
+                    (None, None)
+                }
+            }
         }
         Some(_) => {
             // current_user_pid points at the sentinel (PID 0) — this
