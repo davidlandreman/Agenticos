@@ -11,11 +11,18 @@ the first application migrated to the ring-3 GUI platform, and `calc` and
 absent: `/bin/calc`, `/bin/notepad`, and `/bin/painting` rewrite directly to
 `/host/CALC.ELF`, `/host/NOTEPAD.ELF`, and `/host/PAINTING.ELF`.
 
-## Launch paths
+## Desktop launch paths
 
-- Start → Notepad, Start → Calc, and Start → Painting call
+- Start → Programs contains Terminal, Notepad, Painting, and Calc. The latter
+  three call
   `terminal_factory::spawn_gui_user_app`, which launches the standalone ELF on
   a blocking kernel wrapper thread.
+- Start → Run opens the kernel-owned non-blocking Run dialog. Submitted text is
+  passed unchanged as the single command argument to `/host/ZSH.ELF -c`, using
+  the same `/bin:/host` PATH as interactive terminals.
+- Start → Documents and Settings are disabled placeholders. Start → Shut Down
+  reports that clean shutdown is not implemented; it does not use QEMU's test
+  exit port.
 - zsh `notepad` / `calc` / `painting` resolve through the synthetic `/bin`
   namespace directly to `NOTEPAD.ELF` / `CALC.ELF` / `PAINTING.ELF`.
 - Explorer launches `NOTEPAD.ELF` with the selected text path as `argv[1]`.
@@ -26,7 +33,7 @@ absent: `/bin/calc`, `/bin/notepad`, and `/bin/painting` rewrite directly to
 
 New native applications should use the ring-3 pattern documented in
 `userland/README.md`: add a no_std workspace app, depend on `runtime` and
-`libs/gui`, and add one manifest row. Add a Start-menu action only when the app
+`libs/gui`, and add one manifest row. Add a Programs action only when the app
 should be pinned there. Do not add new kernel widgets or launch-table arms
 unless the workload genuinely requires ring-0 privileges.
 
