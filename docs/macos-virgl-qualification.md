@@ -99,7 +99,10 @@ The qualified production path accelerates ordered textured-quad composition,
 translation, clipping/scissor, layer opacity, premultiplied source-over, and
 radius-6 Aero backdrop blur. Blur uses persistent render-target/sampler scratch
 textures, an output-to-scratch copy, separable ping-pong passes, and a
-two-sampler masked combine. Transparent frame pixels are discarded so rounded
+three-sampler masked combine over the source, blurred snapshot, and preserved
+sharp snapshot. Effective source alpha blends sharp into blurred before
+source-over, so the window's translucent shadow gutter fades smoothly back to
+the unblurred desktop. Transparent frame pixels are discarded so rounded
 corners preserve the unblurred output; opaque client pixels replace the blur.
 The completed render target remains on the host GPU and is presented as a
 scanout-bound VirGL texture; ordinary frames do not transfer it back to guest

@@ -30,7 +30,9 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   pipeline's maximum) meeting the content well directly, content flush to
   the window edge inside a 1px dark hairline
   rim (no light borders), 12px-rounded top corners, a soft 22px drop shadow,
-  and a rounded soft-red close button. Its rounded *bottom* corners are
+  and a rounded soft-red close button. Backdrop strength follows the frame's
+  effective alpha, so the blurred shadow gutter fades smoothly to the sharp
+  desktop. Its rounded *bottom* corners are
   carved by `Window::paint_overlay` — a post-children pass the manager runs
   so the frame can replace the client's corner pixels with the shadowed arc
   (surface ARGB writes are exact replacement); `ThemeSpec.draw_frame_overlay`

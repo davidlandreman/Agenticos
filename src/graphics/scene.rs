@@ -46,7 +46,9 @@ pub enum LayerEffect {
     /// Test/extension point for per-pixel alpha content already in the surface.
     #[expect(dead_code, reason = "intentional kernel API surface")]
     AlphaMask,
-    /// Blur/sample already-composed layers behind this layer.
+    /// Blur/sample already-composed layers behind this layer. The effective
+    /// source alpha also masks the blur strength, so translucent effect edges
+    /// transition continuously back to the sharp backdrop.
     BackdropSample {
         radius: u16,
     },

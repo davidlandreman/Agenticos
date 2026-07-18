@@ -152,7 +152,7 @@ fn test_backdrop_blur_spreads_impulse() {
     surfaces.insert(backdrop_id, backdrop);
     surfaces.insert(
         glass_id,
-        solid_surface(9, 1, PremulArgb::from_rgba(0, 0, 0, 1)),
+        solid_surface(9, 1, PremulArgb::from_rgba(0, 0, 0, 128)),
     );
     let mut scene = SceneFrame::new(9, 1);
     scene.push(Layer::opaque(backdrop_id, Rect::new(0, 0, 9, 1)));
@@ -167,6 +167,36 @@ fn test_backdrop_blur_spreads_impulse() {
     let neighbor = engine.output().pixel(3, 0).unwrap().to_rgba().0;
     assert!(center < 255);
     assert!(neighbor > 0);
+}
+
+fn test_backdrop_blur_fades_with_effect_alpha() {
+    let backdrop_id = SurfaceId(11);
+    let mask_id = SurfaceId(12);
+    let mut backdrop = solid_surface(9, 1, PremulArgb::from_rgba(0, 0, 0, 255));
+    backdrop.set_pixel(4, 0, PremulArgb::from_rgba(255, 255, 255, 255));
+    let mut mask = solid_surface(9, 1, PremulArgb::TRANSPARENT);
+    // Symmetric positions see the same blurred impulse. Only their effect
+    // alpha differs, isolating the blur-mask transition from blur geometry.
+    mask.set_pixel(3, 0, PremulArgb::from_rgba(0, 0, 0, 1));
+    mask.set_pixel(5, 0, PremulArgb::from_rgba(0, 0, 0, 32));
+
+    let mut surfaces = BTreeMap::new();
+    surfaces.insert(backdrop_id, backdrop);
+    surfaces.insert(mask_id, mask);
+    let mut scene = SceneFrame::new(9, 1);
+    scene.push(Layer::opaque(backdrop_id, Rect::new(0, 0, 9, 1)));
+    let mut effect = Layer::opaque(mask_id, Rect::new(0, 0, 9, 1));
+    effect.effect = LayerEffect::BackdropSample { radius: 3 };
+    scene.push(effect);
+
+    let mut engine = CpuCompositionEngine::new(9, 1).unwrap();
+    engine
+        .compose(&scene, &surfaces, &[Rect::new(0, 0, 9, 1)])
+        .unwrap();
+    let faded = engine.output().pixel(3, 0).unwrap().r();
+    let stronger = engine.output().pixel(5, 0).unwrap().r();
+    assert!(faded <= 1, "one-alpha edge retained blur value {faded}");
+    assert!(stronger > faded, "blur did not increase with mask alpha");
 }
 
 fn test_backdrop_damage_uses_current_neighborhood() {
@@ -264,6 +294,7 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_layer_opacity,
         &test_backdrop_blur_uniform_is_identity,
         &test_backdrop_blur_spreads_impulse,
+        &test_backdrop_blur_fades_with_effect_alpha,
         &test_backdrop_damage_uses_current_neighborhood,
         &test_backdrop_coverage_preserves_pixels_and_reduces_work,
     ]
