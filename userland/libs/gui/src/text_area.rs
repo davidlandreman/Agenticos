@@ -115,6 +115,9 @@ impl TextArea {
     }
 
     pub fn set_bounds(&mut self, bounds: Rect) {
+        if self.bounds == bounds {
+            return;
+        }
         self.bounds = bounds;
         self.sync_layout();
         self.ensure_caret_visible();
