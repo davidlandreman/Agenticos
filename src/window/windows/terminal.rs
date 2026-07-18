@@ -43,6 +43,8 @@ pub struct TerminalWindow {
     input_start_col: usize,
     /// Starting row of current input line
     input_start_row: usize,
+    /// Frame-title update consumed by the window manager after event dispatch.
+    pending_frame_title: Option<String>,
 }
 
 impl TerminalWindow {
@@ -51,7 +53,7 @@ impl TerminalWindow {
         let mut text_window = TextWindow::new_with_id(id, bounds);
 
         // Write initial text to show the terminal is ready
-        text_window.write_str("AgenticOS Terminal Ready\n");
+        text_window.write_str("Terminal Ready\n");
         text_window.write_str("Initializing...\n\n");
 
         // Log cursor position and buffer state
@@ -93,6 +95,7 @@ impl TerminalWindow {
             history_index: 0,
             input_start_col: 0,
             input_start_row: 0,
+            pending_frame_title: None,
         }
     }
 
@@ -176,6 +179,10 @@ impl TerminalWindow {
         let replies = self.screen.take_replies();
         if !replies.is_empty() {
             crate::userland::stdin::push_bytes_for_terminal(terminal_id, &replies);
+        }
+
+        if let Some(title) = self.screen.take_title() {
+            self.pending_frame_title = Some(title);
         }
 
         if !self.screen_dirty {
@@ -345,6 +352,10 @@ impl Window for TerminalWindow {
     /// characters would appear alone on wallpaper.
     fn dirty_rect_hint(&self) -> Option<Rect> {
         self.text_window.dirty_rect_hint()
+    }
+
+    fn take_pending_frame_title(&mut self) -> Option<String> {
+        self.pending_frame_title.take()
     }
 
     /// Drain pending output buffers BEFORE the compositor consults dirty

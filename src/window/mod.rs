@@ -291,6 +291,11 @@ pub trait Window: Send {
         None
     }
 
+    /// Take a title update intended for this window's enclosing frame.
+    fn take_pending_frame_title(&mut self) -> Option<alloc::string::String> {
+        None
+    }
+
     /// Typed accessor used by the ring-3 title syscall.
     fn as_frame_window_mut(&mut self) -> Option<&mut windows::frame::FrameWindow> {
         None

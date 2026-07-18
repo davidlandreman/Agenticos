@@ -23,6 +23,7 @@ use crate::graphics::compositor::Compositor;
 use crate::graphics::present::{BootFramebufferPresenter, Presenter};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -794,6 +795,17 @@ impl WindowManager {
                     self.route_event_to_window(sv_id, Event::EnsureVisible(rect));
                 }
             }
+        }
+
+        // A child may request a title change for its enclosing frame. Drain
+        // the request after releasing the child's mutable registry borrow,
+        // then walk upward to the nearest decorated frame.
+        let pending_title = self
+            .window_registry
+            .get_mut(&window_id)
+            .and_then(|w| w.take_pending_frame_title());
+        if let Some(title) = pending_title {
+            self.apply_frame_title_request(window_id, title);
         }
 
         // Handle propagation
@@ -1717,8 +1729,40 @@ impl WindowManager {
                 let prev = ACTIVE_MANAGER.swap(self_ptr, Ordering::SeqCst);
                 window.prepare_for_render();
                 ACTIVE_MANAGER.store(prev, Ordering::SeqCst);
+                let pending_title = window.take_pending_frame_title();
                 self.window_registry.insert(id, window);
+                if let Some(title) = pending_title {
+                    self.apply_frame_title_request(id, title);
+                }
             }
+        }
+    }
+
+    fn apply_frame_title_request(&mut self, window_id: WindowId, title: String) {
+        let mut ancestor = self
+            .window_registry
+            .get(&window_id)
+            .and_then(|window| window.parent());
+        while let Some(id) = ancestor {
+            let is_frame = self
+                .window_registry
+                .get(&id)
+                .and_then(|window| window.window_title())
+                .is_some();
+            if is_frame {
+                if let Some(frame) = self
+                    .window_registry
+                    .get_mut(&id)
+                    .and_then(|window| window.as_frame_window_mut())
+                {
+                    frame.set_title(&title);
+                }
+                break;
+            }
+            ancestor = self
+                .window_registry
+                .get(&id)
+                .and_then(|window| window.parent());
         }
     }
 

@@ -163,6 +163,11 @@ prompt_context() {
   fi
 }
 
+# Host: keep the machine identity at the far left of every prompt.
+prompt_hostname() {
+  prompt_segment "$AGNOSTER_CONTEXT_BG" "$AGNOSTER_CONTEXT_FG" '%m'
+}
+
 prompt_git_relative() {
   local repo_root=$(git_toplevel)
   local path_in_repo=$(pwd | sed "s/^$(echo "$repo_root" | sed 's:/:\\/:g;s/\$/\\$/g')//;s:^/::;s:/$::;")
@@ -355,6 +360,7 @@ build_prompt() {
   RETVAL=$?
   AGNOSTER_PROMPT=''
   CURRENT_BG='NONE'
+  prompt_hostname
   prompt_status
   prompt_virtualenv
   prompt_aws
