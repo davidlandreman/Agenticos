@@ -4,4 +4,4 @@
 # requires `-Zjson-target-spec`, which the bootloader's nested builds don't pass.
 # Keep the kernel and those nested builds on a known-compatible nightly.
 channel = "nightly-2025-07-22"
-components = ["rust-src", "llvm-tools-preview"]
+components = ["clippy", "rust-src", "llvm-tools-preview"]

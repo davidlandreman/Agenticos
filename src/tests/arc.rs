@@ -2,7 +2,7 @@
 
 use crate::lib::arc::{Arc, Weak};
 use crate::lib::test_utils::Testable;
-use alloc::{vec, vec::Vec};
+use alloc::vec;
 use alloc::string::String;
 
 /// Test basic Arc creation and dereferencing

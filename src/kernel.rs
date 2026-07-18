@@ -208,7 +208,7 @@ fn init_filesystems() {
     use crate::drivers::ide::{IDE_CONTROLLER, IdeChannel, IdeDrive, IdeBlockDevice};
     use crate::drivers::block::BlockDevice;
     use crate::fs::{detect_filesystem, read_partitions, PartitionBlockDevice};
-    use crate::fs::vfs::{auto_mount, mount_overlay_root};
+    use crate::fs::vfs::mount_overlay_root;
 
     debug_info!("Detecting and mounting filesystems...");
     

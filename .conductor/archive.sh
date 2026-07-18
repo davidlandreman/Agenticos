@@ -17,5 +17,10 @@ if [[ -n "$workspace_path" ]]; then
     pkill -f "qemu-system-x86_64.*${workspace_path}" 2>/dev/null || true
 fi
 
+if [[ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]]; then
+    workspace_rpc_socket="/tmp/agenticos-rpc-${CONDUCTOR_WORKSPACE_NAME}.sock"
+    rm -f "$workspace_rpc_socket"
+fi
+
 echo "archived: $workspace_name"
 exit 0

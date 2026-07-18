@@ -845,9 +845,8 @@ fn apply_relocations(
             return Err(LoaderError::Truncated);
         }
         let rela_count = sh.sh_size / entsize;
-        for i in 0..rela_count {
-            let rela_off = sh.sh_offset + i * entsize;
-            let rela: Elf64Rela = read_at(bytes, rela_off)?;
+        if rela_count != 0 {
+            let rela: Elf64Rela = read_at(bytes, sh.sh_offset)?;
             let r_type = (rela.r_info & 0xFFFF_FFFF) as u32;
             let r_sym = (rela.r_info >> 32) as u32;
 

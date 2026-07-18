@@ -8,4 +8,5 @@
 pub mod dispatcher;
 pub mod framing;
 
+#[allow(unused_imports)]
 pub use dispatcher::run_dispatcher;

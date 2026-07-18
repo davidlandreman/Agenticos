@@ -50,7 +50,6 @@ pub fn spawn_by_name(name: &str) -> Result<ProcessId, i64> {
 
 #[cfg(feature = "test")]
 mod tests_internal {
-    use super::*;
     use crate::userland::bin_namespace::GUI_APPLETS;
 
     /// Every name in [`GUI_APPLETS`] must be handled by `spawn_by_name`;

@@ -61,7 +61,9 @@ if [ "$HELP" = true ]; then
     echo "                          macOS window: cocoa zoom-to-fit is on by default so"
     echo "                          the 1280x720 guest can be resized/enlarged on Retina."
     echo "                          AGENTICOS_QEMU_ZOOM=off disables it; AGENTICOS_QEMU_FULLSCREEN=1"
-    echo "                          starts maximized to the display."
+    echo "                          starts maximized to the display. AGENTICOS_QEMU_SCALE=N"
+    echo "                          enlarges the window to N times its native size on open"
+    echo "                          (default 4; needs Accessibility permission for the terminal)."
     echo "  -h, --help              Show this help message"
     echo ""
     echo "Default: Build in release mode, create images, and run in QEMU"
@@ -175,7 +177,7 @@ if command -v "$MUSL_GXX" >/dev/null 2>&1; then
         exit 1
     fi
 else
-    echo "⚠️  $MUSL_GXX not found on PATH — skipping HELLOCPP.ELF."
+    echo "ℹ️  Optional $MUSL_GXX not found on PATH — skipping HELLOCPP.ELF."
     echo "   Install hint (macOS): brew install x86_64-linux-musl-cross"
     echo "   Override the binary name: MUSL_GXX=<path-to-musl-g++> ./build.sh"
 fi
@@ -271,5 +273,15 @@ if [ "$RUN_QEMU" = true ]; then
         -device virtio-tablet-pci
         -m "$QEMU_MEMORY"
     )
+    # On macOS the cocoa backend has no initial-scale flag, so open the window
+    # then enlarge it to AGENTICOS_QEMU_SCALE (default 4x) via a backgrounded
+    # AppleScript helper. zoom-to-fit=on (set by qemu-compositor.sh) scales the
+    # guest image to fill the resized window. Skipped when zoom is off, when the
+    # scale is <=1, or off macOS. Best-effort: needs Accessibility permission.
+    QEMU_SCALE="${AGENTICOS_QEMU_SCALE:-4}"
+    if [ "$(uname -s)" = "Darwin" ] && [ "${AGENTICOS_QEMU_ZOOM:-on}" != off ]; then
+        echo "🔍 Scaling QEMU window to ${QEMU_SCALE}x (override with AGENTICOS_QEMU_SCALE)"
+        "$(pwd)/scripts/qemu-window-scale.sh" "$(basename "$QEMU_BIN")" "$QEMU_SCALE" &
+    fi
     "$QEMU_BIN" "${QEMU_ARGS[@]}" "${AGENTICOS_QEMU_RENDER_ARGS[@]}" "${AGENTICOS_QEMU_FW_CFG_ARGS[@]}"
 fi

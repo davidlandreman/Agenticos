@@ -36,6 +36,7 @@ pub use screen::*;
 pub use self::types::{WindowId, ScreenId, Rect, Point};
 pub use self::event::{Event, EventResult};
 pub use self::graphics::{GraphicsDevice, WindowBuffer};
+#[allow(unused_imports)]
 pub use self::selection::{Selection, SelectionMode, ClickMods};
 
 // =====================================================================

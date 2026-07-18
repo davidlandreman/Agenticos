@@ -2,6 +2,12 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
+// AgenticOS is a single binary crate whose subsystem APIs are also exercised by
+// the feature-gated QEMU test harness. In a normal kernel build, rustc therefore
+// sees many intentionally dormant API surfaces as dead code. Keep useful lints
+// enabled while suppressing that structural noise and the intentional `lib.rs`
+// module name used by the kernel's internal support library.
+#![allow(dead_code, special_module_name)]
 
 extern crate alloc;
 
