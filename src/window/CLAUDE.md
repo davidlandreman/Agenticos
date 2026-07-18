@@ -83,6 +83,17 @@ That save/restore behavior applies only to `legacy`. In `retained`, the cursor
 is drawn as the final canonical output overlay after damaged regions have been
 recomposed; it never restores framebuffer background.
 
+## Window-manager synchronization
+
+`WINDOW_MANAGER` uses `PreemptionMutex`, not `InterruptMutex`: a render may be
+long, so the PIT and device IRQs must remain enabled while its lock is held.
+The timer continues advancing time, but takes only its minimal tick/EOI path;
+scheduler housekeeping and kernel-thread context switches resume after the
+critical section ends. Interrupt handlers must never access the manager
+directly; they enqueue input or work for the compositor thread to consume. This
+invariant prevents same-CPU spin-lock deadlocks, interrupt-context allocator
+activity during rendering, and drag-time clock starvation.
+
 ## Renderer boot policy
 
 `build.sh` passes `opt/agenticos/compositor` (`legacy`, `retained`, `gpu`, or

@@ -8,7 +8,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
+
+use crate::arch::x86_64::preemption_guard::PreemptionMutex;
 
 pub mod adapters;
 pub mod compositor;
@@ -424,7 +425,7 @@ pub trait Window: Send {
 }
 
 /// Global window manager instance
-static WINDOW_MANAGER: Mutex<Option<WindowManager>> = Mutex::new(None);
+static WINDOW_MANAGER: PreemptionMutex<Option<WindowManager>> = PreemptionMutex::new(None);
 
 /// Initialize the window manager with a graphics device
 pub fn init_window_manager(device: Box<dyn GraphicsDevice>) {
@@ -434,22 +435,16 @@ pub fn init_window_manager(device: Box<dyn GraphicsDevice>) {
 
 /// Execute a function with the window manager
 ///
-/// IMPORTANT: Disables interrupts while holding the lock to prevent
-/// deadlocks with preemptive multitasking. Uses RAII guard to ensure
-/// interrupts are restored even if the closure panics.
+/// Prevents kernel-thread preemption while holding the lock, avoiding a
+/// single-CPU spin-mutex deadlock without masking the PIT or device IRQs.
+/// Interrupt handlers must never acquire the window manager directly; they
+/// enqueue input/work for the compositor instead.
 pub fn with_window_manager<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut WindowManager) -> R,
 {
-    use crate::arch::x86_64::interrupt_guard::InterruptGuard;
-
-    // RAII guard ensures interrupts are restored even on panic
-    let _guard = InterruptGuard::disable();
-
     let mut wm_lock = WINDOW_MANAGER.lock();
     wm_lock.as_mut().map(f)
-
-    // _guard dropped here, restoring interrupt state
 }
 
 /// Path of the bundled default wallpaper on the FAT root. The basename is
