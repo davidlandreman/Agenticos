@@ -42,13 +42,19 @@ use alloc::vec;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
-/// Maximum bytes a single `write` call can emit.
+/// Kernel staging-buffer bound for a single write trip. Not a call cap:
+/// file and terminal writes loop over chunks of this size, so arbitrary
+/// user lengths succeed while kernel-heap spikes stay bounded. Pipe and
+/// socket writes return a POSIX short write at this bound instead — a
+/// blocked pipe/socket restarts the whole SYSCALL (RIP rewind), so bytes
+/// already consumed by a chunk loop would be duplicated on the re-fire.
 const WRITE_MAX_LEN: usize = 4096;
 /// Maximum iovec entries per `writev`. libstdc++'s underlying stdio
 /// rarely emits more than 2-3 iovecs at a time; 16 is plenty.
 const WRITEV_MAX_IOV: usize = 16;
-/// Maximum total bytes per `writev` (sum of iov_len).
-const WRITEV_MAX_TOTAL: u64 = 16 * 1024;
+/// Maximum total bytes per `writev` (sum of iov_len). Matches Linux's
+/// MAX_RW_COUNT; per-iov chunking keeps kernel memory bounded below this.
+const WRITEV_MAX_TOTAL: u64 = 0x7fff_f000;
 /// Maximum mmap allocation in bytes.
 const MMAP_MAX_LEN: u64 = 512 * 1024 * 1024;
 /// Maximum brk growth from the initial anchor in bytes. Bumped from
@@ -80,10 +86,109 @@ const TIOCGWINSZ: u64 = 0x5413;
 
 // ---------- write / writev / read ----------
 
+/// Longest prefix of `chunk` that does not end partway through a
+/// multi-byte UTF-8 sequence. Chunked terminal writes would otherwise
+/// render U+FFFD at every staging-buffer seam whenever a multi-byte
+/// character straddles two chunks. Returns the full length when the
+/// tail is ASCII or is not valid UTF-8 anyway (progress guarantee).
+pub(crate) fn utf8_safe_chunk_len(chunk: &[u8]) -> usize {
+    let len = chunk.len();
+    let scan = core::cmp::min(len, 3);
+    for back in 1..=scan {
+        let byte = chunk[len - back];
+        if byte & 0x80 == 0 {
+            return len;
+        }
+        if byte & 0xC0 == 0xC0 {
+            let need = if byte >= 0xF0 {
+                4
+            } else if byte >= 0xE0 {
+                3
+            } else {
+                2
+            };
+            return if need > back { len - back } else { len };
+        }
+        // 0b10xxxxxx continuation byte: keep scanning back.
+    }
+    len
+}
+
+/// Copy `len` bytes from user `ptr` into `handle` in staging-buffer
+/// chunks. Returns bytes written (short on a mid-stream error or a
+/// filesystem short write) or a negative errno when nothing was written.
+fn write_file_chunked(
+    handle: &crate::lib::arc::Arc<crate::fs::file_handle::File>,
+    ptr: u64,
+    len: u64,
+) -> i64 {
+    let mut staging = alloc::vec![0u8; core::cmp::min(len as usize, WRITE_MAX_LEN)];
+    let mut written: u64 = 0;
+    while written < len {
+        let chunk = core::cmp::min((len - written) as usize, WRITE_MAX_LEN);
+        let buf = &mut staging[..chunk];
+        if let Err(e) = crate::userland::usercopy::copy_from_user(buf, ptr + written) {
+            return if written > 0 { written as i64 } else { e };
+        }
+        match handle.write(buf) {
+            Ok(n) => {
+                written += n as u64;
+                if n < chunk {
+                    break;
+                }
+            }
+            Err(ref e) => {
+                return if written > 0 {
+                    written as i64
+                } else {
+                    map_file_err(e)
+                }
+            }
+        }
+    }
+    written as i64
+}
+
+/// Copy `len` bytes from user `ptr` and hand them to `emit` as text, in
+/// staging-buffer chunks with multi-byte UTF-8 sequences kept intact
+/// across chunk seams. Returns bytes consumed or a negative errno when
+/// nothing was emitted.
+fn write_terminal_chunked(ptr: u64, len: u64, emit: &mut dyn FnMut(&str)) -> i64 {
+    let mut staging = alloc::vec![0u8; core::cmp::min(len as usize, WRITE_MAX_LEN)];
+    let mut written: u64 = 0;
+    while written < len {
+        let want = core::cmp::min((len - written) as usize, WRITE_MAX_LEN);
+        let buf = &mut staging[..want];
+        if let Err(e) = crate::userland::usercopy::copy_from_user(buf, ptr + written) {
+            return if written > 0 { written as i64 } else { e };
+        }
+        let take = if written + want as u64 == len {
+            // Final chunk: emit everything, seams are no longer a concern.
+            want
+        } else {
+            match utf8_safe_chunk_len(buf) {
+                0 => want,
+                n => n,
+            }
+        };
+        // Lossy: invalid UTF-8 bytes become U+FFFD rather than dropping
+        // the entire call. A strict `from_utf8` here would silently
+        // swallow writes that mix valid text with binary data (e.g.
+        // cat'ing a partially-binary file).
+        let text = alloc::string::String::from_utf8_lossy(&buf[..take]);
+        emit(&text);
+        written += take as u64;
+    }
+    written as i64
+}
+
 /// `write(fd: i32, buf: *const u8, count: usize) -> isize`
 ///
-/// Routes through the FD table: stdout/stderr go to `print!`; opened
-/// files return `-EROFS` (the FAT mount is read-only).
+/// Routes through the FD table: stdout/stderr go to the process's
+/// terminal; file writes go through the VFS (read-only mounts surface
+/// `-EROFS` at open time). Arbitrary lengths are supported: files and
+/// terminals chunk kernel-side; pipes and sockets return POSIX short
+/// writes at the staging bound.
 pub fn write_handler(args: &mut SyscallArgs) -> i64 {
     let fd = args.rdi as i32;
     let ptr = args.rsi;
@@ -109,20 +214,21 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Stdin) | None => return EBADF,
     };
 
-    if len > WRITE_MAX_LEN as u64 {
-        return EFAULT;
-    }
     if len == 0 {
         return 0;
     }
-    let mut staging = alloc::vec![0u8; len as usize];
-    if let Err(e) = crate::userland::usercopy::copy_from_user(&mut staging, ptr) {
-        return e;
-    }
-    let slice = staging.as_slice();
 
     match target {
         Target::Pipe(handle) => {
+            // Short-write cap: see the WRITE_MAX_LEN comment. A full
+            // pipe blocks by restarting the whole SYSCALL, so chunking
+            // here would duplicate already-consumed bytes.
+            let take = core::cmp::min(len, WRITE_MAX_LEN as u64) as usize;
+            let mut staging = alloc::vec![0u8; take];
+            if let Err(e) = crate::userland::usercopy::copy_from_user(&mut staging, ptr) {
+                return e;
+            }
+            let slice = staging.as_slice();
             // Write to a pipe. Return `-EPIPE` when no readers remain
             // (POSIX would also raise SIGPIPE; we skip the signal
             // until a later milestone). When the ring buffer has
@@ -151,28 +257,29 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
                 )
             }
         }
-        Target::File(handle) => match handle.write(slice) {
-            Ok(n) => n as i64,
-            Err(ref e) => map_file_err(e),
-        },
-        Target::Socket(id) => crate::userland::network_syscalls::write_connected(args, id, slice),
+        Target::File(handle) => write_file_chunked(&handle, ptr, len),
+        Target::Socket(id) => {
+            // Same short-write rationale as pipes: a blocking socket
+            // restarts the SYSCALL, so only one staging trip is safe.
+            let take = core::cmp::min(len, WRITE_MAX_LEN as u64) as usize;
+            let mut staging = alloc::vec![0u8; take];
+            if let Err(e) = crate::userland::usercopy::copy_from_user(&mut staging, ptr) {
+                return e;
+            }
+            crate::userland::network_syscalls::write_connected(args, id, &staging)
+        }
         Target::StdoutErr => {
-            // Lossy: invalid UTF-8 bytes become U+FFFD rather than
-            // dropping the entire call. A strict `from_utf8` here
-            // would silently swallow writes that mix valid text with
-            // binary data (e.g. cat'ing a partially-binary file).
-            let s = alloc::string::String::from_utf8_lossy(slice);
             // U8/bugfix: route to THIS process's terminal_id, not the
             // global CURRENT_OUTPUT_TERMINAL. With multiple ring-3
             // processes (one per terminal), the global is wrong —
             // last-launcher wins, so zsh1's writes would land in
             // terminal 2's window.
             let dest_terminal = crate::userland::lifecycle::with_current_process(|p| p.terminal_id);
-            match dest_terminal {
-                Some(tid) => crate::window::terminal::write_to_terminal_id(tid, &s),
+            let mut emit = |s: &str| match dest_terminal {
+                Some(tid) => crate::window::terminal::write_to_terminal_id(tid, s),
                 None => crate::print!("{}", s),
-            }
-            len as i64
+            };
+            write_terminal_chunked(ptr, len, &mut emit)
         }
     }
 }
@@ -241,26 +348,36 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
 
     // Now emit every iov in order. Short writes break the loop so
     // POSIX writev's "stop at the first short write" semantics hold.
+    // Files and terminals chunk kernel-side (arbitrary iov lengths);
+    // pipes and sockets take one staging trip per iov and short-write
+    // at the staging bound (see the WRITE_MAX_LEN comment).
     let mut written: u64 = 0;
     for (base, len) in iovecs {
         if len == 0 {
             continue;
         }
-        let mut bytes = alloc::vec![0u8; len as usize];
-        if let Err(e) = crate::userland::usercopy::copy_from_user(&mut bytes, base) {
-            return if written > 0 { written as i64 } else { e };
-        }
-        let slice = bytes.as_slice();
         match &target {
             Target::StdoutErr => {
-                let s = alloc::string::String::from_utf8_lossy(slice);
-                match dest_terminal {
-                    Some(tid) => crate::window::terminal::write_to_terminal_id(tid, &s),
+                let mut emit = |s: &str| match dest_terminal {
+                    Some(tid) => crate::window::terminal::write_to_terminal_id(tid, s),
                     None => crate::print!("{}", s),
+                };
+                let n = write_terminal_chunked(base, len, &mut emit);
+                if n < 0 {
+                    return if written > 0 { written as i64 } else { n };
                 }
-                written += len;
+                written += n as u64;
+                if (n as u64) < len {
+                    break;
+                }
             }
             Target::Pipe(handle) => {
+                let take = core::cmp::min(len, WRITE_MAX_LEN as u64) as usize;
+                let mut bytes = alloc::vec![0u8; take];
+                if let Err(e) = crate::userland::usercopy::copy_from_user(&mut bytes, base) {
+                    return if written > 0 { written as i64 } else { e };
+                }
+                let slice = bytes.as_slice();
                 if handle.pipe().readers() == 0 {
                     return if written > 0 {
                         written as i64
@@ -293,22 +410,23 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                     )
                 }
             }
-            Target::File(handle) => match handle.write(slice) {
-                Ok(n) => {
-                    written += n as u64;
-                    if (n as u64) < len {
-                        break;
-                    }
+            Target::File(handle) => {
+                let n = write_file_chunked(handle, base, len);
+                if n < 0 {
+                    return if written > 0 { written as i64 } else { n };
                 }
-                Err(ref e) => {
-                    if written > 0 {
-                        return written as i64;
-                    }
-                    return map_file_err(e);
+                written += n as u64;
+                if (n as u64) < len {
+                    break;
                 }
-            },
+            }
             Target::Socket(id) => {
-                let result = crate::userland::network_syscalls::write_connected(args, *id, slice);
+                let take = core::cmp::min(len, WRITE_MAX_LEN as u64) as usize;
+                let mut bytes = alloc::vec![0u8; take];
+                if let Err(e) = crate::userland::usercopy::copy_from_user(&mut bytes, base) {
+                    return if written > 0 { written as i64 } else { e };
+                }
+                let result = crate::userland::network_syscalls::write_connected(args, *id, &bytes);
                 if result < 0 {
                     return if written > 0 { written as i64 } else { result };
                 }
@@ -2586,12 +2704,11 @@ pub fn pread64_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
         Some(_) | None => return EBADF,
     };
-    if len > WRITE_MAX_LEN as u64 {
-        return EFAULT;
-    }
     if len == 0 {
         return 0;
     }
+    // Short read at the staging bound (POSIX-legal); libc loops.
+    let len = core::cmp::min(len, READ_MAX_LEN as u64);
     let prev = handle.position();
     if let Err(ref e) = handle.seek(offset) {
         return map_file_err(e);
@@ -2621,29 +2738,19 @@ pub fn pwrite64_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
         Some(_) | None => return EBADF,
     };
-    if len > WRITE_MAX_LEN as u64 {
-        return EFAULT;
-    }
     if len == 0 {
         return 0;
-    }
-    let mut bytes = alloc::vec![0u8; len as usize];
-    if let Err(e) = crate::userland::usercopy::copy_from_user(&mut bytes, ptr) {
-        return e;
     }
     let prev = handle.position();
     if let Err(ref e) = handle.seek(offset) {
         return map_file_err(e);
     }
-    let n = match handle.write(&bytes) {
-        Ok(n) => n,
-        Err(ref e) => {
-            let _ = handle.seek(prev);
-            return map_file_err(e);
-        }
-    };
+    // Chunked write at the seeked position; `File::write` advances the
+    // shared position, so consecutive chunks land contiguously. The
+    // original position is restored afterwards per pwrite semantics.
+    let ret = write_file_chunked(&handle, ptr, len);
     let _ = handle.seek(prev);
-    n as i64
+    ret
 }
 
 /// `sendfile(out_fd, in_fd, *offset, count) -> isize`
