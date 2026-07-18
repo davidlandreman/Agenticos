@@ -190,9 +190,9 @@ fn build_sfn_entry(
     out[0..11].copy_from_slice(sfn_11);
     // Attributes: ARCHIVE for files, DIRECTORY for dirs.
     out[11] = if is_dir { 0x10 } else { 0x20 };
-    // NT-reserved / case bits / creation-time-tenths / time + date
-    // all zero for now — no RTC yet. (Phase D follow-up: real
-    // timestamps once an RTC is wired.)
+    // NT-reserved / case bits / creation-time-tenths / time + date remain
+    // zero. The kernel now has an RTC-backed wall clock, but persisting FAT
+    // create/modify timestamps is a separate filesystem-semantics follow-up.
     let cluster_hi = ((first_cluster.0 >> 16) & 0xFFFF) as u16;
     let cluster_lo = (first_cluster.0 & 0xFFFF) as u16;
     out[20..22].copy_from_slice(&cluster_hi.to_le_bytes());

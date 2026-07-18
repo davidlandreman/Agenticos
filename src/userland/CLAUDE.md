@@ -110,6 +110,11 @@ FD-table mutation or hold process/network locks or user pointers across a
 yield. Final handle drop uses the deferred-close queue documented in
 `src/net/CLAUDE.md`.
 
+`CLOCK_MONOTONIC`, scheduler sleeps, polling deadlines, interval timers, and
+watchdogs remain based on the 100 Hz PIT. `CLOCK_REALTIME` and `gettimeofday`
+use the boot CMOS RTC snapshot advanced by PIT ticks through `crate::time`;
+when RTC validation fails they retain the prior uptime-from-zero fallback.
+
 Processes live in `lifecycle::PROCESS_TABLE`, indexed by PID. The
 single field `current_user_pid: Option<u32>` names which process's
 CR3 / FS_BASE / FPU / kernel-stack are loaded right now. Today only

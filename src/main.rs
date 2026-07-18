@@ -26,6 +26,7 @@ mod net;
 mod process;
 mod terminal;
 mod tests;
+mod time;
 mod tools;
 mod userland;
 mod window;

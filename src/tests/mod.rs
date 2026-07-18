@@ -66,7 +66,11 @@ pub mod start_menu_tests;
 #[cfg(feature = "test")]
 pub mod surface_alpha;
 #[cfg(feature = "test")]
+pub mod taskbar_tests;
+#[cfg(feature = "test")]
 pub mod text_editor_migration_tests;
+#[cfg(feature = "test")]
+pub mod time;
 #[cfg(feature = "test")]
 pub mod toolbar_status_tests;
 #[cfg(feature = "test")]
@@ -151,6 +155,8 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("tree_view", tree_view_tests::get_tests),
     ("splitter", splitter_tests::get_tests),
     ("start_menu", start_menu_tests::get_tests),
+    ("taskbar", taskbar_tests::get_tests),
+    ("time", time::get_tests),
     ("toolbar_status", toolbar_status_tests::get_tests),
     ("path_bar", path_bar_tests::get_tests),
     ("icon_view", icon_view_tests::get_tests),

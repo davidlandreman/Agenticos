@@ -60,7 +60,7 @@ pub use splitter::{Splitter, SplitterOrientation};
 pub use start_menu::{StartMenuAction, StartMenuItem, StartMenuWindow};
 #[allow(unused_imports)]
 pub use status_bar::StatusBar;
-pub use taskbar::TaskbarWindow;
+pub use taskbar::{TaskbarTrayWindow, TaskbarWindow};
 pub use terminal::TerminalWindow;
 #[allow(unused_imports)]
 pub use text_editor::TextEditor;
