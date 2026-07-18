@@ -78,7 +78,7 @@ impl ScrollView {
             h_scroll_enabled: false,
             v_scroll_enabled: true,
             thumb_grab: None,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
+            bg_color: crate::window::theme::controls::palette().field_bg,
         }
     }
 
@@ -352,6 +352,7 @@ impl Window for ScrollView {
 
         // Draw vertical scrollbar (track + thumb). Coordinates from
         // `vbar_geometry` are already in the same frame as `bounds`.
+        let scrollbar = crate::window::theme::controls::palette();
         if let Some((track_top, track_h, thumb_top, thumb_h)) = self.vbar_geometry() {
             let track_x = bounds.x + bounds.width as i32 - SCROLLBAR_WIDTH as i32;
             // Track
@@ -360,10 +361,16 @@ impl Window for ScrollView {
                 track_top,
                 SCROLLBAR_WIDTH,
                 track_h,
-                Color::LIGHT_GRAY,
+                scrollbar.scrollbar_track,
             );
             // Thumb
-            device.fill_rect(track_x, thumb_top, SCROLLBAR_WIDTH, thumb_h, Color::GRAY);
+            device.fill_rect(
+                track_x,
+                thumb_top,
+                SCROLLBAR_WIDTH,
+                thumb_h,
+                scrollbar.scrollbar_thumb,
+            );
         }
 
         // Draw horizontal scrollbar (track + thumb), if enabled and overflowing.
@@ -375,7 +382,7 @@ impl Window for ScrollView {
                 track_y,
                 track_w,
                 SCROLLBAR_WIDTH,
-                Color::LIGHT_GRAY,
+                scrollbar.scrollbar_track,
             );
             // Horizontal thumb math, mirror of vertical.
             if track_w > 0 && self.content_w > 0 {
@@ -389,7 +396,7 @@ impl Window for ScrollView {
                     track_y,
                     thumb_w,
                     SCROLLBAR_WIDTH,
-                    Color::GRAY,
+                    scrollbar.scrollbar_thumb,
                 );
             }
         }

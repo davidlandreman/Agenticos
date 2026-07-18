@@ -107,6 +107,12 @@ pub fn init(boot_info: &'static mut BootInfo) {
     debug_info!("[boot] display");
     let screen_dims = init_display(boot_info);
 
+    // Publish the resolved frame/control theme for ring-3 GUI apps. Must run
+    // after display + window-manager init (which finalizes the Classic/Aero
+    // selection, including renderer fallbacks) and after managed-/etc init;
+    // both hold at this point, and no ring-3 process exists yet.
+    crate::userland::etc::publish_theme(crate::window::theme::active());
+
     // Mouse, GUIShell desktop, and MCP bridge are not exercised by any
     // in-kernel test. Skipping them under `feature = "test"` removes the
     // largest chunks of `./test.sh` startup latency: GUIShell paints the

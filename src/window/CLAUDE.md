@@ -16,14 +16,26 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   scene, and uses either the CPU reference engine or the qualified VirGL engine.
   CPU output presents through the boot framebuffer or VirtIO-GPU 2D; VirGL
   presents its host texture directly and uses the VirtIO hardware cursor.
-- `theme/` — boot-selected frame theme. `classic` renders Windows 98 "Windows
-  Standard" chrome — a raised 3D bevel border, a horizontal caption gradient
-  (navy→blue active, grey inactive), an 8pt-ish bold caption font, and a raised
-  ButtonFace close button with a bitmap ✕; the bevel does not follow focus, only
-  the caption does. `aero` supplies translucent rounded glass, shadows, and
-  backdrop blur metadata for retained composition. Caption-button geometry for
-  both is data-driven via `FrameMetrics.button_*`, shared by painting and
-  `manager.rs` hit-testing through `theme::close_button_rect`.
+- `theme/` — boot-selected frame + control theme. `classic` renders Windows 98
+  "Windows Standard" chrome — a raised 3D bevel border, a horizontal caption
+  gradient (navy→blue active, grey inactive), an 8pt-ish bold caption font, and
+  a raised ButtonFace close button with a bitmap ✕; the bevel does not follow
+  focus, only the caption does. `aero` supplies translucent rounded glass,
+  shadows, and backdrop blur metadata for retained composition. Caption-button
+  geometry for both is data-driven via `FrameMetrics.button_*`, shared by
+  painting and `manager.rs` hit-testing through `theme::close_button_rect`.
+  `controls.rs` is the single source of truth for *control* surfaces: a
+  theme-dispatched `ControlPalette` (`controls::palette()`) plus drawing
+  helpers (`draw_button` with Normal/Hot/Pressed/Disabled states,
+  `draw_field`, `draw_raised_panel`, `draw_selection`, `draw_menu_surface`).
+  Every widget in `windows/` delegates its surface rendering there — Classic
+  gets Win98 bevels and navy selection, Aero gets rounded gradient buttons
+  (blue border + glow on the default button) and `#CBE8F6` selection. The
+  former `PALETTE_*` constants in `mod.rs` were replaced by this palette. The
+  resolved theme is also published to ring-3 as `/etc/theme` (see
+  `src/userland/etc.rs::publish_theme`), which `userland/libs/gui`'s `theme`
+  module mirrors. Normative color tables live in
+  `docs/plans/2026-07-18-003-feat-theme-aware-controls-plan.md`.
 - `screen.rs` — virtual screen abstraction (today there is one physical display).
 - `console.rs` — kernel `print!` macro output buffer.
 - `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.

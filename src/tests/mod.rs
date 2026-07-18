@@ -177,6 +177,10 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("composition_cpu", composition_cpu::get_tests),
     ("compositor_selection", compositor_selection::get_tests),
     ("window_theme", window_theme::get_tests),
+    (
+        "theme_controls",
+        crate::window::theme::controls::tests::get_tests,
+    ),
     ("virtio_gpu_protocol", virtio_gpu_protocol::get_tests),
     ("virgl_integration", virgl_integration::get_tests),
     ("filter", filter::get_tests),

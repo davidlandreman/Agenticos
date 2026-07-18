@@ -58,8 +58,10 @@ pub struct List {
 }
 
 impl List {
-    /// Create a new list with a specific ID
+    /// Create a new list with a specific ID. Colors default to the active
+    /// theme's data-well palette (overridable via the setters below).
     pub fn new_with_id(id: WindowId, bounds: Rect) -> Self {
+        let palette = crate::window::theme::controls::palette();
         List {
             base: WindowBase::new_with_id(id, bounds),
             items: Vec::new(),
@@ -67,10 +69,10 @@ impl List {
             selection_mode: SelectionMode::Single,
             item_height: 16, // 8px font + 8px padding
             on_select: None,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
-            selected_bg_color: crate::window::PALETTE_HIGHLIGHT_BG,
-            selected_text_color: crate::window::PALETTE_HIGHLIGHT_TEXT,
+            bg_color: palette.field_bg,
+            text_color: palette.field_text,
+            selected_bg_color: palette.selection_bg,
+            selected_text_color: palette.selection_text,
         }
     }
 

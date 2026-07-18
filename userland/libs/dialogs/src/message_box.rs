@@ -3,7 +3,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use gui::{Button, Window, COLOR_PANEL, COLOR_TEXT};
+use gui::{theme, Button, Window};
 
 use crate::DialogStatus;
 
@@ -119,14 +119,15 @@ impl MessageBox {
 
     fn render(&mut self) {
         let lines = self.lines.clone();
+        let palette = theme::palette();
         let canvas = self.window.canvas_mut();
-        canvas.clear(COLOR_PANEL);
+        canvas.clear(palette.content_bg);
         for (index, line) in lines.iter().enumerate() {
             canvas.draw_text(
                 MARGIN,
                 MARGIN + index as i32 * LINE_HEIGHT,
                 line,
-                COLOR_TEXT,
+                palette.text,
             );
         }
         self.affirmative.draw(canvas, true);

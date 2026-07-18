@@ -49,6 +49,11 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   destroy, and update a window title.
 - `gui_gl.rs` — validated GL syscalls 5006-5009, per-PID logical-context
   ownership, bounded packet parsing, mailbox publication, and teardown.
+- `etc.rs` — kernel-managed `/etc` namespace: static account/hosts files,
+  the shipped zsh configuration, DHCP-published `resolv.conf` paths, and
+  `publish_theme`, which writes the boot-resolved Classic/Aero theme to
+  `/etc/theme` for ring-3 GUI apps (read once by `userland/libs/gui`'s
+  `theme` module).
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility
   pointer bounds for synthetic tests, and errno constants. Real processes
   use VMA-aware user-copy validation. Unknown syscall numbers always return

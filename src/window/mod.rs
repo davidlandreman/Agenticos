@@ -42,65 +42,16 @@ pub use self::selection::{ClickMods, Selection, SelectionMode};
 pub use self::types::{Point, Rect, ScreenId, WindowId};
 
 // =====================================================================
-// Default widget palette
+// Widget colors
 //
-// Reconciles default color values across all widget constructors so
-// default-styled widgets in the same window look visually consistent.
-// Out of scope: a configurable theming system. Widgets that need a
-// different look can still override their colors via setter methods.
-//
-// - PALETTE_CHROME_ACTIVE:   window-frame chrome when active (blue)
-// - PALETTE_CHROME_INACTIVE: window-frame chrome when inactive (grey)
-// - PALETTE_CONTENT_BG:      shared content background (used by
-//                            Container, List, MultiColumnList,
-//                            TreeView, IconView, ScrollView, Toolbar,
-//                            StatusBar, PathBar, Menu, ProgressBar,
-//                            TextInput, TextEditor, Button)
-// - PALETTE_BORDER:          borders and dividers
-// - PALETTE_HIGHLIGHT_BG:    selection / hover highlight background
-// - PALETTE_HIGHLIGHT_TEXT:  text on highlight background
-// - PALETTE_TEXT:            text on light backgrounds
-// - PALETTE_PROGRESS_FILL:   filled portion of ProgressBar
-//                            (matches highlight)
-//
-// Intentionally NOT covered by this palette (kept distinct on purpose):
+// The former PALETTE_* constants were replaced by the theme-dispatched
+// control palette in `theme::controls` (`controls::palette()`), which
+// reconciles default widget colors per the boot-selected Classic/Aero
+// theme. Intentionally NOT covered by that palette (kept distinct on
+// purpose):
 // - DesktopWindow background (deep blue identity color).
 // - TextWindow / TerminalWindow (dark grey background, light text).
 // =====================================================================
-
-/// Window-frame chrome color when the frame is active (focused).
-pub const PALETTE_CHROME_ACTIVE: crate::graphics::color::Color =
-    crate::graphics::color::Color::new(0, 100, 200);
-
-/// Window-frame chrome color when the frame is inactive. Retained as part of
-/// the widget palette; the classic frame theme now paints its own Win98
-/// caption gradient rather than this flat chrome color.
-#[expect(dead_code, reason = "widget palette API surface")]
-pub const PALETTE_CHROME_INACTIVE: crate::graphics::color::Color =
-    crate::graphics::color::Color::new(100, 100, 100);
-
-/// Shared light content background used by most widgets.
-pub const PALETTE_CONTENT_BG: crate::graphics::color::Color =
-    crate::graphics::color::Color::new(240, 240, 240);
-
-/// Default border / divider color.
-pub const PALETTE_BORDER: crate::graphics::color::Color =
-    crate::graphics::color::Color::new(100, 100, 100);
-
-/// Default selection / hover highlight background.
-pub const PALETTE_HIGHLIGHT_BG: crate::graphics::color::Color =
-    crate::graphics::color::Color::new(0, 120, 215);
-
-/// Default text color drawn on `PALETTE_HIGHLIGHT_BG`.
-pub const PALETTE_HIGHLIGHT_TEXT: crate::graphics::color::Color =
-    crate::graphics::color::Color::WHITE;
-
-/// Default text color on light backgrounds.
-pub const PALETTE_TEXT: crate::graphics::color::Color = crate::graphics::color::Color::BLACK;
-
-/// Filled portion of a `ProgressBar` — matches the highlight color.
-#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
-pub const PALETTE_PROGRESS_FILL: crate::graphics::color::Color = PALETTE_HIGHLIGHT_BG;
 
 /// Core window trait that all visual elements implement.
 ///
