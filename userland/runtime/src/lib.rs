@@ -2,13 +2,19 @@
 //! small `brk`-backed allocator for native Rust applications.
 
 #![no_std]
-#![feature(alloc_error_handler)]
+#![cfg_attr(feature = "standalone", feature(alloc_error_handler))]
 
 extern crate alloc;
 
+#[cfg(feature = "standalone")]
 use core::alloc::{GlobalAlloc, Layout};
+#[cfg(feature = "standalone")]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(feature = "standalone")]
 use linked_list_allocator::LockedHeap;
+
+#[cfg(all(feature = "standalone", feature = "embedded"))]
+compile_error!("runtime features `standalone` and `embedded` are mutually exclusive");
 
 pub const AT_FDCWD: i32 = -100;
 pub const O_RDONLY: u32 = 0;
@@ -653,11 +659,13 @@ pub struct LinuxStat {
 
 const _: [(); 144] = [(); core::mem::size_of::<LinuxStat>()];
 
+#[cfg(feature = "standalone")]
 pub struct Startup<'a> {
     pub argv: &'a [*const u8],
     pub envp: &'a [*const u8],
 }
 
+#[cfg(feature = "standalone")]
 pub unsafe fn startup_from_stack(stack: *const u64) -> Startup<'static> {
     let argc = core::ptr::read(stack) as usize;
     let argv_ptr = stack.add(1) as *const *const u8;
@@ -673,6 +681,7 @@ pub unsafe fn startup_from_stack(stack: *const u64) -> Startup<'static> {
     }
 }
 
+#[cfg(feature = "standalone")]
 pub unsafe fn argv0_from_stack(stack: *const u64) -> (*const u8, usize) {
     let startup = startup_from_stack(stack);
     let Some(&pointer) = startup.argv.first() else {
@@ -688,12 +697,14 @@ pub unsafe fn argv0_from_stack(stack: *const u64) -> (*const u8, usize) {
     (pointer, len)
 }
 
+#[cfg(feature = "standalone")]
 struct BrkAllocator {
     heap: LockedHeap,
     initialized: AtomicBool,
     end: AtomicUsize,
 }
 
+#[cfg(feature = "standalone")]
 impl BrkAllocator {
     const CHUNK: usize = 64 * 1024;
 
@@ -739,6 +750,7 @@ impl BrkAllocator {
     }
 }
 
+#[cfg(feature = "standalone")]
 unsafe impl GlobalAlloc for BrkAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if !self.initialized.load(Ordering::Acquire) && !self.grow(layout.size() + layout.align()) {
@@ -756,14 +768,17 @@ unsafe impl GlobalAlloc for BrkAllocator {
     }
 }
 
+#[cfg(feature = "standalone")]
 const fn align_up(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
 }
 
 #[global_allocator]
+#[cfg(feature = "standalone")]
 static USER_ALLOCATOR: BrkAllocator = BrkAllocator::new();
 
 #[alloc_error_handler]
+#[cfg(feature = "standalone")]
 fn allocation_error(_layout: Layout) -> ! {
     unsafe { exit(127) }
 }

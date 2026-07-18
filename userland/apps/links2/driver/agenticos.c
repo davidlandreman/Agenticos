@@ -9,6 +9,7 @@
 #ifdef GRDRV_AGENTICOS
 
 #include "links.h"
+#include "agenticos_ui.h"
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -61,8 +62,10 @@ static uint32_t previous_buttons;
 static void agenticos_present(void *data)
 {
 	struct graphics_device *dev = (struct graphics_device *)data;
-	if (dev == active_device && dev->driver_data)
+	if (dev == active_device && dev->driver_data) {
+		ag_ui_render((struct ag_surface *)dev->driver_data);
 		(void)ag_surface_present((struct ag_surface *)dev->driver_data);
+	}
 }
 
 static void agenticos_schedule_present(struct graphics_device *dev)
@@ -80,8 +83,13 @@ static void agenticos_process_events(void *unused)
 		count = (int)(bytes / (long)sizeof(events[0]));
 		for (i = 0; i < count; i++) {
 			struct ag_mapped_event mapped;
+			struct ag_ui_result ui_result;
 			struct graphics_device *dev = active_device;
 			if (!dev) continue;
+			ag_ui_handle_event((struct ag_surface *)dev->driver_data, &events[i], &ui_result);
+			if (ui_result.action_kind) agenticos_ui_accept_result(&ui_result);
+			if (ui_result.repaint) agenticos_schedule_present(dev);
+			if (ui_result.consumed) continue;
 			ag_map_event(&events[i], &mapped, &previous_buttons);
 			switch (mapped.kind) {
 			case 1:
@@ -145,6 +153,7 @@ static void agenticos_shutdown_device(struct graphics_device *dev)
 	if (!dev) return;
 	unregister_bottom_half(agenticos_present, dev);
 	if (active_device == dev) active_device = NULL;
+	agenticos_ui_shutdown((struct ag_surface *)dev->driver_data);
 	ag_surface_destroy((struct ag_surface *)dev->driver_data);
 	mem_free(dev);
 }

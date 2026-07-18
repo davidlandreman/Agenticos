@@ -36,8 +36,13 @@ The Start menu's **Web Browser** entry launches the last command directly.
 The selectable GUI-event descriptor (`gui_event_open`, syscall 5011) plugs
 keyboard, mouse, resize, close, and theme events into Links' normal
 `select(2)` loop. Rust owns the XRGB8888 surface, clipping, bitmap blits,
-fills, lines, scrolling, presentation, and input translation; a small C file
-only implements Links' graphics-driver callback table.
+fills, lines, scrolling, presentation, input translation, browser chrome, and
+native popup-menu behavior. The same host paints generic dialogs, download
+progress, bookmark and manager lists/trees, embedded HTML controls, and
+graphical scrollbars with shared AgenticOS controls. A versioned semantic
+adapter keeps Links as the owner of translated text, state, and callbacks;
+actions return to its bottom-half queue rather than running reentrantly from
+the Rust host.
 
 Links stores its per-user state under `/root/.links`; `/root` is provisioned
 on the writable overlay at boot. The restricted QEMU tests use the

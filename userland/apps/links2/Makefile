@@ -43,7 +43,8 @@ BIN            := $(OUT_DIR)/links
 PATCHES        := $(sort $(wildcard patches/*.patch))
 NPROC          := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 RUST_MANIFEST  := driver-rs/Cargo.toml
-RUST_SOURCES   := $(shell find driver-rs/src -type f) $(RUST_MANIFEST)
+RUST_SOURCES   := $(shell find driver-rs/src ../../runtime/src ../../libs/gui/src ../../libs/gui-core/src -type f) \
+	$(RUST_MANIFEST) ../../runtime/Cargo.toml ../../libs/gui/Cargo.toml ../../libs/gui-core/Cargo.toml
 RUST_TARGET    := $(abspath $(OUT_DIR)/rust-target)
 RUST_ARCHIVE   := $(RUST_TARGET)/x86_64-unknown-linux-musl/release/liblinks_agenticos_driver.a
 
@@ -133,9 +134,9 @@ $(OPENSSL_STAMP): $(OPENSSL_TARBALL) Makefile
 $(RUST_ARCHIVE): $(RUST_SOURCES)
 	@echo "🦀 Building no_std AgenticOS graphics driver..."
 	CARGO_TARGET_DIR=$(RUST_TARGET) cargo build --manifest-path $(RUST_MANIFEST) \
-	  --target x86_64-unknown-linux-musl -Z build-std=core,compiler_builtins --release
+	  --target x86_64-unknown-linux-musl -Z build-std=core,alloc,compiler_builtins --release
 
-$(LINKS_EXTRACTED): $(LINKS_TARBALL) $(PATCHES) driver/agenticos.c
+$(LINKS_EXTRACTED): $(LINKS_TARBALL) $(PATCHES) driver/agenticos.c driver/agenticos-ui.c driver/agenticos_ui.h
 	rm -rf $(LINKS_SRC)
 	tar xjf $< -C $(OUT_DIR)
 	@for patch_file in $(PATCHES); do \
@@ -143,6 +144,8 @@ $(LINKS_EXTRACTED): $(LINKS_TARBALL) $(PATCHES) driver/agenticos.c
 	  patch -d $(LINKS_SRC) -p1 < "$$patch_file"; \
 	done
 	cp driver/agenticos.c $(LINKS_SRC)/agenticos.c
+	cp driver/agenticos-ui.c $(LINKS_SRC)/agenticos-ui.c
+	cp driver/agenticos_ui.h $(LINKS_SRC)/agenticos_ui.h
 	@# The release tarball ships generated files; keep make from trying to run
 	@# unavailable autotools merely because applying a patch refreshed mtimes.
 	touch $(LINKS_SRC)/configure $(LINKS_SRC)/Makefile.in
