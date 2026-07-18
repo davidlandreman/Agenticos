@@ -5,7 +5,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 ## Key files
 
 - `mod.rs` — window-system init and global functions (`render_frame`, `process_terminal_output`, `process_event`).
-- `compositor.rs` — U10 compositor kernel thread. Spawned at boot from `src/kernel.rs`; its loop polls input + processes terminal output + calls `render_frame` then `yield_current`. Pre-U10 this ran inline in the kernel main loop, which froze the desktop under busy ring-3 processes; the kernel-thread scheduler now round-robins the compositor alongside ring-3 work via U5's timer ISR. Honors `binary_load_in_progress()` to keep IDE PIO atomicity intact during large binary loads.
+- `compositor.rs` — U10 compositor kernel thread. Spawned at boot from `src/kernel.rs`; its loop polls input + processes terminal output + calls `render_frame` then `yield_current`. Storage uses interrupt-driven VirtIO DMA, so input and rendering continue during binary loads.
 - `types.rs` — core types: `WindowId`, `ScreenId`, `Rect`, `Point`, `ColorDepth`.
 - `event.rs` — keyboard, mouse, and window events.
 - `graphics.rs` — `GraphicsDevice` trait that abstracts rendering targets.

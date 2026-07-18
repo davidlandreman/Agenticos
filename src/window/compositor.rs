@@ -40,14 +40,8 @@
 //! woken process is already fast (`scheduler::next_runnable` pops `ring3_ready`
 //! on every context switch).
 //!
-//! ## The BinaryLoadGuard interaction
-//!
-//! The IDE PIO atomicity concern (multi-MiB binary loads contending
-//! with framebuffer writes) is preserved: the compositor checks
-//! `binary_load_in_progress()` and skips input + render while a
-//! binary is being loaded. Terminal output processing always runs
-//! (kernel-side `print!` macros accumulate into the console buffer;
-//! we want the post-load redraw to catch up).
+//! Storage uses interrupt-driven VirtIO DMA, so binary loading never pauses
+//! compositor input processing or rendering.
 
 use crate::input::{InputProcessor, INPUT_QUEUE};
 use spin::Mutex;
@@ -85,26 +79,19 @@ pub fn run() {
         // so waking sleepers here gives them frame-cadence resumption.
         crate::userland::lifecycle::process_expired_sleeps();
 
-        let user_active = crate::userland::lifecycle::binary_load_in_progress();
-
-        // Input processing — skip while a binary is being loaded so the
-        // ~3.7 MiB framebuffer writes from render_frame don't contend
-        // with PIO IDE reads. (See the
-        // 2026-05-09-multi-mib-user-binary-load learning.)
-        if !user_active {
-            let mut g = PROCESSOR.lock();
-            if let Some(processor) = g.as_mut() {
-                if using_virtio {
-                    crate::drivers::mouse::poll();
-                    if let Some(event) = processor.check_virtio_tablet() {
-                        crate::window::process_event(event);
-                    }
-                }
-                for event in processor.process_pending(&INPUT_QUEUE) {
+        let mut g = PROCESSOR.lock();
+        if let Some(processor) = g.as_mut() {
+            if using_virtio {
+                crate::drivers::mouse::poll();
+                if let Some(event) = processor.check_virtio_tablet() {
                     crate::window::process_event(event);
                 }
             }
+            for event in processor.process_pending(&INPUT_QUEUE) {
+                crate::window::process_event(event);
+            }
         }
+        drop(g);
 
         // U10/bugfix: invalidate terminal windows that have buffered
         // output from ring-3 writes. The write path itself doesn't
@@ -118,12 +105,8 @@ pub fn run() {
         // compositing catches up after the binary exits.
         crate::window::process_terminal_output();
 
-        // Render frame (early-exit inside if compositor has no dirty
-        // regions). Skip while binary loading for the IDE PIO reason
-        // above.
-        if !user_active {
-            crate::window::render_frame();
-        }
+        // Render frame (early-exit inside if compositor has no dirty regions).
+        crate::window::render_frame();
 
         // Yield. With round-robin scheduling, the compositor gets one
         // slice per scheduler revolution. When idle (no dirty

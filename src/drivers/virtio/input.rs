@@ -91,6 +91,7 @@ impl VirtioTablet {
 
         // Complete initialization
         device.finish_init();
+        device.pci.disable_intx();
 
         debug_info!(
             "VirtIO tablet initialized (status: 0x{:02x})",

@@ -429,13 +429,6 @@ impl MemoryMapper {
         }
     }
 
-    pub fn frame_bytes_mut(&mut self, frame: PhysFrame<Size4KiB>) -> &mut [u8; 0x1000] {
-        unsafe {
-            &mut *((self.physical_memory_offset.as_u64() + frame.start_address().as_u64())
-                as *mut [u8; 0x1000])
-        }
-    }
-
     /// Unmap one present 4 KiB leaf from an arbitrary address space, release
     /// its frame reference, and prune empty page tables bottom-up.
     pub fn unmap_page_from(

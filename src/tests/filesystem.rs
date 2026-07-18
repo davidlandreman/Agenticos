@@ -139,6 +139,86 @@ fn test_file_read_full_arial() {
     }
 }
 
+/// Exercise the production wait path: a spawned kernel thread submits block
+/// I/O, parks its PCB, and resumes only after the PCI completion wake is
+/// drained into the scheduler.
+fn test_virtio_block_wakes_kernel_thread() {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+
+    STATE.store(0, Ordering::Release);
+    crate::process::spawn_process(alloc::string::String::from("block-io-test"), None, || {
+        let file = crate::fs::File::open_read("/system.ttf").expect("open from kernel thread");
+        let mut header = [0u8; 16];
+        let count = file.read(&mut header).expect("DMA read from kernel thread");
+        assert_eq!(count, header.len());
+        assert_eq!(&header[..4], &[0, 1, 0, 0]);
+        STATE.store(1, Ordering::Release);
+    });
+
+    let deadline = crate::arch::x86_64::interrupts::get_timer_ticks().saturating_add(500);
+    while STATE.load(Ordering::Acquire) == 0 {
+        let _ = crate::process::drain_kernel_io_wakes();
+        crate::process::try_run_scheduled_processes();
+        assert!(
+            crate::arch::x86_64::interrupts::get_timer_ticks() < deadline,
+            "kernel thread did not resume from VirtIO block completion"
+        );
+        x86_64::instructions::hlt();
+    }
+}
+
+fn test_zsh_image_read_is_coalesced() {
+    let path = "/host/ZSH.ELF";
+    if !crate::fs::exists(path) {
+        return;
+    }
+    let file = crate::fs::File::open_read(path).expect("open staged zsh");
+    let requests_before = crate::drivers::virtio::block::request_count();
+    let ticks_before = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let bytes = file.read_to_vec().expect("read staged zsh");
+    let requests = crate::drivers::virtio::block::request_count() - requests_before;
+    let ticks = crate::arch::x86_64::interrupts::get_timer_ticks() - ticks_before;
+    debug_info!(
+        "[perf] coalesced zsh image read: {} bytes, {} requests, {} ticks",
+        bytes.len(),
+        requests,
+        ticks
+    );
+    assert!(
+        requests <= 40,
+        "zsh image read fragmented into {} block requests",
+        requests
+    );
+}
+
+fn test_busybox_late_page_read_is_bounded() {
+    let path = "/host/BB.ELF";
+    if !crate::fs::exists(path) {
+        return;
+    }
+    let file = crate::fs::File::open_read(path).expect("open staged BusyBox");
+    let offset = (file.size() / 2) & !4095;
+    let mut page = [0u8; 4096];
+    let requests_before = crate::drivers::virtio::block::request_count();
+    let bytes = file
+        .read_at(offset, &mut page)
+        .expect("read late BusyBox page");
+    let requests = crate::drivers::virtio::block::request_count() - requests_before;
+    debug_info!(
+        "[perf] BusyBox page at {}: {} bytes, {} requests",
+        offset,
+        bytes,
+        requests
+    );
+    assert_eq!(bytes, page.len());
+    assert!(
+        requests <= 6,
+        "late BusyBox page fragmented into {} block requests",
+        requests
+    );
+}
+
 // --- Host folder mount tests (vvfat-backed /host) -----------------------
 //
 // These rely on:
@@ -855,6 +935,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_file_open_arial,
         &test_file_read_arial_header,
         &test_file_read_full_arial,
+        &test_virtio_block_wakes_kernel_thread,
+        &test_zsh_image_read_is_coalesced,
+        &test_busybox_late_page_read_is_bounded,
         &test_host_mount_present,
         &test_host_mount_can_open_seed_file,
         &test_host_mount_does_not_break_root,

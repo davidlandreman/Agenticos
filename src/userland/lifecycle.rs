@@ -21,6 +21,7 @@
 // long-jump. A second `run` while one is active is rejected by the run
 // command before `enter_user_mode` is reached.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -181,6 +182,11 @@ pub struct Process {
     /// — the same offsets are baked into both `iretq_to_user_with_regs`
     /// and `resume_ring3_asm`.
     pub saved_user_state: crate::userland::user_state::UserState,
+    /// Saved ring-0 continuation while a syscall or user page fault is
+    /// sleeping on asynchronous storage. Unlike restartable syscall waits,
+    /// block I/O must resume the in-progress kernel operation exactly where
+    /// it parked (filesystem operations may already have partial state).
+    pub kernel_continuation: Option<Box<crate::process::CpuContext>>,
     /// U8/bugfix: terminal window this process's stdout + stderr
     /// should route to. Inherited from the launching kernel thread's
     /// PCB.terminal_id at install time, and from the parent across
@@ -300,6 +306,10 @@ pub enum Ring3BlockReason {
     Sleeping {
         deadline_tick: u64,
     },
+    /// An asynchronous block request identified by its driver token.
+    WaitingForBlockIo {
+        token: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,6 +388,7 @@ impl Process {
             fs_base: 0,
             fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
             saved_user_state: crate::userland::user_state::UserState::default(),
+            kernel_continuation: None,
             terminal_id: None,
         }
     }
@@ -513,6 +524,21 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
     g.ring3_blocked.insert(pid, reason);
 }
 
+/// Wake the one ring-3 continuation waiting for this completed block request.
+pub fn wake_ring3_blocked_on_io(token: u64) {
+    let mut table = PROCESS_TABLE.lock();
+    let waiting = table.ring3_blocked.iter().find_map(|(pid, reason)| {
+        matches!(reason, Ring3BlockReason::WaitingForBlockIo { token: awaited } if *awaited == token)
+            .then_some(*pid)
+    });
+    if let Some(pid) = waiting {
+        table.ring3_blocked.remove(&pid);
+        if !table.ring3_ready.iter().any(|ready| *ready == pid) {
+            table.ring3_ready.push_back(pid);
+        }
+    }
+}
+
 /// Pop the front of the ring-3 ready queue, if any. Used by U5's
 /// timer-ISR-driven ring-3-aware scheduler when deciding what to
 /// resume after a ring-3 preemption.
@@ -551,6 +577,7 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
         | Some(Ring3BlockReason::WaitingForPipeWrite)
         | Some(Ring3BlockReason::WaitingForNetwork { .. })
         | Some(Ring3BlockReason::Sleeping { .. })
+        | Some(Ring3BlockReason::WaitingForBlockIo { .. })
         | None => false,
     };
     if should_wake {
@@ -1166,6 +1193,7 @@ pub fn install_new_process_opt(
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::fresh(),
         saved_user_state: crate::userland::user_state::UserState::default(),
+        kernel_continuation: None,
         // Filled in by `setup_user_process` from the launching kernel
         // thread's PCB.
         terminal_id: None,
@@ -1594,41 +1622,6 @@ pub fn reap_zombie(target_pid: i32, reaper: u32) -> Option<(u32, i64, Option<i32
     let _ = remove_process(pid);
 
     Some((pid, z.exit_code, z.signal_termination))
-}
-
-/// Counts the number of active user-binary load/setup transactions. The
-/// kernel main loop reads this to skip GUI/render work while the run command
-/// is reading the ELF, mapping pages, initializing VMAs, and installing the
-/// process — the phases that pre-date the active-user slot being filled.
-///
-/// Use `BinaryLoadGuard` to bracket the run path; it increments the counter
-/// on construction and decrements on drop so early-return / panic paths still
-/// release the guard.
-static BINARY_LOAD_DEPTH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-/// Returns true while a binary is being loaded and installed. The guard drops
-/// before the new process runs so compositor rendering continues normally for
-/// interactive programs.
-pub fn binary_load_in_progress() -> bool {
-    BINARY_LOAD_DEPTH.load(core::sync::atomic::Ordering::Acquire) > 0
-}
-
-/// RAII guard that marks the kernel as actively loading-or-running a user
-/// binary. Construct on entry to the run path; drop releases the marker even
-/// if an intermediate step bails out.
-pub struct BinaryLoadGuard;
-
-impl BinaryLoadGuard {
-    pub fn enter() -> Self {
-        BINARY_LOAD_DEPTH.fetch_add(1, core::sync::atomic::Ordering::Release);
-        Self
-    }
-}
-
-impl Drop for BinaryLoadGuard {
-    fn drop(&mut self) {
-        BINARY_LOAD_DEPTH.fetch_sub(1, core::sync::atomic::Ordering::Release);
-    }
 }
 
 /// Helper used by exception handlers: returns true when the saved CS in the

@@ -245,13 +245,14 @@ pub unsafe fn resume_ring3(pid: u32) -> ! {
     // paths (kernel-only L4, no per-process kstack). Real ring-3
     // launches always populate both; tests skip them and rely on
     // staying on the kernel L4 + global rsp0 stack.
-    let (state_copy, l4_frame, kstack_top) = {
+    let (state_copy, kernel_continuation, l4_frame, kstack_top) = {
         let mut g = PROCESS_TABLE.lock();
         let p = g.by_pid.get_mut(&pid).expect("resume_ring3: unknown pid");
         let state = p.saved_user_state;
+        let continuation = p.kernel_continuation.take().map(|saved| *saved);
         let l4 = p.address_space.as_ref().map(|a| a.l4_frame());
         let top = p.kernel_stack.as_ref().map(|k| k.top());
-        (state, l4, top)
+        (state, continuation, l4, top)
     };
 
     // CR3 swap — only if the process has its own address space.
@@ -273,11 +274,60 @@ pub unsafe fn resume_ring3(pid: u32) -> ! {
         .expect("resume_ring3: process disappeared between snapshot and restore");
 
     set_current_user_pid(Some(pid));
+    crate::process::set_in_spawned_process(true);
+
+    if let Some(context) = kernel_continuation {
+        crate::arch::x86_64::context_switch::switch_to_context(&context);
+    }
 
     let (user_cs, user_ss) = user_selectors();
 
     // Diverge.
     resume_ring3_asm(&state_copy as *const UserState, user_cs, user_ss)
+}
+
+/// Park an in-progress ring-3 kernel operation until an exact block request
+/// completes. The current ring-0 stack is retained and execution resumes at
+/// the instruction after `switch_context`; the syscall or page fault is not
+/// replayed.
+pub fn block_current_ring3_on_io(token: u64) {
+    use crate::arch::x86_64::context_switch::switch_context;
+    use alloc::boxed::Box;
+
+    let Some(pid) = current_user_pid() else {
+        return;
+    };
+    let old_context = {
+        let mut table = PROCESS_TABLE.lock();
+        let process = table
+            .by_pid
+            .get_mut(&pid)
+            .expect("block I/O for unknown ring-3 process");
+        // The continuation resumes through `resume_ring3`, which restores the
+        // process CPU image before jumping back into this kernel stack. Save
+        // the live FS_BASE/FPU state first; otherwise a demand-page sleep
+        // replaces the interrupted program's SSE registers with its stale
+        // snapshot (often the all-zero fresh-process image).
+        save_user_cpu_state(process);
+        let saved = process
+            .kernel_continuation
+            .get_or_insert_with(|| Box::new(crate::process::CpuContext::default()));
+        let pointer = (&mut **saved) as *mut crate::process::CpuContext;
+        table.ring3_ready.retain(|ready| *ready != pid);
+        table
+            .ring3_blocked
+            .insert(pid, Ring3BlockReason::WaitingForBlockIo { token });
+        table.current_user_pid = None;
+        pointer
+    };
+
+    crate::process::set_in_spawned_process(false);
+    unsafe {
+        switch_context(
+            old_context,
+            &raw const crate::arch::x86_64::preemption::KERNEL_CONTEXT,
+        );
+    }
 }
 
 /// Naked asm that builds an iretq frame from `state` and transfers to

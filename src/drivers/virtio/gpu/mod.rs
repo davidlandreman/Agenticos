@@ -92,6 +92,7 @@ impl VirtioGpu {
         let control = device.setup_queue(0).ok_or(GpuError::Device)?;
         let cursor = device.setup_queue(1).ok_or(GpuError::Device)?;
         device.finish_init();
+        device.pci.disable_intx();
         Ok(Self {
             device,
             control: ControlQueue::new(control),

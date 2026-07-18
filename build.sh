@@ -193,9 +193,12 @@ if [ "$RUN_QEMU" = true ]; then
         echo "🌐 QEMU user networking enabled"
     fi
     QEMU_ARGS=(
-        -drive "format=raw,file=$BIOS_IMAGE,if=ide,index=0"
-        -drive "file=fat:ro:$HOST_SHARE,if=ide,index=1,snapshot=on"
-        -drive "format=raw,file=$DATA_IMAGE,if=ide,index=2"
+        -drive "format=raw,file=$BIOS_IMAGE,if=none,id=agenticos-root,readonly=on"
+        -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-root,serial=agenticos-root,bootindex=1"
+        -drive "file=fat:ro:$HOST_SHARE,if=none,id=agenticos-host,snapshot=on"
+        -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-host,serial=agenticos-host"
+        -drive "format=raw,file=$DATA_IMAGE,if=none,id=agenticos-data"
+        -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-data,serial=agenticos-data"
         -serial stdio
         -chardev "socket,id=rpc,path=$RPC_SOCK,server=on,wait=off"
         -serial chardev:rpc

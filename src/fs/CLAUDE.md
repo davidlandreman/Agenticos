@@ -21,7 +21,7 @@ Block device (src/drivers/block.rs, ide.rs)
         → File handles (file_handle.rs, fs_manager.rs)
 ```
 
-Block devices and the IDE driver live in `src/drivers/` — see `src/drivers/CLAUDE.md`. The `Arc` used in handles is the kernel's custom impl in `src/lib/arc.rs` (NOT `alloc::sync::Arc`) — see `src/lib/CLAUDE.md`.
+Block devices and the VirtIO-blk driver live in `src/drivers/` — see `src/drivers/CLAUDE.md`. The `Arc` used in handles is the kernel's custom impl in `src/lib/arc.rs` (NOT `alloc::sync::Arc`) — see `src/lib/CLAUDE.md`.
 
 ## File handle API
 
@@ -51,7 +51,7 @@ See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for
 ```
   /          → overlay(upper = Tmpfs, lower = boot FAT partition)
   /host      → FAT (vvfat-backed, read-only)
-  /data      → FAT32 (writable, Secondary Master IDE, persistent)
+  /data      → FAT32 (writable, `agenticos-data` VirtIO disk, persistent)
   /bin/<applet> → synthesized at syscall layer (src/userland/bin_namespace.rs)
 ```
 
@@ -96,5 +96,6 @@ Why it matters: before the fast path, every `File::read` call on a multi-MiB fil
 - **Mount point case is byte-exact.** `vfs.rs::find_filesystem` uses `path.starts_with(mount.path)` so `/host/FOO.TXT` works and `/HOST/FOO.TXT` returns NotFound. The mount POINT is byte-exact lowercase; files inside the mount are matched case-insensitively against their decoded long names.
 - File names within mounts are case-insensitive (ASCII fold). `/system.ttf` and `/SYSTEM.TTF` both resolve to the same file.
 - The FAT cluster-chain follower in `fat_table.rs` does not currently cache; reading a large file walks the FAT each cluster. Acceptable for current sizes; revisit if performance bites.
-- IDE reads are PIO with interrupts disabled per `read_sectors` call — see `src/drivers/CLAUDE.md`. A cluster-walk that issues many `read_sectors` calls is therefore a sequence of small IRQ-disabled windows (one per cluster), not one big window.
+- VirtIO-blk reads and writes use owned DMA pages and sleep their caller until PCI completion; filesystem code must not retain spin locks across block calls.
+- Whole-file FAT reads cache the active FAT sector while walking a cluster chain, then coalesce consecutive clusters into large `read_blocks` calls. This is load-bearing for executable startup: do not regress to one asynchronous request per cluster/FAT entry.
 - The internal FAT `FileHandle.name` field is `[u8; 13]` — a legacy fixed slot. Long names are truncated when stored there, but `stat` and `enumerate_dir` use the full long-name path; the field is only authoritative for SFN-bounded callers.

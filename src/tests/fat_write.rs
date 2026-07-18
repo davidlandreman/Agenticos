@@ -1,7 +1,7 @@
 //! Phase C U8 + U9 tests — FAT writes against the live `/data` disk.
 //!
 //! These exercise the low-level `FatTable` write surface directly via
-//! the kernel's IDE block device, plus higher-level pieces from U9 as
+//! the kernel's VirtIO block device, plus higher-level pieces from U9 as
 //! they land. Tests use QEMU `snapshot=on` for `/data` so writes are
 //! discarded at QEMU exit — each test boot starts from the same
 //! freshly-`mkfs.fat`'d image.
@@ -12,30 +12,19 @@
 //! diverge between two writers in the same boot.
 
 use crate::debug_info;
-use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
+use crate::drivers::virtio::block::VirtioBlockDevice;
 use crate::fs::fat::boot_sector::BootSector;
 use crate::fs::fat::fat_table::FatTable;
 use crate::fs::fat::types::ClusterId;
 use crate::lib::test_utils::Testable;
 
-/// Get a fresh `IdeBlockDevice` for the `/data` disk (Secondary Master)
-/// each call. The kernel's mount path holds one too but we don't
-/// share it — block devices are stateless wrappers around the IDE
-/// channel/drive enum.
-fn data_block_device() -> IdeBlockDevice {
-    // Probe just to confirm the disk is present; a missing disk
-    // means the test environment is misconfigured (test.sh always
-    // attaches one).
-    assert!(
-        IDE_CONTROLLER
-            .get_disk_info(IdeChannel::Secondary, IdeDrive::Master)
-            .is_some(),
-        "Secondary Master must be present for fat_write tests"
-    );
-    IdeBlockDevice::new(IdeChannel::Secondary, IdeDrive::Master)
+/// Get a fresh handle for the serial-identified `/data` VirtIO disk.
+fn data_block_device() -> VirtioBlockDevice {
+    VirtioBlockDevice::by_id("agenticos-data")
+        .expect("agenticos-data must be present for fat_write tests")
 }
 
-fn read_boot_sector(dev: &IdeBlockDevice) -> [u8; 512] {
+fn read_boot_sector(dev: &VirtioBlockDevice) -> [u8; 512] {
     use crate::drivers::block::BlockDevice;
     let mut buf = [0u8; 512];
     dev.read_blocks(0, 1, &mut buf).expect("read boot sector");

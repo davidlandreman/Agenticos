@@ -14,7 +14,7 @@ Low-level x86_64 plumbing: GDT/TSS, IDT, naked-asm context switching, preemption
 - `context_switch.rs` — naked-asm `switch_*` functions used by the cooperative scheduler.
 - `preemption.rs` — naked-asm `timer_interrupt_handler_preemptive` and Rust-side `timer_handler_inner`. Round-robin preemptive scheduler. The CPL=3 branch (U5) calls `lifecycle::try_preempt_ring3` and, if another ring-3 process is runnable, diverges via `switch::resume_ring3`; otherwise it iretq's back to the same process. CPL=0 branch handles kernel-thread preemption via the existing `CpuContext` / `KERNEL_CONTEXT` switch path.
 - `preemption_guard.rs` — nesting-safe `PreemptionGuard` and `PreemptionMutex`. They leave hardware IRQs enabled so PIT time and device input continue, while the CPL=0 timer path takes a minimal tick/EOI fast path and defers scheduler housekeeping and context switches until the outermost protected critical section ends. The nesting counter is global only because the kernel is single-CPU.
-- `interrupt_guard.rs` — RAII guard for `cli`/`sti` regions plus `InterruptMutex`, the required mutex wrapper for state shared by timer-preemptible kernel threads and IF-cleared interrupt/SYSCALL paths. Use the guard anywhere a sequence must be atomic with respect to the scheduler — most importantly inside IDE PIO transactions (see `src/drivers/CLAUDE.md`).
+- `interrupt_guard.rs` — RAII guard for `cli`/`sti` regions plus `InterruptMutex`, the required mutex wrapper for state shared by timer-preemptible kernel threads and IF-cleared interrupt/SYSCALL paths. The VirtIO block registry uses it so PCI completion cannot interrupt a queue mutation (see `src/drivers/CLAUDE.md`).
 
 ## GDT layout (load-bearing)
 

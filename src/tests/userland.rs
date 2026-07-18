@@ -1463,6 +1463,19 @@ fn test_run_zsh_pwd() {
     assert_eq!(code, 0);
 }
 
+/// `zsh -c ls` forks and execs BusyBox, then demand-pages its executable
+/// while the parent waits. This pins the interactive external-command path.
+fn test_run_zsh_external_ls() {
+    let Some((kind, code)) = drive_zsh(&["-f", "+m", "-c", "ls"]) else {
+        return;
+    };
+    assert!(matches!(
+        kind,
+        crate::userland::lifecycle::ExitKind::Cooperative
+    ));
+    assert_eq!(code, 0);
+}
+
 /// Interactive zsh must source the staged global config and build an Agnoster
 /// prompt in-process, without leaving upstream's per-redraw `$()` fork in PS1.
 fn test_run_zsh_global_rc_agnoster_prompt() {
@@ -2584,6 +2597,7 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: crate::userland::user_state::UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     };
     insert_process(parent);
@@ -4356,6 +4370,7 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: crate::userland::user_state::UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     };
 
@@ -4417,6 +4432,7 @@ fn test_has_children_sees_live_child() {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: crate::userland::user_state::UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     };
     insert_process(child);
@@ -4564,6 +4580,7 @@ fn test_remove_process_cleans_ring3_queues() {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: crate::userland::user_state::UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     };
     let p2 = crate::userland::lifecycle::Process {
@@ -4593,6 +4610,7 @@ fn test_remove_process_cleans_ring3_queues() {
         fs_base: 0,
         fpu_state: crate::arch::x86_64::fpu::FpuState::default(),
         saved_user_state: crate::userland::user_state::UserState::default(),
+        kernel_continuation: None,
         terminal_id: None,
     };
     crate::userland::lifecycle::insert_process(p1);
@@ -4738,6 +4756,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_run_zsh_minimal_exit,
         &test_run_zsh_echo_command,
         &test_run_zsh_pwd,
+        &test_run_zsh_external_ls,
         &test_run_zsh_global_rc_agnoster_prompt,
         &test_run_fault_pf,
         &test_run_fault_gp,

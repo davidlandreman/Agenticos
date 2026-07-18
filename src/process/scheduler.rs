@@ -221,11 +221,19 @@ impl Scheduler {
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 pcb.state = ProcessState::Blocked;
                 pcb.block_reason = Some(reason);
-                crate::debug_info!(
-                    "Scheduler: Blocked process {:?} for {:?}",
-                    current_pid,
-                    reason
-                );
+                if matches!(reason, BlockReason::WaitingForBlockIo(_)) {
+                    crate::debug_trace!(
+                        "Scheduler: Blocked process {:?} for {:?}",
+                        current_pid,
+                        reason
+                    );
+                } else {
+                    crate::debug_info!(
+                        "Scheduler: Blocked process {:?} for {:?}",
+                        current_pid,
+                        reason
+                    );
+                }
             }
             // Clear current - schedule will pick next
             self.current = None;
@@ -239,10 +247,15 @@ impl Scheduler {
     pub fn wake(&mut self, pid: ProcessId) {
         if let Some(pcb) = self.processes.get_mut(&pid) {
             if pcb.state == ProcessState::Blocked {
+                let block_reason = pcb.block_reason;
                 pcb.state = ProcessState::Ready;
                 pcb.block_reason = None;
                 self.ready_queue.push_back(pid);
-                crate::debug_info!("Scheduler: Woke process {:?}", pid);
+                if matches!(block_reason, Some(BlockReason::WaitingForBlockIo(_))) {
+                    crate::debug_trace!("Scheduler: Woke block-I/O process {:?}", pid);
+                } else {
+                    crate::debug_info!("Scheduler: Woke process {:?}", pid);
+                }
             }
         }
     }

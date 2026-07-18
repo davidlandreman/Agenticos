@@ -146,9 +146,12 @@ echo "Host folder: $HOST_SHARE -> /host (read-only)"
 DATA_IMAGE="${AGENTICOS_DATA_IMAGE:-target/bootloader/data.img}"
 echo "Data disk: $DATA_IMAGE -> /data (writable, snapshot for tests)"
 QEMU_ARGS=(
-    -drive "format=raw,file=$BIOS_IMAGE,if=ide,index=0"
-    -drive "file=fat:ro:$HOST_SHARE,if=ide,index=1,snapshot=on"
-    -drive "format=raw,file=$DATA_IMAGE,if=ide,index=2,snapshot=on"
+    -drive "format=raw,file=$BIOS_IMAGE,if=none,id=agenticos-root,readonly=on"
+    -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-root,serial=agenticos-root,bootindex=1"
+    -drive "file=fat:ro:$HOST_SHARE,if=none,id=agenticos-host,snapshot=on"
+    -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-host,serial=agenticos-host"
+    -drive "format=raw,file=$DATA_IMAGE,if=none,id=agenticos-data,snapshot=on"
+    -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-data,serial=agenticos-data"
     -serial stdio
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
     -no-reboot

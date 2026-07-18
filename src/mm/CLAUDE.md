@@ -91,7 +91,7 @@ If you re-promote routine fault messages to info/debug, the multi-MiB binary loa
 
 ## Read-into-uninit pattern (`Vec::set_len` after raw read)
 
-`File::read_to_vec` (in `src/fs/file_handle.rs`) reads directly into a `Vec`'s spare capacity instead of pre-zeroing. The pattern: `Vec::with_capacity(size)` + `core::slice::from_raw_parts_mut(ptr, size)` + `read(dst)` + `set_len(bytes_read)`. Each backing page is touched exactly once (by the FAT/IDE copy) instead of twice (zero-fill, then overwrite).
+`File::read_to_vec` (in `src/fs/file_handle.rs`) reads directly into a `Vec`'s spare capacity instead of pre-zeroing. The pattern: `Vec::with_capacity(size)` + `core::slice::from_raw_parts_mut(ptr, size)` + `read(dst)` + `set_len(bytes_read)`. Each backing page is touched exactly once by the FAT/block-device copy instead of twice.
 
 SAFETY contract for any future code reaching for the same pattern:
 

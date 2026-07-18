@@ -122,17 +122,22 @@ impl File {
     /// Read data into the provided buffer
     /// Returns the number of bytes read
     pub fn read(&self, buffer: &mut [u8]) -> FileResult<usize> {
-        let mut inner = self.inner.lock();
-
-        // Check if file is still open
-        if !inner.is_open {
-            return Err(FileError::HandleClosed);
-        }
-
-        // Clone the path to avoid borrowing conflict
-        let path = inner.path.clone();
-
-        let fs_handle = inner.fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
+        let (path, mut fs_handle) = {
+            let inner = self.inner.lock();
+            if !inner.is_open {
+                return Err(FileError::HandleClosed);
+            }
+            let handle = inner.fs_handle.as_ref().ok_or(FileError::HandleClosed)?;
+            (
+                inner.path.clone(),
+                crate::fs::filesystem::FileHandle {
+                    inode: handle.inode,
+                    position: handle.position,
+                    size: handle.size,
+                    mode: handle.mode,
+                },
+            )
+        };
 
         // Get VFS and find filesystem for this path
         let vfs = get_vfs();
@@ -140,9 +145,14 @@ impl File {
 
         // Perform the read
         let bytes_read = filesystem
-            .read(fs_handle, buffer)
+            .read(&mut fs_handle, buffer)
             .map_err(|e| FileError::FilesystemError(e))?;
-        inner.position += bytes_read as u64;
+        let mut inner = self.inner.lock();
+        inner.position = inner.position.saturating_add(bytes_read as u64);
+        let position = inner.position;
+        if let Some(handle) = inner.fs_handle.as_mut() {
+            handle.position = position;
+        }
 
         Ok(bytes_read)
     }
@@ -153,59 +163,57 @@ impl File {
     /// handler, where attempting a heap allocation is both unnecessary and a
     /// potential recursive/deadlock hazard.
     pub fn read_at(&self, offset: u64, buffer: &mut [u8]) -> FileResult<usize> {
-        let mut inner = self.inner.lock();
-        if !inner.is_open {
-            return Err(FileError::HandleClosed);
-        }
-        if offset > inner.size {
-            return Err(FileError::SeekOutOfBounds);
-        }
-        let FileHandleInner {
-            path,
-            position,
-            fs_handle,
-            ..
-        } = &mut *inner;
-        let original_position = *position;
+        let (path, mut fs_handle) = {
+            let inner = self.inner.lock();
+            if !inner.is_open {
+                return Err(FileError::HandleClosed);
+            }
+            if offset > inner.size {
+                return Err(FileError::SeekOutOfBounds);
+            }
+            let handle = inner.fs_handle.as_ref().ok_or(FileError::HandleClosed)?;
+            (
+                inner.path.clone(),
+                crate::fs::filesystem::FileHandle {
+                    inode: handle.inode,
+                    position: offset,
+                    size: handle.size,
+                    mode: handle.mode,
+                },
+            )
+        };
         let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(path).ok_or(FileError::NotFound)?;
-        let fs_handle = fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
+        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
         filesystem
-            .seek(fs_handle, offset)
+            .seek(&mut fs_handle, offset)
             .map_err(FileError::FilesystemError)?;
-        let result = filesystem
-            .read(fs_handle, buffer)
-            .map_err(FileError::FilesystemError);
-        let restore = filesystem
-            .seek(fs_handle, original_position)
-            .map_err(FileError::FilesystemError);
-        *position = original_position;
-        match (result, restore) {
-            (Ok(bytes), Ok(_)) => Ok(bytes),
-            (Err(error), _) => Err(error),
-            (_, Err(error)) => Err(error),
-        }
+        filesystem
+            .read(&mut fs_handle, buffer)
+            .map_err(FileError::FilesystemError)
     }
 
     /// Write data from the provided buffer
     /// Returns the number of bytes written
     pub fn write(&self, buffer: &[u8]) -> FileResult<usize> {
-        let mut inner = self.inner.lock();
-
-        // Check if file supports writing
-        if !inner.mode.write {
-            return Err(FileError::AccessDenied);
-        }
-
-        // Check if file is still open
-        if !inner.is_open {
-            return Err(FileError::HandleClosed);
-        }
-
-        // Clone the path to avoid borrowing conflict
-        let path = inner.path.clone();
-
-        let fs_handle = inner.fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
+        let (path, mut fs_handle) = {
+            let inner = self.inner.lock();
+            if !inner.mode.write {
+                return Err(FileError::AccessDenied);
+            }
+            if !inner.is_open {
+                return Err(FileError::HandleClosed);
+            }
+            let handle = inner.fs_handle.as_ref().ok_or(FileError::HandleClosed)?;
+            (
+                inner.path.clone(),
+                crate::fs::filesystem::FileHandle {
+                    inode: handle.inode,
+                    position: handle.position,
+                    size: handle.size,
+                    mode: handle.mode,
+                },
+            )
+        };
 
         // Get VFS and find filesystem for this path
         let vfs = get_vfs();
@@ -213,9 +221,15 @@ impl File {
 
         // Perform the write
         let bytes_written = filesystem
-            .write(fs_handle, buffer)
+            .write(&mut fs_handle, buffer)
             .map_err(|e| FileError::FilesystemError(e))?;
+        let mut inner = self.inner.lock();
         inner.position += bytes_written as u64;
+        let position = inner.position;
+        if let Some(handle) = inner.fs_handle.as_mut() {
+            handle.position = position;
+            handle.size = handle.size.max(position);
+        }
 
         // Update size if we extended the file
         if inner.position > inner.size {
@@ -228,7 +242,7 @@ impl File {
     /// Read the entire file contents into a `Vec<u8>`.
     ///
     /// Reads directly into the freshly allocated `Vec`'s spare capacity —
-    /// the FAT/IDE copy is the sole writer to each page, so each backing
+    /// the FAT/block-device copy is the sole writer to each page, so each backing
     /// page is touched once instead of twice (zero-fill, then overwrite).
     /// For multi-MiB files this halves the page faults on the caller-side
     /// buffer and removes a full file-sized memset. See plan U3

@@ -273,6 +273,7 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
 
     // Increment tick counter
     let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let _ = crate::process::drain_kernel_io_wakes();
 
     // Ring-3 timer trap (U5): the user app was running. Refresh the
     // active PCB's last_activity_tick so the watchdog doesn't reap a

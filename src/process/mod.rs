@@ -16,6 +16,9 @@ use alloc::string::String;
 /// Flag indicating whether we're currently running a spawned process
 static IN_SPAWNED_PROCESS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+const IO_WAKE_SLOTS: usize = 64;
+static PENDING_IO_WAKES: [core::sync::atomic::AtomicU32; IO_WAKE_SLOTS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; IO_WAKE_SLOTS];
 
 /// Check if we're currently running a spawned process
 pub fn is_in_spawned_process() -> bool {
@@ -33,6 +36,74 @@ pub fn set_in_spawned_process(value: bool) {
 /// Initialize the scheduler
 pub fn init_scheduler() {
     scheduler::SCHEDULER.lock().init();
+}
+
+/// Return the current kernel thread when storage is called from a spawned
+/// kernel process. Boot/main-loop callers deliberately return `None` and use
+/// the driver's early-boot halt wait instead.
+pub fn current_io_waiter() -> Option<ProcessId> {
+    if !is_in_spawned_process() {
+        return None;
+    }
+    scheduler::SCHEDULER.lock().current()
+}
+
+/// Queue an IRQ-originated wake without taking the scheduler's non-IRQ-safe
+/// spin lock. The timer and main-loop housekeeping drain this bounded array.
+pub fn queue_kernel_io_wake(pid: ProcessId) {
+    use core::sync::atomic::Ordering;
+    for slot in &PENDING_IO_WAKES {
+        if slot
+            .compare_exchange(0, pid, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    crate::debug_error!("kernel I/O wake queue full for PID {}", pid);
+}
+
+pub fn drain_kernel_io_wakes() -> bool {
+    use core::sync::atomic::Ordering;
+    let Some(mut scheduler) = scheduler::SCHEDULER.try_lock() else {
+        return false;
+    };
+    let mut woke = false;
+    for slot in &PENDING_IO_WAKES {
+        let pid = slot.swap(0, Ordering::AcqRel);
+        if pid != 0 {
+            scheduler.wake(pid);
+            woke = true;
+        }
+    }
+    woke
+}
+
+/// Preserve and park the current kernel thread on asynchronous block I/O.
+/// Completion moves the exact PCB back to the scheduler ready queue.
+pub fn block_current_kernel_thread_on_io(token: u64) {
+    use crate::arch::x86_64::context_switch::switch_context;
+
+    let old_context = {
+        let mut scheduler = scheduler::SCHEDULER.lock();
+        let Some(pid) = scheduler.current() else {
+            return;
+        };
+        let Some(context) = scheduler.get_context_mut(pid) else {
+            return;
+        };
+        let pointer = context as *mut CpuContext;
+        scheduler.block_current(BlockReason::WaitingForBlockIo(token));
+        pointer
+    };
+    set_in_spawned_process(false);
+    unsafe {
+        switch_context(
+            old_context,
+            &raw const crate::arch::x86_64::preemption::KERNEL_CONTEXT,
+        );
+    }
+    set_in_spawned_process(true);
 }
 
 /// Spawn a new process with the given entry function
@@ -384,9 +455,11 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
         } else {
             // Nothing to dispatch; wait for an interrupt (timer, input)
             // that might unblock our awaited process.
-            unsafe {
-                core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags));
-            }
+            // Keep IF enabled after the wake. The next ring-3 dispatch saves
+            // this kernel context; saving it with IF cleared would return the
+            // test runner/main-loop caller with interrupts permanently off
+            // after the user process exits.
+            x86_64::instructions::interrupts::enable_and_hlt();
         }
     }
 }

@@ -25,7 +25,6 @@ pub trait BlockDevice {
     fn total_blocks(&self) -> u64;
 
     /// Get the total capacity in bytes
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn capacity(&self) -> u64 {
         self.total_blocks() * self.block_size() as u64
     }
@@ -37,11 +36,9 @@ pub trait BlockDevice {
     }
 
     /// Get a human-readable name for the device
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn name(&self) -> &str;
 
     /// Flush any pending writes to the device
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn flush(&self) -> Result<(), &'static str> {
         Ok(()) // Default implementation does nothing
     }
