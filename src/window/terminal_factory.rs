@@ -9,7 +9,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::process::ProcessId;
+use crate::userland::process_service::{
+    LaunchId, LaunchOutcome, LaunchSpec, DEFAULT_USER_ENV, ZSH_HOST_PATH,
+};
 use crate::window::windows::{FrameWindow, TerminalWindow};
 use crate::window::{with_window_manager, Rect, Window, WindowId};
 
@@ -20,8 +22,8 @@ pub struct TerminalInstance {
     pub frame_id: WindowId,
     /// The terminal window itself
     pub terminal_id: WindowId,
-    /// The shell process associated with this terminal
-    pub shell_pid: Option<ProcessId>,
+    /// Asynchronous launch associated with this terminal's shell.
+    pub shell_launch: Option<LaunchId>,
     /// Terminal number for display purposes
     pub number: usize,
 }
@@ -122,7 +124,7 @@ pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
         Ok(TerminalInstance {
             frame_id,
             terminal_id,
-            shell_pid: None,
+            shell_launch: None,
             number: terminal_number,
         })
     })
@@ -176,20 +178,20 @@ pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
         crate::window::terminal::sync_terminal_winsize(terminal_id, rows, cols);
     }
 
-    let pid = spawn_zsh_for_terminal(terminal_id);
-    instance.shell_pid = Some(pid);
+    let launch = spawn_zsh_for_terminal(terminal_id);
+    instance.shell_launch = launch;
 
     {
         let mut instances = TERMINAL_INSTANCES.lock();
         if let Some(inst) = instances.iter_mut().find(|i| i.terminal_id == terminal_id) {
-            inst.shell_pid = Some(pid);
+            inst.shell_launch = launch;
         }
     }
 
     crate::debug_info!(
-        "Terminal factory: zsh spawned for terminal {} with PID {:?}",
+        "Terminal factory: zsh submitted for terminal {} as {:?}",
         instance.number,
-        pid
+        launch
     );
 
     Ok(instance)
@@ -231,139 +233,39 @@ pub fn on_window_destroyed(window_id: WindowId) {
         instance.terminal_id
     );
 
-    // Kill zsh + every process it forked. They all share this
-    // terminal_id (inherited across fork), and this also wakes the
-    // blocked kernel launcher thread so it returns from
-    // `launch_user_binary` instead of hanging forever.
-    crate::userland::lifecycle::kill_ring3_processes_on_terminal(instance.terminal_id);
+    // Cancel a not-yet-installed shell and kill zsh + every process it
+    // forked if the launch has already committed. All descendants inherit the
+    // same terminal_id.
+    crate::userland::process_service::cancel_for_terminal(instance.terminal_id);
 }
 
-/// FAT path the kernel loads when launching the default shell. Staged
-/// from `userland/prebuilt/ZSH.ELF` by `build.sh` / `test.sh`.
-pub(crate) const ZSH_HOST_PATH: &str = "/host/ZSH.ELF";
-
-/// Environment used by every default interactive terminal and by the zsh
-/// launch regression. Keeping one shared profile prevents the test path from
-/// silently exercising a smaller initial stack than the desktop path.
-pub(crate) const TERMINAL_SHELL_ENV: [&str; 8] = [
-    "PATH=/bin:/host",
-    "HOME=/root",
-    "USER=root",
-    "LOGNAME=root",
-    "SHELL=/bin/zsh",
-    "TERM=xterm-256color",
-    "COLORTERM=truecolor",
-    "LANG=C.UTF-8",
-];
-
-/// Spawn a kernel wrapper thread that owns the blocking lifetime of a
-/// standalone ring-3 GUI binary. This is the same scheduler pattern as the
-/// terminal's zsh launcher, without attaching a terminal window.
-pub fn spawn_gui_user_app(path: &'static str, argv: Vec<String>) -> ProcessId {
-    let process_name = argv
-        .first()
-        .cloned()
-        .unwrap_or_else(|| String::from("gui-app"));
-    crate::process::spawn_process(process_name, None, move || {
-        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        match crate::userland::launcher::launch_user_binary(path, &argv_refs, &TERMINAL_SHELL_ENV) {
-            Ok((kind, code)) => crate::debug_info!(
-                "GUI user app {} exited: kind={:?}, code={}",
-                path,
-                kind,
-                code
-            ),
-            Err(error) => crate::debug_error!("GUI user app {} failed: {}", path, error),
-        }
-    })
-}
-
-/// Execute text submitted through the desktop Run dialog with the bundled zsh.
-/// The command is passed as one `-c` argument so zsh remains the sole parser
-/// for quoting, arguments, shell syntax, and PATH lookup.
-pub fn spawn_run_command(command: String) -> ProcessId {
-    crate::process::spawn_process(String::from("run-command"), None, move || {
-        let argv = run_command_argv(&command);
-        match crate::userland::launcher::launch_user_binary(
-            ZSH_HOST_PATH,
-            &argv,
-            &TERMINAL_SHELL_ENV,
-        ) {
-            Ok((kind, 0)) => {
-                crate::debug_info!("Run command exited successfully: kind={:?}", kind);
-            }
-            Ok((kind, code)) => {
-                crate::debug_warn!(
-                    "Run command failed: command={:?}, kind={:?}, code={}",
-                    command,
-                    kind,
-                    code
-                );
-                let message = alloc::format!("Command exited with status {code}: {command}");
-                crate::window::dialogs::show_error("Run", &message);
-            }
-            Err(error) => {
-                crate::debug_error!("Run command {:?} failed to launch: {}", command, error);
-                let message = alloc::format!("Could not run {command}: {error}");
-                crate::window::dialogs::show_error("Run", &message);
-            }
-        }
-    })
-}
-
-pub(crate) fn run_command_argv(command: &str) -> [&str; 3] {
-    [ZSH_HOST_PATH, "-c", command]
-}
-
-/// Spawn a kernel-side process whose entry function loads
-/// `/host/ZSH.ELF` and enters ring 3 with stdio bound to `terminal_id`.
-/// The kernel process blocks for the entire zsh session; on exit the terminal
+/// Queue `/host/ZSH.ELF` with stdio bound to `terminal_id`.
+/// The shared process service owns setup and teardown; on exit the terminal
 /// remains open so its diagnostic banner stays visible.
-fn spawn_zsh_for_terminal(terminal_id: WindowId) -> ProcessId {
-    crate::process::spawn_process(
-        alloc::string::String::from("zsh"),
-        Some(terminal_id),
-        move || {
-            crate::window::terminal::set_current_output_terminal(terminal_id);
-
-            // PATH hits the virtual /bin namespace first (BusyBox
-            // applets + GUI app launchers), then /host for staged
-            // binaries. TERM=xterm-256color advertises full ANSI / 256
-            // color / cursor-positioning support so vi, less, and
-            // agnoster pick the right terminfo behavior — the matching
-            // parser support lives in `src/terminal/` (see the plan
-            // `docs/plans/2026-05-24-001-feat-terminal-ansi-vt-pty-and-caret-plan.md`).
-            // HOME/USER/LOGNAME/SHELL match the kernel-managed /etc/passwd
-            // entry. LANG=C.UTF-8 keeps zsh's multibyte prompt-width
-            // accounting aligned with the terminal's Unicode cell grid.
-            // COLORTERM=truecolor unlocks 24-bit-color code paths in modern
-            // programs.
-            let argv = [ZSH_HOST_PATH];
-            match crate::userland::launcher::launch_user_binary(
-                ZSH_HOST_PATH,
-                &argv,
-                &TERMINAL_SHELL_ENV,
-            ) {
-                Ok((kind, code)) => {
-                    let msg = alloc::format!("[zsh exited: kind={:?}, code={}]", kind, code,);
-                    // Surface to BOTH serial (debug) and the terminal
-                    // window so the user can see + capture diagnostics.
-                    crate::debug_error!("Terminal factory: {}", msg);
-                    let banner = alloc::format!("\n{}\n", msg);
-                    crate::window::terminal::write_to_terminal_id(terminal_id, &banner);
+fn spawn_zsh_for_terminal(terminal_id: WindowId) -> Option<LaunchId> {
+    let argv = [ZSH_HOST_PATH];
+    let spec = LaunchSpec::new(ZSH_HOST_PATH, &argv, &DEFAULT_USER_ENV)
+        .with_terminal(terminal_id)
+        .on_complete(Box::new(move |outcome| {
+            let msg = match outcome {
+                LaunchOutcome::Exited { id, kind, code, .. } => {
+                    alloc::format!("[zsh {id:?} exited: kind={kind:?}, code={code}]")
                 }
-                Err(msg) => {
-                    crate::println!("zsh failed to launch: {}", msg);
-                    crate::debug_error!("Terminal factory: zsh launch failed: {}", msg);
-                    let banner = alloc::format!("\n[zsh launch failed: {}]\n", msg,);
-                    crate::window::terminal::write_to_terminal_id(terminal_id, &banner);
+                LaunchOutcome::Failed { id, error } => {
+                    alloc::format!("[zsh {id:?} launch failed: {error}]")
                 }
-            }
-
-            crate::window::terminal::clear_current_output_terminal();
-            // Leave the terminal window OPEN so the exit banner above
-            // stays visible. The user can dismiss the window manually.
-            // close_terminal(terminal_id);  // disabled for diagnostics
-        },
-    )
+            };
+            crate::debug_error!("Terminal factory: {}", msg);
+            let banner = alloc::format!("\n{msg}\n");
+            crate::window::terminal::write_to_terminal_id(terminal_id, &banner);
+        }));
+    match crate::userland::process_service::submit(spec) {
+        Ok(id) => Some(id),
+        Err(error) => {
+            let banner = alloc::format!("\n[zsh launch submission failed: {error}]\n");
+            crate::debug_error!("Terminal factory: {}", banner);
+            crate::window::terminal::write_to_terminal_id(terminal_id, &banner);
+            None
+        }
+    }
 }

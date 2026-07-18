@@ -495,6 +495,36 @@ fn test_sleeper_wake_at_deadline() {
     remove_synthetic(NOT_DUE);
 }
 
+fn test_kernel_reaper_adopts_child_of_exited_parent() {
+    use crate::userland::lifecycle::{
+        adopt_one_orphan_for_kernel_reaper, reap_zombie, record_zombie,
+    };
+    const PARENT: u32 = 700_100;
+    const CHILD: u32 = 700_101;
+
+    let mut parent = synthetic_process(PARENT);
+    parent.exit_kind = ExitKind::Cooperative;
+    let mut child = synthetic_process(CHILD);
+    child.parent_pid = PARENT;
+    child.exit_kind = ExitKind::Cooperative;
+    PROCESS_TABLE.lock().by_pid.insert(PARENT, parent);
+    PROCESS_TABLE.lock().by_pid.insert(CHILD, child);
+    record_zombie(CHILD, PARENT, 9);
+
+    assert_eq!(adopt_one_orphan_for_kernel_reaper(), Some(CHILD));
+    assert_eq!(
+        PROCESS_TABLE.lock().by_pid.get(&CHILD).unwrap().parent_pid,
+        0
+    );
+    assert!(
+        reap_zombie(CHILD as i32, PARENT).is_none(),
+        "old parent must no longer own the adopted zombie"
+    );
+
+    remove_synthetic(CHILD);
+    remove_synthetic(PARENT);
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_proc_classify,
@@ -512,5 +542,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_signal_fatal_default_semantics,
         &test_kill_any_pid,
         &test_sleeper_wake_at_deadline,
+        &test_kernel_reaper_adopts_child_of_exited_parent,
     ]
 }

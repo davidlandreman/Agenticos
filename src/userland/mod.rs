@@ -20,6 +20,7 @@ pub mod loader;
 pub mod network_syscalls;
 pub mod path;
 pub mod pipe;
+pub mod process_service;
 pub mod procfs;
 pub mod signal;
 pub mod stdin;
@@ -146,10 +147,35 @@ pub fn enter_user_mode_with_aspace(
 /// through CR3. `launch_user_binary` enforces this via
 /// `BINARY_SETUP_MUTEX`.
 pub fn setup_user_process(
+    image: UserImage,
+    argv: &[&str],
+    envp: &[&str],
+    address_space: Option<crate::userland::address_space::AddressSpace>,
+) -> Result<u32, EnterError> {
+    let launcher_terminal_id = {
+        let sched = crate::process::scheduler::SCHEDULER.lock();
+        sched
+            .current()
+            .and_then(|pid| sched.get_process(pid))
+            .and_then(|pcb| pcb.terminal_id)
+    };
+    let pid = setup_user_process_unstarted(image, argv, envp, address_space, launcher_terminal_id)?;
+    crate::userland::lifecycle::mark_ring3_ready(pid);
+    Ok(pid)
+}
+
+/// Install a fully initialized process without making it runnable yet.
+///
+/// The asynchronous process service uses this split to publish detached
+/// ownership and observe cancellation before the first user instruction can
+/// execute. Callers must eventually call `mark_ring3_ready(pid)` or remove the
+/// process.
+pub(crate) fn setup_user_process_unstarted(
     mut image: UserImage,
     argv: &[&str],
     envp: &[&str],
     mut address_space: Option<crate::userland::address_space::AddressSpace>,
+    terminal_id: Option<crate::window::WindowId>,
 ) -> Result<u32, EnterError> {
     // This is the single authoritative VMA initialization point for every
     // entry path. Building it exactly once avoids cloning and then dropping
@@ -197,23 +223,12 @@ pub fn setup_user_process(
     // clean register file (all GPRs zero, user RSP pointing at the
     // freshly-built argc/argv/envp/auxv frame).
     //
-    // Also: inherit the launching kernel thread's `terminal_id` so
-    // this ring-3 process's stdout/stderr route to the right terminal
-    // window (the bugfix to the multi-terminal write-routing race).
-    // Read from SCHEDULER.current()'s PCB.
-    let launcher_terminal_id = {
-        let sched = crate::process::scheduler::SCHEDULER.lock();
-        sched
-            .current()
-            .and_then(|pid| sched.get_process(pid))
-            .and_then(|pcb| pcb.terminal_id)
-    };
     let exe_path = alloc::string::String::from(argv_slice[0]);
     let cmdline = crate::userland::lifecycle::capped_cmdline(argv_slice);
     crate::userland::lifecycle::with_process(new_pid, |p| {
         p.exe_path = Some(exe_path);
         p.cmdline = cmdline;
-        p.terminal_id = launcher_terminal_id;
+        p.terminal_id = terminal_id;
         p.saved_user_state = crate::userland::user_state::UserState {
             rip: entry,
             rsp: user_rsp,
@@ -246,12 +261,10 @@ pub fn setup_user_process(
     crate::userland::stdin::install();
     crate::userland::tty::install_default();
 
-    crate::userland::lifecycle::mark_ring3_ready(new_pid);
-
     Ok(new_pid)
 }
 
-/// U8 wait phase. Blocks the calling kernel thread until ring-3
+/// QEMU compatibility wait phase. Blocks the calling kernel thread until ring-3
 /// process `pid` exits, then reads its exit info and returns. Does
 /// NOT remove the Process from PROCESS_TABLE — the caller's cleanup
 /// (`release_active_image`) is the canonical drop site, and tests

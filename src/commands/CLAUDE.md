@@ -20,8 +20,8 @@ compatibility name for `FILEMAN.ELF`).
 
 - Start → Programs contains Terminal, File Manager, Notepad, Painting,
   Calc, GL Arena, and Task Manager. Standalone apps use
-  `terminal_factory::spawn_gui_user_app`, which launches an ELF on a
-  blocking kernel wrapper thread.
+  `userland::process_service::submit`, which queues an owned launch request
+  for the persistent process service and returns immediately.
 - Start → Run opens the kernel-owned non-blocking Run dialog. Submitted text is
   passed unchanged as the single command argument to `/host/ZSH.ELF -c`, using
   the same `/bin:/host` PATH as interactive terminals.

@@ -339,50 +339,110 @@ fn spawn_terminal() {
 /// thread, the same path Start → Notepad uses.
 fn spawn_painting() {
     crate::debug_info!("GUIShell: Spawning painting...");
-    crate::window::terminal_factory::spawn_gui_user_app(
-        "/host/PAINTING.ELF",
-        alloc::vec![alloc::string::String::from("painting")],
-    );
+    spawn_gui_user_app("/host/PAINTING.ELF", "painting");
 }
 
 fn spawn_calc() {
     crate::debug_info!("GUIShell: Spawning calc...");
-    crate::window::terminal_factory::spawn_gui_user_app(
-        "/host/CALC.ELF",
-        alloc::vec![alloc::string::String::from("calc")],
-    );
+    spawn_gui_user_app("/host/CALC.ELF", "calc");
 }
 
 fn spawn_glgame() {
     crate::debug_info!("GUIShell: Spawning GL Arena...");
-    crate::window::terminal_factory::spawn_gui_user_app(
-        "/host/GLGAME.ELF",
-        alloc::vec![alloc::string::String::from("glgame")],
-    );
+    spawn_gui_user_app("/host/GLGAME.ELF", "glgame");
 }
 
 fn spawn_notepad() {
     crate::debug_info!("GUIShell: Spawning notepad...");
-    crate::window::terminal_factory::spawn_gui_user_app(
-        "/host/NOTEPAD.ELF",
-        alloc::vec![alloc::string::String::from("notepad")],
-    );
+    spawn_gui_user_app("/host/NOTEPAD.ELF", "notepad");
 }
 
 fn spawn_taskmgr() {
     crate::debug_info!("GUIShell: Spawning task manager...");
-    crate::window::terminal_factory::spawn_gui_user_app(
-        "/host/TASKMGR.ELF",
-        alloc::vec![alloc::string::String::from("taskmgr")],
-    );
+    spawn_gui_user_app("/host/TASKMGR.ELF", "taskmgr");
 }
 
 fn spawn_file_manager() {
     crate::debug_info!("GUIShell: Spawning file manager...");
-    crate::window::terminal_factory::spawn_gui_user_app(
-        "/host/FILEMAN.ELF",
-        alloc::vec![alloc::string::String::from("explorer")],
-    );
+    spawn_gui_user_app("/host/FILEMAN.ELF", "explorer");
+}
+
+fn spawn_gui_user_app(path: &'static str, name: &'static str) {
+    use crate::userland::process_service::{LaunchOutcome, LaunchSpec, DEFAULT_USER_ENV};
+
+    let argv = [name];
+    let spec =
+        LaunchSpec::new(path, &argv, &DEFAULT_USER_ENV).on_complete(Box::new(move |outcome| {
+            match outcome {
+                LaunchOutcome::Exited {
+                    pid, kind, code, ..
+                } => crate::debug_info!(
+                    "GUI user app {} pid={} exited: kind={:?}, code={}",
+                    path,
+                    pid,
+                    kind,
+                    code
+                ),
+                LaunchOutcome::Failed { error, .. } => {
+                    crate::debug_error!("GUI user app {} failed: {}", path, error);
+                    let message = alloc::format!("Could not start {}: {}", name, error);
+                    crate::window::dialogs::show_error("Start", &message);
+                }
+            }
+        }));
+    if let Err(error) = crate::userland::process_service::submit(spec) {
+        crate::debug_error!("Could not submit {}: {}", path, error);
+        let message = alloc::format!("Could not start {}: {}", name, error);
+        crate::window::dialogs::show_error("Start", &message);
+    }
+}
+
+fn spawn_run_command(command: alloc::string::String) {
+    use crate::userland::process_service::{
+        LaunchOutcome, LaunchSpec, DEFAULT_USER_ENV, ZSH_HOST_PATH,
+    };
+
+    let argv = run_command_argv(command.as_str());
+    let reported_command = command.clone();
+    let spec = LaunchSpec::new(ZSH_HOST_PATH, &argv, &DEFAULT_USER_ENV)
+        .with_cwd("/host")
+        .on_complete(Box::new(move |outcome| match outcome {
+            LaunchOutcome::Exited { kind, code: 0, .. } => {
+                crate::debug_info!("Run command exited successfully: kind={:?}", kind);
+            }
+            LaunchOutcome::Exited { kind, code, .. } => {
+                crate::debug_warn!(
+                    "Run command failed: command={:?}, kind={:?}, code={}",
+                    reported_command,
+                    kind,
+                    code
+                );
+                let message =
+                    alloc::format!("Command exited with status {code}: {reported_command}");
+                crate::window::dialogs::show_error("Run", &message);
+            }
+            LaunchOutcome::Failed { error, .. } => {
+                crate::debug_error!(
+                    "Run command {:?} failed to launch: {}",
+                    reported_command,
+                    error
+                );
+                let message = alloc::format!("Could not run {reported_command}: {error}");
+                crate::window::dialogs::show_error("Run", &message);
+            }
+        }));
+    if let Err(error) = crate::userland::process_service::submit(spec) {
+        let message = alloc::format!("Could not run {command}: {error}");
+        crate::window::dialogs::show_error("Run", &message);
+    }
+}
+
+pub(crate) fn run_command_argv(command: &str) -> [&str; 3] {
+    [
+        crate::userland::process_service::ZSH_HOST_PATH,
+        "-c",
+        command,
+    ]
 }
 
 /// Toggle the Start menu (show if hidden, hide if shown)
@@ -648,7 +708,7 @@ fn process_pending_actions() {
     // buttons synchronized while the modal is open.
     if let Some(result) = crate::window::dialogs::poll_run_dialog() {
         if let Some(command) = result {
-            crate::window::terminal_factory::spawn_run_command(command);
+            spawn_run_command(command);
         }
     }
 

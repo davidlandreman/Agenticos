@@ -132,6 +132,10 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
     ("procfs", procfs::get_tests),
+    (
+        "process_service",
+        crate::userland::process_service::process_service_tests,
+    ),
     ("gui_userland", gui_userland::get_tests),
     ("vm", vm::get_tests),
     ("compiler_compat", compiler_compat::get_tests),

@@ -385,19 +385,33 @@ pub fn block_kernel_thread_for_ring3_exit(pid: u32) {
 
 /// Park the current kernel thread until an explicit wake and switch away.
 pub fn park_current(reason: BlockReason) {
+    let _ = park_current_if(reason, || true);
+}
+
+/// Park the current kernel thread only when `should_park` still returns true
+/// after the scheduler lock has disabled interrupts.
+///
+/// Event-driven services use this to close the final-check/park race: a
+/// producer publishes an atomic work bit before waking the service, while the
+/// service consumes that bit here at the same instant it commits its blocked
+/// scheduler state.
+pub fn park_current_if(reason: BlockReason, should_park: impl FnOnce() -> bool) -> bool {
     use crate::arch::x86_64::context_switch::switch_context;
     use crate::arch::x86_64::preemption::KERNEL_CONTEXT;
     use core::sync::atomic::Ordering;
 
     let outcome = {
         let mut sched = scheduler::SCHEDULER.lock();
+        if !should_park() {
+            return false;
+        }
         let current_pid = match sched.current() {
             Some(pid) => pid,
-            None => return,
+            None => return false,
         };
         let old_ctx = match sched.get_context_mut(current_pid) {
             Some(context) => context as *mut CpuContext,
-            None => return,
+            None => return false,
         };
         sched.block_current(reason);
         let target = next_switch_target(&mut sched);
@@ -420,6 +434,7 @@ pub fn park_current(reason: BlockReason) {
             IN_SPAWNED_PROCESS.store(true, Ordering::Release);
         }
     }
+    true
 }
 
 /// U8: inline ring-3 dispatch loop for non-kernel-thread contexts

@@ -96,7 +96,7 @@ fn test_busybox_wget_hostname() {
 }
 
 fn run_zsh_network_command(command: &str) {
-    let path = crate::window::terminal_factory::ZSH_HOST_PATH;
+    let path = crate::userland::process_service::ZSH_HOST_PATH;
     assert!(
         crate::fs::exists(path),
         "mandatory fixture missing: {}",
@@ -106,7 +106,7 @@ fn run_zsh_network_command(command: &str) {
     let result = crate::userland::launcher::launch_user_binary(
         path,
         &argv,
-        &crate::window::terminal_factory::TERMINAL_SHELL_ENV,
+        &crate::userland::process_service::DEFAULT_USER_ENV,
     );
     crate::userland::abi::reset_unknown_syscall_trace();
     crate::userland::abi::clear_user_va_bounds();

@@ -5,13 +5,11 @@
 //!
 //! See `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`.
 //!
-//! This is the synchronous launch path: callers block in
-//! [`launch_user_binary`] until the user process exits (cooperative
-//! `exit_group` or fault). Unsupported syscalls return `-ENOSYS` to the
-//! process so libc can choose a fallback. U8 removed the
-//! single-user-app guard — multiple kernel threads can now call this
-//! concurrently and each gets its own ring-3 process, scheduled
-//! round-robin via the U5 timer ISR.
+//! Production callers go through `process_service::submit`: one persistent
+//! worker calls [`prepare_user_binary_unstarted`], publishes ownership, and
+//! marks the new PID ready without waiting for its lifetime. The synchronous
+//! [`launch_user_binary`] path remains only for QEMU fixtures that need to
+//! drive a user binary inline and inspect its returned status.
 //!
 //! ## Concurrency invariant
 //!
@@ -54,6 +52,10 @@ static BINARY_SETUP_MUTEX: Mutex<()> = Mutex::new(());
 /// D5 violation, address-space allocation failure).
 ///
 /// Blocks until the user process exits.
+#[cfg_attr(
+    not(feature = "test"),
+    expect(dead_code, reason = "QEMU test compatibility API")
+)]
 pub fn launch_user_binary(
     path: &str,
     argv: &[&str],
@@ -63,42 +65,8 @@ pub fn launch_user_binary(
     // supported; each gets its own Process, address space, and
     // kernel-thread block until its child exits.
 
-    // Each launch gets a fresh "seen syscalls" table so trace-mode
-    // logging is meaningful per-binary rather than stale.
-    crate::userland::abi::reset_unknown_syscall_trace();
-
-    // U8 concurrency fix: serialize the LOAD-AND-SETUP phase across
-    // concurrent launchers. CR3 is a per-CPU resource — if two
-    // launchers race their `aspace.activate()` calls, the loser's
-    // subsequent `map_user_region` calls write into the winner's L4
-    // (the loader uses the active CR3). The mutex is dropped before
-    // `wait_for_ring3_exit` so two concurrent ring-3 processes still
-    // run concurrently — only their setup phases serialize.
-    // Storage is asynchronous and does not depend on the active CR3, so keep
-    // the potentially long file read outside the address-space setup lock.
-    let (file, bytes) = read_file_bytes(path)?;
-    let pid = {
-        let _setup_guard = BINARY_SETUP_MUTEX.lock();
-
-        let aspace = crate::userland::address_space::AddressSpace::new()
-            .map_err(|e| format!("AddressSpace::new: {:?}", e))?;
-        // SAFETY: AddressSpace::new copies the kernel half from the
-        // kernel L4, so kernel code after the CR3 write is still
-        // mapped. Holding `_setup_guard` guarantees no other launcher
-        // will swap CR3 until we drop it.
-        unsafe {
-            aspace.activate();
-        }
-
-        let image = crate::userland::loader::load_elf_file(&bytes, file)
-            .map_err(|e| format!("loader error: {:?}", e))?;
-
-        crate::userland::setup_user_process(image, argv, envp, Some(aspace))
-            .map_err(|e| format!("setup_user_process: {:?}", e))?
-        // _setup_guard drops here — other launchers can now run their
-        // load + setup phases concurrently with our process running
-        // in ring 3.
-    };
+    let pid = prepare_user_binary_unstarted(path, argv, envp, None)?;
+    crate::userland::lifecycle::mark_ring3_ready(pid);
 
     let result = crate::userland::wait_for_ring3_exit(pid);
 
@@ -120,6 +88,40 @@ pub fn launch_user_binary(
     }
 
     Ok(result)
+}
+
+/// Load and fully install a user process without making it runnable.
+///
+/// The asynchronous process service uses this as its commit boundary: it can
+/// publish detached ownership or honor cancellation before the first user
+/// instruction executes, then either mark the PID ready or remove it.
+pub(crate) fn prepare_user_binary_unstarted(
+    path: &str,
+    argv: &[&str],
+    envp: &[&str],
+    terminal_id: Option<crate::window::WindowId>,
+) -> Result<u32, String> {
+    crate::userland::abi::reset_unknown_syscall_trace();
+
+    // VirtIO storage completion is asynchronous and independent of the
+    // active CR3, so do the potentially long read before entering the
+    // address-space setup transaction.
+    let (file, bytes) = read_file_bytes(path)?;
+    let _setup_guard = BINARY_SETUP_MUTEX.lock();
+
+    let aspace = crate::userland::address_space::AddressSpace::new()
+        .map_err(|e| format!("AddressSpace::new: {:?}", e))?;
+    // SAFETY: AddressSpace::new copies the kernel half from the kernel L4,
+    // and BINARY_SETUP_MUTEX excludes competing CR3-sensitive loaders.
+    unsafe {
+        aspace.activate();
+    }
+
+    let image = crate::userland::loader::load_elf_file(&bytes, file)
+        .map_err(|e| format!("loader error: {:?}", e))?;
+
+    crate::userland::setup_user_process_unstarted(image, argv, envp, Some(aspace), terminal_id)
+        .map_err(|e| format!("setup_user_process: {:?}", e))
 }
 
 fn read_file_bytes(path: &str) -> Result<(crate::lib::arc::Arc<crate::fs::File>, Vec<u8>), String> {

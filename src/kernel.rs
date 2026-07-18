@@ -728,6 +728,11 @@ pub fn run() -> ! {
     // Force an initial render to display the desktop
     window::render_frame();
 
+    // One persistent worker owns kernel-requested ring-3 launch setup and
+    // detached-process teardown. Start it before GUIShell can submit actions.
+    debug_info!("Spawning user process service...");
+    crate::userland::process_service::start();
+
     // Start the GUIShell background process (handles taskbar + start menu)
     debug_info!("Spawning GUIShell background process...");
     crate::commands::guishell::spawn_guishell_process();

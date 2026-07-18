@@ -1695,7 +1695,7 @@ fn test_run_fault_pf() {
 fn drive_zsh(argv_after_path: &[&str]) -> Option<(crate::userland::lifecycle::ExitKind, i64)> {
     use crate::userland::lifecycle::with_active_user;
     use alloc::string::String;
-    let path = crate::window::terminal_factory::ZSH_HOST_PATH;
+    let path = crate::userland::process_service::ZSH_HOST_PATH;
     if !crate::fs::exists(path) {
         crate::debug_info!("[u8] {} not staged; skipping", path);
         return None;
@@ -1715,7 +1715,7 @@ fn drive_zsh(argv_after_path: &[&str]) -> Option<(crate::userland::lifecycle::Ex
     let result = crate::userland::launcher::launch_user_binary(
         path,
         &argv_borrows,
-        &crate::window::terminal_factory::TERMINAL_SHELL_ENV,
+        &crate::userland::process_service::DEFAULT_USER_ENV,
     )
     .expect("launch staged zsh");
 

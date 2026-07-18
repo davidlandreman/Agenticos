@@ -23,7 +23,7 @@ The kernel runs a **live preemptive scheduler** with timer-driven context switch
 
 `spawn_process(name, terminal_id, entry_fn)` in `src/process/mod.rs` allocates a PCB + kernel stack, sets the entry closure, and enqueues the process for the scheduler. Used by:
 
-- `src/window/terminal_factory.rs::spawn_zsh_for_terminal` — kernel process whose entry function blocks in `launch_user_binary("/host/ZSH.ELF")` until zsh exits, then closes the terminal window.
+- `src/userland/process_service.rs` — one persistent kernel worker that drains non-blocking user launch requests and reaps detached ring-3 exits.
 - `src/commands/gui_launch_table.rs::spawn_by_name` — kernel process per GUI app launch (the applet list is empty today — every GUI app has migrated to ring 3; the mechanism remains for a future ring-0-only workload).
 - `src/commands/guishell/mod.rs::spawn_guishell_process` — the desktop / taskbar background process.
 
@@ -31,7 +31,7 @@ The kernel runs a **live preemptive scheduler** with timer-driven context switch
 
 `CpuContext` carries explicit `cs` and `ss` fields (offsets 144 and 152). The naked-asm `iretq` frames in `preemption.rs` and `context_switch.rs` read CS/SS from those fields rather than literal `push 0x08` / `push 0x10`. Kernel processes default to `cs=0x08, ss=0x10`; the kernel-thread scheduler doesn't directly schedule ring-3 (each ring-3 process is in the userland subsystem's `PROCESS_TABLE`, not the kernel-thread scheduler).
 
-**Multi-ring-3 (U5-U8) integration:** `timer_handler_inner`'s CPL=3 branch calls `userland::lifecycle::try_preempt_ring3` to round-robin between ring-3 processes via `userland::switch::resume_ring3`. Kernel threads that launched ring-3 processes (e.g., terminal factory) block on `BlockReason::WaitingForRing3Exit(pid)` while their ring-3 process runs; the kernel main loop's `save_kernel_and_resume_ring3` dispatches `ring3_ready` processes when no kernel thread is runnable. See `src/userland/CLAUDE.md` for the full lifecycle.
+**Multi-ring-3 integration:** ring-3 processes and kernel threads share the tagged scheduler queue. Production launchers do not wait: `process-service` installs the process as Ready, then returns to its queue. On exit the user entity is unregistered and the service is woken to drop the `Process` from a safe kernel stack. `WaitingForRing3Exit` remains only for synchronous QEMU-test compatibility.
 
 ## What's NOT wired up
 
@@ -44,4 +44,4 @@ The kernel runs a **live preemptive scheduler** with timer-driven context switch
 - Naked-asm context switching and timer ISR: `src/arch/x86_64/CLAUDE.md`.
 - Userland (ring-3) processes: `src/userland/CLAUDE.md` (under construction).
 - Kernel-side GUI app launchers: `src/commands/CLAUDE.md`.
-- The interactive shell now runs as ring-3 zsh (`/host/ZSH.ELF`) launched from `src/window/terminal_factory.rs::spawn_zsh_for_terminal`.
+- The interactive shell runs as ring-3 zsh (`/host/ZSH.ELF`); terminal factory creates the window/PTY and submits an explicit-terminal launch request to `process-service`.
