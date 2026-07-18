@@ -66,6 +66,25 @@ pub enum FdSlot {
         handle: Arc<SocketHandle>,
         cloexec: bool,
     },
+    /// A synthesized read-only file (the `/proc` namespace). `data` is
+    /// the full content snapshot generated at `open()`; `cursor` is the
+    /// per-fd read offset. `Arc` keeps dup/fork clones cheap; the
+    /// buffer frees when the last fd drops.
+    VirtualFile {
+        data: Arc<alloc::vec::Vec<u8>>,
+        path: Arc<alloc::string::String>,
+        cursor: usize,
+        cloexec: bool,
+    },
+    /// A synthesized directory (the `/proc` namespace). `entries` is
+    /// the `(name, is_dir)` listing snapshot from `open()` — `.`/`..`
+    /// are synthesized by `getdents64`, not stored.
+    VirtualDir {
+        entries: Arc<alloc::vec::Vec<(alloc::string::String, bool)>>,
+        path: Arc<alloc::string::String>,
+        cursor: usize,
+        cloexec: bool,
+    },
 }
 
 impl FdSlot {}
@@ -178,6 +197,8 @@ impl FdTable {
             FdSlot::PipeRead(_, ce) | FdSlot::PipeWrite(_, ce) => *ce = cloexec,
             FdSlot::VirtualBinDir { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::Socket { cloexec: ce, .. } => *ce = cloexec,
+            FdSlot::VirtualFile { cloexec: ce, .. } => *ce = cloexec,
+            FdSlot::VirtualDir { cloexec: ce, .. } => *ce = cloexec,
             _ => {}
         }
         Ok(())
@@ -191,6 +212,8 @@ impl FdTable {
             FdSlot::PipeRead(_, ce) | FdSlot::PipeWrite(_, ce) => *ce,
             FdSlot::VirtualBinDir { cloexec, .. } => *cloexec,
             FdSlot::Socket { cloexec, .. } => *cloexec,
+            FdSlot::VirtualFile { cloexec, .. } => *cloexec,
+            FdSlot::VirtualDir { cloexec, .. } => *cloexec,
             _ => false,
         })
     }

@@ -114,6 +114,58 @@ pub(super) struct SocketRegistry {
     next_ephemeral: u16,
 }
 
+/// Owned, smoltcp-free view of one registry entry, consumed by
+/// `/proc/agenticos/sockets`.
+#[derive(Debug, Clone)]
+pub struct SocketSnapshot {
+    pub id: SocketId,
+    pub proto: &'static str,
+    pub state: &'static str,
+    pub local: SockAddrV4,
+    pub remote: Option<SockAddrV4>,
+}
+
+/// Build the owned snapshot vector. Called from `NetworkStack` while
+/// the caller holds the `NETWORK` lock; performs no allocation-free
+/// guarantees but stays bounded by `MAX_SOCKETS`.
+pub(super) fn snapshot_registry(
+    registry: &SocketRegistry,
+    sockets: &mut smoltcp::iface::SocketSet<'static>,
+) -> alloc::vec::Vec<SocketSnapshot> {
+    let mut out = alloc::vec::Vec::with_capacity(registry.entries.len());
+    for (&id, entry) in registry.entries.iter() {
+        let (proto, state) = match entry.kind {
+            EntryKind::Tcp { listening, .. } => {
+                let state = match sockets.get::<tcp::Socket>(entry.smol).state() {
+                    tcp::State::Closed if listening => "LISTEN",
+                    tcp::State::Closed => "CLOSED",
+                    tcp::State::Listen => "LISTEN",
+                    tcp::State::SynSent => "SYN_SENT",
+                    tcp::State::SynReceived => "SYN_RECV",
+                    tcp::State::Established => "ESTABLISHED",
+                    tcp::State::FinWait1 => "FIN_WAIT1",
+                    tcp::State::FinWait2 => "FIN_WAIT2",
+                    tcp::State::CloseWait => "CLOSE_WAIT",
+                    tcp::State::Closing => "CLOSING",
+                    tcp::State::LastAck => "LAST_ACK",
+                    tcp::State::TimeWait => "TIME_WAIT",
+                };
+                ("tcp", state)
+            }
+            EntryKind::Udp => ("udp", "-"),
+            EntryKind::Icmp => ("icmp", "-"),
+        };
+        out.push(SocketSnapshot {
+            id,
+            proto,
+            state,
+            local: entry.local,
+            remote: entry.remote,
+        });
+    }
+    out
+}
+
 impl SocketRegistry {
     pub(super) const fn new() -> Self {
         Self {

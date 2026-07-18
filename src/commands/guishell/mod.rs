@@ -51,6 +51,7 @@ pub enum PendingAction {
     SpawnCalc,
     SpawnGlGame,
     SpawnNotepad,
+    SpawnTaskmgr,
     SpawnFileManager,
     OpenRunDialog,
     ShowShutdownNotice,
@@ -264,6 +265,7 @@ fn show_start_menu() {
             StartMenuAction::Painting => queue_action(PendingAction::SpawnPainting),
             StartMenuAction::Calc => queue_action(PendingAction::SpawnCalc),
             StartMenuAction::GlGame => queue_action(PendingAction::SpawnGlGame),
+            StartMenuAction::TaskManager => queue_action(PendingAction::SpawnTaskmgr),
             StartMenuAction::Run => queue_action(PendingAction::OpenRunDialog),
             StartMenuAction::ShutDown => queue_action(PendingAction::ShowShutdownNotice),
         });
@@ -364,6 +366,14 @@ fn spawn_notepad() {
     crate::window::terminal_factory::spawn_gui_user_app(
         "/host/NOTEPAD.ELF",
         alloc::vec![alloc::string::String::from("notepad")],
+    );
+}
+
+fn spawn_taskmgr() {
+    crate::debug_info!("GUIShell: Spawning task manager...");
+    crate::window::terminal_factory::spawn_gui_user_app(
+        "/host/TASKMGR.ELF",
+        alloc::vec![alloc::string::String::from("taskmgr")],
     );
 }
 
@@ -673,6 +683,10 @@ fn process_pending_actions() {
             PendingAction::SpawnNotepad => {
                 close_start_menu();
                 spawn_notepad();
+            }
+            PendingAction::SpawnTaskmgr => {
+                close_start_menu();
+                spawn_taskmgr();
             }
             PendingAction::SpawnFileManager => {
                 close_start_menu();

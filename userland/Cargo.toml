@@ -19,6 +19,7 @@ members = [
     "apps/guilaunch",
     "apps/guidemo",
     "apps/notepad",
+    "apps/taskmgr",
     "apps/calc",
     "apps/painting",
     "apps/glgame",

@@ -68,6 +68,8 @@ const NR_LSEEK: u64 = 8;
 const NR_BRK: u64 = 12;
 const NR_ACCESS: u64 = 21;
 const NR_NANOSLEEP: u64 = 35;
+const NR_GETPID: u64 = 39;
+const NR_KILL: u64 = 62;
 const NR_CLOCK_GETTIME: u64 = 228;
 const NR_FORK: u64 = 57;
 const NR_EXECVE: u64 = 59;
@@ -264,6 +266,16 @@ pub fn ftruncate(fd: i32, length: i64) -> i64 {
 pub struct Timespec {
     pub tv_sec: i64,
     pub tv_nsec: i64,
+}
+
+pub fn getpid() -> i64 {
+    unsafe { syscall0(NR_GETPID) }
+}
+
+/// Send `sig` to `pid`. Signal 0 probes liveness. The kernel permits
+/// any live ring-3 PID as the target (single-user model).
+pub fn kill(pid: i32, sig: i32) -> i64 {
+    unsafe { syscall2(NR_KILL, pid as u64, sig as u64) }
 }
 
 pub fn nanosleep(request: &Timespec, remaining: Option<&mut Timespec>) -> i64 {

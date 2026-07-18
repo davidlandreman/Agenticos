@@ -86,7 +86,14 @@ fn test_menu_model_order_and_geometry() {
             action: StartMenuAction::ShutDown
         }
     ));
-    assert_eq!(START_MENU_PROGRAM_ITEMS.len(), 6);
+    assert_eq!(START_MENU_PROGRAM_ITEMS.len(), 7);
+    assert!(matches!(
+        START_MENU_PROGRAM_ITEMS[6],
+        StartMenuItem::Action {
+            label: "Task Manager",
+            action: StartMenuAction::TaskManager
+        }
+    ));
     assert_eq!(StartMenuWindow::root_height(), 172);
     assert_eq!(
         StartMenuWindow::maximum_width(),

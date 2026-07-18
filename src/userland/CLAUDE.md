@@ -54,9 +54,21 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   use VMA-aware user-copy validation. Unknown syscall numbers always return
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
-  to BusyBox, the remaining kernel-side GUI app through `GLAUNCH.ELF`, or
-  standalone ELFs such as `/host/FILEMAN.ELF`, `/host/GLGAME.ELF`, and
-  `/host/NOTEPAD.ELF`.
+  to BusyBox or standalone ELFs: `/host/CALC.ELF`, `/host/FILEMAN.ELF`
+  (compat command `explorer`), `/host/GLGAME.ELF`, `/host/NOTEPAD.ELF`,
+  `/host/PAINTING.ELF`, and `/host/TASKMGR.ELF` (`taskmgr` + legacy
+  `tasks` alias). The `GLAUNCH.ELF` GUI-applet list is empty today.
+- `procfs.rs` — synthetic read-only `/proc` namespace, modeled on the
+  `/bin` synthesis pattern. Linux-shaped files (`uptime`, `meminfo`,
+  `stat`, `loadavg`, `net/dev`, `/proc/<pid>/{stat,status,cmdline,statm}`
+  — ring-3 PIDs only) scoped to what BusyBox `ps`/`free`/`uptime` parse,
+  plus AgenticOS TSV tables under `/proc/agenticos/{kthreads,gui,sockets}`.
+  File content is generated **once at open()** into an fd-owned buffer
+  (`FdSlot::VirtualFile`/`VirtualDir`) — no kernel lock is held across
+  user reads and each open sees one consistent snapshot. Also home to
+  the `sysinfo(2)` snapshot helper. Per-process RSS is a read-only
+  page-table walk (`MemoryMapper::count_user_resident_pages`), not a
+  maintained counter.
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
 - `error.rs` — loader-side error enum.
@@ -93,18 +105,34 @@ Each process owns:
   SIGALRM delivery. Timer expiry is processed by kernel housekeeping and the
   inline test dispatcher; a signal-woken blocking syscall re-enters the
   dispatcher as `-EINTR` so its handler runs before the syscall can re-block.
+- `utime_ticks` (CPU time charged by the timer ISR whenever it observes the
+  process at CPL=3 — sampled, so sub-tick syscall time is unattributed) and
+  `cmdline` (retained argv, capped at `CMDLINE_MAX_BYTES`), both read by
+  `/proc/<pid>/*` generators.
 - `sleep_deadline` — restart-stable absolute PIT deadline for a blocking
-  `nanosleep`. Set on first entry, checked on every SYSCALL re-fire, cleared on
-  completion (`lifecycle::nanosleep_deadline`). The process parks on
-  `Ring3BlockReason::Sleeping { deadline_tick }`; `process_expired_sleeps()`
-  wakes it when the deadline elapses. That wake pass runs primarily from the
-  compositor kernel thread's loop (`window::compositor::run`) — the kernel main
-  loop is the idle task under U10 and is starved, so a self-timed animation
-  would otherwise wake only every few seconds; it is also called from the main
-  loop and the inline dispatch loop for the launcher/test paths. Dispatch of the
-  woken process is fast (`scheduler::next_runnable` pops `ring3_ready` each
-  switch). Self-driven ring-3 animation loops (`PAINTING.ELF`) and zsh's
-  `sleep`/`usleep` depend on this; `-EINTR`/remaining-time is not modeled.
+  `nanosleep`. Set on first entry, checked on every SYSCALL re-fire, cleared
+  on completion (`lifecycle::nanosleep_deadline`) or signal interruption. The
+  process parks on `Ring3BlockReason::Sleeping { deadline_tick }`;
+  `process_expired_sleeps()` wakes it at the deadline. That wake pass runs
+  from the PIT ISR every tick — the kernel main loop is the idle task under
+  U10 and can starve for seconds while kernel threads hop between each other
+  via `sleep_ticks`' direct thread→thread switch — with the compositor loop,
+  main loop, and inline dispatch loop as redundant backstops. Prompt dispatch
+  of the woken process comes from `sleep_ticks`' `has_ready_ring3()` check: a
+  voluntarily-sleeping kernel thread bounces through the kernel main loop
+  (whose gate runs `save_kernel_and_resume_ring3`) whenever ring-3 work is
+  pending. Self-driven ring-3 animation loops (`PAINTING.ELF`,
+  `TASKMGR.ELF`) and zsh's `sleep`/`usleep` depend on this. On EINTR the
+  remaining time is not written to `rem` (known POSIX gap).
+
+Signals: `kill(2)` addresses **any** live ring-3 PID (single-user model, no
+permission checks) and wakes a blocked target via `wake_ring3_for_signal`.
+Unhandled fatal-default signals (SIGKILL, SIGTERM-without-trap, …) terminate
+the process at the dispatcher tail (`maybe_deliver_signal`'s fatal check →
+`notify_parent_of_signaled_exit` + `cooperative_exit(128+sig)`). Ignored
+signals (SIGCHLD & co.) stay pending as a notification record but are never
+fatal. Known gap: a CPU-bound ring-3 process that never syscalls can outrun a
+pending fatal signal — the timer ISR does not yet run the fatal check.
 
 Socket slots hold `Arc<net::socket::SocketHandle>`. The handle is a shared
 open-file description: dup/fork share `O_NONBLOCK` and protocol state, while

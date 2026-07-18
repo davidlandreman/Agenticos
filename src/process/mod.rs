@@ -6,8 +6,8 @@ pub mod stack;
 
 pub use context::CpuContext;
 pub use pcb::{BlockReason, ProcessControlBlock, ProcessState, WakeEvents};
-pub use process::{allocate_pid, ProcessId, RunnableProcess};
-pub use scheduler::{ProcessInfo, SCHEDULER};
+pub use process::{allocate_pid, ProcessId};
+pub use scheduler::ProcessInfo;
 
 use crate::window::WindowId;
 use alloc::boxed::Box;
@@ -581,19 +581,6 @@ pub fn terminate_process(pid: ProcessId) {
     scheduler::SCHEDULER.lock().terminate(pid);
 }
 
-/// Update CPU percentages for all processes
-///
-/// Call this periodically (every ~50 ticks / 500ms) to calculate CPU usage.
-/// The percentage represents CPU time used in the elapsed window.
-///
-/// # Arguments
-/// * `elapsed_ticks` - Number of timer ticks since last update
-pub fn update_cpu_percentages(elapsed_ticks: u64) {
-    scheduler::SCHEDULER
-        .lock()
-        .update_cpu_percentages(elapsed_ticks);
-}
-
 // =============================================================================
 // Sleep API
 // =============================================================================
@@ -634,8 +621,15 @@ pub fn sleep_ticks(ticks: u64) {
             None => return,
         };
 
+        // Ring-3 work pending? Bounce through the kernel main loop so
+        // its `save_kernel_and_resume_ring3` gate can dispatch it.
+        // Without this, kernel threads that keep each other ready hop
+        // thread→thread indefinitely and a woken ring-3 process (e.g.
+        // a nanosleep sleeper) starves for seconds.
+        let switch_target = if crate::userland::lifecycle::has_ready_ring3() {
+            SwitchTarget::Kernel
         // Check if there are any real processes to run (not counting idle)
-        let switch_target = if sched.ready_count() > 0 {
+        } else if sched.ready_count() > 0 {
             // Get the next process
             if let Some(next_pid) = sched.schedule() {
                 if let Some(ctx) = sched.get_context(next_pid) {

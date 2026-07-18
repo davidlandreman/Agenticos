@@ -60,6 +60,17 @@ impl GuiProcessState {
 static GUI_STATES: InterruptMutex<BTreeMap<u32, GuiProcessState>> =
     InterruptMutex::new(BTreeMap::new());
 
+/// Owned `(pid, window_count, queued_events)` rows for
+/// `/proc/agenticos/gui`. One short critical section; no per-window
+/// detail leaves this module.
+pub fn ownership_snapshot() -> alloc::vec::Vec<(u32, usize, usize)> {
+    let states = GUI_STATES.lock();
+    states
+        .iter()
+        .map(|(&pid, state)| (pid, state.windows.len(), state.events.len()))
+        .collect()
+}
+
 pub fn allocate_handle(pid: u32) -> Result<u32, i64> {
     if pid == KERNEL_PID {
         return Err(crate::userland::abi::EPERM);

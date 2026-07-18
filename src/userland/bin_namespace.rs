@@ -5,17 +5,19 @@
 //! - **GUILAUNCH** (`GLAUNCH.ELF`) — one ring-3 launcher binary that
 //!   takes an applet name in `argv[0]` and issues the
 //!   `gui_launch` syscall, spawning the matching kernel-side GUI app
-//!   (`tasks`).
-//! - **Direct apps** — standalone native ELFs such as `CALC.ELF`,
-//!   `FILEMAN.ELF`, `GLGAME.ELF`, `NOTEPAD.ELF`, and `PAINTING.ELF`.
+//!   (the list is EMPTY today — every GUI app has migrated to ring 3;
+//!   the mechanism remains for a future ring-0-only workload).
+//! - **Direct apps** — standalone native ELFs: `CALC.ELF`,
+//!   `FILEMAN.ELF` (compat command `explorer`), `GLGAME.ELF`,
+//!   `NOTEPAD.ELF`, `PAINTING.ELF`, and `TASKMGR.ELF` (aliased as both
+//!   `taskmgr` and `tasks`).
 //!
 //! The kernel exposes a single virtual `/bin` directory whose entries
 //! resolve into either binary based on which list the name belongs to.
 //! `execve("/bin/ls", ["ls", ...], envp)` rewrites to
-//! `execve("/host/BB.ELF", ["ls", ...], envp)`; `execve("/bin/tasks",
-//! ["tasks"], envp)` rewrites to `execve("/host/GLAUNCH.ELF",
-//! ["tasks"], envp)`. The respective multicall dispatcher then takes
-//! over.
+//! `execve("/host/BB.ELF", ["ls", ...], envp)`; BusyBox's multicall
+//! dispatcher then takes over. Direct entries such as `/bin/notepad`
+//! rewrite straight to their staged ELF with no launcher round trip.
 //!
 //! No symlinks, no directory mirror in `host_share/` — the namespace is
 //! pure kernel synthesis. Standard zsh PATH lookup (`access("/bin/ls",
@@ -44,6 +46,8 @@ pub const GUILAUNCH_HOST_PATH: &str = "/host/GLAUNCH.ELF";
 
 pub const NOTEPAD_HOST_PATH: &str = "/host/NOTEPAD.ELF";
 
+pub const TASKMGR_HOST_PATH: &str = "/host/TASKMGR.ELF";
+
 pub const PAINTING_HOST_PATH: &str = "/host/PAINTING.ELF";
 
 pub const CALC_HOST_PATH: &str = "/host/CALC.ELF";
@@ -58,11 +62,16 @@ pub const FILEMAN_HOST_PATH: &str = "/host/FILEMAN.ELF";
 ///
 /// Names MUST NOT collide with [`APPLETS`] or [`DIRECT_APPLETS`]. The
 /// disjoint-list invariant is asserted at test time.
-pub const GUI_APPLETS: &[&str] = &["tasks"];
+pub const GUI_APPLETS: &[&str] = &[];
 
 /// Sorted standalone executables synthesized into `/bin` without a multicall
 /// launcher. `apply_bin_rewrite` maps each name directly to its staged ELF.
-pub const DIRECT_APPLETS: &[&str] = &["calc", "explorer", "glgame", "notepad", "painting"];
+/// `explorer` is the compatibility command for the ring-3 File Manager;
+/// `taskmgr` and `tasks` are aliases for the ring-3 Task Manager —
+/// `tasks` preserves the retired kernel app's name.
+pub const DIRECT_APPLETS: &[&str] = &[
+    "calc", "explorer", "glgame", "notepad", "painting", "taskmgr", "tasks",
+];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
 /// `/bin/<name>`. Binary-searched on every lookup. MUST stay sorted —
@@ -350,6 +359,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "explorer" => FILEMAN_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,
         "painting" => PAINTING_HOST_PATH,
+        "taskmgr" | "tasks" => TASKMGR_HOST_PATH,
         _ => return None,
     };
     Some((path, canonical))
@@ -641,9 +651,14 @@ mod tests_internal {
     }
 
     fn test_apply_bin_rewrite_dispatches_gui_app() {
-        let (path, applet) = apply_bin_rewrite("/bin/tasks").expect("must resolve");
-        assert_eq!(path, "/host/GLAUNCH.ELF");
-        assert_eq!(applet, "tasks");
+        // Every GUI app has migrated to ring 3 — the GLAUNCH list is
+        // empty, so no /bin name may resolve to GLAUNCH.ELF anymore.
+        assert!(GUI_APPLETS.is_empty());
+        for entry in merged_bin_entries() {
+            let (path, _) = apply_bin_rewrite(&alloc::format!("/bin/{}", entry))
+                .expect("every merged entry must resolve");
+            assert_ne!(path, "/host/GLAUNCH.ELF");
+        }
     }
 
     fn test_apply_bin_rewrite_dispatches_direct_app() {
@@ -668,6 +683,15 @@ mod tests_internal {
         let (path, applet) = apply_bin_rewrite("/bin/explorer").expect("must resolve");
         assert_eq!(path, "/host/FILEMAN.ELF");
         assert_eq!(applet, "explorer");
+
+        // The Task Manager rewrites under both its own name and the
+        // retired kernel app's `tasks` alias.
+        let (path, applet) = apply_bin_rewrite("/bin/taskmgr").expect("must resolve");
+        assert_eq!(path, "/host/TASKMGR.ELF");
+        assert_eq!(applet, "taskmgr");
+        let (path, applet) = apply_bin_rewrite("/bin/tasks").expect("must resolve");
+        assert_eq!(path, "/host/TASKMGR.ELF");
+        assert_eq!(applet, "tasks");
     }
 
     fn test_apply_bin_rewrite_busybox_still_resolves() {
@@ -705,8 +729,12 @@ mod tests_internal {
             "merged stream missing BusyBox 'ls'"
         );
         assert!(
+            entries.contains(&"explorer"),
+            "merged stream missing direct 'explorer' compat command"
+        );
+        assert!(
             entries.contains(&"tasks"),
-            "merged stream missing GUI 'tasks'"
+            "merged stream missing direct 'tasks' alias"
         );
         assert!(entries.contains(&"calc"));
         assert!(entries.contains(&"glgame"));

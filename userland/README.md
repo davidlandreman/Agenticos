@@ -40,6 +40,7 @@ userland/
     ├── guidemo/        # minimal ring-3 GUI reference client
     ├── fileman/        # standalone Finder/Explorer-style file manager
     ├── notepad/        # standalone editor with userland dialogs + working Save
+    ├── taskmgr/        # tabbed task manager over /proc (graphs, End Task)
     ├── calc/           # standalone four-operation calculator
     ├── painting/       # standalone bouncing-shapes GUI demo (self-driven frame loop)
     ├── glgame/         # GL Arena — windowed real-time colored-geometry 3D game
@@ -75,23 +76,25 @@ resolve into multicall or direct binaries staged under `host_share/`:
 
 - **`BB.ELF` — BusyBox** (core utilities plus IPv4 `ping`, `nc`, `nslookup`,
   and HTTP-only `wget`; IPv6 and TLS are not available).
-- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`tasks`).
+- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (empty today — every
+  GUI app has migrated to ring 3; the mechanism remains for a future
+  ring-0-only workload).
 - **Direct standalone ring-3 applications** — `CALC.ELF`, `FILEMAN.ELF`,
-  `GLGAME.ELF`, `NOTEPAD.ELF`, and `PAINTING.ELF` (`calc`, compatibility
-  command `explorer`, `glgame`, `notepad`, and `painting`).
+  `GLGAME.ELF`, `NOTEPAD.ELF`, `PAINTING.ELF`, and `TASKMGR.ELF`
+  (`calc`, compatibility command `explorer`, `glgame`, `notepad`,
+  `painting`; `taskmgr` with legacy alias `tasks`).
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
 to `BB.ELF` with `argv[0]` overwritten to `"ls"`; BusyBox's own
-dispatcher picks the right applet. `execve("/bin/tasks", argv, envp)` resolves
-to `GLAUNCH.ELF` with `argv[0]` overwritten to `"tasks"`; GUILAUNCH's `_start`
-issues the AgenticOS-internal `sys_gui_launch("tasks")` syscall. No symlinks or
-per-applet ELF copies are needed; the namespace is pure kernel synthesis.
+dispatcher picks the right applet. No symlinks or per-applet ELF copies
+are needed; the namespace is pure kernel synthesis.
 
 `execve("/bin/explorer", ...)`, `execve("/bin/notepad", ...)`,
-`execve("/bin/calc", ...)`, `execve("/bin/glgame", ...)`, and
-`execve("/bin/painting", ...)` instead rewrite directly to their staged ELFs.
-There is no `GLAUNCH` round trip or kernel-side application process for them.
+`execve("/bin/calc", ...)`, `execve("/bin/glgame", ...)`,
+`execve("/bin/painting", ...)`, and `execve("/bin/taskmgr", ...)` (or its
+legacy alias `/bin/tasks`) rewrite directly to their staged ELFs. There is
+no `GLAUNCH` round trip or kernel-side application process for any of them.
 
 `stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
 directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
@@ -269,8 +272,13 @@ window. Context creation requires the strict qualified GPU compositor; the app
 shows a CPU-canvas launch hint when that prerequisite is absent.
 
 `libs/gui` also ships retained-mode widgets — `Button`, `TextField`,
-`ListView`, and `MenuBar` — as manually-positioned structs (no layout engine).
-Each draws itself and exposes hit-testing / key routing helpers.
+`ListView`, `MenuBar`, `TabBar`, `ColumnListView` (multi-column, sortable
+headers, key-stable selection), and `TimeSeriesGraph` (ring-buffer area
+chart, fixed or autoscaling y-axis, dual series) — as manually-positioned
+structs (no layout engine). Each draws itself and exposes hit-testing / key
+routing helpers. `apps/taskmgr` is the reference client for the monitoring
+widgets and for the poll-and-sleep (`GUI_NONBLOCK` + `nanosleep`) loop an
+animating app needs instead of the blocking `next_event()`.
 
 ## Using dialogs (`libs/dialogs`)
 
