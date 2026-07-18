@@ -15,6 +15,11 @@ This folder holds in-kernel test modules that run under QEMU when the kernel is 
 - `compiler_compat.rs` — booted static-musl compatibility ladder. Its
   committed ET_EXEC inputs live under `userland/prebuilt/compiler-compat/`
   and are staged even when `test.sh --skip-userland` is used.
+- `tcc.rs` — booted TinyCC end-to-end: launches the staged `/host/TCC.ELF`
+  against `/host/sysroot`, compiles (including a test-authored source and a
+  `.o` round-trip) into `/work`, and executes the fresh binaries through the
+  production loader. Uses the committed `TCC.ELF` + `tcc-sysroot.tar.gz`
+  prebuilts, staged even with `--skip-userland`.
 - `network.rs` — Virtqueue ownership/error edges plus bounded registry and
   QEMU-local DHCP coverage.
 - `network_userland.rs` — booted static-musl socket fixture and BusyBox

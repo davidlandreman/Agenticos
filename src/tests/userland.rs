@@ -866,6 +866,281 @@ fn test_write_handler_zero_len_succeeds() {
     clear_streams_after_dispatcher_test();
 }
 
+/// A single `write()` far above the 4 KiB staging bound lands fully in a
+/// tmpfs-backed file via the kernel-side chunk loop, byte-exact. musl's
+/// `fwrite` issues large direct writes, so this is the shape a compiler
+/// writing an object file or executable produces.
+fn test_write_file_large_chunked() {
+    setup_phase2_active_user();
+    let path = b"/bigwrite.tmp\0";
+    let path_ptr = path.as_ptr() as u64;
+
+    let mut payload = alloc::vec![0u8; 64 * 1024];
+    for (i, byte) in payload.iter_mut().enumerate() {
+        // Period coprime with 4096 so chunk reordering or duplication
+        // cannot reproduce the pattern.
+        *byte = (i % 251) as u8;
+    }
+    let buf_ptr = payload.as_ptr() as u64;
+    let start = core::cmp::min(path_ptr, buf_ptr);
+    let end = core::cmp::max(path_ptr + path.len() as u64, buf_ptr + payload.len() as u64);
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut open = SyscallArgs::default();
+    open.rax = nr::OPEN;
+    open.rdi = path_ptr;
+    open.rsi = 0x241; // O_WRONLY|O_CREAT|O_TRUNC
+    let fd = syscall_dispatch(&mut open);
+    assert!(fd >= 0, "open for write failed: {}", fd);
+
+    let mut write = SyscallArgs::default();
+    write.rax = nr::WRITE;
+    write.rdi = fd as u64;
+    write.rsi = buf_ptr;
+    write.rdx = payload.len() as u64;
+    assert_eq!(syscall_dispatch(&mut write), payload.len() as i64);
+
+    let mut close = SyscallArgs::default();
+    close.rax = nr::CLOSE;
+    close.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut close), 0);
+
+    let readback = crate::fs::File::open_read("/bigwrite.tmp")
+        .expect("reopen written file")
+        .read_to_vec()
+        .expect("read back written file");
+    assert_eq!(readback.len(), payload.len());
+    assert!(readback == payload, "read-back bytes differ from payload");
+
+    let mut unlink = SyscallArgs::default();
+    unlink.rax = nr::UNLINK;
+    unlink.rdi = path_ptr;
+    assert_eq!(syscall_dispatch(&mut unlink), 0);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// `writev()` with iovs above the staging bound chunks each file iov and
+/// returns the full total.
+fn test_writev_file_large_iovs() {
+    setup_phase2_active_user();
+    let path = b"/bigwritev.tmp\0";
+    let path_ptr = path.as_ptr() as u64;
+
+    let mut payload = alloc::vec![0u8; 9000];
+    for (i, byte) in payload.iter_mut().enumerate() {
+        *byte = (i % 239) as u8;
+    }
+    let buf_ptr = payload.as_ptr() as u64;
+    // iov[0] = first 6000 bytes, iov[1] = remaining 3000.
+    let iovecs: [u64; 4] = [buf_ptr, 6000, buf_ptr + 6000, 3000];
+    let iov_ptr = iovecs.as_ptr() as u64;
+    let start = [path_ptr, buf_ptr, iov_ptr].into_iter().min().unwrap();
+    let end = [
+        path_ptr + path.len() as u64,
+        buf_ptr + payload.len() as u64,
+        iov_ptr + 32,
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut open = SyscallArgs::default();
+    open.rax = nr::OPEN;
+    open.rdi = path_ptr;
+    open.rsi = 0x241; // O_WRONLY|O_CREAT|O_TRUNC
+    let fd = syscall_dispatch(&mut open);
+    assert!(fd >= 0, "open for writev failed: {}", fd);
+
+    let mut writev = SyscallArgs::default();
+    writev.rax = nr::WRITEV;
+    writev.rdi = fd as u64;
+    writev.rsi = iov_ptr;
+    writev.rdx = 2;
+    assert_eq!(syscall_dispatch(&mut writev), payload.len() as i64);
+
+    let mut close = SyscallArgs::default();
+    close.rax = nr::CLOSE;
+    close.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut close), 0);
+
+    let readback = crate::fs::File::open_read("/bigwritev.tmp")
+        .expect("reopen writev file")
+        .read_to_vec()
+        .expect("read back writev file");
+    assert!(readback == payload, "writev read-back differs");
+
+    let mut unlink = SyscallArgs::default();
+    unlink.rax = nr::UNLINK;
+    unlink.rdi = path_ptr;
+    assert_eq!(syscall_dispatch(&mut unlink), 0);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// `pwrite64()` above the staging bound writes fully at the offset and
+/// leaves the descriptor position untouched; `pread64()` above the bound
+/// returns a POSIX short read of the staging size instead of -EFAULT.
+fn test_pwrite_large_and_pread_short() {
+    setup_phase2_active_user();
+    let path = b"/bigpwrite.tmp\0";
+    let path_ptr = path.as_ptr() as u64;
+
+    let mut payload = alloc::vec![0u8; 12 * 1024];
+    for (i, byte) in payload.iter_mut().enumerate() {
+        *byte = (i % 233) as u8;
+    }
+    let buf_ptr = payload.as_ptr() as u64;
+    let mut readbuf = alloc::vec![0u8; 8192];
+    let read_ptr = readbuf.as_mut_ptr() as u64;
+    let start = [path_ptr, buf_ptr, read_ptr].into_iter().min().unwrap();
+    let end = [
+        path_ptr + path.len() as u64,
+        buf_ptr + payload.len() as u64,
+        read_ptr + readbuf.len() as u64,
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut open = SyscallArgs::default();
+    open.rax = nr::OPEN;
+    open.rdi = path_ptr;
+    open.rsi = 0x42; // O_RDWR|O_CREAT
+    let fd = syscall_dispatch(&mut open);
+    assert!(fd >= 0, "open for pwrite failed: {}", fd);
+
+    let mut pwrite = SyscallArgs::default();
+    pwrite.rax = nr::PWRITE64;
+    pwrite.rdi = fd as u64;
+    pwrite.rsi = buf_ptr;
+    pwrite.rdx = payload.len() as u64;
+    pwrite.r10 = 0;
+    assert_eq!(syscall_dispatch(&mut pwrite), payload.len() as i64);
+
+    // Position must still be 0: a sequential read sees the file start.
+    let mut read = SyscallArgs::default();
+    read.rax = nr::READ;
+    read.rdi = fd as u64;
+    read.rsi = read_ptr;
+    read.rdx = 16;
+    assert_eq!(syscall_dispatch(&mut read), 16);
+    assert_eq!(&readbuf[..16], &payload[..16]);
+
+    // pread64 with an 8 KiB request: short read of the 4 KiB staging
+    // bound (previously -EFAULT), from the requested offset.
+    let mut pread = SyscallArgs::default();
+    pread.rax = nr::PREAD64;
+    pread.rdi = fd as u64;
+    pread.rsi = read_ptr;
+    pread.rdx = readbuf.len() as u64;
+    pread.r10 = 1000;
+    assert_eq!(syscall_dispatch(&mut pread), 4096);
+    assert_eq!(&readbuf[..4096], &payload[1000..1000 + 4096]);
+
+    let mut close = SyscallArgs::default();
+    close.rax = nr::CLOSE;
+    close.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut close), 0);
+
+    let mut unlink = SyscallArgs::default();
+    unlink.rax = nr::UNLINK;
+    unlink.rdi = path_ptr;
+    assert_eq!(syscall_dispatch(&mut unlink), 0);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// `chmod`/`fchmod` are validated success no-ops: FAT and tmpfs carry no
+/// permission bits and execve performs no +x check. TinyCC chmods its
+/// output executable after writing it.
+fn test_dispatch_chmod_fchmod_noops() {
+    setup_phase2_active_user();
+
+    // chmod on an existing managed file succeeds.
+    let path = b"/etc/zshrc\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::CHMOD;
+    args.rdi = ptr;
+    args.rsi = 0o755;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    // chmod on a missing path reports ENOENT.
+    let missing = b"/no-such-file-for-chmod\0";
+    let missing_ptr = missing.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: missing_ptr,
+        end: missing_ptr + missing.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::CHMOD;
+    args.rdi = missing_ptr;
+    args.rsi = 0o755;
+    assert_eq!(syscall_dispatch(&mut args), ENOENT);
+
+    // chmod on the synthetic /bin namespace is rejected.
+    let bin = b"/bin/ls\0";
+    let bin_ptr = bin.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: bin_ptr,
+        end: bin_ptr + bin.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::CHMOD;
+    args.rdi = bin_ptr;
+    args.rsi = 0o755;
+    assert_eq!(syscall_dispatch(&mut args), EPERM);
+
+    // fchmod: any valid descriptor succeeds, unknown fd is EBADF.
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCHMOD;
+    args.rdi = 1; // stdout
+    args.rsi = 0o644;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCHMOD;
+    args.rdi = 99;
+    args.rsi = 0o644;
+    assert_eq!(syscall_dispatch(&mut args), EBADF);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// Unit coverage for the UTF-8 seam guard used by chunked terminal
+/// writes: a chunk must never end partway through a multi-byte sequence.
+fn test_utf8_safe_chunk_len_boundaries() {
+    use crate::userland::syscalls::utf8_safe_chunk_len;
+
+    // ASCII tail: full length.
+    assert_eq!(utf8_safe_chunk_len(b"abcdef"), 6);
+    // Complete 2-byte sequence at the end ("é" = C3 A9): full length.
+    assert_eq!(utf8_safe_chunk_len(&[b'a', 0xC3, 0xA9]), 3);
+    // Dangling 2-byte lead at the end: trim it.
+    assert_eq!(utf8_safe_chunk_len(&[b'a', b'b', 0xC3]), 2);
+    // First two bytes of a 3-byte sequence ("€" = E2 82 AC): trim both.
+    assert_eq!(utf8_safe_chunk_len(&[b'a', 0xE2, 0x82]), 1);
+    // Complete 3-byte sequence: full length.
+    assert_eq!(utf8_safe_chunk_len(&[0xE2, 0x82, 0xAC]), 3);
+    // First three bytes of a 4-byte sequence (F0 9F 92 96): trim all three.
+    assert_eq!(utf8_safe_chunk_len(&[b'x', 0xF0, 0x9F, 0x92]), 1);
+    // Complete 4-byte sequence: full length.
+    assert_eq!(utf8_safe_chunk_len(&[0xF0, 0x9F, 0x92, 0x96]), 4);
+    // Not valid UTF-8 anyway (all continuation bytes): progress guarantee.
+    assert_eq!(utf8_safe_chunk_len(&[0x80, 0x80, 0x80, 0x80]), 4);
+}
+
 /// `exit_group(42)` records 42 in `LAST_EXIT_CODE` and returns through the
 /// synthetic kernel-test fallback when no real ring-3 process is current.
 fn test_exit_group_handler_records_code() {
@@ -4770,6 +5045,11 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_write_handler_rejects_span_past_bounds,
         &test_write_handler_rejects_pointer_wraparound,
         &test_write_handler_zero_len_succeeds,
+        &test_write_file_large_chunked,
+        &test_writev_file_large_iovs,
+        &test_pwrite_large_and_pread_short,
+        &test_dispatch_chmod_fchmod_noops,
+        &test_utf8_safe_chunk_len_boundaries,
         &test_exit_group_handler_records_code,
         &test_validate_user_slice_zero_len_ok,
         // Loader

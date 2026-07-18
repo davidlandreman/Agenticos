@@ -13,6 +13,7 @@ app_row fileman          apps/fileman           cargo FILEMAN.ELF  built-every-r
 app_row hello-cpp        apps/hello-cpp         make  HELLOCPP.ELF built-every-run musl-cxx      apps/hello-cpp/build/hello-cpp                    -
 app_row zsh              apps/zsh               make  ZSH.ELF      prebuilt-managed musl-cc     apps/zsh/build/zsh                                prebuilt/ZSH.ELF
 app_row busybox          apps/busybox           make  BB.ELF       prebuilt-managed musl-cc     apps/busybox/build/busybox                        prebuilt/BB.ELF
+app_row tcc              apps/tcc               make  TCC.ELF      prebuilt-managed musl-cc     apps/tcc/build/tcc                                prebuilt/TCC.ELF
 app_row compiler-crt     apps/compiler-compat   make  CCCRT.ELF    test-fixture    musl-cc       apps/compiler-compat/build/CCCRT.ELF              prebuilt/compiler-compat/CCCRT.ELF
 app_row compiler-libc    apps/compiler-compat   make  CCLIBC.ELF   test-fixture    musl-cc       apps/compiler-compat/build/CCLIBC.ELF             prebuilt/compiler-compat/CCLIBC.ELF
 app_row compiler-probe   apps/compiler-compat   make  CCPROBE.ELF  test-fixture    musl-cc       apps/compiler-compat/build/CCPROBE.ELF            prebuilt/compiler-compat/CCPROBE.ELF

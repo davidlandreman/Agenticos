@@ -55,6 +55,10 @@ pub const CALC_HOST_PATH: &str = "/host/CALC.ELF";
 pub const GLGAME_HOST_PATH: &str = "/host/GLGAME.ELF";
 pub const FILEMAN_HOST_PATH: &str = "/host/FILEMAN.ELF";
 
+/// TinyCC: on-target C compiler. `tcc` and the traditional `cc` alias
+/// both rewrite here; argv[0] keeps the invoked name.
+pub const TCC_HOST_PATH: &str = "/host/TCC.ELF";
+
 /// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
 /// MUST stay in sync with the match arms in
 /// [`crate::commands::gui_launch_table::spawn_by_name`]; a test in
@@ -68,9 +72,10 @@ pub const GUI_APPLETS: &[&str] = &[];
 /// launcher. `apply_bin_rewrite` maps each name directly to its staged ELF.
 /// `explorer` is the compatibility command for the ring-3 File Manager;
 /// `taskmgr` and `tasks` are aliases for the ring-3 Task Manager —
-/// `tasks` preserves the retired kernel app's name.
+/// `tasks` preserves the retired kernel app's name. `tcc` and `cc` are
+/// both TinyCC.
 pub const DIRECT_APPLETS: &[&str] = &[
-    "calc", "explorer", "glgame", "notepad", "painting", "taskmgr", "tasks",
+    "calc", "cc", "explorer", "glgame", "notepad", "painting", "taskmgr", "tasks", "tcc",
 ];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
@@ -355,6 +360,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
     let canonical = DIRECT_APPLETS[index];
     let path = match canonical {
         "calc" => CALC_HOST_PATH,
+        "cc" | "tcc" => TCC_HOST_PATH,
         "glgame" => GLGAME_HOST_PATH,
         "explorer" => FILEMAN_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,

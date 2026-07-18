@@ -51,13 +51,16 @@ See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for
 
 ```
   /          → overlay(upper = Tmpfs, lower = boot FAT partition)
-  /host      → FAT (vvfat-backed, read-only)
+  /work      → directory on the overlay, provisioned at boot (scratch/compiler output)
+  /host      → FAT (vvfat-backed, read-only; /host/sysroot is the TCC musl sysroot)
   /data      → ext2 (writable, `agenticos-data` VirtIO disk, persistent)
   /legacy-data → optional old FAT image (read-only, `agenticos-legacy` VirtIO disk)
   /bin/<applet> → synthesized at syscall layer (src/userland/bin_namespace.rs)
 ```
 
-The overlay's upper is a fresh `Tmpfs` constructed at boot in `vfs::mount_overlay_root`; the lower is the bootloader-built FAT image. `/bin` is invisible to the FS layer — the syscall dispatcher intercepts opens/access/stat before reaching the VFS.
+The overlay's upper is a fresh `Tmpfs` constructed at boot in `vfs::mount_overlay_root`; the lower is the bootloader-built FAT image. `/bin` is invisible to the FS layer — the syscall dispatcher intercepts opens/access/stat before reaching the VFS. `/work` is not a mount: `src/kernel.rs` mkdirs it idempotently on the overlay after overlay-state hydration.
+
+**Seek past EOF** is allowed on writable filesystems, with the gap zero-filling on the next write; policy lives per-filesystem (`File::seek` just delegates). tmpfs gets it for free (`resize`), ext2 writes sparse gaps natively, and the FAT write path appends explicit zeros from EOF to the write position first, because `write_file_at` links gap clusters while walking to an offset but never writes their data. Read-only FAT mounts (`/host`, overlay-lower handles, `/legacy-data`) keep the `position > size` rejection at the FAT-level seek.
 
 Writes under `/` go through copy-up into tmpfs; persistence happens via the `sync(2)` syscall (BusyBox `sync` applet) which flushes the upper to `/data/overlay-state.{0,1}` double-buffered blob with a 1-byte pointer commit. On boot, `restore_overlay_upper_from_data` validates the active blob's CRC32 and hydrates the upper tmpfs from it.
 

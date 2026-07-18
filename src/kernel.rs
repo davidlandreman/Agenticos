@@ -93,6 +93,17 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // No-op when /data is missing or has no prior sync.
     restore_overlay_upper_from_data();
 
+    // Writable scratch directory on the overlay tmpfs. Idempotent:
+    // a hydrated overlay state that already contains /work (or files
+    // under it) must not fail boot. Ring-3 processes start with cwd
+    // /host (read-only), so this is the conventional place for
+    // compiler output and other build products.
+    match crate::fs::vfs::vfs_mkdir("/work") {
+        Ok(()) => {}
+        Err(crate::fs::filesystem::FilesystemError::AlreadyExists) => {}
+        Err(e) => debug_info!("[boot] /work provisioning failed: {:?}", e),
+    }
+
     debug_info!("[boot] managed /etc");
     crate::userland::etc::init();
 

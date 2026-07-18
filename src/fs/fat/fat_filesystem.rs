@@ -366,10 +366,35 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
             )
         };
         let mut new_first_cluster = first_cluster_in;
+
+        // Seek-past-EOF gap: append explicit zeros from the current end
+        // of file up to the write position. `write_file_at` allocates
+        // and links gap clusters while walking to an offset but never
+        // writes their data, so without this the gap would surface
+        // whatever bytes those clusters last held on disk.
+        let zeros = [0u8; 512];
+        let mut fill_pos = handle.size;
+        while fill_pos < handle.position {
+            let chunk = core::cmp::min(handle.position - fill_pos, zeros.len() as u64) as usize;
+            let n = self
+                .inner
+                .write_file_at(
+                    new_first_cluster,
+                    fill_pos,
+                    &zeros[..chunk],
+                    &mut new_first_cluster,
+                )
+                .map_err(map_fat_err)?;
+            if n == 0 {
+                return Err(FilesystemError::IoError);
+            }
+            fill_pos += n as u64;
+        }
+
         let bytes_written = self
             .inner
             .write_file_at(
-                first_cluster_in,
+                new_first_cluster,
                 handle.position,
                 buffer,
                 &mut new_first_cluster,
@@ -395,7 +420,10 @@ impl<'a> Filesystem for FatFilesystemWrapper<'a> {
     }
 
     fn seek(&self, handle: &mut FileHandle, position: u64) -> Result<u64, FilesystemError> {
-        if position > handle.size {
+        // POSIX permits seeking past EOF on a writable filesystem; the
+        // gap zero-fills on the next write (see `write`). Read-only
+        // mounts keep the historical rejection.
+        if position > handle.size && !self.writable {
             return Err(FilesystemError::InvalidPath);
         }
 
