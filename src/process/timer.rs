@@ -19,6 +19,7 @@ pub enum TimerKind {
     UserSleep,
     UserNetworkTimeout,
     UserRealTimer,
+    UserFutex,
     NetworkPoll,
     CompositorFrame,
 }
@@ -38,6 +39,7 @@ pub enum TimerAction {
     UserSleep(u32),
     UserNetworkTimeout(u32),
     UserRealTimer(u32),
+    UserFutex(u32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,6 +100,7 @@ impl TimerQueue {
             TimerKind::UserRealTimer => 4,
             TimerKind::NetworkPoll => 5,
             TimerKind::CompositorFrame => 6,
+            TimerKind::UserFutex => 7,
         };
         value
             .wrapping_mul(tag)
@@ -359,6 +362,7 @@ pub fn cancel_entity(entity: EntityId) {
         TimerKind::UserRealTimer,
         TimerKind::NetworkPoll,
         TimerKind::CompositorFrame,
+        TimerKind::UserFutex,
     ] {
         let _ = cancel(TimerKey { entity, kind });
     }
@@ -428,6 +432,10 @@ fn deliver(action: TimerAction, now: u64) {
         }
         TimerAction::UserRealTimer(pid) => {
             crate::userland::lifecycle::expire_real_timer(pid, now);
+        }
+        TimerAction::UserFutex(pid) => {
+            let _ = now;
+            crate::userland::futex::expire_wait(pid);
         }
     }
 }

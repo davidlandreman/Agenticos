@@ -78,6 +78,7 @@ pub fn sse_enabled() -> bool {
 /// propagates the alignment requirement out to any enclosing type
 /// (e.g., the per-process `Process` struct embeds one of these).
 #[repr(C, align(16))]
+#[derive(Clone)]
 pub struct FpuState {
     bytes: [u8; 512],
 }

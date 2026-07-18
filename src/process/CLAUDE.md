@@ -10,7 +10,8 @@ implementation details live in `src/userland/`.
 - `manager.rs` — small singleton holding the active stdin buffer used by kernel-side `read` paths. (The kernel-side shell command registry that used to live here was removed when zsh became the default terminal; see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`.)
 - `pcb.rs` — process control block. Carries name, PID, kernel stack, `CpuContext`, watchdog `last_activity_tick`, terminal id, optional entry-fn closure.
 - `context.rs` — `CpuContext` (all GPRs + RIP/RSP/RFLAGS + CS/SS). The CS/SS fields default to kernel selectors (0x08/0x10) so existing kernel-process flows don't change.
-- `scheduler.rs` — shared privilege-neutral run queue with per-CPU current slots and save-before-steal context publication.
+- `scheduler.rs` — shared privilege-neutral run queue with per-CPU current slots,
+  save-before-steal context publication, and optional entity CPU affinity.
 - `stack.rs` — `StackAllocator` over a fixed VA range at `0x_5555_0000_0000`.
 
 ## What's wired up today
@@ -36,10 +37,17 @@ implementation details live in `src/userland/`.
 
 **Multi-ring-3 integration:** ring-3 processes and kernel threads share the tagged scheduler queue. Production launchers do not wait: `process-service` installs the process as Ready, then returns to its queue. On exit the user entity is unregistered and the service is woken to drop the `Process` from a safe kernel stack. `WaitingForRing3Exit` remains only for synchronous QEMU-test compatibility.
 
+**Pthread affinity rule:** several ring-3 task entities may share one TGID and
+address space. Until user TLB shootdown exists, the group is assigned a home
+CPU on its first pthread clone and all members receive scheduler affinity to
+that CPU. Dequeue skips ineligible entities without losing their queue order;
+targeted reschedule IPIs wake the home CPU.
+
 ## What's NOT wired up
 
 - **No isolation between kernel threads.** All kernel code shares one address space (ring 0). Ring-3 processes have their own L4 (USER-bit-protected user half + shared kernel half) — see the userland subsystem at `src/userland/`.
-- **Coarse SMP only.** There is one global run queue and scheduler lock; per-CPU queues, affinity, work stealing, and load balancing are intentionally deferred.
+- **Coarse SMP only.** There is one global run queue and scheduler lock;
+  per-CPU queues, work stealing, and load balancing are intentionally deferred.
 - **No IPC.**
 
 ## Cross-references

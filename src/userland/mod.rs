@@ -10,6 +10,7 @@ pub mod devfs;
 pub mod error;
 pub mod etc;
 pub mod fdtable;
+pub mod futex;
 pub mod gui;
 pub mod gui_gl;
 pub mod gui_syscalls;

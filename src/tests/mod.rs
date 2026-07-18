@@ -58,6 +58,8 @@ pub mod procfs;
 #[cfg(feature = "test")]
 pub mod progress_bar_tests;
 #[cfg(feature = "test")]
+pub mod pthreads;
+#[cfg(feature = "test")]
 pub mod retained_scene;
 #[cfg(feature = "test")]
 pub mod scheduler;
@@ -140,6 +142,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
     ("procfs", procfs::get_tests),
+    ("pthreads", pthreads::get_tests),
     (
         "process_service",
         crate::userland::process_service::process_service_tests,

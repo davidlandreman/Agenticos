@@ -250,6 +250,19 @@ static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 /// between entries to time-slice between ring-3 processes.
 pub struct ProcessTable {
     pub by_pid: BTreeMap<u32, Process>,
+    /// Linux task-id to thread-group-id mapping. Leaders map to themselves.
+    pub thread_groups: BTreeMap<u32, u32>,
+    /// Home CPU for a group once it has more than one task. This preserves
+    /// the one-active-CPU-per-address-space invariant until TLB shootdown.
+    pub group_home_cpu: BTreeMap<u32, usize>,
+    /// Per-task CLONE_CHILD_CLEARTID / set_tid_address pointer.
+    pub clear_child_tid: BTreeMap<u32, u64>,
+    /// Per-task robust-list registration. Owner-death walking is deferred,
+    /// but retaining the registration makes the ABI truthful.
+    pub robust_lists: BTreeMap<u32, (u64, usize)>,
+    /// Tasks that have stopped but whose kernel stacks must be reaped from a
+    /// different stack after the scheduler dispatches away from them.
+    pub dead_tasks: BTreeMap<u32, ()>,
     /// Domain-specific wait reasons. Runnable ownership lives exclusively in
     /// `process::scheduler`; this map is an index for targeted userland wakes.
     pub ring3_blocked: BTreeMap<u32, Ring3BlockReason>,
@@ -259,6 +272,11 @@ impl ProcessTable {
     const fn empty() -> Self {
         Self {
             by_pid: BTreeMap::new(),
+            thread_groups: BTreeMap::new(),
+            group_home_cpu: BTreeMap::new(),
+            clear_child_tid: BTreeMap::new(),
+            robust_lists: BTreeMap::new(),
+            dead_tasks: BTreeMap::new(),
             ring3_blocked: BTreeMap::new(),
         }
     }
@@ -315,6 +333,11 @@ pub enum Ring3BlockReason {
     Sleeping {
         deadline_tick: u64,
     },
+    WaitingForFutex {
+        tgid: u32,
+        address: u64,
+        deadline_tick: Option<u64>,
+    },
     /// An asynchronous block request identified by its driver token.
     WaitingForBlockIo {
         token: u64,
@@ -364,6 +387,7 @@ pub(crate) static PROCESS_TABLE: InterruptMutex<ProcessTable> =
 fn ensure_sentinel(g: &mut ProcessTable) {
     if !g.by_pid.contains_key(&KERNEL_PID) {
         g.by_pid.insert(KERNEL_PID, Process::sentinel());
+        g.thread_groups.insert(KERNEL_PID, KERNEL_PID);
     }
 }
 
@@ -461,10 +485,138 @@ pub fn with_process<R>(pid: u32, f: impl FnOnce(&mut Process) -> R) -> Option<R>
     g.by_pid.get_mut(&pid).map(f)
 }
 
+fn tgid_locked(g: &ProcessTable, tid: u32) -> u32 {
+    g.thread_groups.get(&tid).copied().unwrap_or(tid)
+}
+
+/// Operate on the shared process-group owner for the current task.
+pub fn with_current_group<R>(f: impl FnOnce(&mut Process) -> R) -> R {
+    let mut g = PROCESS_TABLE.lock();
+    ensure_sentinel(&mut g);
+    let tid = crate::arch::x86_64::percpu::current_user_pid().unwrap_or(KERNEL_PID);
+    let tgid = tgid_locked(&g, tid);
+    let group = g
+        .by_pid
+        .get_mut(&tgid)
+        .expect("thread-group leader invariant violated");
+    f(group)
+}
+
+/// Operate on the shared owner for `tgid`.
+pub fn with_group<R>(tgid: u32, f: impl FnOnce(&mut Process) -> R) -> Option<R> {
+    let mut g = PROCESS_TABLE.lock();
+    ensure_sentinel(&mut g);
+    g.by_pid.get_mut(&tgid).map(f)
+}
+
 /// Compatibility alias for the (small) tail of callsites still using
 /// the pre-PR-C name. New code should use `with_current_process`.
 pub fn with_active_user<R>(f: impl FnOnce(&mut Process) -> R) -> R {
-    with_current_process(f)
+    with_current_group(f)
+}
+
+pub fn current_tgid() -> u32 {
+    let mut g = PROCESS_TABLE.lock();
+    ensure_sentinel(&mut g);
+    let tid = crate::arch::x86_64::percpu::current_user_pid().unwrap_or(KERNEL_PID);
+    tgid_locked(&g, tid)
+}
+
+pub fn task_tgid(tid: u32) -> Option<u32> {
+    let g = PROCESS_TABLE.lock();
+    g.by_pid.contains_key(&tid).then(|| tgid_locked(&g, tid))
+}
+
+pub fn group_member_count(tgid: u32) -> usize {
+    let g = PROCESS_TABLE.lock();
+    g.thread_groups
+        .values()
+        .filter(|candidate| **candidate == tgid)
+        .count()
+}
+
+pub fn group_live_member_count(tgid: u32) -> usize {
+    let g = PROCESS_TABLE.lock();
+    g.thread_groups
+        .iter()
+        .filter(|(_, candidate)| **candidate == tgid)
+        .filter(|(tid, _)| !g.dead_tasks.contains_key(tid))
+        .count()
+}
+
+pub fn group_members(tgid: u32) -> alloc::vec::Vec<u32> {
+    PROCESS_TABLE
+        .lock()
+        .thread_groups
+        .iter()
+        .filter_map(|(&tid, &group)| (group == tgid).then_some(tid))
+        .collect()
+}
+
+pub fn set_clear_child_tid(tid: u32, pointer: u64) {
+    let mut g = PROCESS_TABLE.lock();
+    if pointer == 0 {
+        g.clear_child_tid.remove(&tid);
+    } else {
+        g.clear_child_tid.insert(tid, pointer);
+    }
+}
+
+pub fn clear_child_tid(tid: u32) -> Option<u64> {
+    PROCESS_TABLE.lock().clear_child_tid.get(&tid).copied()
+}
+
+pub fn set_robust_list(tid: u32, head: u64, len: usize) {
+    let mut g = PROCESS_TABLE.lock();
+    if head == 0 {
+        g.robust_lists.remove(&tid);
+    } else {
+        g.robust_lists.insert(tid, (head, len));
+    }
+}
+
+pub fn register_thread_task(tid: u32, tgid: u32, process: Process) -> Result<(), ()> {
+    let cpu = crate::arch::x86_64::percpu::cpu_id();
+    let members = {
+        let mut g = PROCESS_TABLE.lock();
+        if g.by_pid.len() >= 129 || !g.by_pid.contains_key(&tgid) || g.by_pid.contains_key(&tid) {
+            return Err(());
+        }
+        let count = g
+            .thread_groups
+            .values()
+            .filter(|candidate| **candidate == tgid)
+            .count();
+        if count >= 64 {
+            return Err(());
+        }
+        let home = *g.group_home_cpu.entry(tgid).or_insert(cpu);
+        if home != cpu {
+            return Err(());
+        }
+        g.by_pid.insert(tid, process);
+        g.thread_groups.insert(tid, tgid);
+        g.thread_groups
+            .iter()
+            .filter_map(|(&member, &group)| (group == tgid).then_some(member))
+            .collect::<alloc::vec::Vec<_>>()
+    };
+    let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
+    for member in members {
+        if scheduler.register_user(member).is_err()
+            || scheduler
+                .set_cpu_affinity(
+                    crate::process::entity::EntityId::UserProcess(member),
+                    Some(cpu),
+                )
+                .is_err()
+        {
+            drop(scheduler);
+            drop(remove_process(tid));
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 /// PID of the currently-loaded ring-3 process, or `None` if none.
@@ -501,7 +653,9 @@ pub fn set_current_user_pid(pid: Option<u32>) {
 /// does both atomically via [`install_new_process_opt`]).
 pub fn insert_process(p: Process) -> u32 {
     let pid = p.pid;
-    PROCESS_TABLE.lock().by_pid.insert(pid, p);
+    let mut g = PROCESS_TABLE.lock();
+    g.by_pid.insert(pid, p);
+    g.thread_groups.insert(pid, pid);
     pid
 }
 
@@ -520,18 +674,59 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     }
     let was_current = current_user_pid() == Some(pid);
     let mut g = PROCESS_TABLE.lock();
-    g.ring3_blocked.remove(&pid);
-    let removed = g.by_pid.remove(&pid)?;
+    let tgid = g.thread_groups.get(&pid).copied().unwrap_or(pid);
+    let members = if pid == tgid {
+        g.thread_groups
+            .iter()
+            .filter_map(|(&tid, &group)| (group == tgid).then_some(tid))
+            .collect::<alloc::vec::Vec<_>>()
+    } else {
+        alloc::vec![pid]
+    };
+    let mut removed = None;
+    for member in &members {
+        g.ring3_blocked.remove(member);
+        g.clear_child_tid.remove(member);
+        g.robust_lists.remove(member);
+        g.dead_tasks.remove(member);
+        g.thread_groups.remove(member);
+        let process = g.by_pid.remove(member);
+        if *member == pid {
+            removed = process;
+        }
+    }
+    if pid == tgid {
+        g.group_home_cpu.remove(&tgid);
+    }
+    let removed = removed?;
     drop(g);
     if was_current {
         crate::arch::x86_64::percpu::set_current_user_pid(None);
     }
-    crate::process::timer::cancel_entity(crate::process::entity::EntityId::UserProcess(pid));
-    crate::process::scheduler::SCHEDULER
-        .lock()
-        .unregister_entity(crate::process::entity::EntityId::UserProcess(pid));
-    crate::userland::gui::cleanup_process(pid);
+    for member in members {
+        crate::process::timer::cancel_entity(crate::process::entity::EntityId::UserProcess(member));
+        crate::process::scheduler::SCHEDULER
+            .lock()
+            .unregister_entity(crate::process::entity::EntityId::UserProcess(member));
+        crate::userland::gui::cleanup_process(member);
+    }
     Some(removed)
+}
+
+/// Reap one stopped non-leader task after it has switched off its own kernel
+/// stack. Leaders retain the shared process resources until the whole group
+/// becomes a zombie and its ordinary owner reaps it.
+pub fn reap_one_dead_thread() -> bool {
+    let candidate = {
+        let g = PROCESS_TABLE.lock();
+        g.dead_tasks.keys().copied().find(|tid| {
+            let tgid = tgid_locked(&g, *tid);
+            *tid != tgid
+        })
+    };
+    let Some(tid) = candidate else { return false };
+    drop(remove_process(tid));
+    true
 }
 
 /// Reset the sentinel entry at PID 0 to its default state. Used by the
@@ -543,6 +738,7 @@ pub fn remove_process(pid: u32) -> Option<Process> {
 pub fn reset_sentinel() {
     let mut g = PROCESS_TABLE.lock();
     g.by_pid.insert(KERNEL_PID, Process::sentinel());
+    g.thread_groups.insert(KERNEL_PID, KERNEL_PID);
 }
 
 // ---------- U3: ring-3 scheduling state ----------
@@ -570,6 +766,10 @@ pub fn mark_ring3_ready(pid: u32) {
     scheduler
         .make_ready(crate::process::entity::EntityId::UserProcess(pid), None)
         .expect("scheduler entity capacity exceeded while readying user process");
+    if let Some(cpu) = scheduler.cpu_affinity(entity) {
+        drop(scheduler);
+        crate::arch::x86_64::smp::notify_cpu(cpu);
+    }
 }
 
 /// Mark `pid` blocked and retain its domain-specific reason for targeted wakes.
@@ -608,6 +808,20 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
             )
             .expect("timer capacity exceeded while arming network timeout");
         }
+        Ring3BlockReason::WaitingForFutex {
+            deadline_tick: Some(deadline_tick),
+            ..
+        } => {
+            crate::process::timer::arm(
+                crate::process::timer::TimerKey {
+                    entity,
+                    kind: crate::process::timer::TimerKind::UserFutex,
+                },
+                deadline_tick,
+                crate::process::timer::TimerAction::UserFutex(pid),
+            )
+            .expect("timer capacity exceeded while arming futex wait");
+        }
         Ring3BlockReason::WaitingForChild { .. }
         | Ring3BlockReason::WaitingForSignal
         | Ring3BlockReason::WaitingForInput
@@ -615,6 +829,10 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
         | Ring3BlockReason::WaitingForPipeRead
         | Ring3BlockReason::WaitingForPipeWrite
         | Ring3BlockReason::WaitingForBlockIo { .. }
+        | Ring3BlockReason::WaitingForFutex {
+            deadline_tick: None,
+            ..
+        }
         | Ring3BlockReason::WaitingForNetwork {
             deadline_tick: None,
         } => {}
@@ -757,6 +975,7 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
             | Some(Ring3BlockReason::WaitingForPipeWrite)
             | Some(Ring3BlockReason::WaitingForNetwork { .. })
             | Some(Ring3BlockReason::Sleeping { .. })
+            | Some(Ring3BlockReason::WaitingForFutex { .. })
             | Some(Ring3BlockReason::WaitingForBlockIo { .. })
             | None => false,
         };
@@ -1295,6 +1514,9 @@ pub fn wake_ring3_for_signal(pid: u32) {
         process.pending_syscall_interrupt = true;
     }
     drop(g);
+    if matches!(reason, Ring3BlockReason::WaitingForFutex { .. }) {
+        crate::userland::futex::interrupt_wait(pid);
+    }
     mark_ring3_ready(pid);
 }
 
@@ -1563,6 +1785,7 @@ pub fn install_new_process_opt(
         crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES,
     );
     PROCESS_TABLE.lock().by_pid.insert(pid, p);
+    PROCESS_TABLE.lock().thread_groups.insert(pid, pid);
     crate::arch::x86_64::percpu::set_current_user_pid(Some(pid));
     pid
 }
@@ -1844,7 +2067,7 @@ pub fn unmap_user_stack(p: &mut Process) {
 /// [`current_user_pid`] for the long tail of callers that want a `u32`
 /// directly (matches pre-PR-C return type).
 pub fn current_pid() -> u32 {
-    current_user_pid().unwrap_or(KERNEL_PID)
+    current_tgid()
 }
 
 // ---------- zombie filing + SIGCHLD on parent ----------
@@ -2246,10 +2469,76 @@ fn signum_for_vector(vector: u8) -> i32 {
 /// Cooperative-exit path — invoked from the `exit` syscall handler.
 /// Same teardown as `cleanup_user_process`, with `ExitKind::Cooperative`.
 pub fn cooperative_exit(code: i64) -> ! {
-    record_exit(ExitKind::Cooperative, code);
-    // Demand-grown stack (U4): release [stack_mapped_bottom, stack_top).
-    with_current_process(unmap_user_stack);
-    long_jump_to_run_or_halt();
+    cooperative_group_exit(code)
+}
+
+fn clear_tid_and_wake(tid: u32, tgid: u32) {
+    let Some(address) = clear_child_tid(tid) else {
+        return;
+    };
+    let zero = 0u32;
+    if crate::userland::usercopy::write_unaligned(address, &zero).is_ok() {
+        crate::userland::futex::wake_address(tgid, address, 1);
+    }
+    set_clear_child_tid(tid, 0);
+}
+
+fn stop_task(tid: u32) {
+    crate::userland::futex::discard_task(tid);
+    PROCESS_TABLE.lock().dead_tasks.insert(tid, ());
+    let entity = crate::process::entity::EntityId::UserProcess(tid);
+    crate::process::timer::cancel_entity(entity);
+    let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
+    scheduler.unregister_entity(entity);
+    scheduler.wake_threads_waiting_for_ring3_exit(tid);
+}
+
+fn finish_group(tgid: u32, code: i64) {
+    let parent_pid = with_group(tgid, |group| {
+        if matches!(group.exit_kind, ExitKind::None) {
+            group.exit_kind = ExitKind::Cooperative;
+            group.exit_code = code;
+        }
+        group.parent_pid
+    })
+    .unwrap_or(KERNEL_PID);
+    if parent_pid != KERNEL_PID {
+        notify_parent_of_exit(tgid, parent_pid, code);
+    }
+    crate::userland::process_service::notify_process_exit(tgid);
+}
+
+/// Linux `SYS_exit`: stop only the calling task. The final member converts
+/// the retained leader into the process zombie observed by wait4/reapers.
+pub fn cooperative_thread_exit(code: i64) -> ! {
+    let tid = current_user_pid().expect("thread exit without a current task");
+    let tgid = task_tgid(tid).unwrap_or(tid);
+    clear_tid_and_wake(tid, tgid);
+    stop_task(tid);
+    if group_live_member_count(tgid) == 0 {
+        with_group(tgid, unmap_user_stack);
+        finish_group(tgid, code);
+    } else {
+        crate::userland::process_service::notify_process_exit(tid);
+    }
+    set_current_user_pid(None);
+    unsafe { crate::userland::switch::dispatch_after_user_stop() }
+}
+
+/// Linux `exit_group`: stop every schedulable task sharing the address space,
+/// then publish one process-level exit record for the leader.
+pub fn cooperative_group_exit(code: i64) -> ! {
+    let tid = current_user_pid().expect("group exit without a current task");
+    let tgid = task_tgid(tid).unwrap_or(tid);
+    let members = group_members(tgid);
+    for member in members {
+        clear_tid_and_wake(member, tgid);
+        stop_task(member);
+    }
+    with_group(tgid, unmap_user_stack);
+    finish_group(tgid, code);
+    set_current_user_pid(None);
+    unsafe { crate::userland::switch::dispatch_after_user_stop() }
 }
 
 fn record_exit(kind: ExitKind, code: i64) {

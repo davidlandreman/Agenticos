@@ -9,7 +9,7 @@ use crate::userland::vm::{VmProt, VmaBacking};
 
 pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
     let page = address & !0xfff;
-    let context = crate::userland::lifecycle::with_current_process(|process| {
+    let context = crate::userland::lifecycle::with_current_group(|process| {
         let space = process.address_space.as_ref()?;
         Some((space.l4_frame(), space.vmas().find(address)?.clone()))
     });
@@ -115,7 +115,7 @@ pub fn ensure_user_range(ptr: u64, len: u64, write: bool) -> Result<(), i64> {
     }
     let end = ptr.checked_add(len).ok_or(EFAULT)?;
     let has_address_space =
-        crate::userland::lifecycle::with_current_process(|process| process.address_space.is_some());
+        crate::userland::lifecycle::with_current_group(|process| process.address_space.is_some());
     if !has_address_space {
         let bounds = crate::userland::abi::user_va_bounds().ok_or(EFAULT)?;
         return (ptr >= bounds.start && end <= bounds.end)

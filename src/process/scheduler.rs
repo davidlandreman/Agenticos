@@ -52,6 +52,9 @@ pub struct SchedEntity {
     pub latency_contract: Option<LatencyContract>,
     /// Full architecture context is safe for another CPU to restore.
     pub context_published: bool,
+    /// Optional logical CPU constraint. User tasks that share an address
+    /// space are pinned together until remote user-TLB shootdown exists.
+    pub cpu_affinity: Option<usize>,
 }
 
 impl SchedEntity {
@@ -63,6 +66,7 @@ impl SchedEntity {
             must_run_by_tick: None,
             latency_contract: None,
             context_published: true,
+            cpu_affinity: None,
         }
     }
 }
@@ -300,6 +304,21 @@ impl Scheduler {
         self.entities.get(&id).map(|entity| entity.state)
     }
 
+    pub fn set_cpu_affinity(&mut self, id: EntityId, cpu: Option<usize>) -> Result<(), ()> {
+        if cpu.is_some_and(|cpu| cpu >= crate::arch::x86_64::smp::online_cpu_count()) {
+            return Err(());
+        }
+        let entity = self.entities.get_mut(&id).ok_or(())?;
+        entity.cpu_affinity = cpu;
+        Ok(())
+    }
+
+    pub fn cpu_affinity(&self, id: EntityId) -> Option<usize> {
+        self.entities
+            .get(&id)
+            .and_then(|entity| entity.cpu_affinity)
+    }
+
     pub fn mark_context_saving(&mut self, id: EntityId) {
         if let Some(entity) = self.entities.get_mut(&id) {
             entity.context_published = false;
@@ -347,9 +366,18 @@ impl Scheduler {
             .count()
     }
 
-    fn pick_ready_index(&self, now: u64) -> Option<usize> {
+    fn eligible_on_cpu(&self, id: EntityId, cpu: usize) -> bool {
+        self.entities
+            .get(&id)
+            .is_some_and(|entity| entity.cpu_affinity.is_none_or(|bound| bound == cpu))
+    }
+
+    fn pick_ready_index(&self, now: u64, cpu: usize) -> Option<usize> {
         let mut due: Option<(usize, u64)> = None;
         for (index, id) in self.run_queue.iter().enumerate() {
+            if !self.eligible_on_cpu(*id, cpu) {
+                continue;
+            }
             let Some(deadline) = self
                 .entities
                 .get(id)
@@ -361,13 +389,17 @@ impl Scheduler {
                 due = Some((index, deadline));
             }
         }
-        due.map(|(index, _)| index)
-            .or_else(|| (!self.run_queue.is_empty()).then_some(0))
+        due.map(|(index, _)| index).or_else(|| {
+            self.run_queue
+                .iter()
+                .position(|id| self.eligible_on_cpu(*id, cpu))
+        })
     }
 
     pub fn schedule_entity(&mut self) -> Option<EntityId> {
         let now = crate::arch::x86_64::interrupts::get_timer_ticks();
-        let index = self.pick_ready_index(now)?;
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        let index = self.pick_ready_index(now, cpu)?;
         let next = self.run_queue.remove_at(index)?;
         let missed = self
             .entities
@@ -445,10 +477,10 @@ impl Scheduler {
     }
 
     pub fn pop_next_user(&mut self) -> Option<u32> {
-        let index = self
-            .run_queue
-            .iter()
-            .position(|id| matches!(id, EntityId::UserProcess(_)))?;
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        let index = self.run_queue.iter().position(|id| {
+            matches!(id, EntityId::UserProcess(_)) && self.eligible_on_cpu(*id, cpu)
+        })?;
         let EntityId::UserProcess(pid) = self.run_queue.remove_at(index)? else {
             return None;
         };
@@ -462,9 +494,11 @@ impl Scheduler {
     }
 
     pub fn peek_next_user(&self) -> Option<u32> {
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
         self.run_queue.iter().find_map(|id| match id {
-            EntityId::UserProcess(pid) => Some(*pid),
+            EntityId::UserProcess(pid) if self.eligible_on_cpu(*id, cpu) => Some(*pid),
             EntityId::KernelThread(_) => None,
+            EntityId::UserProcess(_) => None,
         })
     }
 

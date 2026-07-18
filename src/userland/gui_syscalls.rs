@@ -37,7 +37,7 @@ pub const TEST_GUI_CALLER_PID: u32 = u32::MAX - 1;
 
 pub(crate) fn caller_pid() -> Result<u32, i64> {
     match crate::userland::lifecycle::current_user_pid() {
-        Some(pid) => Ok(pid),
+        Some(_) => Ok(crate::userland::lifecycle::current_tgid()),
         None => {
             #[cfg(feature = "test")]
             {

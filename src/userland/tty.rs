@@ -78,7 +78,7 @@ pub fn winsize() -> Winsize {
 }
 
 fn current_process_slave() -> Option<pty::PtySlave> {
-    let tid = crate::userland::lifecycle::with_current_process(|p| p.terminal_id)?;
+    let tid = crate::userland::lifecycle::with_current_group(|p| p.terminal_id)?;
     pty::slave_for_terminal(tid)
 }
 
