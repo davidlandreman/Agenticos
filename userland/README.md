@@ -53,6 +53,7 @@ userland/
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
     ├── guidemo/        # minimal ring-3 GUI reference client
     ├── fileman/        # standalone Finder/Explorer-style file manager
+    ├── control/        # modern Settings / Control Center
     ├── notepad/        # standalone editor with userland dialogs + working Save
     ├── taskmgr/        # tabbed task manager over /proc (graphs, End Task)
     ├── calc/           # standalone four-operation calculator
@@ -96,9 +97,9 @@ resolve into multicall or direct binaries staged under `host_share/`:
 - **`GLAUNCH.ELF` — kernel-side GUI app launcher** (empty today — every
   GUI app has migrated to ring 3; the mechanism remains for a future
   ring-0-only workload).
-- **Direct standalone ring-3 applications** — `CALC.ELF`, `FILEMAN.ELF`,
+- **Direct standalone ring-3 applications** — `CALC.ELF`, `CONTROL.ELF`, `FILEMAN.ELF`,
   `GLGAME.ELF`, `NOTEPAD.ELF`, `PAINTING.ELF`, and `TASKMGR.ELF`
-  (`calc`, compatibility command `explorer`, `glgame`, `notepad`,
+  (`calc`; `control` with alias `settings`; compatibility command `explorer`, `glgame`, `notepad`,
   `painting`; `taskmgr` with legacy alias `tasks`).
 - **`TCC.ELF` — TinyCC** (`tcc` and the `cc` alias). Compiles against
   the staged musl sysroot at `/host/sysroot`; write output to `/work`
@@ -112,6 +113,7 @@ dispatcher picks the right applet. No symlinks or per-applet ELF copies
 are needed; the namespace is pure kernel synthesis.
 
 `execve("/bin/explorer", ...)`, `execve("/bin/notepad", ...)`,
+`execve("/bin/control", ...)` (or `/bin/settings`),
 `execve("/bin/calc", ...)`, `execve("/bin/glgame", ...)`,
 `execve("/bin/painting", ...)`, and `execve("/bin/taskmgr", ...)` (or its
 legacy alias `/bin/tasks`) rewrite directly to their staged ELFs. There is
@@ -303,10 +305,16 @@ animating app needs instead of the blocking `next_event()`.
 
 ## Using dialogs (`libs/dialogs`)
 
-`libs/dialogs` composes the widgets into four modal dialogs: `FileDialog`
-(Open/Save), `MessageBox` (Ok / OkCancel / YesNo), and `ColorPicker`. Each
-dialog owns its own `gui::Window` (created in its constructor, destroyed on
-drop) and is driven by the retained-mode pattern:
+`libs/dialogs` composes the widgets into four modal dialogs: the modern
+`FileDialog` (Open/Save), `MessageBox` (Ok / OkCancel / YesNo), and
+`ColorPicker`. `FileDialog` provides Places, history, breadcrumbs/location
+entry, current-folder and file-type filtering, metadata-backed details and grid
+views, true double-click, keyboard focus traversal, mode-aware validation,
+overwrite confirmation, and capability-aware New Folder. The simple
+`open`/`save` constructors remain available; `FileDialogOptions` and
+`FileFilter` configure richer callers. Each dialog owns its own `gui::Window`
+(created in its constructor, destroyed on drop) and is driven by the
+retained-mode pattern:
 
 ```rust
 let mut modal = Some(dialogs::Modal::File(FileDialog::open("/host/")?));
@@ -329,8 +337,11 @@ kernel modality — the host must ignore input to its own main window while a
 modal is open (it may still service Resize/Close/Focus). `Modal` is the
 four-way convenience wrapper for single-modal apps; hold an `Option<Modal>`
 and keep a small app-side enum for *why* the dialog is open so you can route
-its outcome. `apps/notepad` (file dialogs + message boxes) and `apps/guidemo`
-(color picker + message box) are the reference clients.
+its outcome. `apps/notepad` (filtered Open/Save + message boxes) and
+`apps/guidemo` (all common dialogs) are the reference clients. Shared
+file-browser presentation primitives used by both the chooser and File Manager
+live in `gui::file_ui`; selection and operation policy remains with each
+caller.
 
 To add a new dialog, add a module under `libs/dialogs/src/`, follow the
 `window_handle()` + `handle_event() -> DialogStatus<T>` shape, and extend the

@@ -4,7 +4,7 @@ use crate::window::renderer::{RendererKind, RetainedRenderer, SurfaceCanvas};
 use crate::window::theme::{
     self, FrameChrome, ThemeKind, ThemeRequest, AERO_BACKDROP_RADIUS, AERO_METRICS, CLASSIC_METRICS,
 };
-use crate::window::{GraphicsDevice, Insets, Rect, WindowId};
+use crate::window::{GraphicsDevice, Insets, Rect, Window, WindowId};
 
 fn test_theme_selection_and_fallback_matrix() {
     assert_eq!(
@@ -231,6 +231,28 @@ fn test_aero_alpha_corners_shadow_and_client() {
     assert_eq!(surface.pixel(46, client_y).unwrap().a(), 0);
 }
 
+fn test_frame_runtime_theme_change_preserves_client_size_and_effect() {
+    let previous = theme::active();
+    theme::activate(ThemeKind::Classic);
+    let mut frame = crate::window::windows::FrameWindow::new(WindowId(9010), "Settings");
+    frame.set_bounds(Rect::new(40, 30, 648, 508));
+    assert_eq!(frame.content_area().width, 640);
+    assert_eq!(frame.content_area().height, 480);
+
+    frame.apply_theme(CLASSIC_METRICS, AERO_METRICS, ThemeKind::Aero);
+    theme::activate(ThemeKind::Aero);
+    assert_eq!(frame.content_area().width, 640);
+    assert_eq!(frame.content_area().height, 480);
+    assert_eq!(frame.bounds(), Rect::new(40, 30, 650, 518));
+    assert_eq!(
+        frame.compositor_properties().effect,
+        crate::graphics::scene::LayerEffect::BackdropSample {
+            radius: AERO_BACKDROP_RADIUS
+        }
+    );
+    theme::activate(previous);
+}
+
 pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
     &[
         &test_theme_selection_and_fallback_matrix,
@@ -239,5 +261,6 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_retained_surface_uses_decorated_bounds,
         &test_classic_key_pixels_regression,
         &test_aero_alpha_corners_shadow_and_client,
+        &test_frame_runtime_theme_change_preserves_client_size_and_effect,
     ]
 }

@@ -8,7 +8,10 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use dialogs::{DialogStatus, FileDialog, MessageBox, MessageChoice, Modal, ModalOutcome};
+use dialogs::{
+    DialogStatus, FileDialog, FileDialogOptions, FileFilter, MessageBox, MessageChoice, Modal,
+    ModalOutcome,
+};
 use gui::{
     next_boundary, previous_boundary, theme, Canvas, MenuBar, Window, FONT_CELL_WIDTH,
     FONT_LINE_HEIGHT, GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
@@ -233,6 +236,7 @@ struct Notepad {
     focused: bool,
     modal: Option<Modal>,
     modal_purpose: ModalPurpose,
+    last_dialog_dir: String,
 }
 
 impl Notepad {
@@ -246,6 +250,7 @@ impl Notepad {
             focused: true,
             modal: None,
             modal_purpose: ModalPurpose::Dismiss,
+            last_dialog_dir: "/host".to_string(),
         };
         if let Some(path) = initial_path {
             app.load_from(&path);
@@ -260,6 +265,13 @@ impl Notepad {
                 Ok(event) => event,
                 Err(error) => return error,
             };
+            if event.kind == gui::GUI_EVENT_THEME_CHANGED {
+                self.render();
+                if let Some(modal) = self.modal.as_mut() {
+                    modal.refresh_theme();
+                }
+                continue;
+            }
             let exit = if event.window == self.window.handle() {
                 self.handle_main(event)
             } else if self.modal.as_ref().map(Modal::window_handle) == Some(event.window) {
@@ -516,6 +528,7 @@ impl Notepad {
             Ok(text) => {
                 self.editor.set_text(text);
                 self.path = Some(path.to_string());
+                self.last_dialog_dir = dialogs::path::parent_directory(path).to_string();
                 self.dirty = false;
             }
             Err(_) => self.show_error("File is not UTF-8 text"),
@@ -526,7 +539,13 @@ impl Notepad {
         if self.modal.is_some() {
             return;
         }
-        match FileDialog::open("/host/") {
+        let start = self
+            .path
+            .as_deref()
+            .map(dialogs::path::parent_directory)
+            .unwrap_or(&self.last_dialog_dir);
+        let options = FileDialogOptions::new(start).with_filter(text_file_filter());
+        match FileDialog::open_with(options) {
             Ok(dialog) => {
                 self.modal_purpose = ModalPurpose::Open;
                 self.modal = Some(Modal::File(dialog));
@@ -539,8 +558,13 @@ impl Notepad {
         if self.modal.is_some() {
             return;
         }
-        let suggested = self.path.as_deref().unwrap_or("/UNTITLED.TXT");
-        match FileDialog::save(suggested) {
+        let suggested = self.path.clone().unwrap_or_else(|| {
+            dialogs::path::join_path(&self.last_dialog_dir, "UNTITLED.TXT", false)
+        });
+        let options = FileDialogOptions::new(&suggested)
+            .with_filter(text_file_filter())
+            .with_default_extension("txt");
+        match FileDialog::save_with(options) {
             Ok(dialog) => {
                 self.modal_purpose = ModalPurpose::SaveAs;
                 self.modal = Some(Modal::File(dialog));
@@ -577,6 +601,9 @@ impl Notepad {
             return false;
         };
         if let DialogStatus::Done(outcome) = modal.handle_event(event) {
+            if let Modal::File(dialog) = modal {
+                self.last_dialog_dir = dialog.current_directory().to_string();
+            }
             self.modal = None;
             let exit = self.on_modal_done(outcome);
             self.render();
@@ -598,6 +625,15 @@ impl Notepad {
         }
         false
     }
+}
+
+fn text_file_filter() -> FileFilter {
+    FileFilter::new(
+        "Text documents",
+        &[
+            "txt", "md", "rs", "toml", "json", "log", "conf", "sh", "c", "h", "cpp",
+        ],
+    )
 }
 
 fn line_col_at(text: &str, index: usize) -> (usize, usize) {

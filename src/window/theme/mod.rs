@@ -154,6 +154,12 @@ pub fn init_boot_policy(renderer: RendererKind) -> ThemeSelection {
         }
     }
 
+    let explicit = matches!(request, ThemeRequest::Classic | ThemeRequest::Aero);
+    crate::system_control::record_boot_theme_override(explicit);
+    if request == ThemeRequest::Auto {
+        request = crate::system_control::theme_preference().request();
+    }
+
     let selection = select_theme(request, renderer);
     activate(selection.selected);
     if let Some(reason) = selection.fallback_reason {

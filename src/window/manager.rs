@@ -164,9 +164,78 @@ impl WindowManager {
         wm
     }
 
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     pub const fn renderer_selection(&self) -> RendererSelection {
         self.renderer_selection
+    }
+
+    /// Apply a runtime theme request as one window-manager transaction.
+    pub fn apply_theme_request(
+        &mut self,
+        requested: super::theme::ThemeRequest,
+    ) -> Result<(super::theme::ThemeSelection, bool), i64> {
+        if requested == super::theme::ThemeRequest::Aero
+            && self.renderer_selection.selected == RendererKind::Legacy
+        {
+            return Err(crate::userland::abi::ENOTSUP);
+        }
+        let selection = super::theme::select_theme(requested, self.renderer_selection.selected);
+        let old_kind = super::theme::active();
+        if old_kind == selection.selected {
+            return Ok((selection, false));
+        }
+
+        let old_metrics = super::theme::metrics_for(old_kind);
+        let new_metrics = super::theme::metrics_for(selection.selected);
+        super::theme::activate(selection.selected);
+        let (screen_width, screen_height) = self.screen_dimensions();
+        let frame_ids: Vec<WindowId> = self
+            .window_registry
+            .iter()
+            .filter_map(|(&id, window)| window.window_title().map(|_| id))
+            .collect();
+
+        for frame_id in &frame_ids {
+            if let Some(window) = self.window_registry.get_mut(frame_id) {
+                if let Some(frame) = window.as_frame_window_mut() {
+                    frame.apply_theme(old_metrics, new_metrics, selection.selected);
+                    let mut bounds = frame.bounds();
+                    bounds.x = bounds
+                        .x
+                        .clamp(0, screen_width.saturating_sub(bounds.width) as i32);
+                    bounds.y = bounds
+                        .y
+                        .clamp(0, screen_height.saturating_sub(bounds.height) as i32);
+                    frame.set_bounds(bounds);
+                }
+            }
+        }
+        for frame_id in frame_ids {
+            self.update_children_for_resized_window(frame_id);
+        }
+        for window in self.window_registry.values_mut() {
+            window.invalidate();
+        }
+        self.force_full_repaint();
+        Ok((selection, true))
+    }
+
+    pub fn set_desktop_wallpaper(&mut self, wallpaper: Option<Vec<u8>>) -> bool {
+        let root = self
+            .get_active_screen()
+            .and_then(|screen| screen.root_window);
+        let Some(root) = root else {
+            return false;
+        };
+        let changed = self
+            .window_registry
+            .get_mut(&root)
+            .and_then(|window| window.as_desktop_window_mut())
+            .map(|desktop| desktop.set_wallpaper(wallpaper))
+            .is_some();
+        if changed {
+            self.force_full_repaint();
+        }
+        changed
     }
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub const fn render_stats(&self) -> RenderStats {
@@ -908,7 +977,14 @@ impl WindowManager {
                                     "VirGL compositor and retained CPU fallback failed: {:?}; fallback=legacy",
                                     error
                                 );
-                                super::theme::activate(super::theme::ThemeKind::Classic);
+                                self.renderer_selection.selected = RendererKind::Legacy;
+                                self.renderer_selection.fallback_reason =
+                                    Some("VirGL and retained runtime failure");
+                                let _ =
+                                    self.apply_theme_request(super::theme::ThemeRequest::Classic);
+                                crate::system_control::queue_theme_publication(
+                                    super::theme::ThemeKind::Classic,
+                                );
                             }
                         }
                     } else {
@@ -916,7 +992,12 @@ impl WindowManager {
                             "retained compositor failed: {:?}; fallback=legacy",
                             error
                         );
-                        super::theme::activate(super::theme::ThemeKind::Classic);
+                        self.renderer_selection.selected = RendererKind::Legacy;
+                        self.renderer_selection.fallback_reason = Some("retained runtime failure");
+                        let _ = self.apply_theme_request(super::theme::ThemeRequest::Classic);
+                        crate::system_control::queue_theme_publication(
+                            super::theme::ThemeKind::Classic,
+                        );
                     }
                     self.compositor.end_frame();
                     self.compositor.dirty.mark_full_repaint();

@@ -277,6 +277,11 @@ pub enum Ring3BlockReason {
     WaitingForChild {
         target: i32,
     },
+    /// `rt_sigsuspend` after atomically installing its temporary signal
+    /// mask. Any newly actionable signal wakes the process through
+    /// [`wake_ring3_for_signal`]; the re-fired syscall is interrupted before
+    /// its handler runs again, so signal delivery observes `-EINTR`.
+    WaitingForSignal,
     /// `read(0, ...)` from stdin with an empty input queue. Wakes
     /// when input lands on the blocked process's terminal via
     /// [`wake_ring3_blocked_on_input`] (called from the stdin push
@@ -607,6 +612,7 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
             .expect("timer capacity exceeded while arming network timeout");
         }
         Ring3BlockReason::WaitingForChild { .. }
+        | Ring3BlockReason::WaitingForSignal
         | Ring3BlockReason::WaitingForInput
         | Ring3BlockReason::WaitingForGuiEvent
         | Ring3BlockReason::WaitingForPipeRead
@@ -666,7 +672,8 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
             Some(Ring3BlockReason::WaitingForChild { target }) => {
                 *target == -1 || *target == child_pid as i32
             }
-            Some(Ring3BlockReason::WaitingForInput)
+            Some(Ring3BlockReason::WaitingForSignal)
+            | Some(Ring3BlockReason::WaitingForInput)
             | Some(Ring3BlockReason::WaitingForGuiEvent)
             | Some(Ring3BlockReason::WaitingForPipeRead)
             | Some(Ring3BlockReason::WaitingForPipeWrite)
@@ -738,18 +745,24 @@ pub fn wake_ring3_blocked_on_input(terminal_id: Option<crate::window::WindowId>)
 /// Used by the SIGWINCH path on grid resize, and available for any
 /// future tty-scoped signal delivery (`SIGINT` on Ctrl-C, etc.).
 ///
-/// Walks the process table once and calls `signal_state.raise(sig)`
-/// on each match. Does not deliver the signal — deferred to the
-/// per-process `maybe_deliver_signal` path that runs at SYSCALL
-/// boundary.
+/// Walks the process table once and calls `signal_state.raise(sig)` on each
+/// match. A matching process parked in a blocking syscall is then passed
+/// through [`wake_ring3_for_signal`], which wakes it only when the new signal
+/// has an actionable disposition under its current mask.
 pub fn raise_signal_on_terminal(terminal_id: crate::window::WindowId, sig: i32) {
     let Some(mut g) = PROCESS_TABLE.try_lock() else {
         return;
     };
-    for (_pid, p) in g.by_pid.iter_mut() {
+    let mut raised = alloc::vec::Vec::new();
+    for (pid, p) in g.by_pid.iter_mut() {
         if p.terminal_id == Some(terminal_id) {
             p.signal_state.raise(sig);
+            raised.push(*pid);
         }
+    }
+    drop(g);
+    for pid in raised {
+        wake_ring3_for_signal(pid);
     }
 }
 
@@ -1315,9 +1328,8 @@ pub fn try_preempt_ring3(
 ///
 /// The ring-3 timer path uses this periodically even when user processes are
 /// runnable. Without that class-level handoff, direct ring3-to-ring3 switches
-/// can monopolize the single CPU forever: a shell polling `wait3(WNOHANG)`
-/// while its child sleeps for network input starves the network worker and
-/// compositor that are needed to make either process progress.
+/// can let a CPU-bound user process monopolize the single CPU and starve the
+/// network worker or compositor needed for system-wide progress.
 #[cfg_attr(
     not(feature = "test"),
     expect(dead_code, reason = "legacy switch characterization")
@@ -1707,8 +1719,9 @@ pub fn current_pid() -> u32 {
 /// Notify the parent that a forked child has exited cooperatively (via
 /// `exit_group`): file the zombie so `wait4` finds it, raise SIGCHLD
 /// on the parent's entry in PROCESS_TABLE, and wake the parent if it's
-/// blocked in `wait4`. No-op when `parent_pid == 0` (top-level binary
-/// launched by the run command — no userland parent).
+/// blocked in either `wait4` or `rt_sigsuspend`. No-op when
+/// `parent_pid == 0` (top-level binary launched by the run command — no
+/// userland parent).
 pub fn notify_parent_of_exit(pid: u32, parent_pid: u32, exit_code: i64) {
     if parent_pid == 0 {
         return;
@@ -1719,9 +1732,14 @@ pub fn notify_parent_of_exit(pid: u32, parent_pid: u32, exit_code: i64) {
     let _ = with_process(parent_pid, |parent| {
         parent.signal_state.raise(crate::userland::signal::SIGCHLD);
     });
-    // U3: wake the parent if it's blocked in `wait4`. Load-bearing
-    // under U7: parent may now `wait4` before the child exits.
+    // Prefer the direct wait4 wake: a process blocked in wait4 should re-run
+    // that syscall and reap the zombie, not have it changed into EINTR merely
+    // because it also installed a SIGCHLD handler.
     wake_ring3_blocked_on_child(parent_pid, pid);
+    // zsh waits for foreground jobs with rt_sigsuspend rather than blocking
+    // wait4. Once SIGCHLD is pending under zsh's temporary suspension mask,
+    // wake that path so its handler can reap with wait4(WNOHANG).
+    wake_ring3_for_signal(parent_pid);
 }
 
 /// Same as [`notify_parent_of_exit`] for children killed by a signal
@@ -1741,8 +1759,10 @@ pub fn notify_parent_of_signaled_exit(pid: u32, parent_pid: u32, signum: i32, ex
     let _ = with_process(parent_pid, |parent| {
         parent.signal_state.raise(crate::userland::signal::SIGCHLD);
     });
-    // U3/U7: wake the parent if it's blocked in `wait4`.
+    // Preserve the same wait4-before-sigsuspend wake ordering as the normal
+    // exit path above.
     wake_ring3_blocked_on_child(parent_pid, pid);
+    wake_ring3_for_signal(parent_pid);
 }
 
 /// Record of a child that exited but hasn't been reaped yet.

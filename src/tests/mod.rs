@@ -145,6 +145,10 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("path", crate::userland::path::path_tests),
     ("etc", crate::userland::etc::etc_tests),
     (
+        "system_control",
+        crate::system_control::system_control_tests,
+    ),
+    (
         "bin_namespace",
         crate::userland::bin_namespace::bin_namespace_tests,
     ),

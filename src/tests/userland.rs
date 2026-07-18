@@ -1768,10 +1768,11 @@ fn test_run_zsh_pwd() {
     assert_eq!(code, 0);
 }
 
-/// `zsh -c ls` forks and execs BusyBox, then demand-pages its executable
-/// while the parent waits. This pins the interactive external-command path.
+/// `zsh -c 'ls; :'` forks and execs BusyBox, then demand-pages its executable
+/// while the parent waits. The trailing builtin prevents zsh's final-command
+/// in-place-exec optimization, pinning the interactive parent wait path.
 fn test_run_zsh_external_ls() {
-    let Some((kind, code)) = drive_zsh(&["-f", "+m", "-c", "ls"]) else {
+    let Some((kind, code)) = drive_zsh(&["-f", "+m", "-c", "ls; :"]) else {
         return;
     };
     assert!(matches!(
@@ -2881,20 +2882,29 @@ fn test_dispatch_rt_sigprocmask_block_strips_kill_stop() {
     teardown_phase2_active_user();
 }
 
-/// `rt_sigsuspend(&mask, 8)` installs the new mask on the current
-/// process and returns `-EINTR`. SIGKILL/SIGSTOP must be stripped from
-/// the installed mask even if the user requests blocking them.
-fn test_dispatch_rt_sigsuspend_installs_mask_and_returns_eintr() {
-    use crate::userland::signal::{SIGCHLD, SIGKILL, SIGSTOP};
+/// `rt_sigsuspend(&mask, 8)` must return `-EINTR` without parking when
+/// the temporary mask exposes an already-pending handled signal. It also
+/// saves the original mask for restoration after that handler returns.
+fn test_rt_sigsuspend_pending_signal_returns_eintr_and_saves_mask() {
+    use crate::userland::signal::{SigAction, SIGCHLD, SIGKILL, SIGSTOP, SIGUSR1};
     setup_phase2_active_user();
 
-    // Pre-set an arbitrary "old" mask so we can confirm sigsuspend
-    // replaces it wholesale, not OR-merges.
+    let old_mask = 1u64 << (SIGCHLD - 1);
     crate::userland::lifecycle::with_current_process(|p| {
-        p.signal_state.blocked = 0xFFFF_FFFF_FFFF_FFFF;
+        p.signal_state.blocked = old_mask;
+        p.signal_state.set_action(
+            SIGCHLD,
+            SigAction {
+                sa_handler: 0xDEAD_BEEF,
+                ..SigAction::default()
+            },
+        );
+        p.signal_state.raise(SIGCHLD);
     });
 
-    let new_mask: u64 = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1)) | (1u64 << (SIGCHLD - 1));
+    // The temporary mask unblocks SIGCHLD and tries to block the two
+    // unblockable signals, which the kernel must strip.
+    let new_mask: u64 = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1)) | (1u64 << (SIGUSR1 - 1));
     let mask_ptr = &new_mask as *const u64 as u64;
     abi::set_user_va_bounds(UserVaBounds {
         start: mask_ptr,
@@ -2905,14 +2915,22 @@ fn test_dispatch_rt_sigsuspend_installs_mask_and_returns_eintr() {
     args.rax = nr::RT_SIGSUSPEND;
     args.rdi = mask_ptr;
     args.rsi = 8;
-    assert_eq!(syscall_dispatch(&mut args), abi::EINTR);
-
-    let blocked = crate::userland::lifecycle::with_current_process(|p| p.signal_state.blocked);
+    // Call the handler directly so the test can inspect state before the
+    // dispatcher tail diverges into the synthetic user handler address.
     assert_eq!(
-        blocked,
-        1u64 << (SIGCHLD - 1),
-        "expected only SIGCHLD bit; KILL/STOP must be stripped",
+        crate::userland::syscalls::rt_sigsuspend_handler(&mut args),
+        abi::EINTR
     );
+
+    crate::userland::lifecycle::with_current_process(|p| {
+        assert_eq!(p.signal_state.blocked, 1u64 << (SIGUSR1 - 1));
+        assert_eq!(p.signal_state.suspend_restore_mask, Some(old_mask));
+
+        p.signal_state.set_action(SIGCHLD, SigAction::default());
+        p.signal_state.blocked = 0;
+        p.signal_state.pending = 0;
+        p.signal_state.suspend_restore_mask = None;
+    });
 
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
@@ -3010,15 +3028,15 @@ fn test_fork_child_exit_sets_sigchld_on_parent() {
 /// `rt_sigsuspend` after `ls` crashed.
 fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
     use crate::userland::lifecycle::{
-        insert_process, notify_parent_of_exit, reap_zombie, remove_process, with_process, ExitKind,
-        Process,
+        insert_process, mark_ring3_blocked, notify_parent_of_exit, reap_zombie, remove_process,
+        with_process, ExitKind, Process, Ring3BlockReason,
     };
-    use crate::userland::signal::SIGCHLD;
+    use crate::userland::signal::{SigAction, SIGCHLD};
 
     // U7: both parent and child live in PROCESS_TABLE simultaneously.
     // The old PARENT_STASH dance is gone; SIGCHLD is raised on the
     // parent's regular entry via `with_process`.
-    let parent = Process {
+    let mut parent = Process {
         pid: 100,
         parent_pid: 0,
         image: None,
@@ -3050,7 +3068,16 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         kernel_continuation: None,
         terminal_id: None,
     };
+    parent.signal_state.set_action(
+        SIGCHLD,
+        SigAction {
+            sa_handler: 0xDEAD_BEEF,
+            ..SigAction::default()
+        },
+    );
     insert_process(parent);
+    clear_ring3_queues();
+    mark_ring3_blocked(100, Ring3BlockReason::WaitingForSignal);
 
     notify_parent_of_exit(101, 100, 139);
 
@@ -3060,6 +3087,15 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         pending & (1 << (SIGCHLD - 1)) != 0,
         "expected SIGCHLD pending on parent, got mask {:#x}",
         pending,
+    );
+    assert_eq!(
+        crate::userland::lifecycle::pop_next_ring3(),
+        Some(100),
+        "SIGCHLD should wake a parent suspended for signal delivery"
+    );
+    assert!(
+        with_process(100, |p| p.pending_syscall_interrupt).unwrap(),
+        "sigsuspend wake must interrupt the re-fired syscall"
     );
 
     // Zombie filed for pid 101 → parent 100, exit code 139.
@@ -4095,7 +4131,7 @@ fn test_handler_blocked_mask_strips_kill_and_stop() {
     assert_ne!(m & (1u64 << (SIGUSR1 - 1)), 0, "signum bit still added");
 }
 
-/// Delivering SIGUSR1 from maybe_deliver_signal-shaped consume path
+/// Delivering SIGUSR1 from the maybe_deliver_signal preparation path
 /// must atomically install the handler mask on Process. This is the
 /// integrity check for the new lock-held mask-install in
 /// maybe_deliver_signal — without it the saved_blocked passed to
@@ -4105,10 +4141,14 @@ fn test_handler_blocked_mask_strips_kill_and_stop() {
 fn test_maybe_deliver_signal_installs_handler_mask() {
     use crate::userland::lifecycle::with_current_process;
     use crate::userland::signal::{SigAction, SIGUSR1, SIGUSR2};
-    use crate::userland::syscalls::handler_blocked_mask;
+    use crate::userland::syscalls::prepare_deliverable_signal;
 
     let snap = with_current_process(|p| {
-        let snap = (p.signal_state.blocked, p.signal_state.pending);
+        let snap = (
+            p.signal_state.blocked,
+            p.signal_state.pending,
+            p.signal_state.suspend_restore_mask,
+        );
         // Install a SIG_DFL-but-not-DFL action so consume_deliverable
         // returns it. We use sa_handler = 0xDEAD so consume_deliverable
         // sees it as a real handler. We never actually dispatch — the
@@ -4126,15 +4166,7 @@ fn test_maybe_deliver_signal_installs_handler_mask() {
         snap
     });
 
-    // Mimic maybe_deliver_signal's lock-held block (the part we can
-    // exercise without diverging into iretq).
-    let prepared = with_current_process(|p| {
-        let (sig, action) = p.signal_state.consume_deliverable()?;
-        let old_blocked = p.signal_state.blocked;
-        let handler_mask = handler_blocked_mask(old_blocked, action.sa_mask, sig);
-        p.signal_state.blocked = handler_mask;
-        Some((sig, action, old_blocked))
-    });
+    let prepared = prepare_deliverable_signal();
 
     let (sig, action, old_blocked) = prepared.expect("a deliverable signal was queued");
     assert_eq!(sig, SIGUSR1);
@@ -4166,6 +4198,45 @@ fn test_maybe_deliver_signal_installs_handler_mask() {
         p.signal_state.set_action(SIGUSR1, SigAction::default());
         p.signal_state.blocked = snap.0;
         p.signal_state.pending = snap.1;
+        p.signal_state.suspend_restore_mask = snap.2;
+    });
+}
+
+/// A signal that completes `rt_sigsuspend` runs under the temporary
+/// suspension mask, but its signal frame must restore the original mask.
+fn test_prepare_deliverable_signal_restores_pre_sigsuspend_mask() {
+    use crate::userland::lifecycle::with_current_process;
+    use crate::userland::signal::{SigAction, SIGCHLD, SIGUSR1, SIGUSR2};
+    use crate::userland::syscalls::prepare_deliverable_signal;
+
+    let original_mask = 1u64 << (SIGCHLD - 1);
+    let temporary_mask = 1u64 << (SIGUSR2 - 1);
+    with_current_process(|p| {
+        p.signal_state.set_action(
+            SIGUSR1,
+            SigAction {
+                sa_handler: 0xDEAD_BEEF,
+                ..SigAction::default()
+            },
+        );
+        p.signal_state.blocked = temporary_mask;
+        p.signal_state.pending = 0;
+        p.signal_state.raise(SIGUSR1);
+        p.signal_state.suspend_restore_mask = Some(original_mask);
+    });
+
+    let (sig, _, restore_mask) =
+        prepare_deliverable_signal().expect("suspended signal should be deliverable");
+    assert_eq!(sig, SIGUSR1);
+    assert_eq!(restore_mask, original_mask);
+    with_current_process(|p| {
+        assert_eq!(p.signal_state.suspend_restore_mask, None);
+        assert_ne!(p.signal_state.blocked & temporary_mask, 0);
+        assert_ne!(p.signal_state.blocked & (1u64 << (SIGUSR1 - 1)), 0);
+
+        p.signal_state.set_action(SIGUSR1, SigAction::default());
+        p.signal_state.blocked = 0;
+        p.signal_state.pending = 0;
     });
 }
 
@@ -5139,6 +5210,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_handler_blocked_mask_preserves_old_bits,
         &test_handler_blocked_mask_strips_kill_and_stop,
         &test_maybe_deliver_signal_installs_handler_mask,
+        &test_prepare_deliverable_signal_restores_pre_sigsuspend_mask,
         &test_loader_per_binary_floor_from_pt_load_end,
         &test_loader_rejects_binary_too_big_for_initial_stack,
         &test_loader_bounds_start_at_initial_commit,
@@ -5305,7 +5377,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_rt_sigaction_sigrtmax_does_not_panic,
         &test_dispatch_rt_sigaction_rejects_sigkill_sigstop,
         &test_dispatch_rt_sigprocmask_block_strips_kill_stop,
-        &test_dispatch_rt_sigsuspend_installs_mask_and_returns_eintr,
+        &test_rt_sigsuspend_pending_signal_returns_eintr_and_saves_mask,
         &test_dispatch_rt_sigsuspend_invalid_sigsetsize,
         &test_dispatch_rt_sigsuspend_null_mask_efaults,
         &test_dispatch_kill_self_sets_pending,

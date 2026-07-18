@@ -9,6 +9,7 @@ pub mod partition;
 pub mod tmpfs;
 pub mod vfs;
 
+#[allow(unused_imports)]
 pub use file_handle::{Directory, File};
 pub use filesystem::{detect_filesystem, FilesystemType};
 pub use partition::{read_partitions, PartitionBlockDevice};

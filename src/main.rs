@@ -25,6 +25,7 @@ mod mm;
 mod net;
 mod process;
 mod random;
+mod system_control;
 mod terminal;
 mod tests;
 mod time;

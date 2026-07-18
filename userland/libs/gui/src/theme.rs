@@ -130,6 +130,26 @@ pub fn set(theme: Theme) {
     );
 }
 
+/// Apply a process-global theme notification before an app handles the event.
+pub fn apply_system_event(event: &runtime::GuiEvent) -> bool {
+    if event.kind != runtime::GUI_EVENT_THEME_CHANGED {
+        return false;
+    }
+    set(if event.payload[0] == 2 {
+        Theme::Aero
+    } else {
+        Theme::Classic
+    });
+    true
+}
+
+pub fn palette_for(theme: Theme) -> &'static Palette {
+    match theme {
+        Theme::Classic => &CLASSIC_PALETTE,
+        Theme::Aero => &AERO_PALETTE,
+    }
+}
+
 fn load() -> Theme {
     let path = b"/etc/theme\0";
     let fd = runtime::openat(runtime::AT_FDCWD, path, runtime::O_RDONLY, 0);
@@ -153,10 +173,7 @@ fn load() -> Theme {
 
 /// The palette for the active theme.
 pub fn palette() -> &'static Palette {
-    match current() {
-        Theme::Classic => &CLASSIC_PALETTE,
-        Theme::Aero => &AERO_PALETTE,
-    }
+    palette_for(current())
 }
 
 /// Label color for a button in `state`.

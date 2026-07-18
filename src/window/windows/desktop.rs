@@ -45,6 +45,12 @@ impl DesktopWindow {
         }
     }
 
+    pub fn set_wallpaper(&mut self, wallpaper: Option<Vec<u8>>) {
+        self.wallpaper = wallpaper;
+        self.backing_store = None;
+        self.base.invalidate();
+    }
+
     /// Fill the backing store with the solid background color in the
     /// store's pixel format. Used for the no-wallpaper / parse-failure
     /// fallback path so the desktop still renders.
@@ -192,6 +198,10 @@ impl Window for DesktopWindow {
 
     fn handle_event(&mut self, _event: Event) -> EventResult {
         EventResult::Ignored
+    }
+
+    fn as_desktop_window_mut(&mut self) -> Option<&mut DesktopWindow> {
+        Some(self)
     }
 
     // Desktop never accepts focus — override the default delegation so

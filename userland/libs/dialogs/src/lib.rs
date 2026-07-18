@@ -36,7 +36,8 @@ mod message_box;
 pub mod path;
 
 pub use color_picker::ColorPicker;
-pub use file_dialog::{FileDialog, FileMode};
+pub use file_dialog::{FileDialog, FileDialogOptions, FileFilter, FileMode, FileView};
+pub use gui::file_ui::{FilePlace, PlaceIcon};
 pub use message_box::{Buttons, MessageBox, MessageChoice};
 
 /// The state of a modal dialog after handling an event.
@@ -59,6 +60,10 @@ pub enum ModalOutcome {
 
 /// A convenience wrapper over the four dialog types so single-modal hosts hold
 /// one `Option<Modal>` field and one dispatch arm.
+///
+/// Only one modal exists at a time, so keeping the variants inline avoids a
+/// second allocation in these small native processes.
+#[allow(clippy::large_enum_variant)]
 pub enum Modal {
     File(FileDialog),
     Message(MessageBox),
@@ -79,6 +84,14 @@ impl Modal {
             Modal::File(dialog) => map_status(dialog.handle_event(event), ModalOutcome::Path),
             Modal::Message(dialog) => map_status(dialog.handle_event(event), ModalOutcome::Choice),
             Modal::Color(dialog) => map_status(dialog.handle_event(event), ModalOutcome::Color),
+        }
+    }
+
+    pub fn refresh_theme(&mut self) {
+        match self {
+            Modal::File(dialog) => dialog.refresh_theme(),
+            Modal::Message(dialog) => dialog.refresh_theme(),
+            Modal::Color(dialog) => dialog.refresh_theme(),
         }
     }
 }

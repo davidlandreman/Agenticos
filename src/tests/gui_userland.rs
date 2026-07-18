@@ -3,7 +3,7 @@ use crate::graphics::composition::{ClientGlDraw, ClientGlVertex, CLIENT_GL_DRAW_
 use crate::userland::abi::{UserVaBounds, EAGAIN, EFAULT, EINVAL, ENOENT};
 use crate::userland::gui::{
     self, GuiEvent, GuiWindowRecord, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_QUEUE_CAPACITY,
-    GUI_MOUSE_MOVE, GUI_NONBLOCK,
+    GUI_EVENT_SETTINGS_CHANGED, GUI_EVENT_THEME_CHANGED, GUI_MOUSE_MOVE, GUI_NONBLOCK,
 };
 use crate::window::event::{
     Event, KeyCode, KeyModifiers, KeyboardEvent, MouseButtons, MouseEvent, MouseEventType,
@@ -205,6 +205,58 @@ fn test_gui_queue_drops_oldest_at_capacity() {
     assert_eq!(gui::pop_event(pid).unwrap().window, 2);
 }
 
+fn test_theme_broadcast_targets_gui_owners_and_coalesces() {
+    gui::reset_for_test();
+    let pid = 45;
+    let handle = gui::allocate_handle(pid).expect("handle");
+    gui::register_window(
+        pid,
+        handle,
+        GuiWindowRecord {
+            frame_id: WindowId::new(),
+            surface_id: WindowId::new(),
+        },
+    )
+    .expect("register");
+    gui::broadcast_theme_changed(
+        crate::window::theme::ThemeKind::Aero,
+        crate::window::theme::ThemeRequest::Aero,
+    );
+    gui::broadcast_theme_changed(
+        crate::window::theme::ThemeKind::Classic,
+        crate::window::theme::ThemeRequest::Classic,
+    );
+    assert_eq!(gui::event_count_for_test(pid), 1);
+    let event = gui::pop_event(pid).expect("theme event");
+    assert_eq!(event.kind, GUI_EVENT_THEME_CHANGED);
+    assert_eq!(event.window, 0);
+    assert_eq!(event.payload[0], 1);
+    assert_eq!(event.payload[1], 1);
+    gui::reset_for_test();
+}
+
+fn test_settings_broadcast_targets_gui_owners_and_coalesces() {
+    gui::reset_for_test();
+    let pid = 46;
+    let handle = gui::allocate_handle(pid).expect("handle");
+    gui::register_window(
+        pid,
+        handle,
+        GuiWindowRecord {
+            frame_id: WindowId::new(),
+            surface_id: WindowId::new(),
+        },
+    )
+    .expect("register");
+    gui::broadcast_settings_changed();
+    gui::broadcast_settings_changed();
+    assert_eq!(gui::event_count_for_test(pid), 1);
+    let event = gui::pop_event(pid).expect("settings event");
+    assert_eq!(event.kind, GUI_EVENT_SETTINGS_CHANGED);
+    assert_eq!(event.window, 0);
+    gui::reset_for_test();
+}
+
 fn test_gui_cleanup_releases_pid_state() {
     gui::reset_for_test();
     let pid = 44;
@@ -363,6 +415,8 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_gui_mouse_button_encodes_timestamp_and_modifiers,
         &test_gui_queue_coalesces_mouse_moves,
         &test_gui_queue_drops_oldest_at_capacity,
+        &test_theme_broadcast_targets_gui_owners_and_coalesces,
+        &test_settings_broadcast_targets_gui_owners_and_coalesces,
         &test_gui_cleanup_releases_pid_state,
         &test_gui_next_event_nonblocking_and_bad_pointer,
         &test_gui_syscall_argument_errors,

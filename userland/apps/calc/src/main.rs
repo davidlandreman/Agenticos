@@ -270,6 +270,11 @@ impl Calculator {
                 Ok(event) => event,
                 Err(error) => return error,
             };
+            if event.kind == gui::GUI_EVENT_THEME_CHANGED {
+                // Calculator client styling is intentionally app-owned; the
+                // surrounding frame is repainted by the kernel.
+                continue;
+            }
             if event.window != self.window.handle() {
                 continue;
             }

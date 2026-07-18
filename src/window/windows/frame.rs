@@ -1,6 +1,6 @@
 use alloc::string::{String, ToString};
 
-use crate::window::theme::{self, FrameChrome};
+use crate::window::theme::{self, FrameChrome, FrameMetrics, ThemeKind};
 use crate::window::{
     CompositorProperties, Event, EventResult, GraphicsDevice, Insets, Rect, Window, WindowId,
 };
@@ -57,6 +57,28 @@ impl FrameWindow {
                 .height
                 .saturating_sub(metrics.title_bar_height + 2 * border),
         )
+    }
+
+    /// Update decoration geometry/effects while preserving client dimensions.
+    pub fn apply_theme(&mut self, old: FrameMetrics, new: FrameMetrics, kind: ThemeKind) {
+        let bounds = self.base.bounds();
+        let client_width = bounds.width.saturating_sub(old.border_width * 2);
+        let client_height = bounds
+            .height
+            .saturating_sub(old.title_bar_height + old.border_width * 2);
+        self.base.set_bounds(Rect::new(
+            bounds.x,
+            bounds.y,
+            client_width.saturating_add(new.border_width * 2),
+            client_height
+                .saturating_add(new.title_bar_height)
+                .saturating_add(new.border_width * 2),
+        ));
+        self.base.set_compositor_properties(CompositorProperties {
+            effect: theme::frame_effect_for(kind),
+            ..CompositorProperties::OPAQUE
+        });
+        self.base.invalidate();
     }
 }
 

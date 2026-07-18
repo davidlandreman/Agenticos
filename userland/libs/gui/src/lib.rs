@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+pub mod file_ui;
 mod font;
 pub mod theme;
 
@@ -11,7 +12,8 @@ use alloc::vec::Vec;
 
 pub use runtime::{
     GuiEvent, GUI_EVENT_CLOSE, GUI_EVENT_FOCUS_CHANGE, GUI_EVENT_KEY, GUI_EVENT_MOUSE,
-    GUI_EVENT_RESIZE, GUI_MOUSE_DOWN, GUI_MOUSE_MOVE, GUI_MOUSE_SCROLL, GUI_MOUSE_UP,
+    GUI_EVENT_RESIZE, GUI_EVENT_SETTINGS_CHANGED, GUI_EVENT_THEME_CHANGED, GUI_MOUSE_DOWN,
+    GUI_MOUSE_MOVE, GUI_MOUSE_SCROLL, GUI_MOUSE_UP,
 };
 pub use theme::{ButtonState, Theme};
 
@@ -234,6 +236,7 @@ pub fn next_event() -> Result<GuiEvent, i64> {
     if result < 0 {
         Err(result)
     } else {
+        theme::apply_system_event(&event);
         Ok(event)
     }
 }
@@ -254,6 +257,7 @@ pub fn try_next_event() -> Result<Option<GuiEvent>, i64> {
     } else if result < 0 {
         Err(result)
     } else {
+        theme::apply_system_event(&event);
         Ok(Some(event))
     }
 }

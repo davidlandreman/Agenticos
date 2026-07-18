@@ -94,6 +94,13 @@ pub struct SignalState {
     /// Pending-signal bitmap. Set by `kill`, by VINTR/VQUIT in the
     /// terminal layer, and by child exit (SIGCHLD).
     pub pending: u64,
+    /// Original blocked mask saved by an in-progress `rt_sigsuspend`.
+    ///
+    /// `rt_sigsuspend` temporarily replaces `blocked` while it waits. When
+    /// the wake-up signal is delivered, the signal frame must restore this
+    /// original mask after the handler returns, rather than the temporary
+    /// suspension mask that was active when the signal became deliverable.
+    pub suspend_restore_mask: Option<u64>,
 }
 
 impl SignalState {
@@ -102,6 +109,7 @@ impl SignalState {
             actions: None,
             blocked: 0,
             pending: 0,
+            suspend_restore_mask: None,
         }
     }
 
@@ -126,6 +134,9 @@ impl SignalState {
             actions: self.actions.as_ref().map(|a| alloc::boxed::Box::new(**a)),
             blocked: self.blocked,
             pending: 0, // POSIX: pending signals not inherited across fork
+            // A child starts after fork(), never inside the parent's
+            // suspended syscall continuation.
+            suspend_restore_mask: None,
         }
     }
 

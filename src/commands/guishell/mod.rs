@@ -53,6 +53,7 @@ pub enum PendingAction {
     SpawnNotepad,
     SpawnTaskmgr,
     SpawnFileManager,
+    SpawnControl,
     OpenRunDialog,
     ShowShutdownNotice,
     FocusWindow(WindowId),
@@ -126,7 +127,7 @@ pub fn init_guishell() {
     // Load the bundled wallpaper outside both GUI locks so the file read can't
     // block window or shell state. Falling back to None yields the legacy
     // solid-blue desktop.
-    let wallpaper = window::load_default_wallpaper();
+    let wallpaper = crate::system_control::load_configured_wallpaper();
 
     let ids = with_window_manager(|wm| {
         // Get screen dimensions
@@ -283,6 +284,7 @@ fn show_start_menu() {
         // Use deferred actions because this callback runs under the window
         // manager lock. Disabled placeholders never emit an action.
         menu.on_select(|action| match action {
+            StartMenuAction::Settings => queue_action(PendingAction::SpawnControl),
             StartMenuAction::FileManager => queue_action(PendingAction::SpawnFileManager),
             StartMenuAction::Terminal => queue_action(PendingAction::SpawnTerminal),
             StartMenuAction::Notepad => queue_action(PendingAction::SpawnNotepad),
@@ -396,6 +398,11 @@ fn spawn_taskmgr() {
 fn spawn_file_manager() {
     crate::debug_info!("GUIShell: Spawning file manager...");
     spawn_gui_user_app("/host/FILEMAN.ELF", "explorer");
+}
+
+fn spawn_control() {
+    crate::debug_info!("GUIShell: Spawning Settings...");
+    spawn_gui_user_app("/host/CONTROL.ELF", "control");
 }
 
 fn spawn_gui_user_app(path: &'static str, name: &'static str) {
@@ -787,6 +794,10 @@ fn process_pending_actions() {
             PendingAction::SpawnFileManager => {
                 close_start_menu();
                 spawn_file_manager();
+            }
+            PendingAction::SpawnControl => {
+                close_start_menu();
+                spawn_control();
             }
             PendingAction::OpenRunDialog => {
                 close_start_menu();

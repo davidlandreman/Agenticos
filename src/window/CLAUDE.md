@@ -34,7 +34,10 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   former `PALETTE_*` constants in `mod.rs` were replaced by this palette. The
   resolved theme is also published to ring-3 as `/etc/theme` (see
   `src/userland/etc.rs::publish_theme`), which `userland/libs/gui`'s `theme`
-  module mirrors. Normative color tables live in
+  module mirrors. Runtime changes from `CONTROL.ELF` retheme every frame,
+  preserve client sizes, update compositor effects, repaint kernel controls,
+  republish `/etc/theme`, and broadcast a coalesced process-global GUI event.
+  Normative color tables live in
   `docs/plans/2026-07-18-003-feat-theme-aware-controls-plan.md`.
 - `screen.rs` — virtual screen abstraction (today there is one physical display).
 - `console.rs` — kernel `print!` macro output buffer.
@@ -55,7 +58,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 
 | Type | Purpose | Notes |
 |---|---|---|
-| `DesktopWindow` | Full-screen background | Optionally owns BMP wallpaper bytes (loaded via `window::load_default_wallpaper`) and blits them through `GraphicsDevice::draw_image_scaled`. Falls back to solid blue (RGB `0, 50, 100`) when no wallpaper is provided or parsing fails — boot must succeed in either branch. |
+| `DesktopWindow` | Full-screen background | Owns optional live-replaceable BMP wallpaper bytes and blits them through `GraphicsDevice::draw_image_scaled`. Falls back to solid blue (RGB `0, 50, 100`) when no wallpaper is provided or parsing fails — boot must succeed in either branch. |
 | `FrameWindow` | Title bar + borders | Metrics and painting come from the active Classic/Aero theme. Aero requires the retained renderer. Uses `WindowBase`. |
 | `TextWindow` | Grid-based text rendering | Cell size derived from the system TTF (`get_default_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
