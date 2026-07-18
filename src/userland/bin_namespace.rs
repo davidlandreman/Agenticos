@@ -1,7 +1,8 @@
 //! Virtual `/bin/<applet>` namespace backed by multicall and direct ELFs.
 //!
 //! - **BusyBox** (`BB.ELF`) — one binary that dispatches on `argv[0]` to
-//!   ~240 coreutils applets (`ls`, `cat`, `grep`, …).
+//!   ~240 coreutils applets (`ls`, `cat`, `grep`, …), plus synthetic command
+//!   aliases such as `vim` → `vi`.
 //! - **GUILAUNCH** (`GLAUNCH.ELF`) — one ring-3 launcher binary that
 //!   takes an applet name in `argv[0]` and issues the
 //!   `gui_launch` syscall, spawning the matching kernel-side GUI app
@@ -154,6 +155,7 @@ pub const APPLETS: &[&str] = &[
     "findfs",
     "flock",
     "fold",
+    "free",
     "fsync",
     "getopt",
     "grep",
@@ -238,6 +240,7 @@ pub const APPLETS: &[&str] = &[
     "realpath",
     "reformime",
     "remove-shell",
+    "reset",
     "resume",
     "rev",
     "rm",
@@ -284,6 +287,7 @@ pub const APPLETS: &[&str] = &[
     "test",
     "time",
     "timeout",
+    "top",
     "touch",
     "tr",
     "tree",
@@ -334,11 +338,19 @@ pub const APPLETS: &[&str] = &[
     "zcat",
 ];
 
+/// Sorted synthetic command aliases backed by BusyBox applets. The first
+/// item is the name exposed in `/bin`; the second is the real BusyBox applet
+/// placed in `argv[0]` at exec time.
+pub const BUSYBOX_ALIASES: &[(&str, &str)] = &[("vim", "vi")];
+
 /// True if `name` is any known applet (BusyBox or GUI). O(log N) per
 /// list via `binary_search`.
 #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub fn is_applet(name: &str) -> bool {
     APPLETS.binary_search(&name).is_ok()
+        || BUSYBOX_ALIASES
+            .binary_search_by_key(&name, |(alias, _)| *alias)
+            .is_ok()
         || GUI_APPLETS.binary_search(&name).is_ok()
         || DIRECT_APPLETS.binary_search(&name).is_ok()
 }
@@ -348,7 +360,13 @@ pub fn is_applet(name: &str) -> bool {
 /// copying the user-supplied string). Does NOT check the GUI list —
 /// see [`lookup_gui`] for that.
 pub fn lookup(name: &str) -> Option<&'static str> {
-    APPLETS.binary_search(&name).ok().map(|i| APPLETS[i])
+    if let Ok(index) = APPLETS.binary_search(&name) {
+        return Some(APPLETS[index]);
+    }
+    BUSYBOX_ALIASES
+        .binary_search_by_key(&name, |(alias, _)| *alias)
+        .ok()
+        .map(|index| BUSYBOX_ALIASES[index].1)
 }
 
 /// Look up an applet name in the GUI list and return the canonical
@@ -417,13 +435,19 @@ pub fn apply_bin_rewrite(normalized: &str) -> Option<(&'static str, &'static str
 ///
 /// Total entry count includes BusyBox, kernel GUI launchers, and direct apps.
 pub fn merged_bin_entries() -> impl Iterator<Item = &'static str> {
-    MergedBinIter { i: 0, j: 0, k: 0 }
+    MergedBinIter {
+        i: 0,
+        j: 0,
+        k: 0,
+        alias: 0,
+    }
 }
 
 struct MergedBinIter {
     i: usize,
     j: usize,
     k: usize,
+    alias: usize,
 }
 
 impl Iterator for MergedBinIter {
@@ -433,6 +457,7 @@ impl Iterator for MergedBinIter {
             APPLETS.get(self.i).copied(),
             GUI_APPLETS.get(self.j).copied(),
             DIRECT_APPLETS.get(self.k).copied(),
+            BUSYBOX_ALIASES.get(self.alias).map(|(name, _)| *name),
         ];
         let mut selected: Option<(usize, &'static str)> = None;
         for (source, candidate) in candidates.into_iter().enumerate() {
@@ -446,7 +471,8 @@ impl Iterator for MergedBinIter {
         match source {
             0 => self.i += 1,
             1 => self.j += 1,
-            _ => self.k += 1,
+            2 => self.k += 1,
+            _ => self.alias += 1,
         }
         Some(value)
     }
@@ -456,7 +482,7 @@ impl Iterator for MergedBinIter {
 /// `stat_virtual_bin` for `st_nlink` and by `getdents64_virtual_bin`
 /// for the EOF cursor.
 pub fn merged_bin_entry_count() -> usize {
-    APPLETS.len() + GUI_APPLETS.len() + DIRECT_APPLETS.len()
+    APPLETS.len() + GUI_APPLETS.len() + DIRECT_APPLETS.len() + BUSYBOX_ALIASES.len()
 }
 
 /// True when `normalized` is exactly `/bin` (the synthesized directory
@@ -483,7 +509,8 @@ mod tests_internal {
 
     fn test_applets_includes_core_set() {
         for name in [
-            "ls", "cat", "grep", "sed", "awk", "wc", "head", "tail", "sh", "echo",
+            "ls", "cat", "grep", "sed", "awk", "wc", "head", "tail", "sh", "echo", "free", "reset",
+            "top", "vi", "vim",
         ] {
             assert!(is_applet(name), "expected applet not present: {}", name);
         }
@@ -497,12 +524,19 @@ mod tests_internal {
         // Verify the lifetime: assigning to a &'static str compiles
         // only because lookup() returns &'static.
         let _static_ref: &'static str = got;
+
+        let vim = lookup("vim").expect("vim alias must resolve");
+        assert_eq!(vim, "vi", "BusyBox must receive its real applet name");
     }
 
     fn test_apply_bin_rewrite_matches_known_applet() {
         let (path, applet) = apply_bin_rewrite("/bin/ls").expect("must resolve");
         assert_eq!(path, "/host/BB.ELF");
         assert_eq!(applet, "ls");
+
+        let (path, applet) = apply_bin_rewrite("/bin/vim").expect("alias must resolve");
+        assert_eq!(path, "/host/BB.ELF");
+        assert_eq!(applet, "vi");
     }
 
     fn test_apply_bin_rewrite_rejects_unknown() {
@@ -642,6 +676,27 @@ mod tests_internal {
     /// Every synthetic namespace class must be disjoint. The dispatch order
     /// in `apply_bin_rewrite` would otherwise silently shadow a later class.
     fn test_applet_classes_are_disjoint() {
+        for win in BUSYBOX_ALIASES.windows(2) {
+            assert!(
+                win[0].0 < win[1].0,
+                "BUSYBOX_ALIASES must be sorted by exposed name"
+            );
+        }
+        for &(alias, target) in BUSYBOX_ALIASES {
+            assert!(
+                APPLETS.binary_search(&alias).is_err(),
+                "BusyBox alias {:?} collides with a real applet",
+                alias,
+            );
+            assert!(
+                APPLETS.binary_search(&target).is_ok(),
+                "BusyBox alias {:?} targets missing applet {:?}",
+                alias,
+                target,
+            );
+            assert!(GUI_APPLETS.binary_search(&alias).is_err());
+            assert!(DIRECT_APPLETS.binary_search(&alias).is_err());
+        }
         for &gui in GUI_APPLETS {
             assert!(
                 !APPLETS.binary_search(&gui).is_ok(),
@@ -740,7 +795,7 @@ mod tests_internal {
         assert_eq!(entries.len(), merged_bin_entry_count());
         assert_eq!(
             entries.len(),
-            APPLETS.len() + GUI_APPLETS.len() + DIRECT_APPLETS.len()
+            APPLETS.len() + GUI_APPLETS.len() + DIRECT_APPLETS.len() + BUSYBOX_ALIASES.len()
         );
         for win in entries.windows(2) {
             assert!(
@@ -769,6 +824,7 @@ mod tests_internal {
         assert!(entries.contains(&"links2"));
         assert!(entries.contains(&"notepad"));
         assert!(entries.contains(&"painting"));
+        assert!(entries.contains(&"vim"));
     }
 
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {

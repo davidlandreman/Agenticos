@@ -1,7 +1,8 @@
 # busybox
 
 Single-binary static-musl BusyBox build, providing `ls`, `cat`, `grep`,
-`sed`, `awk`, `find`, `wc`, `head`, `tail`, `sort`, `uniq`, plus the selected
+`sed`, `awk`, `find`, `wc`, `head`, `tail`, `sort`, `uniq`, `vi` (also exposed
+as `vim`), `free`, `top`, `reset`, plus the selected
 `ping`, `nc`, `nslookup`, and `wget` networking applets behind a multicall dispatcher. The kernel exposes a
 virtual `/bin/<applet>` namespace so `execve("/bin/ls", argv, envp)`
 resolves to `BB.ELF` with `argv[0] = "ls"`, and BusyBox's argv[0]-based
@@ -45,10 +46,17 @@ in lockstep — the SHA verifier hard-fails on mismatch.
 
 - `CONFIG_STATIC=y` — static link against musl.
 - `CONFIG_PIE=n` — kernel ELF loader rejects ET_DYN.
+- `CONFIG_VI=y` — lightweight terminal editor, exposed as both `vi` and the
+  synthetic `vim` alias.
+- `CONFIG_FREE=y`, `CONFIG_TOP=y` — backed by `sysinfo(2)` and the synthetic
+  `/proc`; `top` reports the single CPU and ring-3 processes represented there.
+  Thread and per-map modes stay off until `/proc/<pid>/{task,smaps}` exist.
+- `CONFIG_RESET=y` — backed by the PTY termios ABI and VT100 reset handling.
 - Disabled categories: init/shutdown, login/passwd/accounts, daemons
   (cron, syslog, watchdog, …), module loading, mount/swap/blockdev/mkfs,
   unsupported networking daemons/interface tools, TTY/console manipulation, time/clock
-  adjustment, IPC, namespaces, free/top/iostat (no /proc).
+  adjustment, IPC, namespaces, and monitors needing procfs data beyond the
+  current synthetic subset.
 - Enabled networking is deliberately limited to IPv4 `ping`, `nc`, `nslookup`,
   and HTTP-only `wget`. HTTPS/TLS, IPv6, `udhcpc`, and interface configuration
   remain disabled.
@@ -65,14 +73,12 @@ re-enable), add or remove the relevant `CONFIG_<APPLET>=n` lines in
 `busybox.config`. Avoid checking in a full `.config` snapshot — the
 override-on-defconfig pattern keeps the diff readable.
 
-## Read-only filesystem caveat
+## Filesystem caveat
 
-The kernel's FAT mount is read-only. BusyBox write-side applets (`cp`,
-`mv`, `rm`, `mkdir`, `touch`, `chmod`, `chown`, `ln`, `dd`) ship in
-`BB.ELF` and resolve via `/bin/<applet>`, but every `write()` to a
-file-backed FD returns `EROFS`. The applets surface the error cleanly —
-they do not panic the kernel. When write support lands in `src/fs/`,
-they begin to work without further changes here.
+BusyBox write-side applets (`cp`, `mv`, `rm`, `mkdir`, `touch`, `chmod`,
+`ln`, `dd`) work on the writable overlay and `/data` filesystems. `/host`
+remains read-only, so commands targeting staged host files still report
+`EROFS`. The conventional compiler/editor scratch directory is `/work`.
 
 ## Networking caveat
 
@@ -95,8 +101,10 @@ HTTPS remains deferred until certificate/time support lands.
 ## Applet list ↔ kernel sync
 
 `src/userland/bin_namespace.rs` carries the kernel's view of which
-`/bin/<name>` paths are valid. It MUST stay in sync with the applets
-actually compiled into `BB.ELF`. To regenerate after a config change:
+`/bin/<name>` paths are valid. Its `APPLETS` list MUST stay in sync with the
+applets actually compiled into `BB.ELF`; `BUSYBOX_ALIASES` may additionally
+expose alternate names whose target is in that compiled list. To regenerate
+after a config change:
 
 ```sh
 make -C userland/apps/busybox
