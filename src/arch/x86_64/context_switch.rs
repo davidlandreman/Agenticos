@@ -56,22 +56,91 @@ pub unsafe extern "C" fn switch_context(old_ctx: *mut CpuContext, new_ctx: *cons
         "pushfq",
         "pop rax",
         "mov [rdi + 64], rax",
-        // Load callee-saved registers from new context (rsi = new_ctx)
-        "mov rbx, [rsi + 0]",
-        "mov rbp, [rsi + 8]",
-        "mov r12, [rsi + 16]",
-        "mov r13, [rsi + 24]",
-        "mov r14, [rsi + 32]",
-        "mov r15, [rsi + 40]",
-        // Load flags
-        "mov rax, [rsi + 64]",
+        "cli",
+        // Stage the target image in per-CPU storage while the source stack is
+        // still private. `new_ctx` is commonly a Rust local on that stack.
+        "mov r13, rdi",
+        "mov rdi, rsi",
+        "sub rsp, 8",
+        "call {stage_handoff}",
+        "add rsp, 8",
+        "mov r12, rax",
+
+        // Abandon the entity stack before publishing its completed context.
+        // The per-CPU idle/main stack is inactive during entity execution.
+        "mov rsp, gs:[{kernel_context_rsp_offset}]",
+        "and rsp, -16",
+        "mov rdi, r13",
+        "call {publish_saved_context}",
+
+        // Restore from per-CPU staging and use a synthetic return address for
+        // the CPL0 handoff.
+        "mov r11, r12",
+        "cli",
+        "mov rsp, [r11 + 48]",
+        "push qword ptr [r11 + 56]",
+        "mov rax, [r11 + 64]",
+        "and rax, -513",
         "push rax",
         "popfq",
-        // Load stack pointer
-        "mov rsp, [rsi + 48]",
-        // Jump to new RIP
-        "jmp [rsi + 56]",
+        "mov rbx, [r11 + 0]",
+        "mov rbp, [r11 + 8]",
+        "mov r12, [r11 + 16]",
+        "mov r13, [r11 + 24]",
+        "mov r14, [r11 + 32]",
+        "mov r15, [r11 + 40]",
+        "mov rax, [r11 + 72]",
+        "mov rcx, [r11 + 80]",
+        "mov rdx, [r11 + 88]",
+        "mov rsi, [r11 + 96]",
+        "mov rdi, [r11 + 104]",
+        "mov r8, [r11 + 112]",
+        "mov r9, [r11 + 120]",
+        "mov r10, [r11 + 128]",
+        "mov r11, [r11 + 136]",
+        "sti",
+        "ret",
+        stage_handoff = sym stage_handoff_context,
+        publish_saved_context = sym publish_saved_context,
+        kernel_context_rsp_offset = const crate::arch::x86_64::percpu::KERNEL_CONTEXT_RSP_OFFSET,
     );
+}
+
+extern "C" fn stage_handoff_context(context: *const CpuContext) -> *const CpuContext {
+    unsafe { crate::arch::x86_64::percpu::stage_handoff_context(context) }
+}
+
+extern "C" fn publish_saved_context(old_context: *mut CpuContext) {
+    let published = publish_handoff_context(old_context);
+    debug_assert!(published, "context switch saved an unregistered context");
+}
+
+/// Publish a completed kernel-side save when a handoff may originate either
+/// from a registered kernel entity or from the per-CPU idle/main context.
+/// Returns whether any scheduler entity was identified.
+pub(crate) extern "C" fn publish_handoff_context(old_context: *mut CpuContext) -> bool {
+    let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
+    let pending = crate::arch::x86_64::percpu::take_pending_context_publish();
+    if let Some(entity) = pending {
+        scheduler.publish_context(entity);
+    }
+    // A stale or concurrently superseded side-band user publication must not
+    // strand a kernel thread whose save completed in the same handoff. The
+    // pointer lookup is a no-op for user continuations, so publish both forms
+    // when applicable and require at least one to identify the saved context.
+    let kernel_published = scheduler.publish_kernel_context_ptr(old_context);
+    pending.is_some() || kernel_published
+}
+
+/// Publish the entity whose interrupt-driven save is complete. The assembly
+/// caller has already installed a different stack before entering here.
+pub(crate) extern "C" fn publish_pending_context() {
+    let Some(entity) = crate::arch::x86_64::percpu::take_pending_context_publish() else {
+        return;
+    };
+    crate::process::scheduler::SCHEDULER
+        .lock()
+        .publish_context(entity);
 }
 
 /// Switch to a new process context without saving the old one.
@@ -85,22 +154,86 @@ pub unsafe extern "C" fn switch_context(old_ctx: *mut CpuContext, new_ctx: *cons
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_to_context(new_ctx: *const CpuContext) {
     naked_asm!(
-        // Load callee-saved registers from new context (rdi = new_ctx)
-        "mov rbx, [rdi + 0]",
-        "mov rbp, [rdi + 8]",
-        "mov r12, [rdi + 16]",
-        "mov r13, [rdi + 24]",
-        "mov r14, [rdi + 32]",
-        "mov r15, [rdi + 40]",
-        // Load flags
-        "mov rax, [rdi + 64]",
+        "mov r11, rdi",
+        "mov rsp, [r11 + 48]",
+        "push qword ptr [r11 + 56]",
+        // Load flags with IF masked until the register image is complete.
+        "mov rax, [r11 + 64]",
+        "and rax, -513",
         "push rax",
         "popfq",
-        // Load stack pointer
-        "mov rsp, [rdi + 48]",
-        // Jump to RIP
-        "jmp [rdi + 56]",
+        "mov rbx, [r11 + 0]",
+        "mov rbp, [r11 + 8]",
+        "mov r12, [r11 + 16]",
+        "mov r13, [r11 + 24]",
+        "mov r14, [r11 + 32]",
+        "mov r15, [r11 + 40]",
+        "mov rax, [r11 + 72]",
+        "mov rcx, [r11 + 80]",
+        "mov rdx, [r11 + 88]",
+        "mov rsi, [r11 + 96]",
+        "mov rdi, [r11 + 104]",
+        "mov r8, [r11 + 112]",
+        "mov r9, [r11 + 120]",
+        "mov r10, [r11 + 128]",
+        "mov r11, [r11 + 136]",
+        "sti",
+        "ret",
     );
+}
+
+/// Abandon a terminated kernel thread, retire its stack from a different
+/// stack, and restore the per-CPU kernel/main-loop context.
+///
+/// The stack allocator is shared across CPUs. Publishing the old stack before
+/// changing RSP would let a concurrent spawn reuse memory that still contains
+/// this CPU's live termination frames.
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_to_context_and_retire_stack(
+    new_ctx: *const CpuContext,
+    stack_base: u64,
+) -> ! {
+    naked_asm!(
+        // Preserve both arguments across the Rust helper. The target register
+        // image is restored below, so borrowing r12/r13 here is harmless.
+        "mov r12, rdi",
+        "mov r13, rsi",
+        // Run the allocator on the target stack. Align down for the SysV call
+        // and reload the exact saved RSP afterward.
+        "mov rsp, [r12 + 48]",
+        "and rsp, -16",
+        "mov rdi, r13",
+        "call {retire_stack}",
+        "mov r11, r12",
+        "mov rsp, [r11 + 48]",
+        "push qword ptr [r11 + 56]",
+        "mov rax, [r11 + 64]",
+        "and rax, -513",
+        "push rax",
+        "popfq",
+        "mov rbx, [r11 + 0]",
+        "mov rbp, [r11 + 8]",
+        "mov r12, [r11 + 16]",
+        "mov r13, [r11 + 24]",
+        "mov r14, [r11 + 32]",
+        "mov r15, [r11 + 40]",
+        "mov rax, [r11 + 72]",
+        "mov rcx, [r11 + 80]",
+        "mov rdx, [r11 + 88]",
+        "mov rsi, [r11 + 96]",
+        "mov rdi, [r11 + 104]",
+        "mov r8, [r11 + 112]",
+        "mov r9, [r11 + 120]",
+        "mov r10, [r11 + 128]",
+        "mov r11, [r11 + 136]",
+        "sti",
+        "ret",
+        retire_stack = sym retire_kernel_stack,
+    );
+}
+
+extern "C" fn retire_kernel_stack(stack_base: u64) {
+    crate::process::stack::free_stack(stack_base);
 }
 
 /// Restore a kernel entity from a complete saved context and diverge.
@@ -112,7 +245,18 @@ pub unsafe extern "C" fn switch_to_context(new_ctx: *const CpuContext) {
 #[unsafe(naked)]
 pub unsafe extern "C" fn restore_kernel_context(new_ctx: *const CpuContext) -> ! {
     naked_asm!(
-        "mov r11, rdi",
+        // Stage the target image before abandoning the interrupt/source stack.
+        "cli",
+        "sub rsp, 8",
+        "call {stage_handoff}",
+        "add rsp, 8",
+        "mov r12, rax",
+
+        // Publish only after moving to the per-CPU idle/main stack.
+        "mov rsp, gs:[{kernel_context_rsp_offset}]",
+        "and rsp, -16",
+        "call {publish_pending}",
+        "mov r11, r12",
         "mov rsp, [r11 + 48]",
         "mov rax, [r11 + 56]",
         "push rax",
@@ -140,6 +284,9 @@ pub unsafe extern "C" fn restore_kernel_context(new_ctx: *const CpuContext) -> !
         "mov r11, [r11 + 136]",
         "sti",
         "ret",
+        stage_handoff = sym stage_handoff_context,
+        publish_pending = sym publish_pending_context,
+        kernel_context_rsp_offset = const crate::arch::x86_64::percpu::KERNEL_CONTEXT_RSP_OFFSET,
     );
 }
 
@@ -149,9 +296,33 @@ pub unsafe fn resume_kernel_thread(pid: crate::process::ProcessId) -> ! {
         .get_context(pid)
         .copied()
         .expect("resume_kernel_thread: unknown pid");
+    validate_kernel_context(pid, &context);
     crate::userland::lifecycle::set_current_user_pid(None);
     crate::process::set_in_spawned_process(true);
+    // Kernel entities never own a user address space. A ring-3 timer/exit may
+    // select this thread directly, so restore the permanent kernel CR3 before
+    // the old process can be reaped on another CPU.
+    crate::mm::paging::activate_kernel_l4();
     restore_kernel_context(&context)
+}
+
+pub fn validate_kernel_context(pid: crate::process::ProcessId, context: &CpuContext) {
+    let stack_start = crate::process::stack::STACK_REGION_START;
+    let stack_end = stack_start
+        + (crate::process::stack::MAX_PROCESSES * (crate::process::stack::STACK_SIZE + 4096))
+            as u64;
+    assert!(
+        context.rip >= 0xffff_8000_0000_0000
+            && context.rsp >= stack_start
+            && context.rsp <= stack_end
+            && context.cs == 0x08
+            && context.ss == 0x10,
+        "invalid kernel context for PID {pid}: RIP={:#x} RSP={:#x} CS={:#x} SS={:#x}",
+        context.rip,
+        context.rsp,
+        context.cs,
+        context.ss,
+    );
 }
 
 /// Context switch that saves callee-saved regs but restores ALL regs.
@@ -193,31 +364,38 @@ pub unsafe extern "C" fn switch_context_full_restore(
         "pop rax",
         "mov [rdi + 64], rax",
         // ===== RESTORE ALL registers from new context (rsi = new_ctx) =====
-        // Set up iretq frame on CURRENT stack. CS/SS come from the saved
-        // CpuContext at offsets 144/152 — preserves ring level on resume.
-        "push qword ptr [rsi + 152]", // SS
-        "push qword ptr [rsi + 48]",  // RSP
-        "push qword ptr [rsi + 64]",  // RFLAGS
-        "push qword ptr [rsi + 144]", // CS
-        "push qword ptr [rsi + 56]",  // RIP
+        // Switch to the target stack before transferring. A same-privilege
+        // IRETQ does not install RSP and makes the segment frame needlessly
+        // fragile, so use a synthetic return address just like
+        // restore_kernel_context.
+        "cli",
+        "mov r11, rsi",
+        "mov rsp, [r11 + 48]",
+        "push qword ptr [r11 + 56]", // RIP
+        // Keep interrupts masked until the register image is complete. The
+        // STI interrupt shadow extends through the final RET.
+        "mov rax, [r11 + 64]",
+        "and rax, -513",
+        "push rax",
+        "popfq",
         // Restore all registers from context
-        "mov rbx, [rsi + 0]",
-        "mov rbp, [rsi + 8]",
-        "mov r12, [rsi + 16]",
-        "mov r13, [rsi + 24]",
-        "mov r14, [rsi + 32]",
-        "mov r15, [rsi + 40]",
-        "mov rax, [rsi + 72]",
-        "mov rcx, [rsi + 80]",
-        "mov rdx, [rsi + 88]",
-        "mov rdi, [rsi + 104]", // Restore rdi before rsi
-        "mov r8, [rsi + 112]",
-        "mov r9, [rsi + 120]",
-        "mov r10, [rsi + 128]",
-        "mov r11, [rsi + 136]",
-        "mov rsi, [rsi + 96]", // Restore rsi last
-        // Return via iretq
-        "iretq",
+        "mov rbx, [r11 + 0]",
+        "mov rbp, [r11 + 8]",
+        "mov r12, [r11 + 16]",
+        "mov r13, [r11 + 24]",
+        "mov r14, [r11 + 32]",
+        "mov r15, [r11 + 40]",
+        "mov rax, [r11 + 72]",
+        "mov rcx, [r11 + 80]",
+        "mov rdx, [r11 + 88]",
+        "mov rsi, [r11 + 96]",
+        "mov rdi, [r11 + 104]",
+        "mov r8, [r11 + 112]",
+        "mov r9, [r11 + 120]",
+        "mov r10, [r11 + 128]",
+        "mov r11, [r11 + 136]",
+        "sti",
+        "ret",
     );
 }
 

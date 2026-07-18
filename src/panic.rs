@@ -1,4 +1,3 @@
-use crate::debug_error;
 #[cfg(not(feature = "test"))]
 use crate::drivers::display::text_buffer;
 #[cfg(not(feature = "test"))]
@@ -10,15 +9,9 @@ use core::panic::PanicInfo;
 #[cfg(not(feature = "test"))]
 #[panic_handler]
 pub fn panic(info: &PanicInfo) -> ! {
-    // CRITICAL: Force-enable interrupts immediately.
-    // If we panicked while holding a lock with interrupts disabled,
-    // this ensures the timer keeps running so the system doesn't completely freeze.
-    // This allows the watchdog to eventually detect the hung state.
-    unsafe {
-        core::arch::asm!("sti", options(nomem, nostack));
-    }
-
-    debug_error!("KERNEL PANIC: {}", info);
+    x86_64::instructions::interrupts::disable();
+    crate::arch::x86_64::smp::freeze_other_cpus();
+    crate::lib::debug::write_panic_line("[ERROR] ", format_args!("KERNEL PANIC: {}", info));
 
     // Try to display panic on screen if text buffer is available
     text_buffer::set_color(Color::RED);
@@ -26,7 +19,8 @@ pub fn panic(info: &PanicInfo) -> ! {
     println!("!!! KERNEL PANIC !!!");
     println!("{}", info);
 
-    // Loop with hlt to save power and allow interrupts to fire
+    // Freeze this CPU as well; no scheduler or device handler may interleave
+    // with panic diagnostics.
     loop {
         x86_64::instructions::hlt();
     }
@@ -37,7 +31,9 @@ pub fn panic(info: &PanicInfo) -> ! {
 pub fn panic(info: &PanicInfo) -> ! {
     use crate::lib::test_utils::{exit_qemu, QemuExitCode};
 
-    debug_error!("TEST PANIC: {}", info);
+    x86_64::instructions::interrupts::disable();
+    crate::arch::x86_64::smp::freeze_other_cpus();
+    crate::lib::debug::write_panic_line("[ERROR] ", format_args!("TEST PANIC: {}", info));
 
     // Exit QEMU with failure code for tests
     exit_qemu(QemuExitCode::Failed);

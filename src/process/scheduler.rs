@@ -50,6 +50,8 @@ pub struct SchedEntity {
     pub ready_since_tick: u64,
     pub must_run_by_tick: Option<u64>,
     pub latency_contract: Option<LatencyContract>,
+    /// Full architecture context is safe for another CPU to restore.
+    pub context_published: bool,
 }
 
 impl SchedEntity {
@@ -60,6 +62,7 @@ impl SchedEntity {
             ready_since_tick: 0,
             must_run_by_tick: None,
             latency_contract: None,
+            context_published: true,
         }
     }
 }
@@ -75,8 +78,8 @@ pub struct Scheduler {
     entities: BTreeMap<EntityId, SchedEntity>,
     /// The one ready queue shared by kernel threads and user processes.
     run_queue: RunQueue,
-    /// Entity whose execution state is currently loaded on the CPU.
-    current: Option<EntityId>,
+    /// Entity whose execution state is loaded on each logical CPU.
+    current: [Option<EntityId>; crate::arch::x86_64::acpi::MAX_CPUS],
     /// The idle process PID (runs when nothing else is ready)
     pub idle_pid: Option<ProcessId>,
     /// Whether scheduler is initialized
@@ -94,7 +97,7 @@ impl Scheduler {
             processes: BTreeMap::new(),
             entities: BTreeMap::new(),
             run_queue: RunQueue::new(),
-            current: None,
+            current: [None; crate::arch::x86_64::acpi::MAX_CPUS],
             idle_pid: None,
             initialized: false,
             signal_waiters: Vec::new(),
@@ -160,7 +163,7 @@ impl Scheduler {
 
     /// Get the currently running process ID
     pub fn current(&self) -> Option<ProcessId> {
-        match self.current {
+        match self.current[crate::arch::x86_64::percpu::cpu_id()] {
             Some(EntityId::KernelThread(pid)) => Some(pid),
             Some(EntityId::UserProcess(_)) | None => None,
         }
@@ -171,7 +174,33 @@ impl Scheduler {
         expect(dead_code, reason = "scheduler diagnostics API")
     )]
     pub fn current_entity(&self) -> Option<EntityId> {
-        self.current
+        self.current[crate::arch::x86_64::percpu::cpu_id()]
+    }
+
+    pub fn current_entity_on_cpu(&self, cpu: usize) -> Option<EntityId> {
+        self.current.get(cpu).copied().flatten()
+    }
+
+    #[cfg(feature = "test")]
+    pub fn entity_diagnostics_for_test(
+        &self,
+        id: EntityId,
+    ) -> Option<(RunState, bool, Option<ProcessState>, Option<BlockReason>)> {
+        let entity = self.entities.get(&id)?;
+        let (process_state, block_reason) = match id {
+            EntityId::KernelThread(pid) => self
+                .processes
+                .get(&pid)
+                .map(|pcb| (Some(pcb.state), pcb.block_reason))
+                .unwrap_or((None, None)),
+            EntityId::UserProcess(_) => (None, None),
+        };
+        Some((
+            entity.state,
+            entity.context_published,
+            process_state,
+            block_reason,
+        ))
     }
 
     pub fn register_user(&mut self, pid: u32) -> Result<(), ()> {
@@ -189,7 +218,7 @@ impl Scheduler {
         let Some(state) = self.entities.get(&id).map(|entity| entity.state) else {
             return Err(());
         };
-        if state == RunState::Running && self.current == Some(id) {
+        if state == RunState::Running && self.current.contains(&Some(id)) {
             return Ok(false);
         }
         if state == RunState::Ready {
@@ -204,7 +233,18 @@ impl Scheduler {
                         .unwrap_or(deadline),
                 );
             }
-            return self.run_queue.enqueue(id);
+            if !self
+                .entities
+                .get(&id)
+                .is_some_and(|entity| entity.context_published)
+            {
+                return Ok(false);
+            }
+            let result = self.run_queue.enqueue(id);
+            if matches!(result, Ok(true)) {
+                crate::arch::x86_64::smp::notify_work();
+            }
+            return result;
         }
         if let EntityId::KernelThread(pid) = id {
             if let Some(pcb) = self.processes.get_mut(&pid) {
@@ -220,7 +260,14 @@ impl Scheduler {
         entity.ready_since_tick = now;
         entity.latency_contract = contract;
         entity.must_run_by_tick = contract.map(|c| now.saturating_add(c.max_dispatch_ticks as u64));
-        self.run_queue.enqueue(id)
+        if !entity.context_published {
+            return Ok(false);
+        }
+        let result = self.run_queue.enqueue(id);
+        if matches!(result, Ok(true)) {
+            crate::arch::x86_64::smp::notify_work();
+        }
+        result
     }
 
     pub fn block_entity(&mut self, id: EntityId) {
@@ -229,15 +276,19 @@ impl Scheduler {
             entity.state = RunState::Blocked;
             entity.must_run_by_tick = None;
         }
-        if self.current == Some(id) {
-            self.current = None;
+        for current in &mut self.current {
+            if *current == Some(id) {
+                *current = None;
+            }
         }
     }
 
     pub fn unregister_entity(&mut self, id: EntityId) {
         self.run_queue.remove(id);
-        if self.current == Some(id) {
-            self.current = None;
+        for current in &mut self.current {
+            if *current == Some(id) {
+                *current = None;
+            }
         }
         if let Some(entity) = self.entities.get_mut(&id) {
             entity.state = RunState::Dead;
@@ -247,6 +298,42 @@ impl Scheduler {
 
     pub fn entity_state(&self, id: EntityId) -> Option<RunState> {
         self.entities.get(&id).map(|entity| entity.state)
+    }
+
+    pub fn mark_context_saving(&mut self, id: EntityId) {
+        if let Some(entity) = self.entities.get_mut(&id) {
+            entity.context_published = false;
+        }
+    }
+
+    pub fn publish_context(&mut self, id: EntityId) {
+        let ready = if let Some(entity) = self.entities.get_mut(&id) {
+            entity.context_published = true;
+            entity.state == RunState::Ready
+        } else {
+            false
+        };
+        if ready {
+            let enqueued = self
+                .run_queue
+                .enqueue(id)
+                .expect("scheduler entity capacity exceeded while publishing context");
+            if enqueued {
+                crate::arch::x86_64::smp::notify_work();
+            }
+        }
+    }
+
+    pub fn publish_kernel_context_ptr(&mut self, context: *mut CpuContext) -> bool {
+        let id = self.processes.iter_mut().find_map(|(pid, pcb)| {
+            core::ptr::eq(&mut pcb.context, context).then_some(EntityId::KernelThread(*pid))
+        });
+        if let Some(id) = id {
+            self.publish_context(id);
+            true
+        } else {
+            false
+        }
     }
 
     /// Number of user entities currently eligible to execute or running.
@@ -302,7 +389,8 @@ impl Scheduler {
                 pcb.last_activity_tick = now;
             }
         }
-        self.current = Some(next);
+        self.current[crate::arch::x86_64::percpu::cpu_id()] = Some(next);
+        crate::arch::x86_64::percpu::record_dispatch();
         Some(next)
     }
 
@@ -317,8 +405,35 @@ impl Scheduler {
                 pcb.state = ProcessState::Ready;
             }
         }
-        self.yield_entity(current);
-        let next = self.schedule_entity()?;
+        // The interrupt frame and entity stack remain live until the
+        // architecture handoff switches stacks. Keep the saved context out of
+        // the shared queue until that handoff publishes it.
+        self.mark_context_saving(current);
+        if let Some(entity) = self.entities.get_mut(&current) {
+            entity.state = RunState::Ready;
+            entity.must_run_by_tick = None;
+        }
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        if self.current[cpu] == Some(current) {
+            self.current[cpu] = None;
+        }
+
+        let Some(next) = self.schedule_entity() else {
+            // Nothing else can run, so keep executing the current interrupt
+            // frame without publishing it to another CPU.
+            if let Some(entity) = self.entities.get_mut(&current) {
+                entity.state = RunState::Running;
+                entity.context_published = true;
+            }
+            if let EntityId::KernelThread(pid) = current {
+                if let Some(pcb) = self.processes.get_mut(&pid) {
+                    pcb.state = ProcessState::Running;
+                    pcb.time_slice_remaining = DEFAULT_TIME_SLICE;
+                }
+            }
+            self.current[cpu] = Some(current);
+            return Some(current);
+        };
         if let EntityId::KernelThread(pid) = next {
             if let Some(pcb) = self.processes.get_mut(&pid) {
                 pcb.state = ProcessState::Running;
@@ -342,7 +457,7 @@ impl Scheduler {
             entity.state = RunState::Running;
             entity.must_run_by_tick = None;
         }
-        self.current = Some(id);
+        self.current[crate::arch::x86_64::percpu::cpu_id()] = Some(id);
         Some(pid)
     }
 
@@ -354,8 +469,9 @@ impl Scheduler {
     }
 
     pub fn clear_current_user(&mut self, pid: u32) {
-        if self.current == Some(EntityId::UserProcess(pid)) {
-            self.current = None;
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        if self.current[cpu] == Some(EntityId::UserProcess(pid)) {
+            self.current[cpu] = None;
         }
     }
 
@@ -366,16 +482,18 @@ impl Scheduler {
             entity.state = RunState::Running;
             entity.must_run_by_tick = None;
         }
-        self.current = Some(id);
+        self.current[crate::arch::x86_64::percpu::cpu_id()] = Some(id);
     }
 
     pub fn yield_entity(&mut self, id: EntityId) {
         if let Some(entity) = self.entities.get_mut(&id) {
             entity.state = RunState::Ready;
             entity.must_run_by_tick = None;
+            entity.context_published = true;
         }
-        if self.current == Some(id) {
-            self.current = None;
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        if self.current[cpu] == Some(id) {
+            self.current[cpu] = None;
         }
         self.run_queue
             .enqueue(id)
@@ -423,7 +541,9 @@ impl Scheduler {
     /// # Arguments
     /// * `reason` - Why the process is blocking
     pub fn block_current(&mut self, reason: BlockReason) {
-        if let Some(EntityId::KernelThread(current_pid)) = self.current {
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        if let Some(EntityId::KernelThread(current_pid)) = self.current[cpu] {
+            self.mark_context_saving(EntityId::KernelThread(current_pid));
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 pcb.state = ProcessState::Blocked;
                 pcb.block_reason = Some(reason);
@@ -489,27 +609,41 @@ impl Scheduler {
     }
 
     /// Terminate the current process
-    pub fn terminate_current(&mut self) {
-        if let Some(EntityId::KernelThread(current_pid)) = self.current.take() {
+    /// Remove the current process and return the stack that must be retired
+    /// after the caller has switched to a different stack.
+    pub fn terminate_current(&mut self) -> Option<u64> {
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        if let Some(EntityId::KernelThread(current_pid)) = self.current[cpu].take() {
+            let mut retired_stack = None;
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 pcb.state = ProcessState::Terminated;
                 crate::debug_info!("Scheduler: Terminated process {:?}", current_pid);
-
-                // Free the stack
                 if pcb.stack_base != 0 {
-                    free_stack(pcb.stack_base);
+                    retired_stack = Some(pcb.stack_base);
                 }
             }
             // Remove from processes map
             self.processes.remove(&current_pid);
             self.unregister_entity(EntityId::KernelThread(current_pid));
+            return retired_stack;
         }
+        None
     }
 
-    /// Terminate a specific process
-    pub fn terminate(&mut self, pid: ProcessId) {
+    /// Terminate a non-running process immediately, or request that the CPU
+    /// currently executing it terminate at its next safe timer boundary.
+    /// Returns the logical CPU that owns a deferred termination.
+    pub fn terminate(&mut self, pid: ProcessId) -> Option<usize> {
+        let id = EntityId::KernelThread(pid);
+        if let Some(cpu) = self.current.iter().position(|current| *current == Some(id)) {
+            if let Some(pcb) = self.processes.get_mut(&pid) {
+                pcb.termination_requested = true;
+                return Some(cpu);
+            }
+        }
+
         // Remove from ready queue if present
-        self.run_queue.remove(EntityId::KernelThread(pid));
+        self.run_queue.remove(id);
 
         if let Some(pcb) = self.processes.get_mut(&pid) {
             pcb.state = ProcessState::Terminated;
@@ -523,12 +657,14 @@ impl Scheduler {
 
         // Remove from processes map
         self.processes.remove(&pid);
-        self.unregister_entity(EntityId::KernelThread(pid));
+        self.unregister_entity(id);
+        None
+    }
 
-        // If this was the current process, clear it
-        if self.current == Some(EntityId::KernelThread(pid)) {
-            self.current = None;
-        }
+    pub fn current_termination_requested(&self) -> bool {
+        self.current()
+            .and_then(|pid| self.processes.get(&pid))
+            .is_some_and(|pcb| pcb.termination_requested)
     }
 
     /// Handle a timer tick - decrement time slice and check for preemption
@@ -536,7 +672,8 @@ impl Scheduler {
     /// # Returns
     /// `true` if the current process's time slice has expired and preemption is needed
     pub fn timer_tick(&mut self) -> bool {
-        if let Some(EntityId::KernelThread(current_pid)) = self.current {
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        if let Some(EntityId::KernelThread(current_pid)) = self.current[cpu] {
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 // Increment total runtime
                 pcb.total_runtime += 1;
@@ -565,7 +702,9 @@ impl Scheduler {
     ///
     /// Moves the current process to the back of the ready queue.
     pub fn yield_current(&mut self) {
-        if let Some(EntityId::KernelThread(current_pid)) = self.current {
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        if let Some(EntityId::KernelThread(current_pid)) = self.current[cpu] {
+            self.mark_context_saving(EntityId::KernelThread(current_pid));
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 if pcb.state == ProcessState::Running {
                     pcb.state = ProcessState::Ready;
@@ -574,11 +713,12 @@ impl Scheduler {
                         if let Some(entity) = self.entities.get_mut(&id) {
                             entity.state = RunState::Ready;
                         }
-                        let _ = self.run_queue.enqueue(id);
+                        // `switch_context` publishes the completed save and
+                        // enqueues this entity from its assembly-side hook.
                     }
                 }
             }
-            self.current = None;
+            self.current[cpu] = None;
         }
     }
 

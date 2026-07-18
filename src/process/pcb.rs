@@ -156,6 +156,10 @@ pub struct ProcessControlBlock {
     /// Last tick when process made progress (yielded, slept, or syscall).
     /// Used by watchdog to detect hung processes.
     pub last_activity_tick: u64,
+
+    /// A remote CPU requested termination. The CPU currently executing this
+    /// process consumes the request at a safe timer-preemption boundary.
+    pub termination_requested: bool,
 }
 
 impl ProcessControlBlock {
@@ -178,6 +182,7 @@ impl ProcessControlBlock {
             wake_events: WakeEvents::NONE,
             pending_signals: SignalFlags::NONE,
             last_activity_tick: 0, // Will be set when process is spawned
+            termination_requested: false,
         }
     }
 }

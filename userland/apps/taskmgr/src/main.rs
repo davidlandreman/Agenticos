@@ -25,7 +25,7 @@ use gui::{
     GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
 };
 use runtime::GuiEvent;
-use sampler::Snapshot;
+use sampler::{CpuTimes, Snapshot};
 
 const SIGTERM: i32 = 15;
 const SIGKILL: i32 = 9;
@@ -48,12 +48,18 @@ enum ModalPurpose {
     ConfirmForce(u32),
 }
 
+struct CpuHistory {
+    id: u32,
+    pct10: u64,
+    graph: TimeSeriesGraph,
+}
+
 struct TaskMgr {
     window: Window,
     tabs: TabBar,
     proc_list: ColumnListView,
     end_task: Button,
-    cpu_graph: TimeSeriesGraph,
+    cpu_graphs: Vec<CpuHistory>,
     mem_graph: TimeSeriesGraph,
     net_graph: TimeSeriesGraph,
     socket_list: ColumnListView,
@@ -74,6 +80,22 @@ fn fmt_pct10(tenths: u64) -> String {
     format!("{}.{}", tenths / 10, tenths % 10)
 }
 
+fn cpu_delta_pct10(now: &CpuTimes, before: Option<&CpuTimes>) -> u64 {
+    let Some(before) = before else {
+        return 0;
+    };
+    if now.user < before.user || now.system < before.system || now.idle < before.idle {
+        return 0;
+    }
+    let busy = (now.user - before.user).saturating_add(now.system - before.system);
+    let total = busy.saturating_add(now.idle - before.idle);
+    if total == 0 {
+        0
+    } else {
+        (busy.saturating_mul(1000) / total).min(1000)
+    }
+}
+
 fn fmt_mmss(ticks: u64) -> String {
     let secs = ticks / 100;
     format!("{}:{:02}", secs / 60, secs % 60)
@@ -88,7 +110,7 @@ fn fmt_kb(kb: u64) -> String {
     if kb >= 10 * 1024 {
         format!("{} MB", kb / 1024)
     } else {
-        format!("{} KB", kb)
+        format!("{kb} KB")
     }
 }
 
@@ -102,7 +124,7 @@ fn fmt_rate(bps: u64) -> String {
     } else if bps >= 1024 {
         format!("{}.{} KB/s", bps / 1024, (bps % 1024) * 10 / 1024)
     } else {
-        format!("{} B/s", bps)
+        format!("{bps} B/s")
     }
 }
 
@@ -138,7 +160,7 @@ impl TaskMgr {
             tabs,
             proc_list: ColumnListView::new(0, 0, 10, 10, proc_columns),
             end_task: Button::new("End Task", 0, 0, 96, 24),
-            cpu_graph: TimeSeriesGraph::new(0, 0, 10, 10, 120, Some(100.0)),
+            cpu_graphs: Vec::new(),
             mem_graph: TimeSeriesGraph::new(0, 0, 10, 10, 120, None),
             net_graph: TimeSeriesGraph::new(0, 0, 10, 10, 120, None),
             socket_list: ColumnListView::new(0, 0, 10, 10, socket_columns),
@@ -179,17 +201,41 @@ impl TaskMgr {
         self.end_task.x = w as i32 - 8 - self.end_task.w as i32;
         self.end_task.y = content_y + content_h as i32 - action_h as i32 + 4;
 
-        // Performance tab: two stacked graphs + tile block below.
+        // Performance tab: a maximum-two-row CPU grid, memory, then tiles.
         let tiles_h = 76;
-        let graph_h = ((content_h.saturating_sub(24 + 12 + tiles_h)) / 2).max(60);
-        self.cpu_graph.x = 12;
-        self.cpu_graph.y = content_y + 12;
-        self.cpu_graph.w = w - 24;
-        self.cpu_graph.h = graph_h;
+        let graph_area_h = content_h.saturating_sub(24 + 12 + tiles_h);
+        let cpu_region_h = if self.cpu_graphs.len() <= 2 {
+            graph_area_h / 2
+        } else {
+            graph_area_h * 3 / 5
+        };
+        let cpu_count = self.cpu_graphs.len().max(1);
+        let cpu_cols = if cpu_count == 1 {
+            1
+        } else if cpu_count <= 4 {
+            2
+        } else {
+            cpu_count.div_ceil(2)
+        };
+        let cpu_rows = cpu_count.div_ceil(cpu_cols);
+        let grid_gap = 8u32;
+        let grid_w = w.saturating_sub(24);
+        let graph_w =
+            grid_w.saturating_sub(grid_gap * cpu_cols.saturating_sub(1) as u32) / cpu_cols as u32;
+        let graph_h = cpu_region_h.saturating_sub(grid_gap * cpu_rows.saturating_sub(1) as u32)
+            / cpu_rows as u32;
+        for (index, cpu) in self.cpu_graphs.iter_mut().enumerate() {
+            let row = index / cpu_cols;
+            let col = index % cpu_cols;
+            cpu.graph.x = 12 + col as i32 * (graph_w + grid_gap) as i32;
+            cpu.graph.y = content_y + 12 + row as i32 * (graph_h + grid_gap) as i32;
+            cpu.graph.w = graph_w;
+            cpu.graph.h = graph_h;
+        }
         self.mem_graph.x = 12;
-        self.mem_graph.y = self.cpu_graph.y + graph_h as i32 + 12;
+        self.mem_graph.y = content_y + 12 + cpu_region_h as i32 + 12;
         self.mem_graph.w = w - 24;
-        self.mem_graph.h = graph_h;
+        self.mem_graph.h = graph_area_h.saturating_sub(cpu_region_h + 12);
 
         // Network tab: throughput graph + totals line + socket table.
         self.net_graph.x = 12;
@@ -216,15 +262,24 @@ impl TaskMgr {
             .map(|p| snap.uptime_ticks.saturating_sub(p.uptime_ticks))
             .unwrap_or(0);
 
-        // Aggregate CPU rate.
-        self.cpu_pct10 = if dticks > 0 {
-            let prev = self.prev.as_ref().unwrap();
-            let busy =
-                (snap.cpu_user + snap.cpu_system).saturating_sub(prev.cpu_user + prev.cpu_system);
-            (busy * 1000 / dticks).min(1000)
-        } else {
-            0
-        };
+        // Aggregate and per-CPU rates use each /proc/stat row's own total
+        // delta. On SMP the aggregate denominator is all CPU capacity, not
+        // the single BSP wall-clock tick stream.
+        self.cpu_pct10 = cpu_delta_pct10(
+            &snap.cpu_total,
+            self.prev.as_ref().map(|prev| &prev.cpu_total),
+        );
+        let cpu_rates: Vec<(u32, u64)> = snap
+            .cpus
+            .iter()
+            .map(|cpu| {
+                let before = self
+                    .prev
+                    .as_ref()
+                    .and_then(|prev| prev.cpus.iter().find(|old| old.id == cpu.id));
+                (cpu.id, cpu_delta_pct10(cpu, before))
+            })
+            .collect();
 
         // Network rates (bytes/sec).
         if dticks > 0 {
@@ -298,8 +353,19 @@ impl TaskMgr {
         }
         self.proc_list.set_rows(rows);
 
-        // Graphs.
-        self.cpu_graph.push((self.cpu_pct10 as f32) / 10.0, None);
+        // Graphs. Histories are keyed by logical CPU ID so layout rebuilds or
+        // a malformed sample do not wipe unaffected processors.
+        for (id, pct10) in cpu_rates {
+            if let Some(history) = self.cpu_graphs.iter_mut().find(|cpu| cpu.id == id) {
+                history.pct10 = pct10;
+                history.graph.push(pct10 as f32 / 10.0, None);
+            } else {
+                let mut graph = TimeSeriesGraph::new(0, 0, 10, 10, 120, Some(100.0));
+                graph.push(pct10 as f32 / 10.0, None);
+                self.cpu_graphs.push(CpuHistory { id, pct10, graph });
+            }
+        }
+        self.cpu_graphs.sort_by_key(|cpu| cpu.id);
         let used_mb = snap.mem_total_kb.saturating_sub(snap.mem_free_kb) / 1024;
         self.mem_graph.fixed_max = Some(((snap.mem_total_kb / 1024) as f32).max(1.0));
         self.mem_graph.push(used_mb as f32, None);
@@ -327,6 +393,7 @@ impl TaskMgr {
             .collect();
         self.socket_list.set_rows(socket_rows);
 
+        self.layout();
         self.prev = Some(core::mem::replace(&mut self.snap, snap));
         self.advance_kill_escalation();
         self.dirty = true;
@@ -346,10 +413,7 @@ impl TaskMgr {
         let samples = samples + 1;
         self.pending_kill = Some((pid, samples));
         if samples >= FORCE_KILL_AFTER_SAMPLES && self.modal.is_none() {
-            let text = format!(
-                "PID {} did not exit after SIGTERM.\nForce kill with SIGKILL?",
-                pid
-            );
+            let text = format!("PID {pid} did not exit after SIGTERM.\nForce kill with SIGKILL?");
             if let Ok(msgbox) = MessageBox::confirm("Not Responding", &text) {
                 self.modal = Some((msgbox, ModalPurpose::ConfirmForce(pid)));
             }
@@ -377,7 +441,7 @@ impl TaskMgr {
         let Some((pid, name)) = self.selected_target() else {
             return;
         };
-        let text = format!("End process {} (PID {})?", name, pid);
+        let text = format!("End process {name} (PID {pid})?");
         if let Ok(msgbox) = MessageBox::confirm("End Task", &text) {
             self.modal = Some((msgbox, ModalPurpose::ConfirmEnd(pid)));
             self.dirty = true;
@@ -552,14 +616,22 @@ impl TaskMgr {
                 }
             }
             TAB_PERFORMANCE => {
-                let cpu_label = format!("{}%", fmt_pct10(self.cpu_pct10));
-                self.cpu_graph.draw(canvas, "CPU", &cpu_label);
+                for cpu in &self.cpu_graphs {
+                    let title = format!("CPU {}", cpu.id);
+                    let label = format!("{}%", fmt_pct10(cpu.pct10));
+                    cpu.graph.draw(canvas, &title, &label);
+                }
                 let used_mb = self.snap.mem_total_kb.saturating_sub(self.snap.mem_free_kb) / 1024;
                 let mem_label = format!("{} / {} MB", used_mb, self.snap.mem_total_kb / 1024);
                 self.mem_graph.draw(canvas, "Memory", &mem_label);
                 let tiles_y = self.mem_graph.y + self.mem_graph.h as i32 + 12;
                 let lines = [
-                    format!("Uptime            {}", fmt_uptime(self.snap.uptime_ticks)),
+                    format!(
+                        "CPU total         {}% ({} logical processor{})",
+                        fmt_pct10(self.cpu_pct10),
+                        self.cpu_graphs.len(),
+                        if self.cpu_graphs.len() == 1 { "" } else { "s" }
+                    ),
                     format!(
                         "Processes         {} ring-3, {} kernel threads",
                         self.snap.procs.len(),
@@ -575,7 +647,11 @@ impl TaskMgr {
                         fmt_kb(self.snap.mem_total_kb - self.snap.mem_free_kb),
                         fmt_kb(self.snap.mem_total_kb)
                     ),
-                    format!("Sockets           {}", self.snap.sockets.len()),
+                    format!(
+                        "Uptime / sockets  {} / {}",
+                        fmt_uptime(self.snap.uptime_ticks),
+                        self.snap.sockets.len()
+                    ),
                 ];
                 for (i, line) in lines.iter().enumerate() {
                     canvas.draw_text(16, tiles_y + i as i32 * 14, line, COLOR_TEXT);
@@ -653,6 +729,10 @@ impl TaskMgr {
 
 #[unsafe(naked)]
 #[no_mangle]
+/// # Safety
+///
+/// This is the process entry point and must only be invoked by the AgenticOS
+/// loader with the initial userspace stack in the Linux x86-64 layout.
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
         "mov rdi, rsp",

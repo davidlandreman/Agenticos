@@ -66,6 +66,8 @@ pub mod scroll_view_tests;
 #[cfg(feature = "test")]
 pub mod selection_tests;
 #[cfg(feature = "test")]
+pub mod smp;
+#[cfg(feature = "test")]
 pub mod splitter_tests;
 #[cfg(feature = "test")]
 pub mod start_menu_tests;
@@ -195,6 +197,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("svg_image", svg_image::get_tests),
     ("retained_scene", retained_scene::get_tests),
     ("scheduler", scheduler::get_tests),
+    ("smp", smp::get_tests),
     ("composition_cpu", composition_cpu::get_tests),
     ("compositor_selection", compositor_selection::get_tests),
     ("window_theme", window_theme::get_tests),

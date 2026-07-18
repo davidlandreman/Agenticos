@@ -5,7 +5,6 @@
 //! execution, this handler saves the full CPU state and can switch to another
 //! process without any cooperation from the running process.
 
-use crate::process::context::CpuContext;
 use core::arch::naked_asm;
 use core::sync::atomic::AtomicU64;
 
@@ -18,10 +17,6 @@ pub const WATCHDOG_TIMEOUT_TICKS: u64 = 1000;
 /// Set by timer interrupt, handled by kernel main loop.
 /// We can't kill in interrupt context, so we defer to main loop.
 pub static WATCHDOG_KILL_PID: AtomicU64 = AtomicU64::new(0);
-
-/// Kernel context to return to (set by try_run_scheduled_processes before switching to a process)
-#[no_mangle]
-pub static mut KERNEL_CONTEXT: CpuContext = CpuContext::new();
 
 /// The actual timer interrupt handler with preemption support.
 ///
@@ -142,28 +137,53 @@ const _: () = {
 /// Checks if preemption is needed and sets up context switch if so.
 #[no_mangle]
 extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
-    use crate::arch::x86_64::interrupts::{InterruptIndex, PICS, TIMER_TICKS};
+    use crate::arch::x86_64::interrupts::{eoi, InterruptIndex, TIMER_TICKS};
     use core::sync::atomic::Ordering;
 
-    // Increment tick counter
-    let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-    let _ = crate::process::drain_kernel_io_wakes();
-    crate::process::timer::on_tick(ticks);
+    // The BSP PIT is the sole wall-clock/timer-heap driver. AP LAPIC timers
+    // provide local preemption only.
+    let cpu = crate::arch::x86_64::percpu::cpu_id();
+    let ticks = if cpu == 0 {
+        let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = crate::process::drain_kernel_io_wakes();
+        crate::process::timer::on_tick(ticks);
+        ticks
+    } else {
+        crate::arch::x86_64::interrupts::record_lapic_timer_tick(cpu);
+        TIMER_TICKS.load(Ordering::Relaxed)
+    };
+
+    let frame = unsafe { &*stack_frame };
+    let time_kind = if (frame.cs & 3) == 3 {
+        crate::arch::x86_64::percpu::CpuTimeKind::User
+    } else if crate::arch::x86_64::percpu::in_spawned_process() {
+        crate::arch::x86_64::percpu::CpuTimeKind::System
+    } else if crate::arch::x86_64::percpu::idle_interruptible(cpu) {
+        crate::arch::x86_64::percpu::CpuTimeKind::Idle
+    } else {
+        crate::arch::x86_64::percpu::CpuTimeKind::System
+    };
+    crate::arch::x86_64::percpu::record_cpu_time(time_kind);
 
     // Ring-3 timer trap: save the user state, requeue the tagged entity, and
     // select once from the same queue used for kernel threads. The selected
     // target may be either privilege class. The CPL=0 saver below must not run
     // on this frame because its register image belongs to UserState, not a
     // kernel CpuContext.
-    let frame = unsafe { &*stack_frame };
     if (frame.cs & 3) == 3 {
+        // EOI before any divergent fatal-signal exit. A remote signal kick
+        // normally takes the reschedule-vector path immediately; checking on
+        // every local tick is the bounded fallback.
+        eoi(InterruptIndex::Timer.as_u8());
+        crate::userland::syscalls::maybe_terminate_pending_fatal_signal();
+
         // Charge this tick to the running ring-3 process's CPU-time
         // accounting. `current_user_pid` names the interrupted process
         // (resume_ring3's atomic swap invariant). try_lock only: with
         // IF cleared here no holder can be preempted mid-hold, but a
         // dropped sample under contention is harmless for accounting.
         if let Some(mut table) = crate::userland::lifecycle::PROCESS_TABLE.try_lock() {
-            if let Some(pid) = table.current_user_pid {
+            if let Some(pid) = crate::arch::x86_64::percpu::current_user_pid() {
                 if let Some(p) = table.by_pid.get_mut(&pid) {
                     p.utime_ticks = p.utime_ticks.saturating_add(1);
                 }
@@ -180,10 +200,6 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
         // (or this same one resuming) sees a clean PIC for the next
         // tick. Interrupts are disabled in this handler, so EOI'ing
         // early can't cause re-entry.
-        unsafe {
-            PICS.lock()
-                .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-        }
         let Some(current_pid) = crate::userland::lifecycle::current_user_pid() else {
             return;
         };
@@ -200,9 +216,11 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
             .preempt_and_pick(current);
         match next {
             Some(crate::process::entity::EntityId::UserProcess(pid)) if pid != current_pid => unsafe {
+                crate::arch::x86_64::percpu::set_pending_user_context_publish(current_pid);
                 crate::userland::switch::resume_ring3(pid)
             },
             Some(crate::process::entity::EntityId::KernelThread(pid)) => unsafe {
+                crate::arch::x86_64::percpu::set_pending_user_context_publish(current_pid);
                 crate::arch::x86_64::context_switch::resume_kernel_thread(pid)
             },
             Some(crate::process::entity::EntityId::UserProcess(_)) | None => {}
@@ -214,15 +232,26 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     // the scheduling decision. Timer expiry itself is always deferred to the
     // bounded timer-service worker.
     if !crate::arch::x86_64::preemption_guard::kernel_preemption_allowed() {
-        unsafe {
-            PICS.lock()
-                .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-        }
+        eoi(InterruptIndex::Timer.as_u8());
         return;
     }
 
     // Check if we're running a spawned process
     let in_process = crate::process::is_in_spawned_process();
+
+    // A remote watchdog/requester cannot remove a thread that is executing on
+    // this CPU: doing so would publish and potentially reuse its live stack.
+    // Consume the request locally, after critical sections are allowed to
+    // preempt, and abandon this interrupt frame through terminate_current's
+    // switch-stack-before-retire handoff.
+    if in_process
+        && crate::process::scheduler::SCHEDULER
+            .try_lock()
+            .is_some_and(|scheduler| scheduler.current_termination_requested())
+    {
+        eoi(InterruptIndex::Timer.as_u8());
+        crate::process::terminate_current();
+    }
 
     // Try to acquire the scheduler for accounting and preemption.
     let should_preempt = if let Some(mut sched) = crate::process::scheduler::SCHEDULER.try_lock() {
@@ -289,11 +318,15 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
                     ctx.r13 = frame.r13;
                     ctx.r14 = frame.r14;
                     ctx.r15 = frame.r15;
+                    // IA-32e supplies the interrupted RSP in this frame. QEMU
+                    // may report a null saved SS for a same-privilege trap, so
+                    // normalize SS to our known kernel-data selector below;
+                    // the kernel restore primitive itself transfers with RET.
                     ctx.rsp = frame.rsp;
                     ctx.rip = frame.rip;
                     ctx.rflags = frame.rflags;
                     ctx.cs = frame.cs;
-                    ctx.ss = frame.ss;
+                    ctx.ss = crate::arch::x86_64::gdt::selectors().kernel_data.0 as u64;
 
                     crate::debug_trace!(
                         "Saved context for PID {:?}, RIP={:#x}",
@@ -307,9 +340,15 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
                     Some(crate::process::entity::EntityId::KernelThread(next_pid))
                         if next_pid != current_pid =>
                     {
+                        crate::arch::x86_64::percpu::set_pending_kernel_context_publish(
+                            current_pid,
+                        );
                         kernel_target = Some(next_pid);
                     }
                     Some(crate::process::entity::EntityId::UserProcess(pid)) => {
+                        crate::arch::x86_64::percpu::set_pending_kernel_context_publish(
+                            current_pid,
+                        );
                         user_target = Some(pid);
                     }
                     Some(crate::process::entity::EntityId::KernelThread(_)) | None => {}
@@ -319,10 +358,7 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     }
 
     // Send EOI
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-    }
+    eoi(InterruptIndex::Timer.as_u8());
 
     if let Some(pid) = user_target {
         unsafe { crate::userland::switch::resume_ring3(pid) }

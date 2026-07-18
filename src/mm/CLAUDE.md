@@ -18,10 +18,10 @@ Physical and virtual memory management: frame allocation, virtual paging with de
 - Heap pages are mapped on demand: pages get backing frames only when first accessed.
 
 The global heap allocator uses `InterruptMutex`, not a plain `spin::Mutex`.
-This is load-bearing on the single CPU: timer-preemptible compositor/kernel
-threads allocate frequently, while page-fault and SYSCALL paths may allocate
-with IF already cleared. A preempted allocator owner plus an exception-context
-allocation otherwise spins forever with interrupts disabled.
+This is load-bearing on every CPU: timer-preemptible compositor/kernel threads
+allocate frequently, while page-fault and SYSCALL paths may allocate with IF
+already cleared. Local IF masking prevents same-CPU lock-owner preemption; the
+spin lock provides cross-CPU exclusion.
 
 ## Virtual address partition
 
@@ -55,9 +55,9 @@ loader and older kernel fixtures. Mapping operations:
 
 All runtime access to the global `MemoryMapper` goes through
 `memory::with_memory_mapper`; do not call `paging::get_mapper` outside the
-`mm` module. Mapper closures must stay bounded and must not yield. Do not add a
-spin mutex here: mapper access from page-fault context would make a same-core
-spin lock deadlock.
+`mm` module. The mapper is protected by an `InterruptMutex`, and a per-CPU
+debug flag rejects recursive acquisition. Closures must stay bounded, must not
+yield, and must not touch memory that could page-fault while the lock is held.
 
 ## Page-fault flow
 

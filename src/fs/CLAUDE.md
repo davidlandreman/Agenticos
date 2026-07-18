@@ -25,6 +25,11 @@ Block device (src/drivers/block.rs, ide.rs)
 
 Block devices and the VirtIO-blk driver live in `src/drivers/` — see `src/drivers/CLAUDE.md`. The `Arc` used in handles is the kernel's custom impl in `src/lib/arc.rs` (NOT `alloc::sync::Arc`) — see `src/lib/CLAUDE.md`.
 
+The global mount table and backing filesystem slots are protected by one
+coarse `PreemptionMutex`. Do not hold its guard while calling a filesystem
+operation that can re-enter VFS; copy out the selected filesystem handle or
+mount metadata first, then drop the guard.
+
 ## File handle API
 
 ```rust

@@ -1,11 +1,7 @@
 pub type ProcessId = u32;
 
-static mut NEXT_PID: ProcessId = 1;
+static NEXT_PID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
 pub fn allocate_pid() -> ProcessId {
-    unsafe {
-        let pid = NEXT_PID;
-        NEXT_PID += 1;
-        pid
-    }
+    NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }

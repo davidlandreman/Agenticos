@@ -39,7 +39,6 @@
 //! dispatcher's return value.
 
 use core::arch::naked_asm;
-use core::ptr::addr_of;
 use x86_64::VirtAddr;
 
 use crate::arch::x86_64::gdt;
@@ -66,43 +65,16 @@ pub struct SyscallArgs {
     pub r9: u64,
 }
 
-// ---------- per-CPU SYSCALL scratch ----------
-
-/// Per-CPU scratch the SYSCALL entry stub uses to switch stacks.
-///
-/// Field offsets are load-bearing — the naked-asm stub references `gs:0`
-/// for `kernel_rsp_top` and `gs:8` for `user_rsp_scratch`. Layout is
-/// `repr(C)` to pin those offsets across compiler versions.
-#[repr(C)]
-struct PerCpu {
-    /// Kernel stack top loaded into RSP after `swapgs` on SYSCALL entry.
-    kernel_rsp_top: u64,
-    /// Slot the SYSCALL stub writes the user RSP into before switching.
-    user_rsp_scratch: u64,
-}
-
-/// Single per-CPU instance. Single-CPU kernel — see module comment.
-#[repr(C, align(16))]
-struct AlignedPerCpu(PerCpu);
-
-static mut PERCPU: AlignedPerCpu = AlignedPerCpu(PerCpu {
-    kernel_rsp_top: 0,
-    user_rsp_scratch: 0,
-});
-
 /// Initialize the per-CPU struct and program GS_BASE / KERNEL_GS_BASE.
 ///
 /// Must run after `gdt::init()` (we read `kernel_rsp0_top` from there) and
 /// before `init_syscall_msrs` (which programs LSTAR to the entry stub).
 pub fn init_percpu() {
     let kernel_rsp = gdt::kernel_rsp0_top().as_u64();
-    // SAFETY: single-threaded boot sequence; no concurrent reader.
+    let lapic_id = unsafe { (core::arch::x86_64::__cpuid(1).ebx >> 24) as u8 };
     unsafe {
-        PERCPU.0.kernel_rsp_top = kernel_rsp;
-        PERCPU.0.user_rsp_scratch = 0;
+        crate::arch::x86_64::percpu::init_cpu(0, lapic_id, kernel_rsp);
     }
-    let percpu_addr = addr_of!(PERCPU) as u64;
-    msr::init_gs_base(percpu_addr);
 }
 
 /// Update the SYSCALL stub's `gs:[0]` slot to a new kernel-rsp top.
@@ -116,7 +88,7 @@ pub fn init_percpu() {
 /// keep TSS.rsp0 in sync via `gdt::set_kernel_rsp0` for interrupt
 /// gates to land on the same stack.
 pub unsafe fn set_percpu_kernel_rsp_top(top: u64) {
-    PERCPU.0.kernel_rsp_top = top;
+    crate::arch::x86_64::percpu::set_kernel_rsp_top(top);
 }
 
 /// Program the SYSCALL fast-path MSRs.

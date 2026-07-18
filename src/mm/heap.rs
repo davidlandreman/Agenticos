@@ -88,7 +88,7 @@ unsafe impl GlobalAlloc for LockedHeap {
     }
 }
 
-pub fn init_heap(_mapper: &mut super::paging::MemoryMapper) -> Result<(), &'static str> {
+pub fn init_heap() -> Result<(), &'static str> {
     debug_info!("Initializing heap memory");
 
     // Don't pre-map the heap pages - let them be mapped on demand via page faults

@@ -44,7 +44,7 @@ struct RequestHeader {
 enum Waiter {
     Bootstrap,
     Kernel(crate::process::ProcessId),
-    RingThree,
+    RingThree(u32),
 }
 
 struct Request {
@@ -316,8 +316,7 @@ fn perform(
 
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
     let waiter = if let Some(pid) = crate::userland::lifecycle::current_user_pid() {
-        let _ = pid;
-        Waiter::RingThree
+        Waiter::RingThree(pid)
     } else if let Some(pid) = crate::process::current_io_waiter() {
         Waiter::Kernel(pid)
     } else {
@@ -370,7 +369,7 @@ fn perform(
         };
 
         match waiter {
-            Waiter::RingThree => crate::userland::switch::block_current_ring3_on_io(token),
+            Waiter::RingThree(_) => crate::userland::switch::block_current_ring3_on_io(token),
             Waiter::Kernel(_) => crate::process::block_current_kernel_thread_on_io(token),
             Waiter::Bootstrap => loop {
                 if request_complete(index, head) {
@@ -409,6 +408,18 @@ fn perform(
 #[cfg(feature = "test")]
 pub fn request_count() -> u64 {
     REQUESTS_SUBMITTED.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "test")]
+pub fn request_diagnostics() -> (usize, usize) {
+    let drivers = DRIVERS.lock();
+    let pending = drivers.iter().map(|driver| driver.requests.len()).sum();
+    let complete = drivers
+        .iter()
+        .flat_map(|driver| driver.requests.values())
+        .filter(|request| request.complete)
+        .count();
+    (pending, complete)
 }
 
 fn request_complete(index: usize, head: u16) -> bool {
@@ -461,7 +472,7 @@ pub fn handle_interrupt(irq: u8) {
         match waiter {
             Waiter::Bootstrap => {}
             Waiter::Kernel(pid) => crate::process::queue_kernel_io_wake(pid),
-            Waiter::RingThree => crate::userland::lifecycle::wake_ring3_blocked_on_io(token),
+            Waiter::RingThree(pid) => crate::userland::lifecycle::queue_ring3_io_wake(pid, token),
         }
     }
 }

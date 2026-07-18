@@ -1,3 +1,4 @@
+use crate::arch::x86_64::preemption_guard::{PreemptionMutex, PreemptionMutexGuard};
 use crate::drivers::block::BlockDevice;
 use crate::fs::fat::FatFilesystem;
 use crate::fs::filesystem::{detect_filesystem, Filesystem, FilesystemError, FilesystemType};
@@ -149,12 +150,14 @@ impl VirtualFilesystem {
     }
 }
 
-/// Global VFS instance
-static mut VFS: VirtualFilesystem = VirtualFilesystem::new();
+/// Global mount table. The backing mount-slot arrays above are populated only
+/// during BSP boot while APs remain parked, then become read-only; runtime
+/// mount lookup/mutation is serialized here.
+static VFS: PreemptionMutex<VirtualFilesystem> = PreemptionMutex::new(VirtualFilesystem::new());
 
 /// Get the global VFS instance
-pub fn get_vfs() -> &'static mut VirtualFilesystem {
-    unsafe { &mut *(&raw mut VFS) }
+pub fn get_vfs() -> PreemptionMutexGuard<'static, VirtualFilesystem> {
+    VFS.lock()
 }
 
 /// Auto-mount a block device by detecting its filesystem type
@@ -193,7 +196,7 @@ pub fn auto_mount(
                         // Take a 'static reference to the wrapper now living in the slot.
                         if let Some(wrapper_ref) = (*&raw const MOUNTED_FAT_WRAPPERS)[slot].as_ref()
                         {
-                            let vfs = get_vfs();
+                            let mut vfs = get_vfs();
                             match vfs.mount(mount_path, wrapper_ref as &dyn Filesystem, device) {
                                 Ok(_) => {
                                     debug_info!(
@@ -280,7 +283,7 @@ pub fn auto_mount_writable(
             crate::fs::fat::fat_filesystem::FatFilesystemWrapper::new_writable(fat_fs_static);
         (*wrappers_ptr)[slot] = Some(wrapper);
         if let Some(wrapper_ref) = (*&raw const MOUNTED_FAT_WRAPPERS)[slot].as_ref() {
-            let vfs = get_vfs();
+            let mut vfs = get_vfs();
             vfs.mount(mount_path, wrapper_ref as &dyn Filesystem, device)?;
             debug_info!(
                 "Mounted {} as WRITABLE at {} (slot {})",
@@ -375,7 +378,7 @@ pub fn mount_overlay_root(device: &'static dyn BlockDevice) -> Result<(), Filesy
             .ok_or(FilesystemError::InvalidFilesystem)? as &dyn Filesystem
     };
 
-    let vfs = get_vfs();
+    let mut vfs = get_vfs();
     vfs.mount("/", overlay_ref, &NULL_BLOCK_DEVICE)?;
     debug_info!("Mounted overlay(tmpfs over FAT) at /");
     Ok(())
@@ -537,10 +540,19 @@ pub fn vfs_rename(old_path: &str, new_path: &str) -> Result<(), FilesystemError>
 }
 
 pub fn vfs_sync_all() -> Result<(), FilesystemError> {
-    let vfs = get_vfs();
+    let mut filesystems: [Option<&'static dyn Filesystem>; 16] = [None; 16];
+    let count = {
+        let vfs = get_vfs();
+        let mut count = 0usize;
+        for mount in vfs.list_mounts() {
+            filesystems[count] = Some(mount.filesystem);
+            count += 1;
+        }
+        count
+    };
     let mut last = Ok(());
-    for mount in vfs.list_mounts() {
-        if let Err(e) = mount.filesystem.sync() {
+    for filesystem in filesystems[..count].iter().flatten() {
+        if let Err(e) = filesystem.sync() {
             last = Err(e);
         }
     }

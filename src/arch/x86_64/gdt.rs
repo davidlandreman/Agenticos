@@ -1,75 +1,38 @@
-// Global Descriptor Table and Task State Segment for AgenticOS.
+// Per-CPU Global Descriptor Tables and Task State Segments.
 //
-// Layout is a hard interface: the kernel CS=0x08 and SS=0x10 selectors are
-// hard-coded as literal pushes in `src/arch/x86_64/preemption.rs` and
-// `src/arch/x86_64/context_switch.rs`. Any reordering of the descriptors
-// below WILL break those naked-asm blocks. The user_data-before-user_code
-// order also keeps the door open for `syscall`/`sysret` later, which derives
-// user_cs = STAR[63:48] + 16 and user_ss = STAR[63:48] + 8 by formula.
-//
-// Slot map:
-//   0x00  null
-//   0x08  kernel code (DPL 0, 64-bit)
-//   0x10  kernel data (DPL 0)
-//   0x18  user data   (DPL 3)
-//   0x20  user code   (DPL 3, 64-bit)
-//   0x28  TSS         (system descriptor, occupies two GDT slots)
+// Selector layout is a hard interface with the assembly stubs:
+// 0x08 kernel code, 0x10 kernel data, 0x18 user data, 0x20 user code,
+// 0x28 TSS.
 
-use lazy_static::lazy_static;
+use spin::Once;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
 
-/// IST entry index used by the double-fault handler.
+use super::acpi::MAX_CPUS;
+
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
-// Phase 5 PR-C1 gives each user process its own 16 KiB kernel stack,
-// so this global stack is only used between user-process activations
-// (kernel main loop and one-off kernel syscalls). 16 KiB is plenty.
 const KERNEL_RSP0_STACK_SIZE: usize = 16 * 1024;
 const DOUBLE_FAULT_STACK_SIZE: usize = 4 * 1024;
 
 #[repr(align(16))]
 struct AlignedStack<const N: usize>([u8; N]);
 
-static mut KERNEL_RSP0_STACK: AlignedStack<KERNEL_RSP0_STACK_SIZE> =
-    AlignedStack([0; KERNEL_RSP0_STACK_SIZE]);
+// A CPU initializes and subsequently owns only its indexed stack/TSS slot;
+// GDTS publishes the matching immutable descriptor table exactly once.
+static mut KERNEL_RSP0_STACKS: [AlignedStack<KERNEL_RSP0_STACK_SIZE>; MAX_CPUS] =
+    [const { AlignedStack([0; KERNEL_RSP0_STACK_SIZE]) }; MAX_CPUS];
+static mut DOUBLE_FAULT_STACKS: [AlignedStack<DOUBLE_FAULT_STACK_SIZE>; MAX_CPUS] =
+    [const { AlignedStack([0; DOUBLE_FAULT_STACK_SIZE]) }; MAX_CPUS];
+static mut TSS: [TaskStateSegment; MAX_CPUS] = [const { TaskStateSegment::new() }; MAX_CPUS];
 
-static mut DOUBLE_FAULT_STACK: AlignedStack<DOUBLE_FAULT_STACK_SIZE> =
-    AlignedStack([0; DOUBLE_FAULT_STACK_SIZE]);
-
-lazy_static! {
-    static ref TSS: TaskStateSegment = {
-        let mut tss = TaskStateSegment::new();
-        tss.privilege_stack_table[0] = {
-            let stack_start = VirtAddr::from_ptr(&raw const KERNEL_RSP0_STACK);
-            stack_start + KERNEL_RSP0_STACK_SIZE as u64
-        };
-        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            let stack_start = VirtAddr::from_ptr(&raw const DOUBLE_FAULT_STACK);
-            stack_start + DOUBLE_FAULT_STACK_SIZE as u64
-        };
-        tss
-    };
-    static ref GDT: (GlobalDescriptorTable, Selectors) = {
-        let mut gdt = GlobalDescriptorTable::new();
-        let kernel_code = gdt.add_entry(Descriptor::kernel_code_segment());
-        let kernel_data = gdt.add_entry(Descriptor::kernel_data_segment());
-        let user_data = gdt.add_entry(Descriptor::user_data_segment());
-        let user_code = gdt.add_entry(Descriptor::user_code_segment());
-        let tss = gdt.add_entry(Descriptor::tss_segment(&TSS));
-        (
-            gdt,
-            Selectors {
-                kernel_code,
-                kernel_data,
-                user_data,
-                user_code,
-                tss,
-            },
-        )
-    };
+struct CpuGdt {
+    table: GlobalDescriptorTable,
+    selectors: Selectors,
 }
+
+static GDTS: [Once<CpuGdt>; MAX_CPUS] = [const { Once::new() }; MAX_CPUS];
 
 #[derive(Debug, Clone, Copy)]
 pub struct Selectors {
@@ -80,67 +43,77 @@ pub struct Selectors {
     pub tss: SegmentSelector,
 }
 
-/// Selector accessors for code that needs to push selectors onto an iretq frame.
 pub fn selectors() -> &'static Selectors {
-    &GDT.1
+    &GDTS[0].get().expect("BSP GDT not initialized").selectors
 }
 
-/// Ring-3 (CS, SS) pair, with RPL=3, ready to push onto an iretq frame.
-/// Today's GDT layout yields `(0x23, 0x1B)`; deriving from `selectors()`
-/// keeps the call site honest if the layout ever shifts. Used by U4's
-/// `resume_ring3` wrapper and any other code building a ring-3 iretq
-/// frame from scratch.
 pub fn user_selectors() -> (u64, u64) {
-    let s = selectors();
-    (u64::from(s.user_code.0), u64::from(s.user_data.0))
+    let selectors = selectors();
+    (
+        u64::from(selectors.user_code.0),
+        u64::from(selectors.user_data.0),
+    )
 }
 
-/// Top of the static kernel rsp0 stack — the value the userland subsystem
-/// stamps into `TSS.privilege_stack_table[0]` before entering ring 3 (D6).
-///
-/// Single-app-synchronous (D5) means we always switch *back* to this same
-/// stack on a ring 3 → ring 0 transition; multiplexing per-process rsp0 is
-/// out of scope.
 pub fn kernel_rsp0_top() -> VirtAddr {
-    let stack_start = VirtAddr::from_ptr(&raw const KERNEL_RSP0_STACK);
-    stack_start + KERNEL_RSP0_STACK_SIZE as u64
+    kernel_rsp0_top_for(0)
 }
 
-/// Update `TSS.privilege_stack_table[0]` (rsp0). Call before entering ring 3.
-///
-/// SAFETY: the caller must ensure no ring 3 → ring 0 transition is in flight
-/// while this write is observable in a partial state. Practically this means:
-/// call from CPL=0 with interrupts disabled (or, equivalently, from a context
-/// where no user app is currently active — i.e., from `enter_user_mode` just
-/// before issuing `iretq`). Single-app-synchronous (D5) makes the policy
-/// simple: rsp0 is set once per `run` and not touched again until exit.
-///
-/// We must mutate a `lazy_static` which exposes `&'static TaskStateSegment`
-/// — we go through a raw pointer cast rather than `UnsafeCell` to keep the
-/// `lazy_static` ergonomic. The cast is sound because the static lives for
-/// `'static` and the field is `Copy`.
+pub fn kernel_rsp0_top_for(cpu: usize) -> VirtAddr {
+    assert!(cpu < MAX_CPUS);
+    let start = unsafe { core::ptr::addr_of!(KERNEL_RSP0_STACKS[cpu]) as u64 };
+    VirtAddr::new(start + KERNEL_RSP0_STACK_SIZE as u64)
+}
+
 pub unsafe fn set_kernel_rsp0(rsp0: VirtAddr) {
-    let tss_ptr = &*TSS as *const TaskStateSegment as *mut TaskStateSegment;
-    (*tss_ptr).privilege_stack_table[0] = rsp0;
+    let cpu = super::percpu::cpu_id();
+    TSS[cpu].privilege_stack_table[0] = rsp0;
 }
 
-/// Install the GDT, reload all segment registers, and load the TSS.
+/// Construct and load the calling CPU's private GDT/TSS.
 ///
-/// Must run before any code path that depends on the new selectors — in
-/// particular before the IDT is loaded with handlers that reference IST entries
-/// or before any ring-0/ring-3 transition can occur.
-pub fn init() {
+/// # Safety
+/// `cpu` must be the calling CPU's unique logical slot and may only be
+/// initialized once.
+pub unsafe fn init_cpu(cpu: usize) {
+    assert!(cpu < MAX_CPUS);
+    TSS[cpu].privilege_stack_table[0] = kernel_rsp0_top_for(cpu);
+    let df_start = core::ptr::addr_of!(DOUBLE_FAULT_STACKS[cpu]) as u64;
+    TSS[cpu].interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] =
+        VirtAddr::new(df_start + DOUBLE_FAULT_STACK_SIZE as u64);
+
+    let tss: &'static TaskStateSegment = &*core::ptr::addr_of!(TSS[cpu]);
+    let cpu_gdt = GDTS[cpu].call_once(|| {
+        let mut table = GlobalDescriptorTable::new();
+        let kernel_code = table.add_entry(Descriptor::kernel_code_segment());
+        let kernel_data = table.add_entry(Descriptor::kernel_data_segment());
+        let user_data = table.add_entry(Descriptor::user_data_segment());
+        let user_code = table.add_entry(Descriptor::user_code_segment());
+        let tss = table.add_entry(Descriptor::tss_segment(tss));
+        CpuGdt {
+            table,
+            selectors: Selectors {
+                kernel_code,
+                kernel_data,
+                user_data,
+                user_code,
+                tss,
+            },
+        }
+    });
+
     use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
     use x86_64::instructions::tables::load_tss;
 
-    GDT.0.load();
-    let sel = &GDT.1;
+    cpu_gdt.table.load();
+    let selectors = &cpu_gdt.selectors;
+    CS::set_reg(selectors.kernel_code);
+    SS::set_reg(selectors.kernel_data);
+    DS::set_reg(selectors.kernel_data);
+    ES::set_reg(selectors.kernel_data);
+    load_tss(selectors.tss);
+}
 
-    unsafe {
-        CS::set_reg(sel.kernel_code);
-        SS::set_reg(sel.kernel_data);
-        DS::set_reg(sel.kernel_data);
-        ES::set_reg(sel.kernel_data);
-        load_tss(sel.tss);
-    }
+pub fn init() {
+    unsafe { init_cpu(0) }
 }

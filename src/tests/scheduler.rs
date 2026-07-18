@@ -65,6 +65,55 @@ fn test_latency_contract_is_one_shot_override() {
     assert_eq!(scheduler.latency_misses_for_test(), 0);
 }
 
+fn test_preemption_defers_source_until_context_publish() {
+    let mut scheduler = Scheduler::new();
+    scheduler.init();
+    for pid in [211, 212] {
+        scheduler.register_user(pid).unwrap();
+        scheduler
+            .make_ready(EntityId::UserProcess(pid), None)
+            .unwrap();
+    }
+
+    let current = scheduler.schedule_entity().unwrap();
+    assert_eq!(current, EntityId::UserProcess(211));
+    assert_eq!(
+        scheduler.preempt_and_pick(current),
+        Some(EntityId::UserProcess(212))
+    );
+    assert_eq!(
+        scheduler.entity_diagnostics_for_test(current),
+        Some((RunState::Ready, false, None, None)),
+        "the interrupted entity must remain unpublished while its stack is live",
+    );
+    assert_eq!(scheduler.ready_entity_count(), 0);
+
+    scheduler.publish_context(current);
+    assert_eq!(
+        scheduler.entity_diagnostics_for_test(current),
+        Some((RunState::Ready, true, None, None))
+    );
+    assert_eq!(scheduler.ready_entity_count(), 1);
+}
+
+fn test_preemption_without_alternative_keeps_current_private() {
+    let mut scheduler = Scheduler::new();
+    scheduler.init();
+    scheduler.register_user(213).unwrap();
+    scheduler
+        .make_ready(EntityId::UserProcess(213), None)
+        .unwrap();
+
+    let current = scheduler.schedule_entity().unwrap();
+    assert_eq!(scheduler.preempt_and_pick(current), Some(current));
+    assert_eq!(
+        scheduler.entity_diagnostics_for_test(current),
+        Some((RunState::Running, true, None, None))
+    );
+    assert_eq!(scheduler.current_entity(), Some(current));
+    assert_eq!(scheduler.ready_entity_count(), 0);
+}
+
 fn test_timer_arm_update_and_cancel() {
     use crate::process::timer::{TimerAction, TimerKey, TimerKind, TimerQueue};
 
@@ -122,6 +171,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_run_queue_fifo_and_dedup,
         &test_scheduler_fair_queue_revolves,
         &test_latency_contract_is_one_shot_override,
+        &test_preemption_defers_source_until_context_publish,
+        &test_preemption_without_alternative_keeps_current_private,
         &test_timer_arm_update_and_cancel,
         &test_timer_heap_orders_and_bounds_a_deferred_pass,
     ]

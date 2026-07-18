@@ -54,6 +54,7 @@ if [ "$HELP" = true ]; then
     echo "                          REBUILD_ZSH=1, REBUILD_TCC=1, or REBUILD_LINKS2=1."
     echo "                          QEMU RAM defaults to 2G; override with"
     echo "                          AGENTICOS_QEMU_MEMORY (for example 4G)."
+    echo "                          AGENTICOS_QEMU_SMP selects 1-8 CPUs (default 4)."
     echo "                          Rendering: AGENTICOS_COMPOSITOR=legacy|retained|gpu|auto"
     echo "                          AGENTICOS_GPU_STRICT=1 refuses GPU fallback."
     echo "                          AGENTICOS_RENDER_STATS=1 logs per-stage frame cycles."
@@ -177,7 +178,10 @@ if [ "$RUN_QEMU" = true ]; then
     echo "📂 Mounting host folder: $HOST_SHARE -> /host (read-only)"
     echo "🔌 MCP RPC chardev socket: $RPC_SOCK (chmod 0600 once QEMU creates it)"
     QEMU_MEMORY="${AGENTICOS_QEMU_MEMORY:-2G}"
+    QEMU_SMP="${AGENTICOS_QEMU_SMP:-4}"
+    case "$QEMU_SMP" in 1|2|3|4|5|6|7|8) ;; *) echo "❌ AGENTICOS_QEMU_SMP must be 1-8" >&2; exit 2 ;; esac
     echo "🧠 QEMU memory: $QEMU_MEMORY (override with AGENTICOS_QEMU_MEMORY)"
+    echo "🧮 QEMU CPUs: $QEMU_SMP (override with AGENTICOS_QEMU_SMP)"
     # Restrict the socket to the launching user as soon as QEMU creates it.
     # Backgrounded so it races QEMU startup; if the socket isn't there yet,
     # chmod will fail silently — that's fine, we retry until QEMU is up.
@@ -249,6 +253,7 @@ if [ "$RUN_QEMU" = true ]; then
         -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
         -device virtio-tablet-pci
         -m "$QEMU_MEMORY"
+        -smp "$QEMU_SMP"
     )
     QEMU_ARGS+=("${NETWORK_ARGS[@]}")
     QEMU_ARGS+=("${LEGACY_DATA_ARGS[@]}")

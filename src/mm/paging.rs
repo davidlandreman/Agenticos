@@ -22,9 +22,11 @@ pub const USER_CANONICAL_END: u64 = 0x0000_8000_0000_0000;
 /// Lower-half PML4 entries that remain kernel-owned in every address space.
 pub const KERNEL_HEAP_PML4_SLOT: usize = 136;
 pub const KERNEL_STACK_PML4_SLOT: usize = 170;
+/// Shared lower-half slot reserved for architecture MMIO mappings.
+pub const KERNEL_MMIO_PML4_SLOT: usize = 171;
 
 pub const fn is_kernel_reserved_slot(slot: usize) -> bool {
-    slot == KERNEL_HEAP_PML4_SLOT || slot == KERNEL_STACK_PML4_SLOT
+    slot == KERNEL_HEAP_PML4_SLOT || slot == KERNEL_STACK_PML4_SLOT || slot == KERNEL_MMIO_PML4_SLOT
 }
 
 /// Top of the user stack (exclusive). The stack grows down from here.
@@ -152,13 +154,6 @@ impl<S: x86_64::structures::paging::PageSize> From<MapToError<S>> for UserMapErr
     }
 }
 
-// Global mapper for page fault handling
-pub static mut MAPPER: Option<*mut MemoryMapper> = None;
-
-pub(super) unsafe fn get_mapper() -> Option<&'static mut MemoryMapper> {
-    MAPPER.map(|ptr| &mut *ptr)
-}
-
 /// Frame holding the kernel's L4 (PML4). Captured once at boot so user
 /// processes can switch back to it on exit.
 ///
@@ -166,6 +161,7 @@ pub(super) unsafe fn get_mapper() -> Option<&'static mut MemoryMapper> {
 /// half (PML4 indices 1..512) shared by reference. When the user
 /// process exits, we must switch CR3 back here before dropping the
 /// per-process L4 frame.
+/// Written once by the BSP before AP startup, then read-only.
 pub static mut KERNEL_L4_FRAME: Option<PhysFrame<Size4KiB>> = None;
 
 /// Capture the active CR3 value as the kernel's permanent L4. Called
@@ -234,6 +230,11 @@ pub struct MemoryMapper {
     physical_memory_offset: VirtAddr,
 }
 
+// All access is serialized by `mm::memory::MAPPER`. The boot memory map and
+// page-table alias are immutable after initialization; mutable allocator and
+// mapper state never escapes the lock-backed closure API.
+unsafe impl Send for MemoryMapper {}
+
 impl MemoryMapper {
     pub unsafe fn new(
         physical_memory_offset: VirtAddr,
@@ -264,6 +265,67 @@ impl MemoryMapper {
         let phys_offset = self.physical_memory_offset;
         let active_mapper = unsafe { active_offset_page_table(phys_offset) };
         active_mapper.translate_addr(addr)
+    }
+
+    /// Install one uncached kernel MMIO mapping in the boot/kernel L4.
+    ///
+    /// Architecture MMIO is initialized before the first user address space
+    /// is built, so the reserved PML4 slot is subsequently copied into every
+    /// process L4 with the rest of the shared kernel mappings.
+    pub fn map_mmio_page(
+        &mut self,
+        virt: VirtAddr,
+        phys: PhysAddr,
+    ) -> Result<(), MapToError<Size4KiB>> {
+        debug_assert_eq!(virt.as_u64() & 0xfff, 0);
+        debug_assert_eq!(phys.as_u64() & 0xfff, 0);
+        debug_assert_eq!(usize::from(virt.p4_index()), KERNEL_MMIO_PML4_SLOT);
+        let page = Page::containing_address(virt);
+        let frame = PhysFrame::containing_address(phys);
+        let flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_CACHE
+            | PageTableFlags::WRITE_THROUGH;
+        unsafe {
+            match self
+                .mapper
+                .map_to(page, frame, flags, &mut self.frame_allocator)
+            {
+                Ok(flush) => {
+                    flush.flush();
+                    Ok(())
+                }
+                Err(MapToError::PageAlreadyMapped(existing)) if existing == frame => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    /// Identity-map and reserve a low physical page for the AP trampoline.
+    pub fn prepare_trampoline_page(
+        &mut self,
+        physical: PhysAddr,
+    ) -> Result<(), MapToError<Size4KiB>> {
+        let page = Page::containing_address(VirtAddr::new(physical.as_u64()));
+        let frame = PhysFrame::containing_address(physical);
+        match self.frame_allocator.pin_frame(frame) {
+            Ok(()) | Err(super::frame_allocator::FrameReleaseError::Unmanaged) => {}
+            Err(_) => return Err(MapToError::FrameAllocationFailed),
+        }
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        unsafe {
+            match self
+                .mapper
+                .map_to(page, frame, flags, &mut self.frame_allocator)
+            {
+                Ok(flush) => {
+                    flush.flush();
+                    Ok(())
+                }
+                Err(MapToError::PageAlreadyMapped(existing)) if existing == frame => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
     }
 
     /// Allocate a single physical frame from the boot-time pool. Used by

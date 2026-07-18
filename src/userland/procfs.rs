@@ -298,34 +298,21 @@ pub fn ring3_snapshot(pid: u32) -> Option<Ring3Snapshot> {
 // Generators
 // ---------------------------------------------------------------
 
-/// Aggregate CPU tick totals: `(user, system)` — user is Σ live ring-3
-/// utime, system is Σ kernel-thread runtime. Ticks of processes that
-/// have already been reaped are lost; acceptable for a monitor.
-fn cpu_totals() -> (u64, u64) {
-    let user: u64 = {
-        let g = PROCESS_TABLE.lock();
-        g.by_pid
-            .iter()
-            .filter(|(&pid, _)| pid != KERNEL_PID)
-            .map(|(_, p)| p.utime_ticks)
-            .sum()
-    };
-    let system: u64 = crate::process::scheduler::SCHEDULER
-        .try_lock()
-        .map(|s| {
-            s.get_process_list()
-                .iter()
-                .map(|info| info.total_runtime)
-                .sum()
+fn cpu_time_snapshots() -> Vec<(usize, crate::arch::x86_64::percpu::CpuTimeSnapshot)> {
+    (0..crate::arch::x86_64::smp::online_cpu_count())
+        .filter_map(|cpu| {
+            crate::arch::x86_64::percpu::cpu_time_snapshot(cpu).map(|times| (cpu, times))
         })
-        .unwrap_or(0);
-    (user, system)
+        .collect()
 }
 
 fn gen_uptime() -> Vec<u8> {
     let ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
-    let (user, system) = cpu_totals();
-    let idle = ticks.saturating_sub(user).saturating_sub(system);
+    // Linux reports the sum of idle time across all online CPUs, so this
+    // value may exceed wall-clock uptime on an SMP system.
+    let idle = cpu_time_snapshots()
+        .iter()
+        .fold(0u64, |sum, (_, times)| sum.saturating_add(times.idle));
     // 100 Hz: tick count / 100 = seconds, remainder = centiseconds.
     format!(
         "{}.{:02} {}.{:02}\n",
@@ -376,23 +363,35 @@ fn gen_meminfo() -> Vec<u8> {
 }
 
 fn gen_stat() -> Vec<u8> {
-    let ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
-    let (user, system) = cpu_totals();
-    let idle = ticks.saturating_sub(user).saturating_sub(system);
+    let cpu_times = cpu_time_snapshots();
+    let (user, system, idle) =
+        cpu_times
+            .iter()
+            .fold((0u64, 0u64, 0u64), |(user, system, idle), (_, times)| {
+                (
+                    user.saturating_add(times.user),
+                    system.saturating_add(times.system),
+                    idle.saturating_add(times.idle),
+                )
+            });
     let processes = {
         let g = PROCESS_TABLE.lock();
         g.by_pid.len().saturating_sub(1)
     };
     let mut out = String::new();
-    // 100 Hz PIT ticks are USER_HZ jiffies directly.
+    // Every local scheduling timer runs at 100 Hz, so these counters are
+    // USER_HZ jiffies directly. Aggregate fields are derived from this exact
+    // local snapshot and therefore equal the sum of the cpuN rows below.
     out.push_str(&format!(
         "cpu  {} 0 {} {} 0 0 0 0 0 0\n",
         user, system, idle
     ));
-    out.push_str(&format!(
-        "cpu0 {} 0 {} {} 0 0 0 0 0 0\n",
-        user, system, idle
-    ));
+    for (cpu, times) in cpu_times {
+        out.push_str(&format!(
+            "cpu{} {} 0 {} {} 0 0 0 0 0 0\n",
+            cpu, times.user, times.system, times.idle
+        ));
+    }
     out.push_str("btime 0\n");
     out.push_str(&format!("processes {}\n", processes));
     out.push_str("procs_running 1\n");

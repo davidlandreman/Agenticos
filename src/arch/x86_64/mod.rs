@@ -1,11 +1,16 @@
+pub mod acpi;
 pub mod context_switch;
 pub mod fpu;
 pub mod gdt;
 pub mod interrupt_guard;
 pub mod interrupts;
+pub mod ioapic;
+pub mod lapic;
 pub mod msr;
+pub mod percpu;
 pub mod preemption;
 pub mod preemption_guard;
 pub mod random;
 pub mod rtc;
+pub mod smp;
 pub mod syscall;

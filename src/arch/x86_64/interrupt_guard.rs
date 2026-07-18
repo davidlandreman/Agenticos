@@ -23,11 +23,10 @@ pub struct InterruptGuard {
 
 /// A spin mutex whose critical section cannot be timer-preempted.
 ///
-/// AgenticOS currently runs on one CPU. A plain spin mutex is therefore not
-/// safe when both timer-preemptible kernel threads and interrupt/SYSCALL paths
-/// acquire it: the latter can spin forever if the former was preempted while
-/// holding the lock. This wrapper masks interrupts before attempting the lock
-/// and restores the caller's prior interrupt state after releasing it.
+/// A plain spin mutex is not safe when both timer-preemptible kernel threads
+/// and interrupt/SYSCALL paths acquire it: a local interrupt can spin forever
+/// if it preempted the lock owner. This wrapper masks local interrupts before
+/// attempting the lock; the inner spin lock provides cross-CPU exclusion.
 pub struct InterruptMutex<T> {
     inner: spin::Mutex<T>,
 }
