@@ -1,10 +1,10 @@
 //! Text input widget for editable text
 
 use super::base::WindowBase;
-use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
 use crate::window::event::{KeyCode, MouseEventType};
 use crate::window::keyboard::keycode_to_char;
+use crate::window::theme::controls;
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -16,7 +16,8 @@ pub type TextSubmitCallback = Box<dyn FnMut(&str) + Send>;
 /// Callback type for Escape while the input is focused.
 pub type TextCancelCallback = Box<dyn FnMut() + Send>;
 
-/// A single-line text input widget
+/// A single-line text input widget. The well surface (background + border,
+/// focus feedback) comes from the active theme via `theme::controls`.
 pub struct TextInput {
     /// Base window functionality
     base: WindowBase,
@@ -30,14 +31,6 @@ pub struct TextInput {
     on_submit: Option<TextSubmitCallback>,
     /// Callback for Escape/cancel
     on_cancel: Option<TextCancelCallback>,
-    /// Background color
-    bg_color: Color,
-    /// Text color
-    text_color: Color,
-    /// Border color
-    border_color: Color,
-    /// Focused border color
-    focus_border_color: Color,
 }
 
 impl TextInput {
@@ -53,10 +46,6 @@ impl TextInput {
             on_change: None,
             on_submit: None,
             on_cancel: None,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
-            border_color: crate::window::PALETTE_BORDER,
-            focus_border_color: crate::window::PALETTE_CHROME_ACTIVE,
         }
     }
 
@@ -176,23 +165,10 @@ impl Window for TextInput {
         let y = bounds.y;
         let width = bounds.width;
         let height = bounds.height;
-        let right = x + width as i32 - 1;
-        let bottom = y + height as i32 - 1;
 
-        // Draw background
-        device.fill_rect(x, y, width, height, self.bg_color);
-
-        // Draw border (different color when focused)
-        let border_color = if self.base.has_focus() {
-            self.focus_border_color
-        } else {
-            self.border_color
-        };
-
-        device.draw_line(x, y, right, y, border_color);
-        device.draw_line(x, y, x, bottom, border_color);
-        device.draw_line(x, bottom, right, bottom, border_color);
-        device.draw_line(right, y, right, bottom, border_color);
+        // Themed well: background + border with focus feedback.
+        controls::draw_field(device, bounds, self.base.has_focus());
+        let text_color = controls::palette().field_text;
 
         // Draw text with padding
         let padding: i32 = 4;
@@ -206,7 +182,7 @@ impl Window for TextInput {
 
         // Draw text
         if !self.text.is_empty() {
-            device.draw_text(text_x, text_y, &self.text, font.as_font(), self.text_color);
+            device.draw_text(text_x, text_y, &self.text, font.as_font(), text_color);
         }
 
         // Draw cursor when focused
@@ -214,7 +190,7 @@ impl Window for TextInput {
             let cursor_x = text_x + self.text.len() as i32 * char_width;
             // Draw a vertical line as cursor
             if cursor_x < x + width as i32 - padding {
-                let cursor_color = self.text_color;
+                let cursor_color = text_color;
                 device.draw_line(
                     cursor_x,
                     text_y,

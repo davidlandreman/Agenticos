@@ -4,9 +4,9 @@
 //! that open dropdown menus. Popups are displayed as separate windows for
 //! proper z-ordering and event handling.
 
-use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
 use crate::window::event::MouseEventType;
+use crate::window::theme::controls;
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 use alloc::{boxed::Box, string::String, vec::Vec};
 
@@ -115,12 +115,6 @@ pub struct MenuBar {
     hover_index: Option<usize>,
     /// Callback when menu item is selected
     on_select: Option<MenuSelectCallback>,
-    /// Background color
-    bg_color: Color,
-    /// Text color
-    text_color: Color,
-    /// Hover background color
-    hover_bg_color: Color,
     /// ID of the popup window (if open)
     popup_window_id: Option<WindowId>,
     /// Pending popup to be created (set by open_menu, consumed by poll_pending_popup)
@@ -140,12 +134,6 @@ impl MenuBar {
             open_menu_index: None,
             hover_index: None,
             on_select: None,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
-            // Subtle grey hover (kept distinct from PALETTE_HIGHLIGHT_BG)
-            // — the menu-bar title strip uses a lighter highlight than
-            // its dropdown so the click affordance reads correctly.
-            hover_bg_color: Color::new(200, 200, 200),
             popup_window_id: None,
             pending_popup: None,
             global_offset: (0, 0),
@@ -301,22 +289,21 @@ impl Window for MenuBar {
         // During paint, bounds are temporarily set to absolute coordinates
         self.global_offset = (bounds.x, bounds.y);
 
-        // Draw menu bar background
+        // Draw menu bar background + bottom divider from the theme.
+        let palette = controls::palette();
         device.fill_rect(
             bounds.x,
             bounds.y,
             bounds.width,
             MENU_BAR_HEIGHT as u32,
-            self.bg_color,
+            palette.content_bg,
         );
-
-        // Draw bottom border
         device.fill_rect(
             bounds.x,
             bounds.y + MENU_BAR_HEIGHT as i32 - 1,
             bounds.width,
             1,
-            Color::new(180, 180, 180),
+            palette.border,
         );
 
         // Draw menu titles
@@ -327,12 +314,9 @@ impl Window for MenuBar {
             // Highlight if hovered or open
             let is_active = self.hover_index == Some(i) || self.open_menu_index == Some(i);
             if is_active {
-                device.fill_rect(
-                    x,
-                    bounds.y,
-                    menu.width as u32,
-                    MENU_BAR_HEIGHT as u32,
-                    self.hover_bg_color,
+                controls::draw_selection(
+                    device,
+                    Rect::new(x, bounds.y, menu.width as u32, MENU_BAR_HEIGHT),
                 );
             }
 
@@ -342,7 +326,11 @@ impl Window for MenuBar {
                 text_y,
                 &menu.title,
                 font.as_font(),
-                self.text_color,
+                if is_active {
+                    palette.selection_text
+                } else {
+                    palette.text
+                },
             );
         }
 

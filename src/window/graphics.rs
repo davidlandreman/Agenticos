@@ -49,7 +49,10 @@ pub trait GraphicsDevice: Send {
     /// Draw a line between two points
     fn draw_line(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: Color);
 
-    /// Draw a rectangle outline
+    /// Draw a rectangle outline. (Production widgets now draw themed
+    /// borders via `theme::controls`; the remaining caller is the
+    /// test-only `ProgressBar`.)
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     fn draw_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color);
 
     /// Fill a rectangle with a color

@@ -7,7 +7,6 @@ use alloc::vec::Vec;
 
 use crate::fs::filesystem::FileType;
 use crate::fs::Directory;
-use crate::graphics::color::Color;
 use crate::window::windows::dialog::{
     clear_dialog_state, close_dialog_with_result, get_dialog_result, is_dialog_open,
     set_dialog_state, DialogResult,
@@ -60,7 +59,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
         let container_id = wm.create_window(Some(frame_id));
         let mut container = ContainerWindow::new_with_id(container_id, content_area);
         container.set_parent(Some(frame_id));
-        container.set_background_color(Color::new(240, 240, 240));
+        container.set_background_color(crate::window::theme::controls::palette().content_bg);
 
         // Padding wraps the root VBox; insets give breathing room.
         let padding_id = wm.create_window(Some(container_id));
@@ -140,8 +139,7 @@ pub fn show_save_dialog(default_name: &str) -> Option<String> {
         let save_button_id = wm.create_window(Some(button_row_id));
         let mut save_button = Button::new_with_id(save_button_id, Rect::new(0, 0, 0, 0), "Save");
         save_button.set_parent(Some(button_row_id));
-        save_button.set_bg_color(Color::new(0, 120, 215));
-        save_button.set_text_color(Color::WHITE);
+        save_button.set_default(true);
         let _input_id_for_save = filename_input_id;
         save_button.on_click(move || {
             // For now, just close with cancel since save isn't implemented

@@ -2,9 +2,9 @@
 //! Button widget with mouse click support
 
 use super::base::WindowBase;
-use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
 use crate::window::event::MouseEventType;
+use crate::window::theme::controls::{self, ControlState};
 use crate::window::{Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -12,7 +12,8 @@ use alloc::string::String;
 /// Callback type for button click events
 pub type ButtonCallback = Box<dyn FnMut() + Send>;
 
-/// A clickable button widget
+/// A clickable button widget. The surface (face, bevel/gradient, border)
+/// comes from the active Classic/Aero theme via `theme::controls`.
 pub struct Button {
     /// Base window functionality
     base: WindowBase,
@@ -22,10 +23,8 @@ pub struct Button {
     pressed: bool,
     /// Click callback
     on_click: Option<ButtonCallback>,
-    /// Normal background color
-    bg_color: Color,
-    /// Text color
-    text_color: Color,
+    /// Default / accent button (Aero: blue border + glow; Classic: black rim).
+    default_button: bool,
     /// Whether the button is enabled. Disabled buttons paint in a
     /// greyed-out state and ignore `ButtonDown` / `ButtonUp` events
     /// (the click callback never fires).
@@ -40,8 +39,7 @@ impl Button {
             label: String::from(label),
             pressed: false,
             on_click: None,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
+            default_button: false,
             enabled: true,
         }
     }
@@ -59,20 +57,13 @@ impl Button {
         self.on_click = Some(Box::new(callback));
     }
 
-    /// Set the button label
-
-    /// Get the button label
-
-    /// Set background color
-    pub fn set_bg_color(&mut self, color: Color) {
-        self.bg_color = color;
-        self.base.invalidate();
-    }
-
-    /// Set text color
-    pub fn set_text_color(&mut self, color: Color) {
-        self.text_color = color;
-        self.base.invalidate();
+    /// Mark this button as the dialog's default / accent button. The theme
+    /// renders it distinctly (Aero: blue border + glow; Classic: black rim).
+    pub fn set_default(&mut self, default_button: bool) {
+        if self.default_button != default_button {
+            self.default_button = default_button;
+            self.base.invalidate();
+        }
     }
 
     /// Set whether the button is enabled. When disabled, the button
@@ -127,44 +118,18 @@ impl Window for Button {
         let y = bounds.y;
         let width = bounds.width;
         let height = bounds.height;
-        let right = x + width as i32 - 1;
-        let bottom = y + height as i32 - 1;
 
-        // Colors for 3D effect
-        let highlight = Color::WHITE;
-        let shadow = Color::DARK_GRAY;
-
-        // Disabled buttons paint with a lighter background and a
-        // mid-grey label; the 3D edge highlight/shadow still draws so
-        // the bounds remain visible, just muted.
-        let (bg, label_color) = if self.enabled {
-            (self.bg_color, self.text_color)
+        let state = if !self.enabled {
+            ControlState::Disabled
+        } else if self.pressed {
+            ControlState::Pressed
+        } else if self.default_button {
+            ControlState::Hot
         } else {
-            // Lighter than the default LIGHT_GRAY (192/192/192).
-            let disabled_bg = Color {
-                red: 224,
-                green: 224,
-                blue: 224,
-            };
-            (disabled_bg, Color::GRAY)
+            ControlState::Normal
         };
 
-        // Draw button background
-        device.fill_rect(x, y, width, height, bg);
-
-        if self.pressed {
-            // Pressed state: shadow on top/left, highlight on bottom/right
-            device.draw_line(x, y, right, y, shadow);
-            device.draw_line(x, y, x, bottom, shadow);
-            device.draw_line(x, bottom, right, bottom, highlight);
-            device.draw_line(right, y, right, bottom, highlight);
-        } else {
-            // Normal state: highlight on top/left, shadow on bottom/right
-            device.draw_line(x, y, right, y, highlight);
-            device.draw_line(x, y, x, bottom, highlight);
-            device.draw_line(x, bottom, right, bottom, shadow);
-            device.draw_line(right, y, right, bottom, shadow);
-        }
+        controls::draw_button(device, bounds, state);
 
         // Draw label centered
         if !self.label.is_empty() {
@@ -185,14 +150,15 @@ impl Window for Button {
                 y + 2
             };
 
-            // Offset text slightly when pressed for visual feedback
-            let (draw_x, draw_y) = if self.pressed {
-                (text_x + 1, text_y + 1)
-            } else {
-                (text_x, text_y)
-            };
-
-            device.draw_text(draw_x, draw_y, &self.label, font.as_font(), label_color);
+            // Classic shifts the label down-right while pressed.
+            let shift = controls::pressed_label_shift(state);
+            device.draw_text(
+                text_x + shift,
+                text_y + shift,
+                &self.label,
+                font.as_font(),
+                controls::button_text(state),
+            );
         }
 
         self.base.clear_needs_repaint();

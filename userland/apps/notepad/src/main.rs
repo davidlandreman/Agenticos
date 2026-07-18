@@ -10,9 +10,8 @@ use alloc::vec::Vec;
 
 use dialogs::{DialogStatus, FileDialog, MessageBox, MessageChoice, Modal, ModalOutcome};
 use gui::{
-    next_boundary, previous_boundary, Canvas, MenuBar, Window, COLOR_BORDER, COLOR_HIGHLIGHT,
-    COLOR_PANEL, COLOR_TEXT, COLOR_WHITE, GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE,
-    GUI_EVENT_RESIZE, GUI_MOUSE_DOWN, GUI_MOUSE_SCROLL,
+    next_boundary, previous_boundary, theme, Canvas, MenuBar, Window, GUI_EVENT_CLOSE,
+    GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE, GUI_MOUSE_DOWN, GUI_MOUSE_SCROLL,
 };
 
 const FILE_ITEMS: &[&str] = &["New", "Open...", "Save", "Save As...", "Exit"];
@@ -155,12 +154,13 @@ impl Editor {
     }
 
     fn draw(&self, canvas: &mut Canvas, top: u32, bottom: u32, focused: bool) {
+        let palette = theme::palette();
         canvas.fill_rect(
             0,
             top as i32,
             canvas.width(),
             bottom.saturating_sub(top),
-            COLOR_WHITE,
+            palette.field_bg,
         );
         let selected = self.selection();
         let mut line = 0usize;
@@ -182,10 +182,10 @@ impl Editor {
                     .map(|(start, end)| index >= start && index < end)
                     .unwrap_or(false)
                 {
-                    canvas.fill_rect(x, y - 1, 8, LINE_HEIGHT, COLOR_HIGHLIGHT);
-                    canvas.draw_char(x, y, character, COLOR_WHITE);
+                    canvas.fill_rect(x, y - 1, 8, LINE_HEIGHT, palette.selection_bg);
+                    canvas.draw_char(x, y, character, palette.selection_text);
                 } else {
-                    canvas.draw_char(x, y, character, COLOR_TEXT);
+                    canvas.draw_char(x, y, character, palette.field_text);
                 }
             }
             column += 1;
@@ -195,7 +195,12 @@ impl Editor {
             if cursor_line >= self.first_line {
                 let y = top as i32 + (cursor_line - self.first_line) as i32 * LINE_HEIGHT as i32;
                 if y + LINE_HEIGHT as i32 <= bottom as i32 {
-                    canvas.vertical_line(4 + cursor_column as i32 * 8, y + 1, 9, COLOR_TEXT);
+                    canvas.vertical_line(
+                        4 + cursor_column as i32 * 8,
+                        y + 1,
+                        9,
+                        palette.field_text,
+                    );
                 }
             }
         }
@@ -271,8 +276,9 @@ impl Notepad {
         let path = self.path.as_deref().unwrap_or("Untitled");
         let dirty = self.dirty;
         let focused = self.focused && self.modal.is_none();
+        let palette = theme::palette();
         let canvas = self.window.canvas_mut();
-        canvas.clear(COLOR_PANEL);
+        canvas.clear(palette.content_bg);
         self.editor
             .draw(canvas, MenuBar::HEIGHT, editor_bottom, focused);
         canvas.fill_rect(
@@ -280,10 +286,10 @@ impl Notepad {
             editor_bottom as i32,
             canvas.width(),
             STATUS_HEIGHT,
-            COLOR_PANEL,
+            palette.content_bg,
         );
-        canvas.horizontal_line(0, editor_bottom as i32, canvas.width(), COLOR_BORDER);
-        canvas.draw_text(6, editor_bottom as i32 + 5, path, COLOR_TEXT);
+        canvas.horizontal_line(0, editor_bottom as i32, canvas.width(), palette.border);
+        canvas.draw_text(6, editor_bottom as i32 + 5, path, palette.text);
         if dirty {
             canvas.draw_text(
                 canvas.width() as i32 - 80,

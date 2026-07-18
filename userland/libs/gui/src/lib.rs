@@ -2,6 +2,8 @@
 
 extern crate alloc;
 
+pub mod theme;
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -10,7 +12,11 @@ pub use runtime::{
     GuiEvent, GUI_EVENT_CLOSE, GUI_EVENT_FOCUS_CHANGE, GUI_EVENT_KEY, GUI_EVENT_MOUSE,
     GUI_EVENT_RESIZE, GUI_MOUSE_DOWN, GUI_MOUSE_MOVE, GUI_MOUSE_SCROLL, GUI_MOUSE_UP,
 };
+pub use theme::{ButtonState, Theme};
 
+// Legacy theme-agnostic values. Widgets now derive their colors from the
+// active theme (`theme::palette()`); these remain for app-specific chrome
+// that intentionally does not follow the theme.
 pub const COLOR_BLACK: u32 = 0x000000;
 pub const COLOR_WHITE: u32 = 0xFFFFFF;
 pub const COLOR_TEXT: u32 = 0x202020;
@@ -233,23 +239,32 @@ impl<'a> MenuBar<'a> {
     pub const ITEM_HEIGHT: u32 = 22;
 
     pub fn draw(&self, canvas: &mut Canvas) {
-        canvas.fill_rect(0, 0, canvas.width(), Self::HEIGHT, COLOR_PANEL);
-        canvas.horizontal_line(0, Self::HEIGHT as i32 - 1, canvas.width(), COLOR_BORDER);
+        let palette = theme::palette();
+        canvas.fill_rect(0, 0, canvas.width(), Self::HEIGHT, palette.content_bg);
+        canvas.horizontal_line(0, Self::HEIGHT as i32 - 1, canvas.width(), palette.border);
         if self.open {
-            canvas.fill_rect(4, 3, 48, 18, 0xD8E8F8);
+            theme::draw_selection(canvas, 4, 3, 48, 18);
         }
-        canvas.draw_text(10, 8, self.label, COLOR_TEXT);
+        canvas.draw_text(
+            10,
+            8,
+            self.label,
+            if self.open {
+                palette.selection_text
+            } else {
+                palette.text
+            },
+        );
         if self.open {
             let width = 128;
-            let height = Self::ITEM_HEIGHT * self.items.len() as u32;
-            canvas.fill_rect(4, Self::HEIGHT as i32, width, height, COLOR_PANEL);
-            canvas.rect(4, Self::HEIGHT as i32, width, height, COLOR_BORDER);
+            let height = Self::ITEM_HEIGHT * self.items.len() as u32 + 4;
+            theme::draw_menu_surface(canvas, 4, Self::HEIGHT as i32, width, height);
             for (index, item) in self.items.iter().enumerate() {
                 canvas.draw_text(
                     12,
                     Self::HEIGHT as i32 + index as i32 * Self::ITEM_HEIGHT as i32 + 7,
                     item,
-                    COLOR_TEXT,
+                    palette.text,
                 );
             }
         }
@@ -324,15 +339,33 @@ impl Button {
         x >= self.x && x < self.x + self.w as i32 && y >= self.y && y < self.y + self.h as i32
     }
 
+    /// Draw with the two classic states: `hot` marks the default / accent
+    /// button (Aero: blue border + glow; Classic: black rim).
     pub fn draw(&self, canvas: &mut Canvas, hot: bool) {
-        let fill = if hot { COLOR_HIGHLIGHT } else { COLOR_PANEL };
-        let text_color = if hot { COLOR_WHITE } else { COLOR_TEXT };
-        canvas.fill_rect(self.x, self.y, self.w, self.h, fill);
-        canvas.rect(self.x, self.y, self.w, self.h, COLOR_BORDER);
+        self.draw_state(
+            canvas,
+            if hot {
+                ButtonState::Hot
+            } else {
+                ButtonState::Normal
+            },
+        );
+    }
+
+    /// Draw with a full [`ButtonState`] for apps that track pressed /
+    /// disabled states themselves.
+    pub fn draw_state(&self, canvas: &mut Canvas, state: ButtonState) {
+        theme::draw_button(canvas, self.x, self.y, self.w, self.h, state);
         let text_width = self.label.chars().count() as i32 * 8;
         let text_x = self.x + (self.w as i32 - text_width) / 2;
         let text_y = self.y + (self.h as i32 - 8) / 2;
-        canvas.draw_text(text_x.max(self.x + 2), text_y, &self.label, text_color);
+        let shift = theme::pressed_label_shift(state);
+        canvas.draw_text(
+            text_x.max(self.x + 2) + shift,
+            text_y + shift,
+            &self.label,
+            theme::button_text(state),
+        );
     }
 }
 
@@ -457,17 +490,17 @@ impl TextField {
         } else if column >= self.scroll + visible {
             self.scroll = column + 1 - visible;
         }
-        canvas.fill_rect(self.x, self.y, self.w, self.h, COLOR_WHITE);
-        canvas.rect(self.x, self.y, self.w, self.h, COLOR_BORDER);
+        theme::draw_field(canvas, self.x, self.y, self.w, self.h, focused);
+        let text_color = theme::palette().field_text;
         let text_y = self.y + (self.h as i32 - 8) / 2;
         let mut pixel_x = self.x + Self::PAD;
         for character in self.text.chars().skip(self.scroll).take(visible) {
-            canvas.draw_char(pixel_x, text_y, character, COLOR_TEXT);
+            canvas.draw_char(pixel_x, text_y, character, text_color);
             pixel_x += 8;
         }
         if focused {
             let caret_x = self.x + Self::PAD + (column - self.scroll) as i32 * 8;
-            canvas.vertical_line(caret_x, self.y + 4, self.h.saturating_sub(8), COLOR_TEXT);
+            canvas.vertical_line(caret_x, self.y + 4, self.h.saturating_sub(8), text_color);
         }
     }
 }
@@ -617,7 +650,8 @@ impl ListView {
     }
 
     pub fn draw(&self, canvas: &mut Canvas) {
-        canvas.fill_rect(self.x, self.y, self.w, self.h, COLOR_WHITE);
+        let palette = theme::palette();
+        canvas.fill_rect(self.x, self.y, self.w, self.h, palette.field_bg);
         let visible = self.visible_rows();
         let overflow = self.rows.len() > visible;
         let gutter = if overflow { 6 } else { 0 };
@@ -629,21 +663,28 @@ impl ListView {
                 break;
             };
             let row_y = self.y + slot as i32 * Self::ROW_HEIGHT as i32;
-            let (bg, fg) = if self.selected == Some(row) {
-                (COLOR_HIGHLIGHT, COLOR_WHITE)
-            } else {
-                (COLOR_WHITE, COLOR_TEXT)
-            };
-            if bg != COLOR_WHITE {
-                canvas.fill_rect(self.x, row_y, self.w - gutter as u32, Self::ROW_HEIGHT, bg);
+            let selected = self.selected == Some(row);
+            if selected {
+                theme::draw_selection(
+                    canvas,
+                    self.x,
+                    row_y,
+                    self.w - gutter as u32,
+                    Self::ROW_HEIGHT,
+                );
             }
+            let fg = if selected {
+                palette.selection_text
+            } else {
+                palette.field_text
+            };
             let clipped: String = text.chars().take(max_chars).collect();
             canvas.draw_text(self.x + 4, row_y + 4, &clipped, fg);
         }
-        canvas.rect(self.x, self.y, self.w, self.h, COLOR_BORDER);
+        theme::draw_field_border(canvas, self.x, self.y, self.w, self.h, false);
         if overflow {
             let gutter_x = self.x + self.w as i32 - gutter;
-            canvas.vertical_line(gutter_x, self.y, self.h, COLOR_BORDER);
+            canvas.vertical_line(gutter_x, self.y, self.h, palette.border);
             let total = self.rows.len();
             let track = self.h as i32 - 2;
             let thumb_h = ((visible * track as usize) / total).max(8) as i32;
@@ -655,7 +696,7 @@ impl ListView {
                 thumb_y,
                 gutter as u32 - 2,
                 thumb_h as u32,
-                COLOR_BORDER,
+                palette.border,
             );
         }
     }
