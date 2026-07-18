@@ -39,6 +39,7 @@ userland/
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
     ├── guidemo/        # minimal ring-3 GUI reference client
     ├── fileman/        # standalone Finder/Explorer-style file manager
+    ├── control/        # modern Settings / Control Center
     ├── notepad/        # standalone editor with userland dialogs + working Save
     ├── taskmgr/        # tabbed task manager over /proc (graphs, End Task)
     ├── calc/           # standalone four-operation calculator
@@ -82,9 +83,9 @@ resolve into multicall or direct binaries staged under `host_share/`:
 - **`GLAUNCH.ELF` — kernel-side GUI app launcher** (empty today — every
   GUI app has migrated to ring 3; the mechanism remains for a future
   ring-0-only workload).
-- **Direct standalone ring-3 applications** — `CALC.ELF`, `FILEMAN.ELF`,
+- **Direct standalone ring-3 applications** — `CALC.ELF`, `CONTROL.ELF`, `FILEMAN.ELF`,
   `GLGAME.ELF`, `NOTEPAD.ELF`, `PAINTING.ELF`, and `TASKMGR.ELF`
-  (`calc`, compatibility command `explorer`, `glgame`, `notepad`,
+  (`calc`; `control` with alias `settings`; compatibility command `explorer`, `glgame`, `notepad`,
   `painting`; `taskmgr` with legacy alias `tasks`).
 - **`TCC.ELF` — TinyCC** (`tcc` and the `cc` alias). Compiles against
   the staged musl sysroot at `/host/sysroot`; write output to `/work`
@@ -98,6 +99,7 @@ dispatcher picks the right applet. No symlinks or per-applet ELF copies
 are needed; the namespace is pure kernel synthesis.
 
 `execve("/bin/explorer", ...)`, `execve("/bin/notepad", ...)`,
+`execve("/bin/control", ...)` (or `/bin/settings`),
 `execve("/bin/calc", ...)`, `execve("/bin/glgame", ...)`,
 `execve("/bin/painting", ...)`, and `execve("/bin/taskmgr", ...)` (or its
 legacy alias `/bin/tasks`) rewrite directly to their staged ELFs. There is

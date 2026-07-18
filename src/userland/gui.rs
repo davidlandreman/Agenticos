@@ -18,6 +18,8 @@ pub const GUI_EVENT_MOUSE: u32 = 2;
 pub const GUI_EVENT_RESIZE: u32 = 3;
 pub const GUI_EVENT_CLOSE: u32 = 4;
 pub const GUI_EVENT_FOCUS_CHANGE: u32 = 5;
+pub const GUI_EVENT_THEME_CHANGED: u32 = 6;
+pub const GUI_EVENT_SETTINGS_CHANGED: u32 = 7;
 
 pub const GUI_MOUSE_MOVE: u32 = 0;
 pub const GUI_MOUSE_DOWN: u32 = 1;
@@ -137,6 +139,73 @@ pub fn enqueue_event(pid: u32, event: GuiEvent) {
         }
     }
     wake_ring3_blocked_on_gui_event(pid);
+}
+
+/// Notify every GUI-owning process of a process-global theme transition.
+/// A queued older transition is replaced so rapid changes converge without
+/// consuming event-queue capacity.
+pub fn broadcast_theme_changed(
+    effective: crate::window::theme::ThemeKind,
+    requested: crate::window::theme::ThemeRequest,
+) {
+    let event = GuiEvent {
+        kind: GUI_EVENT_THEME_CHANGED,
+        window: 0,
+        payload: [
+            match effective {
+                crate::window::theme::ThemeKind::Classic => 1,
+                crate::window::theme::ThemeKind::Aero => 2,
+            },
+            match requested {
+                crate::window::theme::ThemeRequest::Auto => 0,
+                crate::window::theme::ThemeRequest::Classic => 1,
+                crate::window::theme::ThemeRequest::Aero => 2,
+            },
+            0,
+            0,
+            0,
+            0,
+        ],
+    };
+    broadcast_global_event(event);
+}
+
+/// Notify GUI-owning processes that non-theme system settings changed.
+/// Control Center uses this to refresh other open instances after a live
+/// wallpaper update.
+pub fn broadcast_settings_changed() {
+    broadcast_global_event(GuiEvent {
+        kind: GUI_EVENT_SETTINGS_CHANGED,
+        window: 0,
+        payload: [0; 6],
+    });
+}
+
+fn broadcast_global_event(event: GuiEvent) {
+    let wake: Vec<u32> = {
+        let mut states = GUI_STATES.lock();
+        states
+            .iter_mut()
+            .filter_map(|(&pid, state)| {
+                if state.windows.is_empty() {
+                    return None;
+                }
+                if let Some(queued) = state
+                    .events
+                    .iter_mut()
+                    .find(|queued| queued.kind == event.kind && queued.window == 0)
+                {
+                    *queued = event;
+                } else {
+                    push_bounded(state, event);
+                }
+                Some(pid)
+            })
+            .collect()
+    };
+    for pid in wake {
+        wake_ring3_blocked_on_gui_event(pid);
+    }
 }
 
 fn push_bounded(state: &mut GuiProcessState, event: GuiEvent) {

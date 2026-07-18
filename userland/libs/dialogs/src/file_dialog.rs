@@ -304,6 +304,10 @@ impl FileDialog {
         &self.current_dir
     }
 
+    pub fn refresh_theme(&mut self) {
+        self.render();
+    }
+
     fn colors(&self) -> FileUiColors {
         if theme::current() == theme::Theme::Aero {
             MODERN

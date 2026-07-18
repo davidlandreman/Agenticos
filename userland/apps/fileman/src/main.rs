@@ -229,6 +229,13 @@ impl FileManager {
                 }
                 Err(error) => return error,
             };
+            if event.kind == gui::GUI_EVENT_THEME_CHANGED {
+                self.render();
+                if let Some(active) = self.modal.as_mut() {
+                    active.modal.refresh_theme();
+                }
+                continue;
+            }
             if event.window == self.window.handle() {
                 if self.handle_main(event) {
                     return 0;

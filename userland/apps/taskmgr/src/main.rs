@@ -477,6 +477,13 @@ impl TaskMgr {
     }
 
     fn route(&mut self, event: GuiEvent) {
+        if gui::theme::apply_system_event(&event) {
+            if let Some((modal, _)) = self.modal.as_mut() {
+                modal.refresh_theme();
+            }
+            self.dirty = true;
+            return;
+        }
         if let Some((modal, _)) = self.modal.as_mut() {
             if event.window == modal.window_handle() {
                 if let DialogStatus::Done(choice) = modal.handle_event(&event) {

@@ -58,6 +58,10 @@ impl ColorPicker {
         self.window.handle()
     }
 
+    pub fn refresh_theme(&mut self) {
+        self.render();
+    }
+
     fn value(&self) -> u32 {
         (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32
     }

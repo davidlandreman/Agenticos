@@ -83,6 +83,7 @@ pub fn run() {
 
         // Render frame (early-exit inside if compositor has no dirty regions).
         crate::window::render_frame();
+        crate::system_control::drain_pending_notifications();
 
         // A one-tick cadence bounds input/render latency while allowing the
         // thread to leave the run queue completely between passes.

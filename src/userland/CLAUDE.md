@@ -60,14 +60,17 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
 - `etc.rs` — kernel-managed `/etc` namespace: static account/hosts files,
   the shipped zsh configuration, DHCP-published `resolv.conf` paths, and
   `publish_theme`, which writes the boot-resolved Classic/Aero theme to
-  `/etc/theme` for ring-3 GUI apps (read once by `userland/libs/gui`'s
-  `theme` module).
+  `/etc/theme` for ring-3 GUI apps. `userland/libs/gui` caches it and updates
+  the cache from `GUI_EVENT_THEME_CHANGED` on live Control Center changes.
+  `GUI_EVENT_SETTINGS_CHANGED` lets multiple Control Center instances refresh
+  after non-theme changes such as a new desktop wallpaper.
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility
   pointer bounds for synthetic tests, and errno constants. Real processes
   use VMA-aware user-copy validation. Unknown syscall numbers always return
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
-  to BusyBox or standalone ELFs: `/host/CALC.ELF`, `/host/FILEMAN.ELF`
+  to BusyBox or standalone ELFs: `/host/CALC.ELF`, `/host/CONTROL.ELF`
+  (`control` + `settings` aliases), `/host/FILEMAN.ELF`
   (compat command `explorer`), `/host/GLGAME.ELF`, `/host/NOTEPAD.ELF`,
   `/host/PAINTING.ELF`, `/host/TASKMGR.ELF` (`taskmgr` + legacy
   `tasks` alias), and `/host/TCC.ELF` (TinyCC; both `tcc` and the `cc`
@@ -183,6 +186,11 @@ The AgenticOS-private range extends syscall 5000 with nine GUI calls:
 - 5007 `gui_gl_submit_frame(context, packet, len, flags)`
 - 5008 `gui_gl_get_info(context, info, len)`
 - 5009 `gui_gl_context_destroy(context)`
+
+Private syscall 5010 is the versioned `system_control` command surface used by
+`CONTROL.ELF` to query renderer/display/personalization state and to apply
+persistent theme or wallpaper changes. Preferences live at
+`/data/agenticos/settings.conf`; missing storage degrades to session-only.
 
 Pixels are little-endian XRGB8888 (`u32` value `0x00RRGGBB`). Presents copy a
 full client surface into kernel memory. Events use a fixed 32-byte
