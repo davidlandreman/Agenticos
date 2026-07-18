@@ -77,10 +77,22 @@ fn test_busybox_nc_numeric_ipv4() {
     run_busybox_applet(&["nc", "-z", "-w", "2", "10.0.2.100", "8080"]);
 }
 
+fn test_busybox_nc_hostname() {
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    run_busybox_applet(&["nc", "-z", "-w", "2", "agenticos-echo.test", "8080"]);
+}
+
 fn test_busybox_wget_numeric_http() {
     crate::net::wait_for_config_ticks(500)
         .expect("QEMU-local DHCP lease was not acquired within five seconds");
     run_busybox_applet(&["wget", "-q", "-O", "-", "http://10.0.2.101:8081/"]);
+}
+
+fn test_busybox_wget_hostname() {
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    run_busybox_applet(&["wget", "-q", "-O", "-", "http://agenticos-http.test:8081/"]);
 }
 
 fn run_zsh_network_command(command: &str) {
@@ -126,13 +138,22 @@ fn test_zsh_wget_numeric_http() {
     run_zsh_network_command("wget -q -O - http://10.0.2.101:8081/");
 }
 
+fn test_zsh_wget_hostname() {
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    run_zsh_network_command("wget -q -O - http://agenticos-http.test:8081/");
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_static_musl_network_fixture,
         &test_busybox_ping_numeric_ipv4,
         &test_busybox_nc_numeric_ipv4,
+        &test_busybox_nc_hostname,
         &test_busybox_wget_numeric_http,
+        &test_busybox_wget_hostname,
         &test_zsh_ping_numeric_ipv4,
         &test_zsh_wget_numeric_http,
+        &test_zsh_wget_hostname,
     ]
 }

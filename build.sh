@@ -100,15 +100,6 @@ echo "🛠  Building userland (release)..."
 HOST_SHARE_STAGE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
 mkdir -p "$HOST_SHARE_STAGE"
 
-# U4: stage minimal /etc/{passwd,group} so musl's getpwuid_r returns the
-# root entry zsh needs for $HOME/$USER/$SHELL. The kernel-side path
-# rewriter in src/userland/path.rs::apply_fs_rewrite maps
-# /etc/passwd -> /host/etc/passwd; FAT's case-insensitive subdir walker
-# resolves that to host_share/ETC/PASSWD. Single-line root entry is the
-# musl-getpwuid_r minimum (seven colon-delimited fields).
-mkdir -p "$HOST_SHARE_STAGE/ETC"
-printf 'root:x:0:0::/root:/bin/zsh\n' > "$HOST_SHARE_STAGE/ETC/PASSWD"
-printf 'root:x:0:\n'                  > "$HOST_SHARE_STAGE/ETC/GROUP"
 if cargo build --release --manifest-path userland/Cargo.toml; then
     USER_HELLO="userland/target/x86_64-unknown-none/release/hello"
     if [ -f "$USER_HELLO" ]; then

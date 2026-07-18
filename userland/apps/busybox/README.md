@@ -2,7 +2,7 @@
 
 Single-binary static-musl BusyBox build, providing `ls`, `cat`, `grep`,
 `sed`, `awk`, `find`, `wc`, `head`, `tail`, `sort`, `uniq`, plus the selected
-`ping`, `nc`, and `wget` networking applets behind a multicall dispatcher. The kernel exposes a
+`ping`, `nc`, `nslookup`, and `wget` networking applets behind a multicall dispatcher. The kernel exposes a
 virtual `/bin/<applet>` namespace so `execve("/bin/ls", argv, envp)`
 resolves to `BB.ELF` with `argv[0] = "ls"`, and BusyBox's argv[0]-based
 dispatch picks the right applet.
@@ -49,9 +49,9 @@ in lockstep — the SHA verifier hard-fails on mismatch.
   (cron, syslog, watchdog, …), module loading, mount/swap/blockdev/mkfs,
   unsupported networking daemons/interface tools, TTY/console manipulation, time/clock
   adjustment, IPC, namespaces, free/top/iostat (no /proc).
-- Enabled networking is deliberately limited to IPv4 `ping`, `nc`, and
-  HTTP-only `wget`. HTTPS/TLS, IPv6, `udhcpc`, interface configuration, and
-  resolver-dependent demos remain disabled.
+- Enabled networking is deliberately limited to IPv4 `ping`, `nc`, `nslookup`,
+  and HTTP-only `wget`. HTTPS/TLS, IPv6, `udhcpc`, and interface configuration
+  remain disabled.
 
 The Makefile applies these as `make defconfig && (strip overridden keys)
 && cat busybox.config >> .config && make oldconfig`, so any new applets
@@ -76,19 +76,21 @@ they begin to work without further changes here.
 
 ## Networking caveat
 
-The kernel currently exposes numeric IPv4 sockets only: DHCP-provided DNS
-servers are recorded, but libc name lookup and TLS are not implemented. In the
-default interactive QEMU network these are representative commands:
+The kernel publishes DHCP-provided DNS servers to a managed
+`/etc/resolv.conf`, so musl and BusyBox resolve hostnames over IPv4. TLS is not
+implemented. In the default interactive QEMU network these are representative
+commands:
 
 ```sh
-ping -c 3 10.0.2.2
+nslookup example.com
+ping -c 3 example.com
 nc -z -w 2 10.0.2.2 80
-wget -O- http://10.0.2.2:8000/
+wget -O- http://example.com/
 ```
 
-The last two require a service listening at the chosen numeric address/port;
-the automated suite provides its own QEMU-local endpoints. Do not advertise
-hostname URLs or HTTPS until the resolver and certificate/time work lands.
+The connectivity commands require the selected service to be reachable; the
+automated suite provides its own QEMU-local endpoints and `/etc/hosts` aliases.
+HTTPS remains deferred until certificate/time support lands.
 
 ## Applet list ↔ kernel sync
 

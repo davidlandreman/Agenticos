@@ -104,12 +104,6 @@ echo "Building and running kernel tests..."
 HOST_SHARE_STAGE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
 mkdir -p "$HOST_SHARE_STAGE"
 
-# U4: same /etc staging as build.sh — the e2e zsh test path needs
-# /etc/passwd resolvable from inside the guest.
-mkdir -p "$HOST_SHARE_STAGE/ETC"
-printf 'root:x:0:0::/root:/bin/zsh\n' > "$HOST_SHARE_STAGE/ETC/PASSWD"
-printf 'root:x:0:\n'                  > "$HOST_SHARE_STAGE/ETC/GROUP"
-
 # Mandatory static-musl compatibility fixtures. These are committed test
 # inputs, so stage them even with --skip-userland and fail loudly if a fresh
 # checkout is missing one. Ordinary test runs never invoke a musl compiler.

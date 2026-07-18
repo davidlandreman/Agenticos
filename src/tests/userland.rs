@@ -6,7 +6,7 @@ use crate::mm::paging::{
 use crate::tests::userland_fixtures as fix;
 use crate::userland::abi::{
     self, nr, syscall_dispatch, validate_user_slice, UserVaBounds, EBADF, EFAULT, EINVAL, ENOENT,
-    ENOSYS, ENOTTY, ERANGE, EROFS, LAST_EXIT_CODE,
+    ENOSYS, ENOTTY, EPERM, ERANGE, EROFS, LAST_EXIT_CODE,
 };
 use crate::userland::error::LoaderError;
 use crate::userland::fdtable::{FdSlot, FdTable};
@@ -350,6 +350,48 @@ fn test_dispatch_poll_unknown_fd_returns_pollnval() {
     let ret = syscall_dispatch(&mut args);
     assert_eq!(ret, 1);
     assert_eq!(fds[0].revents, 0x0020); // POLLNVAL
+    crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// Linux ignores negative pollfd entries. musl reserves fd=-1 slots for DNS
+/// TCP fallback while waiting on its UDP socket, so POLLNVAL here would turn
+/// resolver waits into a busy loop.
+fn test_dispatch_poll_negative_fd_is_ignored() {
+    install_streams_for_dispatcher_test();
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    let mut fds = [
+        PollFd {
+            fd: -1,
+            events: 0x0001 | 0x0004,
+            revents: 0x7fff,
+        },
+        PollFd {
+            fd: 1,
+            events: 0x0004,
+            revents: 0,
+        },
+    ];
+    let ptr = fds.as_mut_ptr() as u64;
+    let bytes = (fds.len() * core::mem::size_of::<PollFd>()) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr,
+        end: ptr + bytes,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::POLL;
+    args.rdi = ptr;
+    args.rsi = fds.len() as u64;
+    let ret = syscall_dispatch(&mut args);
+    assert_eq!(ret, 1);
+    assert_eq!(fds[0].revents, 0);
+    assert_eq!(fds[1].revents, 0x0004);
     crate::userland::abi::clear_user_va_bounds();
     clear_streams_after_dispatcher_test();
 }
@@ -1784,17 +1826,8 @@ fn test_dispatch_open_writable_flag_returns_erofs() {
     teardown_phase2_active_user();
 }
 
-/// U4 integration: `open("/etc/passwd", O_RDONLY)` succeeds via the path
-/// rewriter — the user-supplied "/etc/passwd" routes through
-/// resolve_user_path → apply_fs_rewrite → "/host/etc/passwd", which the
-/// FAT subdir walker resolves to `host_share/ETC/PASSWD` (staged by
-/// build.sh / test.sh). Skip-if-missing so the test is graceful when
-/// the FAT mount isn't present (shouldn't happen in normal test boots,
-/// but mirrors the established skip pattern).
-fn test_dispatch_open_etc_passwd_via_rewriter() {
-    if !crate::fs::exists("/host/etc/passwd") {
-        return;
-    }
+/// The kernel-owned runtime `/etc/passwd` is directly visible to userland.
+fn test_dispatch_open_runtime_etc_passwd() {
     setup_phase2_active_user();
     let path = b"/etc/passwd\0";
     let ptr = path.as_ptr() as u64;
@@ -1810,18 +1843,17 @@ fn test_dispatch_open_etc_passwd_via_rewriter() {
     let fd = syscall_dispatch(&mut args);
     assert!(fd >= 0, "expected fd >= 0, got {}", fd);
 
+    let mut close = SyscallArgs::default();
+    close.rax = nr::CLOSE;
+    close.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut close), 0);
+
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
 }
 
-/// U4 integration: `open("/etc/shadow", O_RDONLY)` returns -ENOENT —
-/// the rewriter maps it to /host/etc/shadow which is not staged.
-/// Validates the "fail closed" behavior when /etc/* is asked for but
-/// the underlying FAT path doesn't exist.
-fn test_dispatch_open_etc_unstaged_returns_enoent() {
-    if !crate::fs::exists("/host/etc/passwd") {
-        return; // host mount missing entirely — skip
-    }
+/// Files not seeded into the kernel-owned runtime `/etc` remain absent.
+fn test_dispatch_open_etc_unmanaged_file_returns_enoent() {
     setup_phase2_active_user();
     let path = b"/etc/shadow\0";
     let ptr = path.as_ptr() as u64;
@@ -1840,14 +1872,8 @@ fn test_dispatch_open_etc_unstaged_returns_enoent() {
     teardown_phase2_active_user();
 }
 
-/// U4 integration: `/etc/../etc/passwd` resolves correctly through the
-/// rewriter — normalize_path collapses the .. first, then the rewriter
-/// sees /etc/passwd and rewrites it. This locks in the security
-/// invariant that path traversal can't bypass the allowlist.
+/// Path normalization still resolves traversal back to the managed file.
 fn test_dispatch_open_etc_traversal_collapses() {
-    if !crate::fs::exists("/host/etc/passwd") {
-        return;
-    }
     setup_phase2_active_user();
     let path = b"/etc/../etc/passwd\0";
     let ptr = path.as_ptr() as u64;
@@ -1862,6 +1888,48 @@ fn test_dispatch_open_etc_traversal_collapses() {
     args.rsi = 0;
     let fd = syscall_dispatch(&mut args);
     assert!(fd >= 0, "expected fd >= 0 after traversal, got {}", fd);
+
+    let mut close = SyscallArgs::default();
+    close.rax = nr::CLOSE;
+    close.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut close), 0);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_open_runtime_etc_for_write_returns_erofs() {
+    setup_phase2_active_user();
+    let path = b"/etc/resolv.conf\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::OPEN;
+    args.rdi = ptr;
+    args.rsi = 1; // O_WRONLY
+    assert_eq!(syscall_dispatch(&mut args), EROFS);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_unlink_runtime_etc_returns_eperm() {
+    setup_phase2_active_user();
+    let path = b"/etc/resolv.conf\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::UNLINK;
+    args.rdi = ptr;
+    assert_eq!(syscall_dispatch(&mut args), EPERM);
 
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
@@ -4435,6 +4503,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         // U3: musl-init / zsh-startup syscalls
         &test_dispatch_poll_streams_ready,
         &test_dispatch_poll_unknown_fd_returns_pollnval,
+        &test_dispatch_poll_negative_fd_is_ignored,
         &test_dispatch_poll_zero_nfds_returns_zero,
         &test_dispatch_poll_nfds_over_cap_returns_einval,
         &test_dispatch_readlink_proc_self_exe,
@@ -4515,9 +4584,11 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_chdir_nonexistent_returns_enoent,
         &test_dispatch_open_nonexistent_returns_enoent,
         &test_dispatch_open_writable_flag_returns_erofs,
-        &test_dispatch_open_etc_passwd_via_rewriter,
-        &test_dispatch_open_etc_unstaged_returns_enoent,
+        &test_dispatch_open_runtime_etc_passwd,
+        &test_dispatch_open_etc_unmanaged_file_returns_enoent,
         &test_dispatch_open_etc_traversal_collapses,
+        &test_dispatch_open_runtime_etc_for_write_returns_erofs,
+        &test_dispatch_unlink_runtime_etc_returns_eperm,
         &test_dispatch_close_stream_is_noop,
         &test_dispatch_dup_stdout,
         &test_dispatch_lseek_on_stream_returns_espipe,
