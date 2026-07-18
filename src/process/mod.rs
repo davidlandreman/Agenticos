@@ -284,7 +284,6 @@ pub fn terminate_current() {
     }
 }
 
-
 /// U8: block the current kernel thread until ring-3 process `pid`
 /// exits, then return. Called from `enter_user_mode_with_aspace` after
 /// the launcher has installed the Process and marked it Ready.
@@ -349,12 +348,23 @@ pub fn block_kernel_thread_for_ring3_exit(pid: u32) {
 /// `exit_kind` becomes non-None.
 fn drive_inline_ring3_until_exit(awaited_pid: u32) {
     use crate::userland::lifecycle::{pop_next_ring3, with_process, ExitKind};
+    #[cfg(feature = "test")]
+    let test_deadline = crate::arch::x86_64::interrupts::get_timer_ticks().saturating_add(3_000);
     loop {
         let exited =
             with_process(awaited_pid, |p| !matches!(p.exit_kind, ExitKind::None)).unwrap_or(true); // process gone (already reaped) → treat as exited
         if exited {
             return;
         }
+
+        #[cfg(feature = "test")]
+        assert!(
+            crate::arch::x86_64::interrupts::get_timer_ticks() < test_deadline,
+            "ring-3 process {} exceeded the 30-second test deadline",
+            awaited_pid,
+        );
+
+        crate::userland::lifecycle::process_due_real_timers();
 
         // Tests and other non-kernel-thread launchers use this inline loop,
         // so the ordinary `net-rx-tx` kernel worker is not scheduled while
@@ -379,7 +389,6 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
         }
     }
 }
-
 
 /// Handle preemption from the kernel main loop
 ///

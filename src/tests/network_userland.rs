@@ -68,7 +68,7 @@ fn run_busybox_applet(argv: &[&str]) {
 fn test_busybox_ping_numeric_ipv4() {
     crate::net::wait_for_config_ticks(500)
         .expect("QEMU-local DHCP lease was not acquired within five seconds");
-    run_busybox_applet(&["ping", "-c", "1", "-W", "2", "10.0.2.2"]);
+    run_busybox_applet(&["ping", "-c", "2", "-W", "2", "10.0.2.2"]);
 }
 
 fn test_busybox_nc_numeric_ipv4() {
@@ -117,7 +117,7 @@ fn run_zsh_network_command(command: &str) {
 fn test_zsh_ping_numeric_ipv4() {
     crate::net::wait_for_config_ticks(500)
         .expect("QEMU-local DHCP lease was not acquired within five seconds");
-    run_zsh_network_command("ping -c 1 -W 2 10.0.2.2");
+    run_zsh_network_command("ping -c 2 -W 2 10.0.2.2");
 }
 
 fn test_zsh_wget_numeric_http() {

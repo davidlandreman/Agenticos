@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -11,6 +12,13 @@
 #define ECHO_ADDRESS "10.0.2.100"
 #define ECHO_PORT 8080
 #define PAYLOAD_SIZE 8192
+
+static volatile sig_atomic_t alarm_seen;
+
+static void handle_alarm(int signal_number) {
+    (void)signal_number;
+    alarm_seen = 1;
+}
 
 static int fail(const char *message, size_t length, int code) {
     (void)write(STDERR_FILENO, message, length);
@@ -95,54 +103,73 @@ int main(void) {
     close(udp);
     PROGRESS("udp-ok");
 
+    int timer_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    CHECK(timer_socket >= 0, 28, "timer UDP socket");
+    CHECK(bind(timer_socket, (const struct sockaddr *)&any, sizeof(any)) == 0,
+          29, "timer UDP bind");
+    struct sigaction alarm_action = {0};
+    alarm_action.sa_handler = handle_alarm;
+    sigemptyset(&alarm_action.sa_mask);
+    CHECK(sigaction(SIGALRM, &alarm_action, NULL) == 0, 30, "SIGALRM action");
+    struct itimerval alarm_timer = {
+        .it_value = {.tv_sec = 0, .tv_usec = 100000},
+    };
+    CHECK(setitimer(ITIMER_REAL, &alarm_timer, NULL) == 0, 31, "arm ITIMER_REAL");
+    errno = 0;
+    CHECK(recv(timer_socket, scratch, sizeof(scratch), 0) == -1 && errno == EINTR,
+          32, "SIGALRM interrupts recv");
+    CHECK(alarm_seen == 1, 33, "SIGALRM handler");
+    close(timer_socket);
+    PROGRESS("itimer-ok");
+
     int tcp = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    CHECK(tcp >= 0, 30, "TCP socket");
+    CHECK(tcp >= 0, 34, "TCP socket");
     struct timeval timeout = {.tv_sec = 5, .tv_usec = 0};
-    CHECK(setsockopt(tcp, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0, 31, "receive timeout");
-    CHECK(setsockopt(tcp, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0, 32, "send timeout");
+    CHECK(setsockopt(tcp, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0, 35, "receive timeout");
+    CHECK(setsockopt(tcp, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0, 36, "send timeout");
 
     struct sockaddr_in echo = {
         .sin_family = AF_INET,
         .sin_port = htons(ECHO_PORT),
     };
-    CHECK(inet_pton(AF_INET, ECHO_ADDRESS, &echo.sin_addr) == 1, 33, "numeric address");
+    CHECK(inet_pton(AF_INET, ECHO_ADDRESS, &echo.sin_addr) == 1, 37, "numeric address");
     int connect_result = connect(tcp, (const struct sockaddr *)&echo, sizeof(echo));
-    CHECK(connect_result == -1 && errno == EINPROGRESS, 34, "nonblocking connect");
+    CHECK(connect_result == -1 && errno == EINPROGRESS, 38, "nonblocking connect");
     PROGRESS("connect-started");
 
     errno = 0;
     CHECK(connect(tcp, (const struct sockaddr *)&echo, sizeof(echo)) == -1 && errno == EALREADY,
-          35, "connect EALREADY");
+          39, "connect EALREADY");
 
     struct pollfd tcp_poll = {.fd = tcp, .events = POLLOUT, .revents = 0};
     int ready = poll(&tcp_poll, 1, 10000);
-    CHECK(ready == 1 && (tcp_poll.revents & (POLLOUT | POLLERR)) != 0, 36, "connect poll");
+    CHECK(ready == 1 && (tcp_poll.revents & (POLLOUT | POLLERR)) != 0, 40, "connect poll");
     int socket_error = -1;
     socklen_t socket_error_len = sizeof(socket_error);
     CHECK(getsockopt(tcp, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_len) == 0,
-          37, "SO_ERROR query");
-    CHECK(socket_error == 0, 38, "TCP connection result");
+          41, "SO_ERROR query");
+    CHECK(socket_error == 0, 42, "TCP connection result");
     PROGRESS("connect-ok");
 
     int socket_type = 0;
     socklen_t socket_type_len = sizeof(socket_type);
     CHECK(getsockopt(tcp, SOL_SOCKET, SO_TYPE, &socket_type, &socket_type_len) == 0 &&
               socket_type == SOCK_STREAM,
-          39, "SO_TYPE");
+          43, "SO_TYPE");
 
     struct sockaddr_in local;
     socklen_t local_len = sizeof(local);
-    CHECK(getsockname(tcp, (struct sockaddr *)&local, &local_len) == 0, 40, "TCP getsockname");
+    CHECK(getsockname(tcp, (struct sockaddr *)&local, &local_len) == 0, 44, "TCP getsockname");
     CHECK(local.sin_addr.s_addr != htonl(INADDR_ANY) && ntohs(local.sin_port) != 0,
-          41, "TCP local endpoint");
+          45, "TCP local endpoint");
     struct sockaddr_in peer;
     socklen_t peer_len = sizeof(peer);
-    CHECK(getpeername(tcp, (struct sockaddr *)&peer, &peer_len) == 0, 42, "TCP getpeername");
+    CHECK(getpeername(tcp, (struct sockaddr *)&peer, &peer_len) == 0, 46, "TCP getpeername");
     CHECK(peer.sin_addr.s_addr == echo.sin_addr.s_addr && peer.sin_port == echo.sin_port,
-          43, "TCP peer endpoint");
+          47, "TCP peer endpoint");
 
     flags = fcntl(tcp, F_GETFL);
-    CHECK(flags >= 0 && fcntl(tcp, F_SETFL, flags & ~O_NONBLOCK) == 0, 44, "TCP blocking mode");
+    CHECK(flags >= 0 && fcntl(tcp, F_SETFL, flags & ~O_NONBLOCK) == 0, 48, "TCP blocking mode");
 
     static uint8_t outbound[4 + PAYLOAD_SIZE];
     static uint8_t inbound[4 + PAYLOAD_SIZE];

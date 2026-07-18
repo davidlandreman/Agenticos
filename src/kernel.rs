@@ -748,6 +748,8 @@ pub fn run() -> ! {
             }
         }
 
+        crate::userland::lifecycle::process_due_real_timers();
+
         // === PROCESS SCHEDULING ===
         // Run any ready processes (GUIShell, spawned commands, etc.)
         // Processes that call sleep_ticks/sleep_until_event return here

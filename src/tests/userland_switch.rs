@@ -43,6 +43,8 @@ fn synthetic_process(pid: u32) -> Process {
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
+        real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -290,6 +292,8 @@ fn insert_synthetic(pid: u32) {
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
+        real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -534,6 +538,96 @@ fn test_signal_delivery_consumes_from_current_only() {
     remove_process(9311);
 }
 
+/// An expired real timer queues SIGALRM, disarms a one-shot timer, and
+/// interrupts a blocked network syscall so the dispatcher can deliver EINTR.
+fn test_real_timer_expiry_wakes_blocked_network_syscall() {
+    use crate::userland::lifecycle::{
+        mark_ring3_blocked, pop_next_ring3, process_due_real_timers, remove_process,
+        set_current_user_pid, take_pending_syscall_interrupt, with_process, NetworkWaitState,
+        Ring3BlockReason,
+    };
+    use crate::userland::signal::{SigAction, SIGALRM};
+
+    let _g = PreemptTestGuard::new();
+    insert_synthetic(9320);
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    with_process(9320, |process| {
+        process.signal_state.set_action(
+            SIGALRM,
+            SigAction {
+                sa_handler: 0xDEAD_BEEF,
+                sa_flags: 0,
+                sa_restorer: 0,
+                sa_mask: 0,
+            },
+        );
+        process.real_timer.deadline_tick = Some(now);
+        process.network_wait = Some(NetworkWaitState {
+            syscall_nr: crate::userland::abi::nr::RECVFROM,
+            identity: 7,
+            deadline_tick: None,
+            expired: false,
+        });
+    });
+    mark_ring3_blocked(
+        9320,
+        Ring3BlockReason::WaitingForNetwork {
+            deadline_tick: None,
+        },
+    );
+
+    process_due_real_timers();
+
+    assert_eq!(pop_next_ring3(), Some(9320));
+    with_process(9320, |process| {
+        assert_ne!(process.signal_state.pending & (1 << (SIGALRM - 1)), 0);
+        assert!(process.real_timer.deadline_tick.is_none());
+        assert!(process.network_wait.is_none());
+        assert!(process.pending_syscall_interrupt);
+    });
+    set_current_user_pid(Some(9320));
+    assert!(take_pending_syscall_interrupt());
+    assert!(!take_pending_syscall_interrupt());
+    set_current_user_pid(None);
+    remove_process(9320);
+}
+
+/// Blocked SIGALRM remains pending but must not interrupt a blocked syscall.
+fn test_real_timer_expiry_respects_signal_mask() {
+    use crate::userland::lifecycle::{
+        mark_ring3_blocked, pop_next_ring3, process_due_real_timers, remove_process, with_process,
+        Ring3BlockReason,
+    };
+    use crate::userland::signal::{SigAction, SIGALRM};
+
+    let _g = PreemptTestGuard::new();
+    insert_synthetic(9321);
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    with_process(9321, |process| {
+        process.signal_state.set_action(
+            SIGALRM,
+            SigAction {
+                sa_handler: 0xDEAD_BEEF,
+                sa_flags: 0,
+                sa_restorer: 0,
+                sa_mask: 0,
+            },
+        );
+        process.signal_state.blocked |= 1 << (SIGALRM - 1);
+        process.real_timer.deadline_tick = Some(now);
+    });
+    mark_ring3_blocked(9321, Ring3BlockReason::WaitingForInput);
+
+    process_due_real_timers();
+
+    assert!(pop_next_ring3().is_none());
+    with_process(9321, |process| {
+        assert_ne!(process.signal_state.pending & (1 << (SIGALRM - 1)), 0);
+        assert!(!process.pending_syscall_interrupt);
+    });
+    remove_process(9321);
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_save_ring3_copies_every_gpr,
@@ -548,5 +642,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_preempt_ring3_to_kernel_saves_and_requeues_current,
         &test_signal_raised_on_other_process_does_not_land_in_current,
         &test_signal_delivery_consumes_from_current_only,
+        &test_real_timer_expiry_wakes_blocked_network_syscall,
+        &test_real_timer_expiry_respects_signal_mask,
     ]
 }

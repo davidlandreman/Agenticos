@@ -81,7 +81,7 @@ servers are recorded, but libc name lookup and TLS are not implemented. In the
 default interactive QEMU network these are representative commands:
 
 ```sh
-ping -c 1 10.0.2.2
+ping -c 3 10.0.2.2
 nc -z -w 2 10.0.2.2 80
 wget -O- http://10.0.2.2:8000/
 ```

@@ -30,6 +30,7 @@ pub const SIGUSR1: i32 = 10;
 pub const SIGSEGV: i32 = 11;
 #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub const SIGUSR2: i32 = 12;
+pub const SIGALRM: i32 = 14;
 pub const SIGCHLD: i32 = 17;
 pub const SIGBUS: i32 = 7;
 pub const SIGSTOP: i32 = 19;
@@ -90,12 +91,14 @@ impl SignalState {
 
     fn ensure_actions(&mut self) -> &mut [SigAction; NSIG + 1] {
         if self.actions.is_none() {
-            self.actions = Some(alloc::boxed::Box::new([SigAction {
-                sa_handler: SIG_DFL,
-                sa_flags: 0,
-                sa_restorer: 0,
-                sa_mask: 0,
-            }; NSIG + 1]));
+            self.actions = Some(alloc::boxed::Box::new(
+                [SigAction {
+                    sa_handler: SIG_DFL,
+                    sa_flags: 0,
+                    sa_restorer: 0,
+                    sa_mask: 0,
+                }; NSIG + 1],
+            ));
         }
         self.actions.as_deref_mut().unwrap()
     }
@@ -119,8 +122,6 @@ impl SignalState {
         }
         self.pending |= 1u64 << (sig - 1);
     }
-
-
 
     /// Set the action for `sig`, returning the previous one. SIGKILL
     /// and SIGSTOP cannot have their disposition changed (POSIX
@@ -146,6 +147,21 @@ impl SignalState {
             Some(table) => Some(table[sig as usize]),
             None => Some(SigAction::default()),
         }
+    }
+
+    /// Whether `sig` can be delivered through the signal-frame path now.
+    /// Default dispositions are not implemented by that path yet, so only an
+    /// installed, unblocked user handler counts as deliverable.
+    pub fn has_deliverable_handler(&self, sig: i32) -> bool {
+        if sig < 1 || (sig as usize) > NSIG {
+            return false;
+        }
+        let mask = 1u64 << (sig - 1);
+        if self.blocked & mask != 0 {
+            return false;
+        }
+        self.action(sig)
+            .is_some_and(|action| action.sa_handler != SIG_DFL && action.sa_handler != SIG_IGN)
     }
 
     /// Pick the lowest pending signal that's both unblocked *and* has

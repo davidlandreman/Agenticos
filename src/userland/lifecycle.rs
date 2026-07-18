@@ -49,7 +49,6 @@ pub struct AbnormalExit {
     pub fault_rip: VirtAddr,
 }
 
-
 /// The single active per-CPU user-process slot.
 ///
 /// Holds:
@@ -98,6 +97,12 @@ pub struct Process {
     pub fd_table: FdTable,
     /// Restart-stable deadline state for a blocking network syscall.
     pub network_wait: Option<NetworkWaitState>,
+    /// Linux ITIMER_REAL state, represented against the monotonic 100 Hz PIT.
+    pub real_timer: RealTimerState,
+    /// Set when an asynchronous signal wakes a re-fire-based blocking syscall.
+    /// The next dispatcher entry delivers the signal with `-EINTR` instead of
+    /// running the syscall handler and immediately blocking again.
+    pub pending_syscall_interrupt: bool,
     /// Phase 2: per-process current working directory. Anchors relative
     /// paths in `openat(AT_FDCWD, …)`, `stat`, `access`, etc. Always
     /// stored as a normalized absolute path.
@@ -182,7 +187,6 @@ pub struct Process {
     /// zsh1's writes to land in terminal 2's window.
     pub terminal_id: Option<crate::window::WindowId>,
 }
-
 
 /// What ended the user process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,6 +297,21 @@ pub struct NetworkWaitState {
     pub expired: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RealTimerState {
+    pub deadline_tick: Option<u64>,
+    pub interval_ticks: u64,
+}
+
+impl RealTimerState {
+    pub const fn disarmed() -> Self {
+        Self {
+            deadline_tick: None,
+            interval_ticks: 0,
+        }
+    }
+}
+
 // This table is shared by timer-preemptible kernel threads, ring-3 exception
 // handlers, and SYSCALL handlers (which enter with IF cleared). A plain spin
 // mutex allows a kernel thread to be preempted while holding the table and the
@@ -330,6 +349,8 @@ impl Process {
             mmap_next: 0,
             fd_table: FdTable::new(),
             network_wait: None,
+            real_timer: RealTimerState::disarmed(),
+            pending_syscall_interrupt: false,
             cwd: String::new(),
             address_space: None,
             signal_state: SignalState::new(),
@@ -383,7 +404,6 @@ pub fn with_process<R>(pid: u32, f: impl FnOnce(&mut Process) -> R) -> Option<R>
 pub fn with_active_user<R>(f: impl FnOnce(&mut Process) -> R) -> R {
     with_current_process(f)
 }
-
 
 /// PID of the currently-loaded ring-3 process, or `None` if none.
 /// Distinct from [`current_pid`] which folds `None` into `KERNEL_PID`
@@ -653,6 +673,62 @@ pub fn wake_ring3_blocked_on_network(state_changed: bool) {
     }
 }
 
+/// Queue expired ITIMER_REAL alarms and make signal-interruptible blocked
+/// processes runnable. This runs from kernel housekeeping rather than the PIT
+/// ISR: scanning the process table and growing the ready queue do not belong in
+/// interrupt context, and timers must not depend on the network worker.
+pub fn process_due_real_timers() {
+    use crate::userland::signal::SIGALRM;
+
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let mut interruptible = alloc::vec::Vec::new();
+
+    for (&pid, process) in g.by_pid.iter_mut() {
+        let Some(deadline) = process.real_timer.deadline_tick else {
+            continue;
+        };
+        if now < deadline {
+            continue;
+        }
+
+        process.signal_state.raise(SIGALRM);
+        if process.real_timer.interval_ticks == 0 {
+            process.real_timer.deadline_tick = None;
+        } else {
+            let interval = process.real_timer.interval_ticks;
+            let periods = now.saturating_sub(deadline) / interval + 1;
+            let advanced = deadline.saturating_add(periods.saturating_mul(interval));
+            process.real_timer.deadline_tick = Some(if advanced <= now {
+                now.saturating_add(interval)
+            } else {
+                advanced
+            });
+        }
+
+        if process.signal_state.has_deliverable_handler(SIGALRM) {
+            interruptible.push(pid);
+        }
+    }
+
+    for pid in interruptible {
+        let Some(reason) = g.ring3_blocked.remove(&pid) else {
+            continue;
+        };
+        if let Some(process) = g.by_pid.get_mut(&pid) {
+            if matches!(reason, Ring3BlockReason::WaitingForNetwork { .. }) {
+                process.network_wait = None;
+            }
+            process.pending_syscall_interrupt = true;
+        }
+        if !g.ring3_ready.iter().any(|ready| *ready == pid) {
+            g.ring3_ready.push_back(pid);
+        }
+    }
+}
+
 /// Return a restart-stable absolute deadline for a blocking network syscall.
 /// `None` timeout means infinite. An expired matching state is consumed and
 /// reported as `Err(())`.
@@ -685,6 +761,11 @@ pub fn prepare_network_wait(
 
 pub fn clear_network_wait() {
     with_current_process(|process| process.network_wait = None);
+}
+
+/// Consume the marker installed when a signal woke a blocked syscall.
+pub fn take_pending_syscall_interrupt() -> bool {
+    with_current_process(|process| core::mem::take(&mut process.pending_syscall_interrupt))
 }
 
 pub fn clear_stale_network_wait(syscall_nr: u64) {
@@ -889,7 +970,6 @@ pub fn alloc_pid() -> u32 {
     NEXT_PID.fetch_add(1, Ordering::Relaxed)
 }
 
-
 /// Variant that accepts an optional address space. The kernel-test
 /// path bypasses the run command and runs binaries on the kernel L4
 /// directly, passing `None`; production launches always pass `Some`.
@@ -916,6 +996,8 @@ pub fn install_new_process_opt(
         mmap_next: mmap_base,
         fd_table,
         network_wait: None,
+        real_timer: RealTimerState::disarmed(),
+        pending_syscall_interrupt: false,
         cwd: String::from("/host"),
         address_space,
         signal_state: SignalState::new(),

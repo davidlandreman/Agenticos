@@ -591,16 +591,61 @@ fn test_dispatch_getrusage_self_zero_fills_and_rejects_unknown_who() {
     crate::userland::abi::clear_user_va_bounds();
 }
 
-/// `setitimer(ITIMER_REAL, &new, NULL)` and `nanosleep(&req, NULL)`
-/// both return 0 without touching unspecified memory (the stub paths).
-fn test_dispatch_setitimer_and_nanosleep_stubs_return_zero() {
+/// ITIMER_REAL validates its input, rounds sub-tick values upward, returns the
+/// prior timer, and disarms when passed a null new-value pointer.
+fn test_dispatch_setitimer_real_arms_queries_and_validates() {
+    let mut storage = [[0i64; 4]; 2];
+    storage[0] = [0, 250_000, 0, 1];
+    let start = storage.as_mut_ptr() as u64;
+    let end = start + core::mem::size_of_val(&storage) as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds { start, end });
+    crate::userland::lifecycle::with_current_process(|process| {
+        process.real_timer = crate::userland::lifecycle::RealTimerState::disarmed();
+    });
+
     let mut args = SyscallArgs::default();
     args.rax = crate::userland::abi::nr::SETITIMER;
-    args.rdi = 0;
-    args.rsi = 0xdead_beef; // pointer not validated when no old buffer
-    args.rdx = 0; // old_value NULL → no validation
+    args.rdi = 0; // ITIMER_REAL
+    args.rsi = storage[0].as_ptr() as u64;
+    args.rdx = storage[1].as_mut_ptr() as u64;
     assert_eq!(syscall_dispatch(&mut args), 0);
+    assert_eq!(storage[1], [0; 4]);
+    crate::userland::lifecycle::with_current_process(|process| {
+        assert_eq!(process.real_timer.interval_ticks, 25);
+        let deadline = process
+            .real_timer
+            .deadline_tick
+            .expect("one-microsecond timer should arm");
+        let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+        assert!(deadline >= now && deadline <= now.saturating_add(1));
+    });
 
+    // Linux accepts a null new-value pointer as a disarm operation. The old
+    // interval and remaining one-tick value are still returned.
+    storage[1] = [0; 4];
+    args.rsi = 0;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    assert_eq!(&storage[1][..2], &[0, 250_000]);
+    assert!(storage[1][2] == 0 && (storage[1][3] == 0 || storage[1][3] == 10_000));
+    crate::userland::lifecycle::with_current_process(|process| {
+        assert!(process.real_timer.deadline_tick.is_none());
+    });
+
+    storage[0] = [0, 0, -1, 0];
+    args.rsi = storage[0].as_ptr() as u64;
+    args.rdx = 0;
+    assert_eq!(syscall_dispatch(&mut args), crate::userland::abi::EINVAL);
+
+    args.rdi = 1; // ITIMER_VIRTUAL is outside the delivered scope.
+    assert_eq!(syscall_dispatch(&mut args), crate::userland::abi::EINVAL);
+
+    crate::userland::lifecycle::with_current_process(|process| {
+        process.real_timer = crate::userland::lifecycle::RealTimerState::disarmed();
+    });
+    crate::userland::abi::clear_user_va_bounds();
+}
+
+fn test_dispatch_nanosleep_stub_returns_zero() {
     let mut args = SyscallArgs::default();
     args.rax = crate::userland::abi::nr::NANOSLEEP;
     args.rdi = 0xdead_beef;
@@ -2354,6 +2399,8 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
+        real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -4047,6 +4094,8 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
+        real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -4105,6 +4154,8 @@ fn test_has_children_sees_live_child() {
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
+        real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -4249,6 +4300,8 @@ fn test_remove_process_cleans_ring3_queues() {
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
+        real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -4275,6 +4328,8 @@ fn test_remove_process_cleans_ring3_queues() {
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
+        real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
         signal_state: crate::userland::signal::SignalState::new(),
@@ -4391,7 +4446,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_prlimit64_old_value_writes_infinity,
         &test_dispatch_prlimit64_null_old_returns_zero,
         &test_dispatch_getrusage_self_zero_fills_and_rejects_unknown_who,
-        &test_dispatch_setitimer_and_nanosleep_stubs_return_zero,
+        &test_dispatch_setitimer_real_arms_queries_and_validates,
+        &test_dispatch_nanosleep_stub_returns_zero,
         &test_write_handler_valid_slice,
         &test_write_handler_rejects_unknown_fd,
         &test_write_handler_rejects_kernel_pointer,

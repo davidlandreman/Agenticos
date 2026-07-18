@@ -2,9 +2,10 @@
 
 `NETTEST.ELF` is the mandatory booted integration fixture for AgenticOS's
 Linux IPv4 socket ABI. It checks invalid-family errno behavior, UDP
-nonblocking readiness, TCP nonblocking connect, endpoint and socket-option
-queries, partial stream I/O, finite timeouts, and clean shutdown against the
-QEMU-local framed echo command.
+nonblocking readiness, ITIMER_REAL/SIGALRM interruption of a blocking receive,
+TCP nonblocking connect, endpoint and socket-option queries, partial stream
+I/O, finite timeouts, and clean shutdown against the QEMU-local framed echo
+command.
 
 Refresh the committed static `ET_EXEC` binary after changing its source:
 
