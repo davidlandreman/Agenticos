@@ -1,12 +1,12 @@
-use bootloader_api::BootInfo;
-use crate::lib::debug::{self, DebugLevel};
-use crate::{debug_info, debug_debug, debug_warn};
 use crate::arch::x86_64::{gdt, interrupts};
-use crate::mm::memory;
 use crate::drivers::display::display;
 use crate::drivers::ps2_controller;
+use crate::lib::debug::{self, DebugLevel};
+use crate::mm::memory;
 use crate::window;
+use crate::{debug_debug, debug_info, debug_warn};
 use alloc::boxed::Box;
+use bootloader_api::BootInfo;
 
 pub fn init(boot_info: &'static mut BootInfo) {
     // Initialize debug subsystem
@@ -50,7 +50,9 @@ pub fn init(boot_info: &'static mut BootInfo) {
 
     // Extract what we need from boot_info before borrowing it
     // Use a default offset if not provided by bootloader
-    let physical_memory_offset = boot_info.physical_memory_offset.into_option()
+    let physical_memory_offset = boot_info
+        .physical_memory_offset
+        .into_option()
         .unwrap_or(0x10000000000); // Default offset for identity mapping
     let rsdp_addr = boot_info.rsdp_addr.into_option();
 
@@ -70,6 +72,9 @@ pub fn init(boot_info: &'static mut BootInfo) {
 
     debug_info!("[boot] scheduler");
     crate::process::init_scheduler();
+
+    debug_info!("[boot] network");
+    crate::net::init();
 
     // Linux ABI syscall surface (write/exit_group, plus the broader set in
     // U9) is dispatched directly from `userland::abi::syscall_dispatch` —
@@ -161,11 +166,9 @@ fn init_mcp_bridge() {
 
     // Spawn the dispatcher loop as a kernel process so long tool calls don't
     // stall the main event loop or input.
-    crate::process::spawn_process(
-        String::from("rpc-dispatcher"),
-        None,
-        || crate::tools::rpc::run_dispatcher(),
-    );
+    crate::process::spawn_process(String::from("rpc-dispatcher"), None, || {
+        crate::tools::rpc::run_dispatcher()
+    });
 
     debug_info!("MCP dispatcher process spawned; serving on COM2");
 }
@@ -192,100 +195,126 @@ fn init_display(boot_info: &'static mut BootInfo) -> Option<(u32, u32)> {
 
 // Static storage for IDE block devices and partition devices
 static mut PRIMARY_MASTER_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
-static mut PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] = [None, None, None, None];
+static mut PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] =
+    [None, None, None, None];
 
 // Static storage for the host-share disk on Primary Slave (vvfat-backed when
 // the user runs ./build.sh; absent otherwise). Kept in a separate slot/array
 // so the host disk's partitions don't alias the root disk's PARTITION_DEVICES.
 static mut PRIMARY_SLAVE_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
-static mut HOST_PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] = [None, None, None, None];
+static mut HOST_PARTITION_DEVICES: [Option<crate::fs::PartitionBlockDevice<'static>>; 4] =
+    [None, None, None, None];
 
 /// Secondary Master = the writable /data disk. Whole-disk FAT32 (no
 /// MBR/partition table); the BPB lives at sector 0.
 static mut SECONDARY_MASTER_DISK: Option<crate::drivers::ide::IdeBlockDevice> = None;
 
 fn init_filesystems() {
-    use crate::drivers::ide::{IDE_CONTROLLER, IdeChannel, IdeDrive, IdeBlockDevice};
     use crate::drivers::block::BlockDevice;
-    use crate::fs::{detect_filesystem, read_partitions, PartitionBlockDevice};
+    use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
     use crate::fs::vfs::mount_overlay_root;
+    use crate::fs::{detect_filesystem, read_partitions, PartitionBlockDevice};
 
     debug_info!("Detecting and mounting filesystems...");
-    
+
     // Check primary master disk
-    if let Some((model_bytes, sectors)) = IDE_CONTROLLER.get_disk_info(IdeChannel::Primary, IdeDrive::Master) {
+    if let Some((model_bytes, sectors)) =
+        IDE_CONTROLLER.get_disk_info(IdeChannel::Primary, IdeDrive::Master)
+    {
         let size_mb = (sectors * 512) / (1024 * 1024);
-        
+
         // Convert model bytes to string
         let model_len = model_bytes.iter().position(|&c| c == 0).unwrap_or(40);
-        let model = core::str::from_utf8(&model_bytes[..model_len]).unwrap_or("Unknown").trim();
-        
+        let model = core::str::from_utf8(&model_bytes[..model_len])
+            .unwrap_or("Unknown")
+            .trim();
+
         debug_info!("Found IDE disk: {} ({} MB)", model, size_mb);
-        
+
         // Create block device for the disk and store it statically
         unsafe {
             PRIMARY_MASTER_DISK = Some(IdeBlockDevice::new(IdeChannel::Primary, IdeDrive::Master));
         }
-        
+
         let primary_master = unsafe { (*&raw const PRIMARY_MASTER_DISK).as_ref().unwrap() };
-        
+
         // Try to read the boot sector
         let mut boot_sector = [0u8; 512];
         match primary_master.read_blocks(0, 1, &mut boot_sector) {
             Ok(_) => {
                 debug_info!("Successfully read boot sector");
-                
+
                 // Check for valid MBR signature
                 if boot_sector[510] == 0x55 && boot_sector[511] == 0xAA {
                     debug_info!("Valid boot sector signature found");
-                    
+
                     // Try to read partition table
                     match read_partitions(primary_master) {
                         Ok(partitions) => {
                             let mut partition_num = 0;
                             let mut first_valid_partition = None;
-                            
+
                             // First pass: create partition devices and store them
                             for (i, partition) in partitions.iter().enumerate() {
                                 if let Some(part) = partition {
                                     partition_num += 1;
-                                    debug_info!("Partition {}: Type={:?}, Start={}, Size={} sectors", 
-                                        i + 1, part.partition_type, part.start_lba, part.size_sectors);
-                                    
+                                    debug_info!(
+                                        "Partition {}: Type={:?}, Start={}, Size={} sectors",
+                                        i + 1,
+                                        part.partition_type,
+                                        part.start_lba,
+                                        part.size_sectors
+                                    );
+
                                     // Create a partition device and store it statically
                                     unsafe {
-                                        PARTITION_DEVICES[i] = Some(PartitionBlockDevice::new(primary_master, part));
+                                        PARTITION_DEVICES[i] =
+                                            Some(PartitionBlockDevice::new(primary_master, part));
                                     }
-                                    
+
                                     // Get a reference to the stored partition device
-                                    let part_device = unsafe { PARTITION_DEVICES[i].as_ref().unwrap() };
-                                    
+                                    let part_device =
+                                        unsafe { PARTITION_DEVICES[i].as_ref().unwrap() };
+
                                     match detect_filesystem(part_device) {
                                         Ok(fs_type) => {
                                             debug_info!("  Detected filesystem: {:?}", fs_type);
                                             // Only consider FAT filesystems as valid for mounting
                                             use crate::fs::FilesystemType;
-                                            if first_valid_partition.is_none() && 
-                                               matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) {
+                                            if first_valid_partition.is_none()
+                                                && matches!(
+                                                    fs_type,
+                                                    FilesystemType::Fat12
+                                                        | FilesystemType::Fat16
+                                                        | FilesystemType::Fat32
+                                                )
+                                            {
                                                 first_valid_partition = Some(i);
                                             }
                                         }
                                         Err(_) => {
-                                            debug_info!("  Unknown filesystem on partition {}", i + 1);
+                                            debug_info!(
+                                                "  Unknown filesystem on partition {}",
+                                                i + 1
+                                            );
                                         }
                                     }
                                 }
                             }
-                            
+
                             // Mount the first valid partition as root, wrapped in
                             // an overlay(tmpfs over FAT) so userland sees a
                             // writable namespace without mutating the immutable
                             // boot image.
                             if let Some(part_idx) = first_valid_partition {
-                                let part_device = unsafe { PARTITION_DEVICES[part_idx].as_ref().unwrap() };
+                                let part_device =
+                                    unsafe { PARTITION_DEVICES[part_idx].as_ref().unwrap() };
                                 match mount_overlay_root(part_device) {
                                     Ok(_) => {
-                                        debug_info!("Mounted overlay(tmpfs over FAT partition {}) at /", part_idx + 1);
+                                        debug_info!(
+                                            "Mounted overlay(tmpfs over FAT partition {}) at /",
+                                            part_idx + 1
+                                        );
                                     }
                                     Err(e) => {
                                         // Per doc-review #A-5: panic loudly rather than
@@ -297,16 +326,26 @@ fn init_filesystems() {
                                     }
                                 }
                             }
-                            
+
                             if partition_num == 0 {
-                                debug_info!("No partitions found, checking whole disk for filesystem");
+                                debug_info!(
+                                    "No partitions found, checking whole disk for filesystem"
+                                );
                                 // Try to detect filesystem on whole disk
                                 match detect_filesystem(primary_master) {
                                     Ok(fs_type) => {
-                                        debug_info!("Detected filesystem on whole disk: {:?}", fs_type);
+                                        debug_info!(
+                                            "Detected filesystem on whole disk: {:?}",
+                                            fs_type
+                                        );
                                         // Only mount if it's a supported FAT filesystem
                                         use crate::fs::FilesystemType;
-                                        if matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) {
+                                        if matches!(
+                                            fs_type,
+                                            FilesystemType::Fat12
+                                                | FilesystemType::Fat16
+                                                | FilesystemType::Fat32
+                                        ) {
                                             match mount_overlay_root(primary_master) {
                                                 Ok(_) => {
                                                     debug_info!("Mounted overlay(tmpfs over whole-disk FAT) at /");
@@ -316,7 +355,10 @@ fn init_filesystems() {
                                                 }
                                             }
                                         } else {
-                                            debug_info!("Filesystem type {:?} not supported for mounting", fs_type);
+                                            debug_info!(
+                                                "Filesystem type {:?} not supported for mounting",
+                                                fs_type
+                                            );
                                         }
                                     }
                                     Err(_) => {
@@ -337,17 +379,28 @@ fn init_filesystems() {
                             debug_info!("Detected filesystem: {:?}", fs_type);
                             // Only mount if it's a supported FAT filesystem
                             use crate::fs::FilesystemType;
-                            if matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) {
+                            if matches!(
+                                fs_type,
+                                FilesystemType::Fat12
+                                    | FilesystemType::Fat16
+                                    | FilesystemType::Fat32
+                            ) {
                                 match mount_overlay_root(primary_master) {
                                     Ok(_) => {
                                         debug_info!("Mounted overlay(tmpfs over whole disk) at /");
                                     }
                                     Err(e) => {
-                                        panic!("FATAL: overlay root mount (no MBR) failed: {:?}", e);
+                                        panic!(
+                                            "FATAL: overlay root mount (no MBR) failed: {:?}",
+                                            e
+                                        );
                                     }
                                 }
                             } else {
-                                debug_info!("Filesystem type {:?} not supported for mounting", fs_type);
+                                debug_info!(
+                                    "Filesystem type {:?} not supported for mounting",
+                                    fs_type
+                                );
                             }
                         }
                         Err(_) => {
@@ -363,7 +416,7 @@ fn init_filesystems() {
     } else {
         debug_info!("No IDE disk found on primary master");
     }
-    
+
     debug_info!("Filesystem initialization complete");
 }
 
@@ -374,20 +427,28 @@ fn init_filesystems() {
 /// the MBR, then `auto_mount` the FAT partition. Any failure (no drive, no MBR
 /// signature, no FAT partition, mount error) logs and returns silently.
 fn try_mount_host_disk() {
-    use crate::drivers::ide::{IDE_CONTROLLER, IdeChannel, IdeDrive, IdeBlockDevice};
     use crate::drivers::block::BlockDevice;
-    use crate::fs::{detect_filesystem, read_partitions, PartitionBlockDevice, FilesystemType};
+    use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
     use crate::fs::vfs::auto_mount;
+    use crate::fs::{detect_filesystem, read_partitions, FilesystemType, PartitionBlockDevice};
 
-    let Some((model_bytes, sectors)) = IDE_CONTROLLER.get_disk_info(IdeChannel::Primary, IdeDrive::Slave) else {
+    let Some((model_bytes, sectors)) =
+        IDE_CONTROLLER.get_disk_info(IdeChannel::Primary, IdeDrive::Slave)
+    else {
         debug_info!("No IDE disk found on primary slave (host folder not mounted)");
         return;
     };
 
     let size_mb = (sectors * 512) / (1024 * 1024);
     let model_len = model_bytes.iter().position(|&c| c == 0).unwrap_or(40);
-    let model = core::str::from_utf8(&model_bytes[..model_len]).unwrap_or("Unknown").trim();
-    debug_info!("Found host IDE disk on primary slave: {} ({} MB)", model, size_mb);
+    let model = core::str::from_utf8(&model_bytes[..model_len])
+        .unwrap_or("Unknown")
+        .trim();
+    debug_info!(
+        "Found host IDE disk on primary slave: {} ({} MB)",
+        model,
+        size_mb
+    );
 
     unsafe {
         PRIMARY_SLAVE_DISK = Some(IdeBlockDevice::new(IdeChannel::Primary, IdeDrive::Slave));
@@ -417,7 +478,10 @@ fn try_mount_host_disk() {
         let Some(part) = partition else { continue };
         debug_info!(
             "Host partition {}: Type={:?}, Start={}, Size={} sectors",
-            i + 1, part.partition_type, part.start_lba, part.size_sectors
+            i + 1,
+            part.partition_type,
+            part.start_lba,
+            part.size_sectors
         );
 
         unsafe {
@@ -426,8 +490,17 @@ fn try_mount_host_disk() {
         let part_device = unsafe { HOST_PARTITION_DEVICES[i].as_ref().unwrap() };
 
         match detect_filesystem(part_device) {
-            Ok(fs_type) if matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) => {
-                debug_info!("Host partition {}: detected {:?}, mounting at /host", i + 1, fs_type);
+            Ok(fs_type)
+                if matches!(
+                    fs_type,
+                    FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32
+                ) =>
+            {
+                debug_info!(
+                    "Host partition {}: detected {:?}, mounting at /host",
+                    i + 1,
+                    fs_type
+                );
                 match auto_mount(part_device, "/host") {
                     Ok(_) => {
                         debug_info!("Host folder mounted at /host");
@@ -440,7 +513,11 @@ fn try_mount_host_disk() {
                 }
             }
             Ok(fs_type) => {
-                debug_info!("Host partition {}: filesystem {:?} not supported", i + 1, fs_type);
+                debug_info!(
+                    "Host partition {}: filesystem {:?} not supported",
+                    i + 1,
+                    fs_type
+                );
             }
             Err(_) => {
                 debug_info!("Host partition {}: filesystem detection failed", i + 1);
@@ -461,20 +538,28 @@ fn try_mount_host_disk() {
 /// error) logs and returns silently — the kernel boots fine without
 /// /data, just with no persistent writable mount.
 fn try_mount_data_disk() {
-    use crate::drivers::ide::{IDE_CONTROLLER, IdeBlockDevice, IdeChannel, IdeDrive};
+    use crate::drivers::ide::{IdeBlockDevice, IdeChannel, IdeDrive, IDE_CONTROLLER};
     use crate::fs::filesystem::FilesystemError;
     use crate::fs::vfs::{auto_mount, auto_mount_writable};
     use crate::fs::{detect_filesystem, FilesystemType};
 
-    let Some((model_bytes, sectors)) = IDE_CONTROLLER.get_disk_info(IdeChannel::Secondary, IdeDrive::Master) else {
+    let Some((model_bytes, sectors)) =
+        IDE_CONTROLLER.get_disk_info(IdeChannel::Secondary, IdeDrive::Master)
+    else {
         debug_info!("No IDE disk found on secondary master (no persistent /data)");
         return;
     };
 
     let size_mb = (sectors * 512) / (1024 * 1024);
     let model_len = model_bytes.iter().position(|&c| c == 0).unwrap_or(40);
-    let model = core::str::from_utf8(&model_bytes[..model_len]).unwrap_or("Unknown").trim();
-    debug_info!("Found data IDE disk on secondary master: {} ({} MB)", model, size_mb);
+    let model = core::str::from_utf8(&model_bytes[..model_len])
+        .unwrap_or("Unknown")
+        .trim();
+    debug_info!(
+        "Found data IDE disk on secondary master: {} ({} MB)",
+        model,
+        size_mb
+    );
 
     unsafe {
         SECONDARY_MASTER_DISK = Some(IdeBlockDevice::new(IdeChannel::Secondary, IdeDrive::Master));
@@ -483,8 +568,16 @@ fn try_mount_data_disk() {
 
     // Whole-disk FAT: no MBR, no partition table. Detect at sector 0.
     match detect_filesystem(data_disk) {
-        Ok(fs_type) if matches!(fs_type, FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32) => {
-            debug_info!("Data disk: detected {:?}, mounting at /data WRITABLE", fs_type);
+        Ok(fs_type)
+            if matches!(
+                fs_type,
+                FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32
+            ) =>
+        {
+            debug_info!(
+                "Data disk: detected {:?}, mounting at /data WRITABLE",
+                fs_type
+            );
             // Try writable first; on dirty-bit refusal (C-2) fall back
             // to a read-only mount with a warning so userland still has
             // a /data mount to inspect.
@@ -516,7 +609,6 @@ fn try_mount_data_disk() {
         }
     }
 }
-
 
 /// Phase D U11: after /data is mounted, find the overlay mounted at
 /// `/` and ask it to hydrate its upper-layer tmpfs from any prior
@@ -561,7 +653,10 @@ fn restore_overlay_upper_from_data() {
     let upper: &crate::fs::tmpfs::Tmpfs = unsafe { &*upper_ptr };
 
     match crate::fs::overlay::sync::restore_upper_from_disk(upper) {
-        Ok(n) => debug_info!("overlay restore: hydrated upper with {} entries from /data", n),
+        Ok(n) => debug_info!(
+            "overlay restore: hydrated upper with {} entries from /data",
+            n
+        ),
         Err(e) => debug_warn!("overlay restore: failed: {:?}", e),
     }
 }
@@ -610,9 +705,9 @@ pub fn run() -> ! {
         // === WATCHDOG HANDLING ===
         // Check if timer detected a hung process that needs to be killed
         {
-            use core::sync::atomic::Ordering;
             use crate::arch::x86_64::preemption::WATCHDOG_KILL_PID;
             use crate::process::ProcessId;
+            use core::sync::atomic::Ordering;
 
             let kill_pid_raw = WATCHDOG_KILL_PID.swap(0, Ordering::AcqRel);
             if kill_pid_raw != 0 {
@@ -621,12 +716,17 @@ pub fn run() -> ! {
                 // Get process name before killing it (for the alert dialog)
                 let process_name = {
                     let sched = crate::process::scheduler::SCHEDULER.lock();
-                    sched.get_process(pid)
+                    sched
+                        .get_process(pid)
                         .map(|pcb| pcb.name.clone())
                         .unwrap_or_else(|| alloc::string::String::from("Unknown"))
                 };
 
-                debug_warn!("Watchdog: Terminating hung process {:?} '{}'", pid, process_name);
+                debug_warn!(
+                    "Watchdog: Terminating hung process {:?} '{}'",
+                    pid,
+                    process_name
+                );
 
                 // Terminate the process
                 crate::process::terminate_process(pid);

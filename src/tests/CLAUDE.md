@@ -15,6 +15,12 @@ This folder holds in-kernel test modules that run under QEMU when the kernel is 
 - `compiler_compat.rs` — booted static-musl compatibility ladder. Its
   committed ET_EXEC inputs live under `userland/prebuilt/compiler-compat/`
   and are staged even when `test.sh --skip-userland` is used.
+- `network.rs` — Virtqueue ownership/error edges plus bounded registry and
+  QEMU-local DHCP coverage.
+- `network_userland.rs` — booted static-musl socket fixture and BusyBox
+  numeric IPv4 `ping`, `nc`, and HTTP-only `wget` smokes, including
+  zsh→fork/execve regressions for `ping` and `wget`. `test.sh` supplies
+  restricted QEMU networking and repository-owned guest-forwarded services.
 
 ## Adding a test
 
@@ -65,9 +71,11 @@ Each test prints its name to serial and `[ok]` on success. Failure triggers the 
 - **Static slices, not `Vec`.** `get_tests()` returns `&'static [...]` — this isn't decorative; some tests run before the heap is up, so the slice must be available without allocation.
 - **Topic-organized.** Add new test functions to the existing topic module that fits, or add a new topic file (then wire its `get_tests()` into the test runner).
 - **Don't write infinite-loop tests.** A hang prevents QEMU from exiting; the harness reads no exit code and reports failure ambiguously.
-- **Booted compatibility inputs are mandatory.** `compiler_compat` must fail,
-  not skip, when a committed fixture is missing. Refresh those binaries only
-  through `userland/apps/compiler-compat/` and commit source plus ELF together.
+- **Booted compatibility inputs are mandatory.** `compiler_compat` and
+  `network_userland` must fail, not skip, when a committed fixture is missing.
+  Refresh binaries through their source directories and commit source plus ELF
+  together. Networking waits must be PIT-deadline-bounded and must use only
+  the restricted QEMU-local services configured by `test.sh`.
 
 ## Cross-references
 

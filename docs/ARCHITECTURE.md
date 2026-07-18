@@ -4,7 +4,7 @@ This document describes the architecture and design decisions of AgenticOS compo
 
 ## Overall Architecture
 
-AgenticOS is a monolithic kernel operating system targeting x86-64. While the eventual goal is to support "agentic" computing capabilities, the current implementation focuses on fundamental OS features. All code runs in kernel space (ring 0) with no user/kernel separation.
+AgenticOS is a modular monolithic kernel targeting x86-64. Kernel subsystems run in ring 0 and static-musl applications run in isolated ring-3 address spaces through a finite Linux x86-64 ABI.
 
 **Design Philosophy:**
 - Modular organization within monolithic structure
@@ -20,11 +20,12 @@ AgenticOS is a monolithic kernel operating system targeting x86-64. While the ev
 - **Display System**: Fast double-buffered graphics
 - **Filesystem**: Clean Arc-based API for file access
 - **Input Devices**: Full keyboard and mouse support
-- **Command System**: Easy to extend with new commands
+- **Userland**: Preemptively scheduled ring-3 zsh/BusyBox processes
+- **Networking**: DHCP-configured IPv4 with ICMP, UDP, TCP, and socket FDs
 - **Build System**: Simple and effective
 
 ### What Needs Work
-- **No Multitasking**: Everything is synchronous
+- **No SMP**: Scheduling is preemptive but single-CPU
 - **Graphics Architecture**: Organic growth led to complexity
 - **Global State**: Over-reliance on statics
 - **Test Coverage**: Minimal testing
@@ -33,10 +34,8 @@ AgenticOS is a monolithic kernel operating system targeting x86-64. While the ev
 
 ### Not Yet Implemented
 - **Agent Runtime**: The core vision
-- **User Mode**: Everything runs privileged
-- **Networking**: No network stack
-- **Write Support**: Filesystem is read-only
-- **Advanced Features**: No threads, IPC, etc.
+- **Advanced Networking**: No DNS lookup, IPv6, TLS, or NIC interrupts
+- **Advanced Features**: No SMP or full POSIX surface
 
 ### Module Organization
 
@@ -51,8 +50,10 @@ src/
 ├── graphics/            # Graphics and font rendering
 ├── lib/                 # Core utilities (Arc, debug, test)
 ├── mm/                  # Memory management (heap, paging)
-├── process/             # Process abstractions (no scheduling)
-├── commands/            # Shell commands (13 implemented)
+├── net/                 # IPv4 stack and bounded sockets
+├── process/             # Preemptive kernel scheduler
+├── userland/            # Ring-3 loader and Linux ABI
+├── commands/            # Kernel-side GUI applications
 └── tests/               # Kernel test suite
 ```
 
@@ -60,7 +61,7 @@ src/
 
 1. **No Standard Library**: Uses `#![no_std]` requiring custom implementations
 2. **Static Allocation**: 8MB display buffer, pre-allocated structures
-3. **Synchronous Execution**: No async/await or threading
+3. **Single CPU**: Preemptive scheduling without SMP
 4. **Global State**: Heavy use of `static mut` and `lazy_static`
 5. **Trait-Based Abstractions**: BlockDevice, Filesystem, Process, Font
 
@@ -86,12 +87,40 @@ The `main.rs` file has been reduced to a minimal entry point (< 25 lines) that s
 
 ### Kernel Initialization (`kernel.rs`)
 
-The initialization sequence is now centralized in `kernel.rs`:
+The initialization sequence is centralized in `kernel.rs`:
 1. **Debug subsystem** - Initialize logging first for diagnostics
 2. **Interrupts** - Set up interrupt descriptor table
 3. **Memory manager** - Initialize physical memory management
-4. **Display subsystem** - Initialize framebuffer and text rendering
-5. **Shell process** - Run the shell process to show system information and provide user interface
+4. **Scheduler** - Initialize kernel/ring-3 scheduling
+5. **Network** - Discover modern VirtIO-net and start the poll worker when present
+6. **Storage/display/desktop** - Mount filesystems and start the GUI
+
+## IPv4 Networking (`drivers/virtio/net.rs`, `net/`, `userland/`)
+
+The first network vertical slice is intentionally bounded:
+
+1. QEMU exposes one explicit modern `virtio-net-pci` device.
+2. The driver negotiates VirtIO 1.0 plus an optional device MAC and owns
+   page-contained RX/TX DMA pools and tokenized queues.
+3. smoltcp 0.12 provides Ethernet, ARP, IPv4, DHCPv4, ICMP, UDP, and TCP.
+4. A kernel-owned DHCP socket installs the dynamic address/default route and
+   retains up to three offered DNS servers as read-only metadata.
+5. The AgenticOS socket registry imposes fixed socket and per-socket buffer
+   limits and exposes stable IDs through shared FD handles.
+6. The ring-3 ABI implements the finite Linux `AF_INET` socket subset plus
+   `read`/`write`/`writev`, descriptor control, and `poll`/`ppoll` integration.
+
+The `net-rx-tx` kernel worker uses smoltcp deadlines, capped at about 10 ms
+while user sockets are active and 100 ms while idle. Syscalls may perform one
+bounded poll before checking state. No NIC interrupt routing is installed.
+Blocking operations yield with a restart-stable absolute deadline; the
+network and process-table locks never overlap or survive the yield.
+
+Interactive QEMU uses user-mode NAT and usually leases `10.0.2.15` with
+gateway/host alias `10.0.2.2`; `AGENTICOS_NETWORK=off` provides a nonfatal
+no-NIC boot. Tests use `restrict=on` and repository-owned guest-forwarded
+services. IPv6, DNS resolution, TLS, fragmentation, offloads, multiple NICs,
+and interface configuration are deferred.
 
 ## Architecture-Specific Code (`arch/`)
 
@@ -482,10 +511,10 @@ The panic handler (`panic.rs`) provides:
    - Resource limits and quotas
    - Inter-agent communication
 
-2. **Networking**
-   - Basic network stack
-   - Agent-to-agent protocols
-   - Remote agent execution
+2. **Networking follow-ups**
+   - DNS and resolver ownership
+   - IPv6 and interrupt-driven receive
+   - Agent-to-agent protocols and remote execution
 
 3. **Distributed Features**
    - Agent migration

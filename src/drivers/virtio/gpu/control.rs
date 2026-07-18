@@ -54,12 +54,11 @@ impl ControlQueue {
         expected: u32,
     ) -> Result<(), GpuError> {
         response.fill(0);
-        let mut buffers = VirtqBuffer::from_slice_segments(request, false);
-        buffers.extend(VirtqBuffer::from_mut_slice_segments(response));
-        let head = self
-            .queue
-            .add_chain(&buffers)
-            .map_err(GpuError::Queue)?;
+        let mut buffers =
+            VirtqBuffer::try_from_slice_segments(request, false).map_err(GpuError::Queue)?;
+        buffers
+            .extend(VirtqBuffer::try_from_mut_slice_segments(response).map_err(GpuError::Queue)?);
+        let head = self.queue.add_chain(&buffers).map_err(GpuError::Queue)?;
         self.queue.notify();
         let used = self
             .queue

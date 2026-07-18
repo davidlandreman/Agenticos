@@ -4,5 +4,6 @@
 //! VirtIO provides high-performance paravirtualized devices.
 
 pub mod common;
-pub mod input;
 pub mod gpu;
+pub mod input;
+pub mod net;

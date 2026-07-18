@@ -12,7 +12,7 @@ and without an outbound network fetch.
 | File       | Source                    | Type | Size      | Notes                                          |
 |------------|---------------------------|------|-----------|------------------------------------------------|
 | `ZSH.ELF`  | `userland/apps/zsh/`      | EXEC | ~1.5 MiB  | static-musl zsh, vendors ncurses-widec         |
-| `BB.ELF`   | `userland/apps/busybox/`  | EXEC | ~700 KiB  | static-musl BusyBox multicall (~240 applets)   |
+| `BB.ELF`   | `userland/apps/busybox/`  | EXEC | ~700 KiB  | static-musl BusyBox, including ping/nc/HTTP wget |
 
 (Add a row when a new prebuilt-managed app lands. Keep size approximate
 — the reviewer uses it to gut-check binary diffs, not for exactness.)
@@ -63,6 +63,11 @@ static-musl test inputs, not interactive apps. `test.sh` always stages them,
 including with `--skip-userland`, so the booted `compiler_compat` module is
 hermetic on machines without a musl cross compiler. Their sources and refresh
 recipe live in `userland/apps/compiler-compat/`.
+
+The `network/` subdirectory is likewise a mandatory test-input category.
+`NETTEST.ELF` is a self-checking static-musl socket fixture; `test.sh` stages
+it even with `--skip-userland`. Its source and refresh recipe live in
+`userland/apps/network-test/`.
 
 The rule of thumb: an app belongs here if (a) its build fetches an
 upstream tarball, or (b) its compile takes long enough that running

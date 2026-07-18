@@ -27,6 +27,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 use x86_64::VirtAddr;
 
+use crate::arch::x86_64::interrupt_guard::InterruptMutex;
 use crate::userland::address_space::AddressSpace;
 use crate::userland::fdtable::FdTable;
 use crate::userland::image::UserImage;
@@ -99,6 +100,8 @@ pub struct Process {
     /// Phase 2: file-descriptor table. Slots 0/1/2 are pinned to the
     /// standard streams; slots 3..N hold `Arc<File>` opened via `openat`.
     pub fd_table: FdTable,
+    /// Restart-stable deadline state for a blocking network syscall.
+    pub network_wait: Option<NetworkWaitState>,
     /// Phase 2: per-process current working directory. Anchors relative
     /// paths in `openat(AT_FDCWD, …)`, `stat`, `access`, etc. Always
     /// stored as a normalized absolute path.
@@ -275,7 +278,9 @@ pub enum Ring3BlockReason {
     /// `wait4(target, ...)` with no matching zombie yet. Wakes when
     /// any child of this process becomes a zombie (U6's child-exit
     /// path calls `wake_ring3_blocked_on_child(parent_pid)`).
-    WaitingForChild { target: i32 },
+    WaitingForChild {
+        target: i32,
+    },
     /// `read(0, ...)` from stdin with an empty input queue. Wakes
     /// when input lands on the blocked process's terminal via
     /// [`wake_ring3_blocked_on_input`] (called from the stdin push
@@ -296,9 +301,26 @@ pub enum Ring3BlockReason {
     /// bytes, or when the last reader drops (so the writer re-fires
     /// and returns `EPIPE`) — see [`wake_ring3_blocked_on_pipe_writable`].
     WaitingForPipeWrite,
+    WaitingForNetwork {
+        deadline_tick: Option<u64>,
+    },
 }
 
-pub(crate) static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::new(ProcessTable::empty());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkWaitState {
+    pub syscall_nr: u64,
+    pub identity: u64,
+    pub deadline_tick: Option<u64>,
+    pub expired: bool,
+}
+
+// This table is shared by timer-preemptible kernel threads, ring-3 exception
+// handlers, and SYSCALL handlers (which enter with IF cleared). A plain spin
+// mutex allows a kernel thread to be preempted while holding the table and the
+// ring-3 handler to spin forever on the same single CPU. Make the invariant
+// structural so new call sites cannot accidentally reintroduce that deadlock.
+pub(crate) static PROCESS_TABLE: InterruptMutex<ProcessTable> =
+    InterruptMutex::new(ProcessTable::empty());
 
 /// Lazy initializer: ensures the sentinel entry at PID 0 exists. Called
 /// from every `with_current_process`/`with_process` path before lookup
@@ -328,6 +350,7 @@ impl Process {
             brk_base: 0,
             mmap_next: 0,
             fd_table: FdTable::new(),
+            network_wait: None,
             cwd: String::new(),
             address_space: None,
             signal_state: SignalState::new(),
@@ -521,6 +544,7 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
         Some(Ring3BlockReason::WaitingForInput)
         | Some(Ring3BlockReason::WaitingForPipeRead)
         | Some(Ring3BlockReason::WaitingForPipeWrite)
+        | Some(Ring3BlockReason::WaitingForNetwork { .. })
         | None => false,
     };
     if should_wake {
@@ -623,6 +647,86 @@ pub fn wake_ring3_blocked_on_pipe_readable() {
 /// [`wake_ring3_blocked_on_pipe_readable`].
 pub fn wake_ring3_blocked_on_pipe_writable() {
     wake_ring3_blocked_by(|r| matches!(r, Ring3BlockReason::WaitingForPipeWrite));
+}
+
+/// Wake network waiters after a socket state change, and expire any waiter
+/// whose absolute PIT deadline has elapsed. The per-process `network_wait`
+/// record is deliberately retained across ordinary event wakes so a restarted
+/// syscall cannot extend a finite timeout.
+pub fn wake_ring3_blocked_on_network(state_changed: bool) {
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let waking: alloc::vec::Vec<(u32, bool)> = g
+        .ring3_blocked
+        .iter()
+        .filter_map(|(pid, reason)| match reason {
+            Ring3BlockReason::WaitingForNetwork { deadline_tick } => {
+                let expired = deadline_tick.is_some_and(|deadline| now >= deadline);
+                (state_changed || expired).then_some((*pid, expired))
+            }
+            _ => None,
+        })
+        .collect();
+    for (pid, expired) in waking {
+        if expired {
+            if let Some(process) = g.by_pid.get_mut(&pid) {
+                if let Some(wait) = process.network_wait.as_mut() {
+                    wait.expired = true;
+                }
+            }
+        }
+        g.ring3_blocked.remove(&pid);
+        if !g.ring3_ready.iter().any(|ready| *ready == pid) {
+            g.ring3_ready.push_back(pid);
+        }
+    }
+}
+
+/// Return a restart-stable absolute deadline for a blocking network syscall.
+/// `None` timeout means infinite. An expired matching state is consumed and
+/// reported as `Err(())`.
+pub fn prepare_network_wait(
+    syscall_nr: u64,
+    identity: u64,
+    timeout_ticks: Option<u64>,
+) -> Result<Option<u64>, ()> {
+    with_current_process(|process| {
+        if let Some(wait) = process.network_wait {
+            if wait.syscall_nr == syscall_nr && wait.identity == identity {
+                if wait.expired {
+                    process.network_wait = None;
+                    return Err(());
+                }
+                return Ok(wait.deadline_tick);
+            }
+        }
+        let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+        let deadline_tick = timeout_ticks.map(|ticks| now.saturating_add(ticks.max(1)));
+        process.network_wait = Some(NetworkWaitState {
+            syscall_nr,
+            identity,
+            deadline_tick,
+            expired: false,
+        });
+        Ok(deadline_tick)
+    })
+}
+
+pub fn clear_network_wait() {
+    with_current_process(|process| process.network_wait = None);
+}
+
+pub fn clear_stale_network_wait(syscall_nr: u64) {
+    with_current_process(|process| {
+        if process
+            .network_wait
+            .is_some_and(|wait| wait.syscall_nr != syscall_nr)
+        {
+            process.network_wait = None;
+        }
+    });
 }
 
 fn wake_ring3_blocked_by<F>(matcher: F)
@@ -776,6 +880,40 @@ pub fn try_preempt_ring3(
     Some(next)
 }
 
+/// Save the currently running ring-3 process and queue it for a later
+/// dispatch from the kernel main loop.
+///
+/// The ring-3 timer path uses this periodically even when user processes are
+/// runnable. Without that class-level handoff, direct ring3-to-ring3 switches
+/// can monopolize the single CPU forever: a shell polling `wait3(WNOHANG)`
+/// while its child sleeps for network input starves the network worker and
+/// compositor that are needed to make either process progress.
+pub fn preempt_ring3_to_kernel(
+    frame: &crate::arch::x86_64::preemption::InterruptStackFrame,
+) -> bool {
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return false;
+    };
+    let Some(cur) = g.current_user_pid else {
+        return false;
+    };
+    if cur == KERNEL_PID {
+        return false;
+    }
+    let Some(process) = g.by_pid.get_mut(&cur) else {
+        return false;
+    };
+    crate::userland::switch::save_ring3(process, frame);
+    if !g.ring3_ready.iter().any(|pid| *pid == cur) {
+        g.ring3_ready.push_back(cur);
+    }
+    // No ring-3 address space is considered loaded after the caller switches
+    // to KERNEL_CONTEXT. Clearing this under the same lock keeps the ready
+    // queue and current marker coherent for the main-loop dispatcher.
+    g.current_user_pid = None;
+    true
+}
+
 /// Allocate a fresh PID. Used by `enter_user_mode_with` and (future)
 /// `fork`.
 pub fn alloc_pid() -> u32 {
@@ -819,6 +957,7 @@ pub fn install_new_process_opt(
         brk_base,
         mmap_next: mmap_base,
         fd_table,
+        network_wait: None,
         cwd: String::from("/host"),
         address_space,
         signal_state: SignalState::new(),

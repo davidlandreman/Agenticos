@@ -13,6 +13,7 @@ pub mod kernel_stack;
 pub mod launcher;
 pub mod lifecycle;
 pub mod loader;
+pub mod network_syscalls;
 pub mod path;
 pub mod pipe;
 pub mod signal;
