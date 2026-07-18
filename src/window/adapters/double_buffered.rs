@@ -224,19 +224,20 @@ impl GraphicsDevice for DoubleBufferedDevice {
             return;
         };
 
-        let h_us = height as usize;
-        let w_us = width as usize;
-
         let mut buffer = self.buffer.lock();
         for py in 0..dst_h {
-            // Map back to the unclipped destination coordinate, then to the
-            // source pixel using nearest-neighbor.
+            // Map back to the unclipped destination coordinate. Raster images
+            // use the Image default's nearest-neighbor sampling; SVG images
+            // rasterize directly at the requested destination size.
             let unclipped_dy = (dst_y as i64 - y as i64) as usize + py;
-            let sy = (unclipped_dy * src_h) / h_us;
             for px in 0..dst_w {
                 let unclipped_dx = (dst_x as i64 - x as i64) as usize + px;
-                let sx = (unclipped_dx * src_w) / w_us;
-                if let Some(color) = image.get_pixel(sx, sy) {
+                if let Some(color) = image.get_scaled_pixel(
+                    unclipped_dx,
+                    unclipped_dy,
+                    width as usize,
+                    height as usize,
+                ) {
                     buffer.draw_pixel(dst_x + px, dst_y + py, color);
                 }
             }

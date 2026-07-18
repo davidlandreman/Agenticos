@@ -266,6 +266,43 @@ fn test_aero_start_menu_uses_control_palette() {
     );
 }
 
+fn test_start_menu_renders_embedded_svg_icons() {
+    let previous_theme = theme::active();
+    theme::activate(ThemeKind::Classic);
+    let mut menu = StartMenuWindow::new_with_id(WindowId(8105), Point::new(0, 0));
+    let height = StartMenuWindow::root_height();
+    let mut surface = Surface::new(SurfaceDesc::new(START_MENU_ROOT_WIDTH, height)).unwrap();
+    {
+        let mut canvas = SurfaceCanvas::new(
+            &mut surface,
+            (0, 0),
+            (START_MENU_ROOT_WIDTH as usize, height as usize),
+        );
+        menu.paint(&mut canvas);
+    }
+    assert!(
+        (6..30)
+            .any(|y| (33..57)
+                .any(|x| { surface.pixel(x, y).unwrap().to_rgba() == (244, 196, 78, 255) })),
+        "Programs row should contain pixels from programs.svg"
+    );
+
+    menu.handle_event(mouse(MouseEventType::Move, root_row_center(0)));
+    let mut flyout =
+        Surface::new(SurfaceDesc::new(StartMenuWindow::maximum_width(), height)).unwrap();
+    let width = flyout.width();
+    {
+        let mut canvas = SurfaceCanvas::new(&mut flyout, (0, 0), (width as usize, height as usize));
+        menu.paint(&mut canvas);
+    }
+    assert!(
+        (4..24).any(|y| (199..219)
+            .any(|x| { flyout.pixel(x, y).unwrap().to_rgba() == (255, 212, 90, 255) })),
+        "Programs flyout should contain pixels from file-manager.svg"
+    );
+    theme::activate(previous_theme);
+}
+
 fn test_text_input_callbacks_and_utf8_limit() {
     *LAST_TEXT.lock() = None;
     *SUBMITTED.lock() = None;
@@ -300,6 +337,7 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_enabled_and_disabled_dispatch,
         &test_classic_start_menu_key_pixels,
         &test_aero_start_menu_uses_control_palette,
+        &test_start_menu_renders_embedded_svg_icons,
         &test_text_input_callbacks_and_utf8_limit,
         &test_run_command_is_one_zsh_argument,
     ]

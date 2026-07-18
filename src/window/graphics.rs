@@ -127,9 +127,10 @@ pub trait GraphicsDevice: Send {
         }
     }
 
-    /// Blit a parsed image at `(x, y)` scaled to `width × height` using
-    /// nearest-neighbor sampling. Coordinates and clipping follow the same
-    /// contract as `draw_pixel`.
+    /// Blit a parsed image at `(x, y)` scaled to `width × height`. Raster
+    /// images use nearest-neighbor sampling by default; vector images can
+    /// rasterize directly at the destination size through `Image`'s scaled
+    /// sampling hook. Coordinates and clipping follow `draw_pixel`.
     fn draw_image_scaled(&mut self, x: i32, y: i32, width: u32, height: u32, image: &dyn Image) {
         if width == 0 || height == 0 {
             return;
@@ -140,11 +141,14 @@ pub trait GraphicsDevice: Send {
             return;
         }
         for dy in 0..height {
-            let sy = (dy as usize * src_h) / height as usize;
             let dst_y = y + dy as i32;
             for dx in 0..width {
-                let sx = (dx as usize * src_w) / width as usize;
-                if let Some(color) = image.get_pixel(sx, sy) {
+                if let Some(color) = image.get_scaled_pixel(
+                    dx as usize,
+                    dy as usize,
+                    width as usize,
+                    height as usize,
+                ) {
                     self.draw_pixel(x + dx as i32, dst_y, color);
                 }
             }
