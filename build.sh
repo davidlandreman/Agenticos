@@ -70,6 +70,11 @@ if [ "$HELP" = true ]; then
     echo "                          (default 4; needs Accessibility permission for the terminal)."
     echo "                          Networking defaults on; set"
     echo "                          AGENTICOS_NETWORK=off to pass -nic none."
+    echo "                          If the selected QEMU lacks the slirp 'user'"
+    echo "                          backend (the pinned VirGL bottle), networking"
+    echo "                          bridges through a slirp-capable helper QEMU"
+    echo "                          (AGENTICOS_QEMU_NET_HELPER_BIN to pin one,"
+    echo "                          AGENTICOS_SLIRP_SOCK for the bridge socket)."
     echo "  -h, --help              Show this help message"
     echo ""
     echo "Default: Build in release mode, create images, and run in QEMU"
@@ -195,12 +200,32 @@ if [ "$RUN_QEMU" = true ]; then
     if [ "${AGENTICOS_NETWORK:-on}" = "off" ]; then
         NETWORK_ARGS=(-nic none)
         echo "🌐 Networking disabled (AGENTICOS_NETWORK=off)"
-    else
+    elif "$QEMU_BIN" -netdev help 2>/dev/null | grep -qx user; then
         NETWORK_ARGS=(
             -netdev "user,id=agenticos-net"
             -device "virtio-net-pci,disable-legacy=on,netdev=agenticos-net,mac=02:41:47:4e:54:01"
         )
         echo "🌐 QEMU user networking enabled"
+    else
+        # The pinned macOS VirGL bottle ships without the slirp `user`
+        # backend. Bridge the guest NIC to a slirp-capable helper QEMU over
+        # a unix stream socket so GPU launches keep networking.
+        # shellcheck source=scripts/qemu-slirp-bridge.sh
+        . "$(pwd)/scripts/qemu-slirp-bridge.sh"
+        SLIRP_SOCK="${AGENTICOS_SLIRP_SOCK:-/tmp/agenticos-slirp.sock}"
+        if agenticos_start_slirp_bridge "$SLIRP_SOCK"; then
+            trap agenticos_stop_slirp_bridge EXIT
+            NETWORK_ARGS=(
+                -netdev "stream,id=agenticos-net,server=off,addr.type=unix,addr.path=$SLIRP_SOCK"
+                -device "virtio-net-pci,disable-legacy=on,netdev=agenticos-net,mac=02:41:47:4e:54:01"
+            )
+            echo "🌐 QEMU networking via slirp bridge: $AGENTICOS_SLIRP_BRIDGE_BIN ($SLIRP_SOCK)"
+        else
+            NETWORK_ARGS=(-nic none)
+            echo "🌐 Networking unavailable: $QEMU_BIN lacks the 'user' netdev backend and no"
+            echo "   slirp-capable helper QEMU was found (override with AGENTICOS_QEMU_NET_HELPER_BIN);"
+            echo "   passing -nic none"
+        fi
     fi
     QEMU_ARGS=(
         -drive "format=raw,file=$BIOS_IMAGE,if=none,id=agenticos-root,readonly=on"

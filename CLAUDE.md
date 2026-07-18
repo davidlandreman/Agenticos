@@ -36,7 +36,7 @@ The legacy kernel-side command interpreter (the `shell/` process that hand-parse
 
 **Prebuilt userland ELFs**: `ZSH.ELF` (and any future Linux ports that fetch upstream tarballs) ship as committed binaries under `userland/prebuilt/`. Fresh clones boot a working zsh without the `x86_64-linux-musl-cross` toolchain installed. `HELLO.ELF` (Rust) and `HELLOCPP.ELF` (small C++ wrapper) are NOT prebuilt — they build from source on every run. After changing the upstream source / Makefile / patches of a prebuilt-managed app, run `./userland/refresh-prebuilt.sh` and commit the updated binary alongside the source change.
 
-**QEMU Configuration**: 2 GiB RAM by default (override with `AGENTICOS_QEMU_MEMORY`), serial output, a UTC CMOS RTC, VirtIO tablet, explicit modern VirtIO-net with QEMU user-mode NAT, and `isa-debug-exit` for test integration. Set `AGENTICOS_NETWORK=off` for a no-NIC interactive boot; tests use restricted networking plus repository-owned guest-forwarded services.
+**QEMU Configuration**: 2 GiB RAM by default (override with `AGENTICOS_QEMU_MEMORY`), serial output, a UTC CMOS RTC, VirtIO tablet, explicit modern VirtIO-net with QEMU user-mode NAT, and `isa-debug-exit` for test integration. Set `AGENTICOS_NETWORK=off` for a no-NIC interactive boot; tests use restricted networking plus repository-owned guest-forwarded services. QEMU builds without the slirp `user` backend (the pinned macOS VirGL bottle) automatically get networking through a stock-QEMU slirp bridge (`scripts/qemu-slirp-bridge.sh`), so VirGL GPU launches are networked too.
 
 ### Testing
 - `./test.sh` — Run all kernel tests in QEMU with automatic exit

@@ -11,21 +11,26 @@ set -euo pipefail
 cd "${CONDUCTOR_WORKSPACE_PATH:-$(git rev-parse --show-toplevel)}"
 
 # Exercise the qualified VirGL compositor with Aero window chrome. The pinned
-# macOS QEMU bottle has no user-network backend, so its default launch is
-# offline. Explicit caller values still override all of these defaults.
+# macOS QEMU bottle has no user-network backend; build.sh detects that and
+# bridges the guest NIC to a stock QEMU's slirp over a unix stream socket, so
+# networking stays on by default. Explicit caller values still override all
+# of these defaults.
 qemu_virgl_prefix="${AGENTICOS_QEMU_VIRGL_PREFIX:-$(brew --cellar qemu)/1.0.27}"
 export AGENTICOS_COMPOSITOR="${AGENTICOS_COMPOSITOR:-gpu}"
 export AGENTICOS_GPU_STRICT="${AGENTICOS_GPU_STRICT:-1}"
 export AGENTICOS_QEMU_BIN="${AGENTICOS_QEMU_BIN:-$qemu_virgl_prefix/bin/qemu-system-x86_64}"
 export AGENTICOS_QEMU_GL="${AGENTICOS_QEMU_GL:-es}"
 export AGENTICOS_THEME="${AGENTICOS_THEME:-aero}"
-export AGENTICOS_NETWORK="${AGENTICOS_NETWORK:-off}"
+export AGENTICOS_NETWORK="${AGENTICOS_NETWORK:-on}"
 
 # build.sh's manual-run default is machine-global. Give each Conductor
 # workspace its own RPC socket so parallel QEMUs cannot unlink or replace one
 # another's endpoint.
 if [[ -z "${AGENTICOS_RPC_SOCK:-}" && -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]]; then
     export AGENTICOS_RPC_SOCK="/tmp/agenticos-rpc-${CONDUCTOR_WORKSPACE_NAME}.sock"
+fi
+if [[ -z "${AGENTICOS_SLIRP_SOCK:-}" && -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]]; then
+    export AGENTICOS_SLIRP_SOCK="/tmp/agenticos-slirp-${CONDUCTOR_WORKSPACE_NAME}.sock"
 fi
 
 # Per-workspace override hook. Dropping a .conductor/run.local.sh in a
