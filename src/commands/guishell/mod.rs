@@ -8,8 +8,8 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use spin::Mutex;
 
+use crate::arch::x86_64::preemption_guard::PreemptionMutex;
 use crate::process::{ProcessId, WakeEvents};
 use crate::window::windows::taskbar::{
     tray_bounds, window_button_bounds, BUTTON_GAP, BUTTON_HEIGHT, BUTTON_Y_OFFSET,
@@ -78,36 +78,57 @@ impl GUIShellState {
 pub fn queue_action(action: PendingAction) {
     // Use lock() instead of try_lock() to ensure the action is always queued
     // try_lock() was silently dropping actions when the lock was briefly held
-    let mut state = GUISHELL_STATE.lock();
-    crate::debug_trace!(
-        "GUIShell: Queuing action {:?}",
-        core::mem::discriminant(&action)
-    );
-    state.pending_action = Some(action);
+    let process_id = {
+        let mut state = GUISHELL_STATE.lock();
+        crate::debug_trace!(
+            "GUIShell: Queuing action {:?}",
+            core::mem::discriminant(&action)
+        );
+        state.pending_action = Some(action);
+        state.process_id
+    };
 
     // Signal the GUIShell process to wake up and handle the action
-    if let Some(pid) = state.process_id {
+    if let Some(pid) = process_id {
         crate::process::signal_process(pid, WakeEvents::WINDOW_EVENT);
     }
 }
 
 /// Global GUIShell state
-static GUISHELL_STATE: Mutex<GUIShellState> = Mutex::new(GUIShellState::new());
+static GUISHELL_STATE: PreemptionMutex<GUIShellState> = PreemptionMutex::new(GUIShellState::new());
+
+/// Enter the window manager from GUIShell code.
+///
+/// GUIShell state must always be released first. Keeping this check at the
+/// boundary makes future state-to-window-manager lock regressions fail fast in
+/// debug builds instead of wedging the compositor.
+fn with_window_manager<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut window::WindowManager) -> R,
+{
+    debug_assert!(
+        !GUISHELL_STATE.is_locked(),
+        "GUIShell must release GUISHELL_STATE before acquiring the window manager"
+    );
+    window::with_window_manager(f)
+}
 
 /// Initialize the GUIShell desktop environment
 #[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
 pub fn init_guishell() {
-    let mut state = GUISHELL_STATE.lock();
-    if state.initialized {
-        return;
+    {
+        let state = GUISHELL_STATE.lock();
+        if state.initialized {
+            return;
+        }
     }
 
-    // Load the bundled wallpaper outside the window-manager lock so the file
-    // read can't deadlock against any window state. Falling back to None
-    // yields the legacy solid-blue desktop.
+    // Load the bundled wallpaper outside both GUI locks so the file read can't
+    // block window or shell state. Falling back to None yields the legacy
+    // solid-blue desktop.
     let wallpaper = window::load_default_wallpaper();
 
-    window::with_window_manager(|wm| {
+    let ids = with_window_manager(|wm| {
         // Get screen dimensions
         let (width, height) = wm.screen_dimensions();
 
@@ -134,8 +155,6 @@ pub fn init_guishell() {
             screen.set_root_window(desktop_id);
         }
 
-        state.desktop_id = Some(desktop_id);
-
         // Create taskbar window at bottom of screen
         let taskbar_id = wm.create_window(Some(desktop_id));
         let mut taskbar = TaskbarWindow::new_with_id(taskbar_id, width, height);
@@ -149,7 +168,6 @@ pub fn init_guishell() {
 
         // Register taskbar with window manager
         wm.set_taskbar_id(Some(taskbar_id));
-        state.taskbar_id = Some(taskbar_id);
 
         // Create Start button as child of taskbar
         let start_button_id = wm.create_window(Some(taskbar_id));
@@ -175,18 +193,12 @@ pub fn init_guishell() {
             taskbar.add_child(start_button_id);
         }
 
-        // Update taskbar with start button ID
-        // We need to get it as a TaskbarWindow to call set_start_button
-        // But since we can't downcast, we'll track it in state instead
-        state.start_button_id = Some(start_button_id);
-
         // Create the right-anchored notification tray as an independent child
         // so its minute updates invalidate only the tray region.
         let tray_id = wm.create_window(Some(taskbar_id));
         let mut tray = TaskbarTrayWindow::new_with_id(tray_id, tray_bounds(width));
         tray.set_parent(Some(taskbar_id));
         wm.set_window_impl(tray_id, Box::new(tray));
-        state.tray_id = Some(tray_id);
 
         // Force repaint of all windows
         if let Some(window) = wm.window_registry.get_mut(&desktop_id) {
@@ -212,31 +224,43 @@ pub fn init_guishell() {
             start_button_id,
             tray_id
         );
+        (desktop_id, taskbar_id, start_button_id, tray_id)
     });
 
-    state.initialized = true;
+    if let Some((desktop_id, taskbar_id, start_button_id, tray_id)) = ids {
+        let mut state = GUISHELL_STATE.lock();
+        state.desktop_id = Some(desktop_id);
+        state.taskbar_id = Some(taskbar_id);
+        state.start_button_id = Some(start_button_id);
+        state.tray_id = Some(tray_id);
+        state.initialized = true;
+    }
 }
 
 /// Show the Start menu
 fn show_start_menu() {
-    let mut state = GUISHELL_STATE.lock();
+    let (taskbar_id, desktop_id) = {
+        let state = GUISHELL_STATE.lock();
 
-    // If menu already open, don't create another
-    if state.menu_id.is_some() {
-        return;
-    }
+        // If menu already open, don't create another
+        if state.menu_id.is_some() {
+            return;
+        }
 
-    let taskbar_id = match state.taskbar_id {
-        Some(id) => id,
-        None => return,
+        let taskbar_id = match state.taskbar_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let desktop_id = match state.desktop_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        (taskbar_id, desktop_id)
     };
 
-    let desktop_id = match state.desktop_id {
-        Some(id) => id,
-        None => return,
-    };
-
-    window::with_window_manager(|wm| {
+    let menu_id = with_window_manager(|wm| {
         // Get taskbar position
         let taskbar_bounds = wm
             .window_registry
@@ -289,20 +313,27 @@ fn show_start_menu() {
         }
         wm.force_full_repaint();
 
-        state.menu_id = Some(menu_id);
-
         crate::debug_info!("GUIShell: Start menu opened (menu={:?})", menu_id);
+        menu_id
     });
+
+    if let Some(menu_id) = menu_id {
+        GUISHELL_STATE.lock().menu_id = Some(menu_id);
+    }
 }
 
 /// Close the Start menu
 fn close_start_menu() {
-    let mut state = GUISHELL_STATE.lock();
+    let menu = {
+        let mut state = GUISHELL_STATE.lock();
+        state
+            .menu_id
+            .take()
+            .map(|menu_id| (menu_id, state.desktop_id))
+    };
 
-    if let Some(menu_id) = state.menu_id.take() {
-        let desktop_id = state.desktop_id;
-
-        window::with_window_manager(|wm| {
+    if let Some((menu_id, desktop_id)) = menu {
+        with_window_manager(|wm| {
             // Remove menu from desktop's children
             if let Some(desktop_id) = desktop_id {
                 if let Some(desktop) = wm.window_registry.get_mut(&desktop_id) {
@@ -469,8 +500,7 @@ fn sync_taskbar_buttons() {
     drop(state);
 
     // Get current frame windows
-    let frame_windows =
-        window::with_window_manager(|wm| wm.get_frame_windows()).unwrap_or_else(Vec::new);
+    let frame_windows = with_window_manager(|wm| wm.get_frame_windows()).unwrap_or_else(Vec::new);
 
     // Find frame windows that need buttons (with their titles)
     let mut frames_needing_buttons: Vec<(WindowId, alloc::string::String)> = Vec::new();
@@ -508,19 +538,21 @@ fn sync_taskbar_buttons() {
 
 /// Add a window button to the taskbar
 fn add_window_button(frame_id: WindowId, title: &str) {
-    let mut state = GUISHELL_STATE.lock();
-    let taskbar_id = match state.taskbar_id {
-        Some(id) => id,
-        None => return,
+    let (taskbar_id, button_count) = {
+        let state = GUISHELL_STATE.lock();
+        let taskbar_id = match state.taskbar_id {
+            Some(id) => id,
+            None => return,
+        };
+        (taskbar_id, state.window_buttons.len() + 1)
     };
 
-    let button_id = window::with_window_manager(|wm| {
+    let button_id = with_window_manager(|wm| {
         // Create a new button
         let button_id = wm.create_window(Some(taskbar_id));
 
         // Calculate initial position (will be updated by layout)
         let (screen_width, _) = wm.screen_dimensions();
-        let button_count = state.window_buttons.len() + 1;
         let bounds = window_button_bounds(screen_width, button_count, button_count - 1);
 
         // Truncate title if too long
@@ -551,6 +583,7 @@ fn add_window_button(frame_id: WindowId, title: &str) {
     });
 
     if let Some(button_id) = button_id {
+        let mut state = GUISHELL_STATE.lock();
         state.window_buttons.push((button_id, frame_id));
         crate::debug_trace!(
             "GUIShell: Added window button {:?} for frame {:?}",
@@ -562,16 +595,19 @@ fn add_window_button(frame_id: WindowId, title: &str) {
 
 /// Remove a window button from the taskbar
 fn remove_window_button(button_id: WindowId) {
-    let mut state = GUISHELL_STATE.lock();
-    let taskbar_id = match state.taskbar_id {
-        Some(id) => id,
-        None => return,
+    let taskbar_id = {
+        let mut state = GUISHELL_STATE.lock();
+        let taskbar_id = match state.taskbar_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Remove from state before destroying the corresponding window.
+        state.window_buttons.retain(|(bid, _)| *bid != button_id);
+        taskbar_id
     };
 
-    // Remove from state
-    state.window_buttons.retain(|(bid, _)| *bid != button_id);
-
-    window::with_window_manager(|wm| {
+    with_window_manager(|wm| {
         // Remove from taskbar's children
         if let Some(taskbar) = wm.window_registry.get_mut(&taskbar_id) {
             taskbar.remove_child(button_id);
@@ -595,7 +631,7 @@ fn update_button_layout() {
         return;
     }
 
-    window::with_window_manager(|wm| {
+    with_window_manager(|wm| {
         let (screen_width, _) = wm.screen_dimensions();
 
         for (i, (button_id, _)) in buttons.iter().enumerate() {
@@ -610,7 +646,7 @@ fn update_button_layout() {
 
 /// Focus a window (called when taskbar button is clicked)
 fn focus_window(frame_id: WindowId) {
-    window::with_window_manager(|wm| {
+    with_window_manager(|wm| {
         // Bring to front
         wm.bring_to_front(frame_id);
 
@@ -687,14 +723,14 @@ fn guishell_process_main() {
 /// Process pending actions (called from the GUIShell process)
 fn process_pending_actions() {
     // First, sync menu state with window manager
-    {
-        let mut state = GUISHELL_STATE.lock();
-        if let Some(menu_id) = state.menu_id {
-            let menu_exists =
-                window::with_window_manager(|wm| wm.window_registry.contains_key(&menu_id))
-                    .unwrap_or(false);
+    let menu_id = GUISHELL_STATE.lock().menu_id;
+    if let Some(menu_id) = menu_id {
+        let menu_exists =
+            with_window_manager(|wm| wm.window_registry.contains_key(&menu_id)).unwrap_or(false);
 
-            if !menu_exists {
+        if !menu_exists {
+            let mut state = GUISHELL_STATE.lock();
+            if state.menu_id == Some(menu_id) {
                 crate::debug_info!(
                     "GUIShell: Menu {:?} was destroyed externally, clearing state",
                     menu_id
@@ -776,7 +812,8 @@ fn process_pending_actions() {
 ///
 /// Call this when window events occur that might need GUIShell attention.
 pub fn signal_guishell() {
-    if let Some(pid) = GUISHELL_STATE.lock().process_id {
+    let process_id = GUISHELL_STATE.lock().process_id;
+    if let Some(pid) = process_id {
         crate::process::signal_process(pid, WakeEvents::WINDOW_EVENT);
     }
 }

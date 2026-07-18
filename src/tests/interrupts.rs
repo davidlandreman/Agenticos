@@ -69,8 +69,10 @@ fn test_preemption_mutex_failed_try_lock_restores_depth() {
     use crate::arch::x86_64::preemption_guard::{kernel_preemption_allowed, PreemptionMutex};
 
     let mutex = PreemptionMutex::new(7u8);
+    assert!(!mutex.is_locked());
     assert!(kernel_preemption_allowed());
     let guard = mutex.lock();
+    assert!(mutex.is_locked());
     assert!(!kernel_preemption_allowed());
     assert!(mutex.try_lock().is_none());
     assert!(
@@ -79,6 +81,7 @@ fn test_preemption_mutex_failed_try_lock_restores_depth() {
     );
     assert_eq!(*guard, 7);
     drop(guard);
+    assert!(!mutex.is_locked());
     assert!(kernel_preemption_allowed());
 
     let reacquired = mutex
