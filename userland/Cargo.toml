@@ -17,6 +17,7 @@ members = [
     "libs/gl",
     "libs/dialogs",
     "apps/hello",
+    "apps/clipboard",
     "apps/guilaunch",
     "apps/guidemo",
     "apps/notepad",

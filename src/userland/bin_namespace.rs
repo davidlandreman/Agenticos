@@ -57,6 +57,9 @@ pub const GLGAME_HOST_PATH: &str = "/host/GLGAME.ELF";
 pub const FILEMAN_HOST_PATH: &str = "/host/FILEMAN.ELF";
 pub const CONTROL_HOST_PATH: &str = "/host/CONTROL.ELF";
 
+/// Text-only `pbcopy` / `pbpaste` multicall executable.
+pub const CLIPBOARD_HOST_PATH: &str = "/host/PBCLIP.ELF";
+
 /// TinyCC: on-target C compiler. `tcc` and the traditional `cc` alias
 /// both rewrite here; argv[0] keeps the invoked name.
 pub const TCC_HOST_PATH: &str = "/host/TCC.ELF";
@@ -125,6 +128,8 @@ pub const DIRECT_APPLETS: &[&str] = &[
     "objcopy",
     "objdump",
     "painting",
+    "pbcopy",
+    "pbpaste",
     "ranlib",
     "readelf",
     "settings",
@@ -442,6 +447,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "explorer" => FILEMAN_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,
         "painting" => PAINTING_HOST_PATH,
+        "pbcopy" | "pbpaste" => CLIPBOARD_HOST_PATH,
         "taskmgr" | "tasks" => TASKMGR_HOST_PATH,
         _ => binutils_host_path(canonical)?,
     };
@@ -830,6 +836,13 @@ mod tests_internal {
         let (path, applet) = apply_bin_rewrite("/bin/settings").expect("must resolve");
         assert_eq!(path, "/host/CONTROL.ELF");
         assert_eq!(applet, "settings");
+
+        let (path, applet) = apply_bin_rewrite("/bin/pbcopy").expect("must resolve");
+        assert_eq!(path, "/host/PBCLIP.ELF");
+        assert_eq!(applet, "pbcopy");
+        let (path, applet) = apply_bin_rewrite("/bin/pbpaste").expect("must resolve");
+        assert_eq!(path, "/host/PBCLIP.ELF");
+        assert_eq!(applet, "pbpaste");
 
         for (name, expected) in [
             ("addr2line", "/host/ADDRLINE.ELF"),

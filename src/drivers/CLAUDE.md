@@ -29,6 +29,8 @@ PCI bus, VirtIO block storage, PS/2 keyboard and mouse, VirtIO input/network/GPU
 - `virtio/rng.rs` — polling modern VirtIO entropy device. Completion waits are
   finite; a timed-out or malformed queue is quarantined while its DMA storage
   remains owned by the driver.
+- `serial.rs` — auxiliary UART ownership: COM2 carries the MCP RPC stream and
+  COM3 carries the independent host text-clipboard protocol.
 - `display/` — framebuffer driver. `display.rs` controls single/double buffering (the `USE_DOUBLE_BUFFER` flag lives here even though graphics primitives live in `src/graphics/`). `frame_buffer.rs` is the low-level abstraction; `text_buffer.rs` and `double_buffered_text.rs` handle text rendering; `double_buffer.rs` provides the 8 MiB static back buffer.
 
 ## VirtIO block completion (load-bearing)

@@ -38,6 +38,7 @@ Conductor uses `git worktree` under the hood: each workspace is a separate worki
 | Bootloader disk image | `target/bootloader/bios.img` would collide. | Lives inside per-worktree `target/`, so naturally isolated. `build.sh` and `test.sh` honor an `AGENTICOS_BIOS_IMAGE` override if you want to point at a custom path. |
 | QEMU process | Two QEMUs from the same workspace fight over stdio. | `runScriptMode: "nonconcurrent"` in `conductor.json` makes Conductor stop the prior QEMU before launching a new one in the same workspace. Different workspaces still run concurrently. |
 | QEMU RPC socket | A machine-global `/tmp/agenticos-rpc.sock` would be unlinked by the next workspace to start. | `.conductor/run.sh` sets `AGENTICOS_RPC_SOCK` from `CONDUCTOR_WORKSPACE_NAME`; archive removes that workspace's socket. |
+| QEMU clipboard socket | Parallel guests need independent COM3 host-clipboard channels. | `.conductor/run.sh` sets `AGENTICOS_CLIPBOARD_SOCK` from `CONDUCTOR_WORKSPACE_NAME`; archive removes that workspace's socket. |
 | Cargo registry / git index (`~/.cargo`) | None — cargo handles concurrent reads safely. | Shared by design; second-workspace builds are fast. |
 | Personal Claude Code permissions | `.claude/settings.local.json` is gitignored, so it isn't carried into a new worktree. | `.conductor/setup.sh` copies it from `$CONDUCTOR_ROOT_PATH` if present, otherwise creates an empty allowlist. Shared `.claude/settings.json` (plugin enablement + base permissions) is committed and inherited automatically. |
 

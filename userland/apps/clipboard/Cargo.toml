@@ -1,0 +1,16 @@
+[package]
+name = "clipboard"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "clipboard"
+path = "src/main.rs"
+
+[dependencies]
+runtime = { path = "../../runtime" }
+
+[build-dependencies]
+userland-build-support = { path = "../../build-support" }

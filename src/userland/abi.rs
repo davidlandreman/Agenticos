@@ -347,6 +347,7 @@ pub mod nr {
     pub const GUI_GL_CONTEXT_DESTROY: u64 = 5009;
     pub const SYSTEM_CONTROL: u64 = 5010;
     pub const GUI_EVENT_OPEN: u64 = 5011;
+    pub const CLIPBOARD: u64 = 5012;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -493,6 +494,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GUI_GL_CONTEXT_DESTROY => crate::userland::gui_gl::context_destroy_handler(args),
         nr::SYSTEM_CONTROL => crate::system_control::syscall_handler(args),
         nr::GUI_EVENT_OPEN => crate::userland::gui_syscalls::gui_event_open_handler(args),
+        nr::CLIPBOARD => crate::clipboard::syscall_handler(args),
         // Phase B: namespace mutations
         nr::MKDIR => syscalls::mkdir_handler(args),
         nr::MKDIRAT => syscalls::mkdirat_handler(args),

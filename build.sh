@@ -149,9 +149,10 @@ if [ "$RUN_QEMU" = true ]; then
     BIOS_IMAGE="${AGENTICOS_BIOS_IMAGE:-target/bootloader/bios.img}"
     HOST_SHARE="${AGENTICOS_HOST_SHARE:-$(pwd)/host_share}"
     RPC_SOCK="${AGENTICOS_RPC_SOCK:-/tmp/agenticos-rpc.sock}"
+    CLIPBOARD_SOCK="${AGENTICOS_CLIPBOARD_SOCK:-/tmp/agenticos-clipboard.sock}"
     mkdir -p "$HOST_SHARE"
     # Stale socket from a previous run will block QEMU's listener.
-    rm -f "$RPC_SOCK"
+    rm -f "$RPC_SOCK" "$CLIPBOARD_SOCK"
     QEMU_BIN="${AGENTICOS_QEMU_BIN:-$(command -v qemu-system-x86_64 || true)}"
     if [ -z "$QEMU_BIN" ] || [ ! -x "$QEMU_BIN" ]; then
         echo "❌ QEMU binary is missing or not executable: ${QEMU_BIN:-<unset>}" >&2
@@ -178,6 +179,7 @@ if [ "$RUN_QEMU" = true ]; then
     echo "🪟 Requested theme: ${AGENTICOS_THEME:-auto}"
     echo "📂 Mounting host folder: $HOST_SHARE -> /host (read-only)"
     echo "🔌 MCP RPC chardev socket: $RPC_SOCK (chmod 0600 once QEMU creates it)"
+    echo "📋 Text clipboard chardev socket: $CLIPBOARD_SOCK"
     QEMU_MEMORY="${AGENTICOS_QEMU_MEMORY:-2G}"
     QEMU_SMP="${AGENTICOS_QEMU_SMP:-4}"
     case "$QEMU_SMP" in 1|2|3|4|5|6|7|8) ;; *) echo "❌ AGENTICOS_QEMU_SMP must be 1-8" >&2; exit 2 ;; esac
@@ -188,8 +190,8 @@ if [ "$RUN_QEMU" = true ]; then
     # chmod will fail silently — that's fine, we retry until QEMU is up.
     (
         for _ in 1 2 3 4 5 6 7 8 9 10; do
-            if [ -S "$RPC_SOCK" ]; then
-                chmod 0600 "$RPC_SOCK" && exit 0
+            if [ -S "$RPC_SOCK" ] && [ -S "$CLIPBOARD_SOCK" ]; then
+                chmod 0600 "$RPC_SOCK" "$CLIPBOARD_SOCK" && exit 0
             fi
             sleep 0.2
         done
@@ -266,6 +268,8 @@ if [ "$RUN_QEMU" = true ]; then
         -serial stdio
         -chardev "socket,id=rpc,path=$RPC_SOCK,server=on,wait=off"
         -serial chardev:rpc
+        -chardev "socket,id=clipboard,path=$CLIPBOARD_SOCK,server=on,wait=off"
+        -serial chardev:clipboard
         -no-reboot -no-shutdown
         -rtc "base=utc"
         -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
@@ -286,5 +290,26 @@ if [ "$RUN_QEMU" = true ]; then
         echo "🔍 Scaling QEMU window to ${QEMU_SCALE}x (override with AGENTICOS_QEMU_SCALE)"
         "$(pwd)/scripts/qemu-window-scale.sh" "$(basename "$QEMU_BIN")" "$QEMU_SCALE" &
     fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "❌ python3 is required for the host clipboard bridge" >&2
+        exit 1
+    fi
+    if ! python3 "$(pwd)/tools/clipboard_bridge.py" --check; then
+        exit 1
+    fi
+    CLIPBOARD_BRIDGE_PID=""
+    agenticos_cleanup_host_bridges() {
+        if [ -n "${CLIPBOARD_BRIDGE_PID:-}" ] && kill -0 "$CLIPBOARD_BRIDGE_PID" 2>/dev/null; then
+            kill "$CLIPBOARD_BRIDGE_PID" 2>/dev/null || true
+            wait "$CLIPBOARD_BRIDGE_PID" 2>/dev/null || true
+        fi
+        rm -f "$CLIPBOARD_SOCK"
+        if declare -F agenticos_stop_slirp_bridge >/dev/null 2>&1; then
+            agenticos_stop_slirp_bridge
+        fi
+    }
+    trap agenticos_cleanup_host_bridges EXIT
+    python3 "$(pwd)/tools/clipboard_bridge.py" --socket "$CLIPBOARD_SOCK" &
+    CLIPBOARD_BRIDGE_PID=$!
     "$QEMU_BIN" "${QEMU_ARGS[@]}" "${AGENTICOS_QEMU_RENDER_ARGS[@]}" "${AGENTICOS_QEMU_FW_CFG_ARGS[@]}"
 fi

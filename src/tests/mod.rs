@@ -8,6 +8,8 @@ pub mod basic;
 #[cfg(feature = "test")]
 pub mod binutils;
 #[cfg(feature = "test")]
+pub mod clipboard;
+#[cfg(feature = "test")]
 pub mod compiler_compat;
 #[cfg(feature = "test")]
 pub mod composition_cpu;
@@ -168,6 +170,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
         "bin_namespace",
         crate::userland::bin_namespace::bin_namespace_tests,
     ),
+    ("clipboard", clipboard::get_tests),
     (
         "gui_launch_table",
         crate::commands::gui_launch_table::gui_launch_table_tests,

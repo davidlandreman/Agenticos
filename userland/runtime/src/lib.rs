@@ -104,6 +104,10 @@ const NR_GUI_GL_GET_INFO: u64 = 5008;
 const NR_GUI_GL_CONTEXT_DESTROY: u64 = 5009;
 const NR_SYSTEM_CONTROL: u64 = 5010;
 const NR_GUI_EVENT_OPEN: u64 = 5011;
+const NR_CLIPBOARD: u64 = 5012;
+
+pub const CLIPBOARD_COPY: u64 = 1;
+pub const CLIPBOARD_PASTE: u64 = 2;
 
 pub const GUI_EVENT_OPEN_NONBLOCK: u64 = 0x800;
 pub const GUI_EVENT_OPEN_CLOEXEC: u64 = 0x80000;
@@ -354,6 +358,30 @@ pub fn brk(address: usize) -> i64 {
 
 pub fn sync() -> i64 {
     unsafe { syscall0(NR_SYNC) }
+}
+
+/// Replace the host's text clipboard with `text`.
+pub fn clipboard_copy(text: &[u8]) -> i64 {
+    unsafe {
+        syscall3(
+            NR_CLIPBOARD,
+            CLIPBOARD_COPY,
+            text.as_ptr() as u64,
+            text.len() as u64,
+        )
+    }
+}
+
+/// Read the host's text clipboard into `buffer`, returning its byte length.
+pub fn clipboard_paste(buffer: &mut [u8]) -> i64 {
+    unsafe {
+        syscall3(
+            NR_CLIPBOARD,
+            CLIPBOARD_PASTE,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+        )
+    }
 }
 
 pub fn fork() -> i64 {
