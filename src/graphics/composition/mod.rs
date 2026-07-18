@@ -9,6 +9,7 @@ pub(crate) use virgl::stage_surface_rect_for_test;
 pub use virgl::VirglCompositionEngine;
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use crate::graphics::scene::SceneFrame;
 use crate::graphics::surface::{Surface, SurfaceId};
@@ -18,6 +19,52 @@ use crate::window::Rect;
 pub enum CompositionEngineKind {
     Cpu,
     Virgl,
+}
+
+pub const CLIENT_GL_MAX_PACKET_BYTES: usize = 192 * 1024;
+pub const CLIENT_GL_MAX_DRAWS: usize = 1024;
+pub const CLIENT_GL_MAX_VERTICES: usize = 4096;
+pub const CLIENT_GL_DRAW_DEPTH_TEST: u32 = 1 << 0;
+pub const CLIENT_GL_DRAW_CULL_BACK: u32 = 1 << 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClientGlId(pub u64);
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ClientGlVertex {
+    pub position: [f32; 4],
+    pub color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientGlDraw {
+    pub first_vertex: u32,
+    pub vertex_count: u32,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientGlFrame {
+    pub serial: u64,
+    pub width: u32,
+    pub height: u32,
+    pub viewport: Rect,
+    pub clear_color: [f32; 4],
+    pub clear_depth: f64,
+    pub draws: Vec<ClientGlDraw>,
+    pub vertices: Vec<ClientGlVertex>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientGlInfo {
+    pub width: u32,
+    pub height: u32,
+    pub supported_draw_flags: u32,
+    pub last_completed_serial: u64,
+    pub last_error: i32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -97,6 +144,30 @@ pub trait CompositionEngine: Send {
     fn output(&self) -> &Surface;
     fn output_mut(&mut self) -> &mut Surface;
 
+    fn create_gl_client(
+        &mut self,
+        _width: u32,
+        _height: u32,
+    ) -> Result<ClientGlId, CompositionError> {
+        Err(CompositionError::UnsupportedClientSurface)
+    }
+
+    fn submit_gl_client_frame(
+        &mut self,
+        _id: ClientGlId,
+        _frame: ClientGlFrame,
+    ) -> Result<(), CompositionError> {
+        Err(CompositionError::UnsupportedClientSurface)
+    }
+
+    fn gl_client_info(&self, _id: ClientGlId) -> Option<ClientGlInfo> {
+        None
+    }
+
+    fn destroy_gl_client(&mut self, _id: ClientGlId) -> Result<(), CompositionError> {
+        Err(CompositionError::UnsupportedClientSurface)
+    }
+
     /// Whether presentation bypasses the guest CPU output surface.
     fn uses_direct_scanout(&self) -> bool {
         false
@@ -139,4 +210,6 @@ pub enum CompositionError {
     UnsupportedEffect,
     SurfaceAllocation,
     GpuFailure,
+    UnsupportedClientSurface,
+    MissingClientSurface(ClientGlId),
 }

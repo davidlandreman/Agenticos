@@ -24,7 +24,7 @@ The kernel runs a **live preemptive scheduler** with timer-driven context switch
 `spawn_process(name, terminal_id, entry_fn)` in `src/process/mod.rs` allocates a PCB + kernel stack, sets the entry closure, and enqueues the process for the scheduler. Used by:
 
 - `src/window/terminal_factory.rs::spawn_zsh_for_terminal` — kernel process whose entry function blocks in `launch_user_binary("/host/ZSH.ELF")` until zsh exits, then closes the terminal window.
-- `src/commands/gui_launch_table.rs::spawn_by_name` — kernel process for the remaining legacy GUI app (`tasks`).
+- `src/commands/gui_launch_table.rs::spawn_by_name` — kernel process per GUI app launch (the applet list is empty today — every GUI app has migrated to ring 3; the mechanism remains for a future ring-0-only workload).
 - `src/commands/guishell/mod.rs::spawn_guishell_process` — the desktop / taskbar background process.
 
 ## Ring-3 awareness

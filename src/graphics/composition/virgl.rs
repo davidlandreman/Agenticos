@@ -13,21 +13,23 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use crate::drivers::virtio::gpu::protocol::{
-    GpuBox, GpuRect, FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, VIRGL_BIND_SAMPLER_VIEW,
-    VIRGL_BIND_SCANOUT,
+    GpuBox, GpuRect, FORMAT_B8G8R8A8_UNORM, FORMAT_Z16_UNORM, FORMAT_Z24X8_UNORM,
+    FORMAT_Z24_UNORM_S8_UINT, FORMAT_Z32_FLOAT, VIRGL_BIND_DEPTH_STENCIL, VIRGL_BIND_RENDER_TARGET,
+    VIRGL_BIND_SAMPLER_VIEW, VIRGL_BIND_SCANOUT,
 };
 use crate::drivers::virtio::gpu::virgl::commands::VirglCommandEncoder;
 use crate::drivers::virtio::gpu::virgl::{VirglContext, VirglResource};
 use crate::drivers::virtio::gpu::{CursorResource, VirtioGpu};
 use crate::graphics::scene::{
-    backdrop_box_radii, backdrop_halo, inflate_rect, LayerEffect, SceneFrame,
+    backdrop_box_radii, backdrop_halo, inflate_rect, LayerEffect, LayerSource, SceneFrame,
 };
 use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
 use crate::window::Rect;
 
 use super::{
-    timestamp_cycles, CompositionEngine, CompositionEngineKind, CompositionError,
-    CpuCompositionEngine, RenderStats,
+    timestamp_cycles, ClientGlFrame, ClientGlId, ClientGlInfo, CompositionEngine,
+    CompositionEngineKind, CompositionError, CpuCompositionEngine, RenderStats,
+    CLIENT_GL_DRAW_CULL_BACK, CLIENT_GL_DRAW_DEPTH_TEST,
 };
 
 const PIPE_BUFFER: u32 = 0;
@@ -69,6 +71,18 @@ const FIRST_SAMPLER_VIEW: u32 = 100;
 const PIPELINE_OBJECT_COUNT: u64 = 19;
 const MAX_GPU_BACKDROP_RADIUS: u16 = 4;
 
+const CLIENT_VERTEX_ELEMENTS: u32 = 20;
+const CLIENT_VERTEX_SHADER: u32 = 21;
+const CLIENT_FRAGMENT_SHADER: u32 = 22;
+const CLIENT_BLEND: u32 = 23;
+const CLIENT_DSA_DISABLED: u32 = 24;
+const CLIENT_DSA_DEPTH: u32 = 25;
+const CLIENT_RASTERIZER: u32 = 26;
+const CLIENT_RASTERIZER_CULL: u32 = 27;
+const FIRST_CLIENT_OBJECT: u32 = 10_000;
+const CLIENT_VERTEX_STRIDE: u32 = 32;
+const CLIENT_MIN_VERTEX_BUFFER_BYTES: usize = 16 * 1024;
+
 const VERTEX_SHADER: u32 = 0;
 const FRAGMENT_SHADER: u32 = 1;
 const VS: &str = "VERT\n\
@@ -95,6 +109,19 @@ const CLEAR_FS: &str = "FRAG\n\
 DCL OUT[0], COLOR\n\
 IMM FLT32 { 0.0, 0.0, 0.0, 0.0 }\n\
   0: MOV OUT[0], IMM[0]\n\
+  1: END\n";
+const CLIENT_VS: &str = "VERT\n\
+DCL IN[0]\n\
+DCL IN[1]\n\
+DCL OUT[0], POSITION\n\
+DCL OUT[1], COLOR\n\
+  0: MOV OUT[0], IN[0]\n\
+  1: MOV OUT[1], IN[1]\n\
+  2: END\n";
+const CLIENT_FS: &str = "FRAG\n\
+DCL IN[0], COLOR, COLOR\n\
+DCL OUT[0], COLOR\n\
+  0: MOV OUT[0], IN[0]\n\
   1: END\n";
 const EFFECT_FS: &str = "FRAG\n\
 DCL IN[0], GENERIC[0], LINEAR\n\
@@ -129,6 +156,25 @@ struct CachedTexture {
     sampler_view_live: bool,
 }
 
+struct ClientTarget {
+    resource: VirglResource,
+    surface: u32,
+    sampler_view: u32,
+}
+
+struct ClientContext {
+    width: u32,
+    height: u32,
+    targets: [ClientTarget; 2],
+    front: usize,
+    depth: Option<VirglResource>,
+    depth_surface: Option<u32>,
+    vertex_resource: Option<VirglResource>,
+    vertex_capacity: usize,
+    pending: Option<ClientGlFrame>,
+    info: ClientGlInfo,
+}
+
 pub struct VirglCompositionEngine {
     gpu: Option<VirtioGpu>,
     context: Option<VirglContext>,
@@ -149,6 +195,11 @@ pub struct VirglCompositionEngine {
     retired_vertex_resources: Vec<VirglResource>,
     vertex_capacity: usize,
     vertex_bytes: Vec<u8>,
+    clients: BTreeMap<ClientGlId, ClientContext>,
+    next_client_id: u64,
+    next_client_object: u32,
+    client_pipeline_initialized: bool,
+    client_depth_format: Option<u32>,
 }
 
 impl VirglCompositionEngine {
@@ -168,6 +219,20 @@ impl VirglCompositionEngine {
         let capabilities = gpu
             .discover_virgl_capabilities()
             .map_err(|_| CompositionError::GpuFailure)?;
+        let client_depth_format = [
+            FORMAT_Z24_UNORM_S8_UINT,
+            FORMAT_Z32_FLOAT,
+            FORMAT_Z24X8_UNORM,
+            FORMAT_Z16_UNORM,
+        ]
+        .into_iter()
+        .find(|&format| capset_supports_depth_format(&capabilities.data, format));
+        crate::debug_info!(
+            "VirGL client depth format selection={:?} capset={} bytes={}",
+            client_depth_format,
+            capabilities.info.id,
+            capabilities.data.len()
+        );
         let mut context = gpu
             .create_virgl_context(&capabilities)
             .map_err(|_| CompositionError::GpuFailure)?;
@@ -258,6 +323,11 @@ impl VirglCompositionEngine {
             retired_vertex_resources: Vec::new(),
             vertex_capacity: 0,
             vertex_bytes: Vec::new(),
+            clients: BTreeMap::new(),
+            next_client_id: 1,
+            next_client_object: FIRST_CLIENT_OBJECT,
+            client_pipeline_initialized: false,
+            client_depth_format,
         };
         engine.qualify_backdrop_pipeline()?;
         Ok(engine)
@@ -384,6 +454,257 @@ impl VirglCompositionEngine {
         Ok(())
     }
 
+    fn allocate_client_object(&mut self) -> Result<u32, CompositionError> {
+        let handle = self.next_client_object;
+        self.next_client_object = handle
+            .checked_add(1)
+            .ok_or(CompositionError::SurfaceAllocation)?;
+        Ok(handle)
+    }
+
+    fn create_client_with_parts(
+        &mut self,
+        gpu: &mut VirtioGpu,
+        context: &mut VirglContext,
+        width: u32,
+        height: u32,
+    ) -> Result<ClientGlId, CompositionError> {
+        if width == 0 || height == 0 || width > 4096 || height > 4096 {
+            return Err(CompositionError::InvalidOutput);
+        }
+        let depth_format = self.client_depth_format;
+        let byte_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(CompositionError::SurfaceAllocation)?;
+        let surface0 = self.allocate_client_object()?;
+        let view0 = self.allocate_client_object()?;
+        let surface1 = self.allocate_client_object()?;
+        let view1 = self.allocate_client_object()?;
+        let depth_surface = if depth_format.is_some() {
+            Some(self.allocate_client_object()?)
+        } else {
+            None
+        };
+
+        let mut color0 = gpu
+            .create_virgl_resource(
+                context,
+                PIPE_TEXTURE_2D,
+                FORMAT_B8G8R8A8_UNORM,
+                VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW,
+                width,
+                height,
+                byte_len,
+            )
+            .map_err(|_| CompositionError::GpuFailure)?;
+        let mut color1 = match gpu.create_virgl_resource(
+            context,
+            PIPE_TEXTURE_2D,
+            FORMAT_B8G8R8A8_UNORM,
+            VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW,
+            width,
+            height,
+            byte_len,
+        ) {
+            Ok(resource) => resource,
+            Err(_) => {
+                let _ = gpu.destroy_virgl_resource(context, &mut color0);
+                return Err(CompositionError::GpuFailure);
+            }
+        };
+        let mut depth = if let Some(format) = depth_format {
+            match gpu.create_virgl_resource(
+                context,
+                PIPE_TEXTURE_2D,
+                format,
+                VIRGL_BIND_DEPTH_STENCIL,
+                width,
+                height,
+                byte_len,
+            ) {
+                Ok(resource) => Some(resource),
+                Err(_) => {
+                    let _ = gpu.destroy_virgl_resource(context, &mut color1);
+                    let _ = gpu.destroy_virgl_resource(context, &mut color0);
+                    return Err(CompositionError::GpuFailure);
+                }
+            }
+        } else {
+            None
+        };
+
+        let full = GpuBox {
+            x: 0,
+            y: 0,
+            z: 0,
+            width,
+            height,
+            depth: 1,
+        };
+        let uploaded0 = gpu.transfer_virgl_resource(&mut color0, full, true).is_ok();
+        let uploaded1 = uploaded0 && gpu.transfer_virgl_resource(&mut color1, full, true).is_ok();
+        if !uploaded1 {
+            if let Some(depth) = depth.as_mut() {
+                let _ = gpu.destroy_virgl_resource(context, depth);
+            }
+            let _ = gpu.destroy_virgl_resource(context, &mut color1);
+            let _ = gpu.destroy_virgl_resource(context, &mut color0);
+            return Err(CompositionError::GpuFailure);
+        }
+
+        let initialize_pipeline = !self.client_pipeline_initialized;
+        let mut encoder = VirglCommandEncoder::new();
+        let encoded = (|| {
+            if initialize_pipeline {
+                encode_client_pipeline_create(&mut encoder)?;
+            }
+            encoder.create_surface(surface0, color0.id, FORMAT_B8G8R8A8_UNORM, 0, 0)?;
+            encoder.create_sampler_view(view0, color0.id, FORMAT_B8G8R8A8_UNORM)?;
+            encoder.create_surface(surface1, color1.id, FORMAT_B8G8R8A8_UNORM, 0, 0)?;
+            encoder.create_sampler_view(view1, color1.id, FORMAT_B8G8R8A8_UNORM)?;
+            if let (Some(surface), Some(resource), Some(format)) =
+                (depth_surface, depth.as_ref(), depth_format)
+            {
+                encoder.create_surface(surface, resource.id, format, 0, 0)?;
+            }
+            Ok::<(), crate::drivers::virtio::gpu::GpuError>(())
+        })();
+        if encoded.is_err() || gpu.submit_virgl(context, encoder.words()).is_err() {
+            if let Some(depth) = depth.as_mut() {
+                let _ = gpu.destroy_virgl_resource(context, depth);
+            }
+            let _ = gpu.destroy_virgl_resource(context, &mut color1);
+            let _ = gpu.destroy_virgl_resource(context, &mut color0);
+            return Err(CompositionError::GpuFailure);
+        }
+        if initialize_pipeline {
+            self.client_pipeline_initialized = true;
+        }
+
+        let id = ClientGlId(self.next_client_id);
+        self.next_client_id = self
+            .next_client_id
+            .checked_add(1)
+            .ok_or(CompositionError::SurfaceAllocation)?;
+        let supported_draw_flags = CLIENT_GL_DRAW_CULL_BACK
+            | if depth.is_some() {
+                CLIENT_GL_DRAW_DEPTH_TEST
+            } else {
+                0
+            };
+        self.clients.insert(
+            id,
+            ClientContext {
+                width,
+                height,
+                targets: [
+                    ClientTarget {
+                        resource: color0,
+                        surface: surface0,
+                        sampler_view: view0,
+                    },
+                    ClientTarget {
+                        resource: color1,
+                        surface: surface1,
+                        sampler_view: view1,
+                    },
+                ],
+                front: 0,
+                depth,
+                depth_surface,
+                vertex_resource: None,
+                vertex_capacity: 0,
+                pending: None,
+                info: ClientGlInfo {
+                    width,
+                    height,
+                    supported_draw_flags,
+                    ..ClientGlInfo::default()
+                },
+            },
+        );
+        Ok(id)
+    }
+
+    fn destroy_client_with_parts(
+        &mut self,
+        gpu: &mut VirtioGpu,
+        context: &mut VirglContext,
+        id: ClientGlId,
+    ) -> Result<(), CompositionError> {
+        let Some(mut client) = self.clients.remove(&id) else {
+            return Err(CompositionError::MissingClientSurface(id));
+        };
+        let mut encoder = VirglCommandEncoder::new();
+        let encoded = (|| {
+            encoder.clear_fragment_sampler_view()?;
+            for target in &client.targets {
+                encoder.destroy_object(OBJECT_SAMPLER_VIEW, target.sampler_view)?;
+                encoder.destroy_surface(target.surface)?;
+            }
+            if let Some(depth_surface) = client.depth_surface {
+                encoder.destroy_surface(depth_surface)?;
+            }
+            if self.clients.is_empty() && self.client_pipeline_initialized {
+                encode_client_pipeline_destroy(&mut encoder)?;
+            }
+            Ok::<(), crate::drivers::virtio::gpu::GpuError>(())
+        })();
+        if encoded.is_ok() {
+            let _ = gpu.submit_virgl(context, encoder.words());
+        }
+        if self.clients.is_empty() {
+            self.client_pipeline_initialized = false;
+        }
+        if let Some(mut vertices) = client.vertex_resource.take() {
+            let _ = gpu.destroy_virgl_resource(context, &mut vertices);
+        }
+        for target in &mut client.targets {
+            let _ = gpu.destroy_virgl_resource(context, &mut target.resource);
+        }
+        if let Some(mut depth) = client.depth.take() {
+            let _ = gpu.destroy_virgl_resource(context, &mut depth);
+        }
+        if encoded.is_err() {
+            Err(CompositionError::GpuFailure)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn render_pending_clients(
+        &mut self,
+        gpu: &mut VirtioGpu,
+        context: &mut VirglContext,
+    ) -> Result<(), CompositionError> {
+        let ids: Vec<ClientGlId> = self.clients.keys().copied().collect();
+        for id in ids {
+            let pending = self
+                .clients
+                .get_mut(&id)
+                .and_then(|client| client.pending.take());
+            let Some(frame) = pending else {
+                continue;
+            };
+            let Some(client) = self.clients.get_mut(&id) else {
+                continue;
+            };
+            if frame.width != client.width || frame.height != client.height {
+                client.info.last_error = -22;
+                continue;
+            }
+            if render_client_frame(gpu, context, client, &frame).is_err() {
+                client.info.last_error = -5;
+                return Err(CompositionError::GpuFailure);
+            }
+            client.front ^= 1;
+            client.info.last_completed_serial = frame.serial;
+            client.info.last_error = 0;
+        }
+        Ok(())
+    }
+
     fn compose_frame(
         &mut self,
         gpu: &mut VirtioGpu,
@@ -403,6 +724,7 @@ impl VirglCompositionEngine {
             .filter_map(|requested| requested.intersection(&bounds))
             .collect();
         let mut stats = RenderStats::default();
+        self.render_pending_clients(gpu, context)?;
         let upload_started = timestamp_cycles();
 
         let stale_ids: Vec<SurfaceId> = self
@@ -424,23 +746,26 @@ impl VirglCompositionEngine {
 
         let mut prepared_surfaces = BTreeSet::new();
         for layer in &scene.layers {
-            if !layer.visible || layer.opacity == 0 || !prepared_surfaces.insert(layer.surface_id) {
+            let LayerSource::Canonical(surface_id) = layer.source else {
+                continue;
+            };
+            if !layer.visible || layer.opacity == 0 || !prepared_surfaces.insert(surface_id) {
                 continue;
             }
             let source = surfaces
-                .get(&layer.surface_id)
-                .ok_or(CompositionError::MissingSurface(layer.surface_id))?;
+                .get(&surface_id)
+                .ok_or(CompositionError::MissingSurface(surface_id))?;
             let desc = source.desc();
             let cached_desc = self
                 .texture_cache
-                .get(&layer.surface_id)
+                .get(&surface_id)
                 .map(|cached| cached.desc);
 
             if cached_desc == Some(desc) {
                 stats.texture_cache_hits = stats.texture_cache_hits.saturating_add(1);
                 let cached = self
                     .texture_cache
-                    .get_mut(&layer.surface_id)
+                    .get_mut(&surface_id)
                     .ok_or(CompositionError::GpuFailure)?;
                 for &rect in source.damage() {
                     let Some(rect) = rect.intersection(&Rect::new(0, 0, desc.width, desc.height))
@@ -470,7 +795,7 @@ impl VirglCompositionEngine {
 
             let old_bytes = self
                 .texture_cache
-                .get(&layer.surface_id)
+                .get(&surface_id)
                 .map(|cached| cached.resource.backing.len())
                 .unwrap_or(0);
             let future_bytes = self
@@ -530,7 +855,7 @@ impl VirglCompositionEngine {
                 sampler_view,
                 sampler_view_live: false,
             };
-            if let Some(old) = self.texture_cache.insert(layer.surface_id, replacement) {
+            if let Some(old) = self.texture_cache.insert(surface_id, replacement) {
                 stats.texture_cache_replacements =
                     stats.texture_cache_replacements.saturating_add(1);
                 self.retired_textures.push(old);
@@ -556,9 +881,27 @@ impl VirglCompositionEngine {
             if !layer.visible || layer.opacity == 0 {
                 continue;
             }
-            let source = surfaces
-                .get(&layer.surface_id)
-                .ok_or(CompositionError::MissingSurface(layer.surface_id))?;
+            let (source_width, source_height, sampler_view) = match layer.source {
+                LayerSource::Canonical(surface_id) => {
+                    let source = surfaces
+                        .get(&surface_id)
+                        .ok_or(CompositionError::MissingSurface(surface_id))?;
+                    let view = self
+                        .texture_cache
+                        .get(&surface_id)
+                        .map(|cached| cached.sampler_view)
+                        .ok_or(CompositionError::GpuFailure)?;
+                    (source.width(), source.height(), view)
+                }
+                LayerSource::VirglClient(client_id) => {
+                    let client = self
+                        .clients
+                        .get(&client_id)
+                        .ok_or(CompositionError::MissingClientSurface(client_id))?;
+                    let target = &client.targets[client.front];
+                    (client.width, client.height, target.sampler_view)
+                }
+            };
             let layer_bounds = layer.output_bounds();
             let Some(scissor) = layer_bounds
                 .intersection(&layer.clip_rect)
@@ -572,14 +915,16 @@ impl VirglCompositionEngine {
             {
                 continue;
             }
-            let sampler_view = self
-                .texture_cache
-                .get(&layer.surface_id)
-                .map(|cached| cached.sampler_view)
-                .ok_or(CompositionError::GpuFailure)?;
             let first_vertex = u32::try_from(self.vertex_bytes.len() / 32)
                 .map_err(|_| CompositionError::SurfaceAllocation)?;
-            append_layer_vertices(&mut self.vertex_bytes, layer, width, height, source);
+            append_layer_vertices(
+                &mut self.vertex_bytes,
+                layer,
+                width,
+                height,
+                source_width,
+                source_height,
+            );
             prepared_layers.push(PreparedLayer {
                 sampler_view,
                 scissor,
@@ -649,6 +994,7 @@ impl VirglCompositionEngine {
                 )?;
             }
             encoder.set_framebuffer(OUTPUT_SURFACE)?;
+            encode_pipeline_bind(&mut encoder, width, height)?;
 
             if !sampler_views_to_destroy.is_empty() {
                 encoder.clear_fragment_sampler_view()?;
@@ -877,8 +1223,16 @@ impl CompositionEngine for VirglCompositionEngine {
             if layer.visible && !layer.transform.is_translation() {
                 return Err(CompositionError::UnsupportedTransform);
             }
-            if layer.visible && layer.opacity != 0 && !surfaces.contains_key(&layer.surface_id) {
-                return Err(CompositionError::MissingSurface(layer.surface_id));
+            if layer.visible && layer.opacity != 0 {
+                match layer.source {
+                    LayerSource::Canonical(id) if !surfaces.contains_key(&id) => {
+                        return Err(CompositionError::MissingSurface(id));
+                    }
+                    LayerSource::VirglClient(id) if !self.clients.contains_key(&id) => {
+                        return Err(CompositionError::MissingClientSurface(id));
+                    }
+                    _ => {}
+                }
             }
             if layer.visible
                 && matches!(
@@ -940,6 +1294,55 @@ impl CompositionEngine for VirglCompositionEngine {
 
     fn output_mut(&mut self) -> &mut Surface {
         &mut self.output
+    }
+
+    fn create_gl_client(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<ClientGlId, CompositionError> {
+        let Some(mut gpu) = self.gpu.take() else {
+            return Err(CompositionError::GpuFailure);
+        };
+        let Some(mut context) = self.context.take() else {
+            self.gpu = Some(gpu);
+            return Err(CompositionError::GpuFailure);
+        };
+        let result = self.create_client_with_parts(&mut gpu, &mut context, width, height);
+        self.gpu = Some(gpu);
+        self.context = Some(context);
+        result
+    }
+
+    fn submit_gl_client_frame(
+        &mut self,
+        id: ClientGlId,
+        frame: ClientGlFrame,
+    ) -> Result<(), CompositionError> {
+        let client = self
+            .clients
+            .get_mut(&id)
+            .ok_or(CompositionError::MissingClientSurface(id))?;
+        client.pending = Some(frame);
+        Ok(())
+    }
+
+    fn gl_client_info(&self, id: ClientGlId) -> Option<ClientGlInfo> {
+        self.clients.get(&id).map(|client| client.info)
+    }
+
+    fn destroy_gl_client(&mut self, id: ClientGlId) -> Result<(), CompositionError> {
+        let Some(mut gpu) = self.gpu.take() else {
+            return Err(CompositionError::GpuFailure);
+        };
+        let Some(mut context) = self.context.take() else {
+            self.gpu = Some(gpu);
+            return Err(CompositionError::GpuFailure);
+        };
+        let result = self.destroy_client_with_parts(&mut gpu, &mut context, id);
+        self.gpu = Some(gpu);
+        self.context = Some(context);
+        result
     }
 
     fn uses_direct_scanout(&self) -> bool {
@@ -1059,6 +1462,173 @@ impl CompositionEngine for VirglCompositionEngine {
     }
 }
 
+fn render_client_frame(
+    gpu: &mut VirtioGpu,
+    context: &mut VirglContext,
+    client: &mut ClientContext,
+    frame: &ClientGlFrame,
+) -> Result<(), CompositionError> {
+    let byte_len = frame
+        .vertices
+        .len()
+        .checked_mul(core::mem::size_of::<super::ClientGlVertex>())
+        .ok_or(CompositionError::SurfaceAllocation)?;
+    let mut retired_vertex = None;
+    if byte_len != 0 && byte_len > client.vertex_capacity {
+        let capacity = byte_len
+            .max(CLIENT_MIN_VERTEX_BUFFER_BYTES)
+            .checked_next_power_of_two()
+            .ok_or(CompositionError::SurfaceAllocation)?;
+        let width = u32::try_from(capacity).map_err(|_| CompositionError::SurfaceAllocation)?;
+        let resource = gpu
+            .create_virgl_resource(
+                context,
+                PIPE_BUFFER,
+                FORMAT_R8_UNORM,
+                PIPE_BIND_VERTEX_BUFFER,
+                width,
+                1,
+                capacity,
+            )
+            .map_err(|_| CompositionError::GpuFailure)?;
+        retired_vertex = client.vertex_resource.replace(resource);
+        client.vertex_capacity = capacity;
+    }
+
+    let back = client.front ^ 1;
+    let mut encoder = VirglCommandEncoder::new();
+    if let Some(depth_surface) = client.depth_surface {
+        encoder
+            .set_framebuffer_with_depth(client.targets[back].surface, depth_surface)
+            .map_err(|_| CompositionError::GpuFailure)?;
+    } else {
+        encoder
+            .set_framebuffer(client.targets[back].surface)
+            .map_err(|_| CompositionError::GpuFailure)?;
+    }
+    encoder
+        .bind_object(OBJECT_VERTEX_ELEMENTS, CLIENT_VERTEX_ELEMENTS)
+        .map_err(|_| CompositionError::GpuFailure)?;
+    encoder
+        .bind_shader(CLIENT_VERTEX_SHADER, VERTEX_SHADER)
+        .map_err(|_| CompositionError::GpuFailure)?;
+    encoder
+        .bind_shader(CLIENT_FRAGMENT_SHADER, FRAGMENT_SHADER)
+        .map_err(|_| CompositionError::GpuFailure)?;
+    encoder
+        .bind_object(OBJECT_BLEND, CLIENT_BLEND)
+        .map_err(|_| CompositionError::GpuFailure)?;
+    encoder
+        .set_gl_viewport_rect(
+            frame.viewport.x as u32,
+            frame.viewport.y as u32,
+            frame.viewport.width,
+            frame.viewport.height,
+        )
+        .map_err(|_| CompositionError::GpuFailure)?;
+    encoder
+        .set_scissor(0, 0, client.width as u16, client.height as u16)
+        .map_err(|_| CompositionError::GpuFailure)?;
+    if client.depth_surface.is_some() {
+        encoder
+            .clear_color_depth(frame.clear_color, frame.clear_depth)
+            .map_err(|_| CompositionError::GpuFailure)?;
+    } else {
+        encoder
+            .clear_color(
+                crate::drivers::virtio::gpu::virgl::commands::ClearColor::from_array(
+                    frame.clear_color,
+                ),
+            )
+            .map_err(|_| CompositionError::GpuFailure)?;
+    }
+
+    if !frame.vertices.is_empty() {
+        let mut bytes = Vec::with_capacity(byte_len);
+        for vertex in &frame.vertices {
+            for value in vertex.position.into_iter().chain(vertex.color) {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let vertices = client
+            .vertex_resource
+            .as_ref()
+            .ok_or(CompositionError::GpuFailure)?;
+        encoder
+            .inline_write_buffer(vertices.id, &bytes)
+            .map_err(|_| CompositionError::GpuFailure)?;
+        encoder
+            .set_vertex_buffer(vertices.id, CLIENT_VERTEX_STRIDE)
+            .map_err(|_| CompositionError::GpuFailure)?;
+        for draw in &frame.draws {
+            encoder
+                .bind_object(
+                    OBJECT_DSA,
+                    if client.depth_surface.is_some() && draw.flags & CLIENT_GL_DRAW_DEPTH_TEST != 0
+                    {
+                        CLIENT_DSA_DEPTH
+                    } else {
+                        CLIENT_DSA_DISABLED
+                    },
+                )
+                .map_err(|_| CompositionError::GpuFailure)?;
+            encoder
+                .bind_object(
+                    OBJECT_RASTERIZER,
+                    if draw.flags & CLIENT_GL_DRAW_CULL_BACK != 0 {
+                        CLIENT_RASTERIZER_CULL
+                    } else {
+                        CLIENT_RASTERIZER
+                    },
+                )
+                .map_err(|_| CompositionError::GpuFailure)?;
+            encoder
+                .draw_triangles_from(draw.first_vertex, draw.vertex_count)
+                .map_err(|_| CompositionError::GpuFailure)?;
+        }
+    }
+    gpu.submit_virgl(context, encoder.words())
+        .map_err(|_| CompositionError::GpuFailure)?;
+    if let Some(mut retired) = retired_vertex {
+        gpu.destroy_virgl_resource(context, &mut retired)
+            .map_err(|_| CompositionError::GpuFailure)?;
+    }
+    Ok(())
+}
+
+fn encode_client_pipeline_create(
+    encoder: &mut VirglCommandEncoder,
+) -> Result<(), crate::drivers::virtio::gpu::GpuError> {
+    encoder.create_vertex_elements(
+        CLIENT_VERTEX_ELEMENTS,
+        &[
+            (0, 0, FORMAT_R32G32B32A32_FLOAT),
+            (16, 0, FORMAT_R32G32B32A32_FLOAT),
+        ],
+    )?;
+    encoder.create_shader(CLIENT_VERTEX_SHADER, VERTEX_SHADER, CLIENT_VS)?;
+    encoder.create_shader(CLIENT_FRAGMENT_SHADER, FRAGMENT_SHADER, CLIENT_FS)?;
+    encoder.link_shaders(CLIENT_VERTEX_SHADER, CLIENT_FRAGMENT_SHADER)?;
+    encoder.create_replace_blend(CLIENT_BLEND)?;
+    encoder.create_disabled_dsa(CLIENT_DSA_DISABLED)?;
+    encoder.create_depth_less_dsa(CLIENT_DSA_DEPTH)?;
+    encoder.create_rasterizer(CLIENT_RASTERIZER, true)?;
+    encoder.create_rasterizer_cull_back(CLIENT_RASTERIZER_CULL, true)
+}
+
+fn encode_client_pipeline_destroy(
+    encoder: &mut VirglCommandEncoder,
+) -> Result<(), crate::drivers::virtio::gpu::GpuError> {
+    encoder.destroy_object(OBJECT_RASTERIZER, CLIENT_RASTERIZER_CULL)?;
+    encoder.destroy_object(OBJECT_RASTERIZER, CLIENT_RASTERIZER)?;
+    encoder.destroy_object(OBJECT_DSA, CLIENT_DSA_DEPTH)?;
+    encoder.destroy_object(OBJECT_DSA, CLIENT_DSA_DISABLED)?;
+    encoder.destroy_object(OBJECT_BLEND, CLIENT_BLEND)?;
+    encoder.destroy_object(OBJECT_SHADER, CLIENT_FRAGMENT_SHADER)?;
+    encoder.destroy_object(OBJECT_SHADER, CLIENT_VERTEX_SHADER)?;
+    encoder.destroy_object(OBJECT_VERTEX_ELEMENTS, CLIENT_VERTEX_ELEMENTS)
+}
+
 fn encode_pipeline_create(
     encoder: &mut VirglCommandEncoder,
     output_resource: u32,
@@ -1107,6 +1677,20 @@ fn encode_pipeline_create(
     encoder.create_disabled_dsa(DSA_STATE)?;
     encoder.bind_object(OBJECT_DSA, DSA_STATE)?;
     encoder.create_rasterizer(RASTERIZER_STATE, true)?;
+    encode_pipeline_bind(encoder, width, height)
+}
+
+fn encode_pipeline_bind(
+    encoder: &mut VirglCommandEncoder,
+    width: u32,
+    height: u32,
+) -> Result<(), crate::drivers::virtio::gpu::GpuError> {
+    encoder.bind_object(OBJECT_VERTEX_ELEMENTS, VERTEX_ELEMENTS)?;
+    encoder.bind_shader(VERTEX_SHADER_HANDLE, VERTEX_SHADER)?;
+    encoder.bind_shader(FRAGMENT_SHADER_HANDLE, FRAGMENT_SHADER)?;
+    encoder.bind_fragment_sampler_state(SAMPLER_STATE)?;
+    encoder.bind_object(OBJECT_BLEND, BLEND_STATE)?;
+    encoder.bind_object(OBJECT_DSA, DSA_STATE)?;
     encoder.bind_object(OBJECT_RASTERIZER, RASTERIZER_STATE)?;
     encoder.set_viewport(width, height)
 }
@@ -1244,6 +1828,11 @@ impl Drop for VirglCompositionEngine {
             self.scanout_active = false;
         }
 
+        let client_ids: Vec<ClientGlId> = self.clients.keys().copied().collect();
+        for id in client_ids {
+            let _ = self.destroy_client_with_parts(&mut gpu, &mut context, id);
+        }
+
         let live_sampler_views: Vec<u32> = self
             .texture_cache
             .values()
@@ -1300,22 +1889,41 @@ impl Drop for VirglCompositionEngine {
     }
 }
 
+fn capset_supports_depth_format(capset: &[u8], format: u32) -> bool {
+    // virgl_caps_v1 starts with max_version, then 16-word sampler, render,
+    // depth/stencil, and vertex-buffer format masks. Capset 2 embeds v1 at
+    // offset zero, so the same bounded lookup works for both advertised IDs.
+    const MASK_WORDS: usize = 16;
+    const DEPTH_MASK_OFFSET: usize = 4 + MASK_WORDS * 4 + MASK_WORDS * 4;
+    let word = format as usize / 32;
+    if word >= MASK_WORDS {
+        return false;
+    }
+    let offset = DEPTH_MASK_OFFSET + word * 4;
+    let Some(bytes) = capset.get(offset..offset + 4) else {
+        return false;
+    };
+    let bits = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    bits & (1 << (format % 32)) != 0
+}
+
 fn append_layer_vertices(
     bytes: &mut Vec<u8>,
     layer: &crate::graphics::scene::Layer,
     output_width: u32,
     output_height: u32,
-    source: &Surface,
+    source_width: u32,
+    source_height: u32,
 ) {
     let bounds = layer.output_bounds();
     let left = screen_to_ndc_x(bounds.x, output_width);
     let right = screen_to_ndc_x(bounds.right(), output_width);
     let top = screen_to_ndc_y(bounds.y, output_height);
     let bottom = screen_to_ndc_y(bounds.bottom(), output_height);
-    let u0 = layer.source_rect.x.max(0) as f32 / source.width() as f32;
-    let v0 = layer.source_rect.y.max(0) as f32 / source.height() as f32;
-    let u1 = layer.source_rect.right().max(0) as f32 / source.width() as f32;
-    let v1 = layer.source_rect.bottom().max(0) as f32 / source.height() as f32;
+    let u0 = layer.source_rect.x.max(0) as f32 / source_width as f32;
+    let v0 = layer.source_rect.y.max(0) as f32 / source_height as f32;
+    let u1 = layer.source_rect.right().max(0) as f32 / source_width as f32;
+    let v1 = layer.source_rect.bottom().max(0) as f32 / source_height as f32;
     let opacity = layer.opacity as f32 / u8::MAX as f32;
     let vertices = [
         ([left, top, 0.0, 1.0], [u0, v0, opacity, 1.0]),

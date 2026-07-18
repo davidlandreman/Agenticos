@@ -33,7 +33,7 @@ use crate::arch::x86_64::syscall::SyscallArgs;
 use crate::userland::abi::{
     validate_user_slice, EACCES, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINTR, EINVAL, EIO, EISDIR,
     EMFILE, ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EOPNOTSUPP, EPERM, ERANGE,
-    EROFS, ESPIPE, EXDEV, LAST_EXIT_CODE,
+    EROFS, ESPIPE, ESRCH, EXDEV, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
 use crate::userland::path::{copy_user_cstr, normalize_path};
@@ -102,10 +102,14 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
     let target = match slot {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Target::StdoutErr,
         Some(FdSlot::File { handle, .. }) => Target::File(handle),
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. }) => return EISDIR,
         Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
+        // /proc snapshots are read-only.
+        Some(FdSlot::VirtualFile { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
 
@@ -196,10 +200,14 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
     let target = match with_fd_slot(fd) {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Target::StdoutErr,
         Some(FdSlot::File { handle, .. }) => Target::File(handle),
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. }) => return EISDIR,
         Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
+        // /proc snapshots are read-only.
+        Some(FdSlot::VirtualFile { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
     if iovcnt < 0 || iovcnt as usize > WRITEV_MAX_IOV {
@@ -350,7 +358,28 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
     match slot {
         Some(FdSlot::Stdin) => read_stdin_blocking(args, ptr, cap),
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => EBADF,
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. }) => EISDIR,
+        Some(FdSlot::VirtualFile { data, cursor, .. }) => {
+            // Serve from the open-time snapshot; advance the per-fd
+            // cursor. Returns 0 at EOF like a regular file.
+            let start = cursor.min(data.len());
+            let n = core::cmp::min(cap as usize, data.len() - start);
+            if n > 0 {
+                if let Err(e) =
+                    crate::userland::usercopy::copy_to_user(ptr, &data[start..start + n])
+                {
+                    return e;
+                }
+                with_fd_table_mut(|t| {
+                    if let Some(FdSlot::VirtualFile { cursor: c, .. }) = t.get_mut(fd) {
+                        *c = start + n;
+                    }
+                });
+            }
+            n as i64
+        }
         Some(FdSlot::PipeRead(handle, _)) => {
             // Drain bytes from the pipe. EOF when empty *and* no
             // writers remain. When empty but writers exist, block via
@@ -1175,6 +1204,10 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         // U3: child shares parent's exe path (fork doesn't change the
         // running binary; execve replaces it).
         exe_path: parent.exe_path.clone(),
+        cmdline: parent.cmdline.clone(),
+        // CPU time is per-process, not inherited (POSIX: child's
+        // tms_utime starts at zero).
+        utime_ticks: 0,
         // Demand-grown stack: child inherits the parent's exact stack
         // window. The parent's stack pages already copied into the
         // child's L4 via AddressSpace::clone_for_child above.
@@ -1405,6 +1438,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         // U3: exec replaces the running binary, so /proc/self/exe now
         // points at the new program. argv[0] is the canonical name.
         p.exe_path = Some(String::from(argv_refs[0]));
+        p.cmdline = crate::userland::lifecycle::capped_cmdline(&argv_refs);
         // Phase 5 PR-B: POSIX semantics — exec resets signal
         // dispositions but preserves the blocked mask. Pending
         // signals are also preserved across exec.
@@ -1485,29 +1519,27 @@ pub fn kill_handler(args: &mut SyscallArgs) -> i64 {
     if sig < 0 || (sig as usize) > crate::userland::signal::NSIG {
         return EINVAL;
     }
-    let me = crate::userland::lifecycle::current_pid() as i32;
-    if pid == me {
-        if sig == 0 {
-            return 0;
-        }
-        crate::userland::lifecycle::with_current_process(|p| p.signal_state.raise(sig));
-        return 0;
+    // No process groups: pid must name one live ring-3 process. The
+    // single-user model has no permission checks — any process may
+    // signal any other (this is what lets a ring-3 task manager
+    // implement End Task through the ordinary kill path).
+    if pid <= 0 {
+        return ESRCH;
     }
-    // U7: deliver to the parent in the regular PROCESS_TABLE (formerly
-    // the PARENT_STASH slot). Returns ESRCH if `pid` doesn't match our
-    // direct parent — kill(any, sig) lookup across arbitrary PIDs is
-    // out of scope for this kernel.
-    let parent_pid = crate::userland::lifecycle::with_current_process(|p| p.parent_pid as i32);
-    if parent_pid == pid && pid != 0 {
-        if sig == 0 {
-            return 0;
+    let raised = crate::userland::lifecycle::with_process(pid as u32, |target| {
+        if sig != 0 {
+            target.signal_state.raise(sig);
         }
-        let _ = crate::userland::lifecycle::with_process(pid as u32, |parent| {
-            parent.signal_state.raise(sig);
-        });
-        return 0;
+    });
+    if raised.is_none() {
+        return ESRCH;
     }
-    -3 // ESRCH
+    if sig != 0 && pid != crate::userland::lifecycle::current_pid() as i32 {
+        // If the target is parked in a blocking syscall, unblock it so
+        // the pending signal is examined at its next dispatcher entry.
+        crate::userland::lifecycle::wake_ring3_for_signal(pid as u32);
+    }
+    0
 }
 
 /// `tkill(tid, sig)` — single-threaded model: same as `kill(tid,
@@ -1766,6 +1798,34 @@ pub fn maybe_deliver_signal(args: &SyscallArgs, syscall_ret: i64) -> Option<i64>
         crate::userland::lifecycle::current_user_pid().is_some(),
         "maybe_deliver_signal called with no current ring-3 process — would deliver to sentinel"
     );
+    // Fatal default dispositions first: a pending unblocked signal
+    // with no handler whose default action terminates (SIGKILL,
+    // SIGTERM without a trap, …) kills the process here, before the
+    // handler-delivery path runs. Only a real nonzero ring-3 PID may
+    // take the divergent exit path (same guard as exit_group_handler
+    // — synthetic dispatcher tests have no scheduler context to yield
+    // from).
+    if matches!(
+        crate::userland::lifecycle::current_user_pid(),
+        Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID
+    ) {
+        let fatal = crate::userland::lifecycle::with_current_process(|p| {
+            p.signal_state.take_fatal_default()
+        });
+        if let Some(sig) = fatal {
+            let (pid, parent_pid) =
+                crate::userland::lifecycle::with_active_user(|au| (au.pid, au.parent_pid));
+            let code = 128 + sig as i64; // shell convention for the exit code
+            crate::debug_info!(
+                "USERLAND: pid={} killed by signal {} (default action)",
+                pid,
+                sig
+            );
+            *LAST_EXIT_CODE.lock() = Some(code);
+            crate::userland::lifecycle::notify_parent_of_signaled_exit(pid, parent_pid, sig, code);
+            crate::userland::lifecycle::cooperative_exit(code);
+        }
+    }
     let prepared = crate::userland::lifecycle::with_current_process(|p| {
         let (sig, action) = p.signal_state.consume_deliverable()?;
         let old_blocked = p.signal_state.blocked;
@@ -2016,8 +2076,8 @@ const _R_OK: u32 = 4;
 const _W_OK: u32 = 2;
 const _X_OK: u32 = 1;
 
-/// `clock_gettime` clock IDs we recognize. Both anchor at boot for now;
-/// real wall-clock will arrive when an RTC or NTP source is wired up.
+/// `clock_gettime` clock IDs we recognize. Realtime is anchored to the boot
+/// RTC snapshot; monotonic remains PIT uptime.
 const CLOCK_REALTIME: i32 = 0;
 const CLOCK_MONOTONIC: i32 = 1;
 
@@ -2134,13 +2194,6 @@ fn resolve_user_path(ptr: u64) -> Result<String, i64> {
     Ok(with_cwd(|cwd| normalize_path(cwd, &raw)))
 }
 
-/// Coarse monotonic clock — `timer_ticks * 10ms`. Wall-clock equivalence
-/// is intentional: we have no RTC/NTP, so realtime starts at 0 too.
-fn monotonic_ns() -> u64 {
-    let ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
-    ticks.saturating_mul(10_000_000)
-}
-
 // ---------- open / openat / close ----------
 
 /// `open(path, flags, mode) -> int`. Equivalent to `openat(AT_FDCWD, …)`.
@@ -2175,12 +2228,45 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
         if is_bin_dir(&path) || apply_bin_rewrite(&path).is_some() {
             return EPERM;
         }
+        // /proc is synthesized and strictly read-only.
+        if crate::userland::procfs::is_proc_path(&path) {
+            return EACCES;
+        }
         if crate::userland::etc::is_managed_path(&path) {
             return EROFS;
         }
         if !crate::fs::vfs::vfs_is_writable(&path) {
             return EROFS;
         }
+    }
+
+    // Synthetic /proc namespace: content (or the directory listing) is
+    // generated once here — the fd owns the snapshot.
+    if crate::userland::procfs::is_proc_path(&path) {
+        use crate::lib::arc::Arc;
+        return match crate::userland::procfs::open_node(&path) {
+            Some(crate::userland::procfs::ProcNode::File(data)) => with_fd_table_mut(|t| {
+                t.alloc(FdSlot::VirtualFile {
+                    data: Arc::new(data),
+                    path: Arc::new(path.clone()),
+                    cursor: 0,
+                    cloexec,
+                })
+            })
+            .map(|fd| fd as i64)
+            .unwrap_or(EMFILE),
+            Some(crate::userland::procfs::ProcNode::Dir(entries)) => with_fd_table_mut(|t| {
+                t.alloc(FdSlot::VirtualDir {
+                    entries: Arc::new(entries),
+                    path: Arc::new(path.clone()),
+                    cursor: 0,
+                    cloexec,
+                })
+            })
+            .map(|fd| fd as i64)
+            .unwrap_or(EMFILE),
+            None => ENOENT,
+        };
     }
 
     // Virtual /bin namespace: opening /bin returns a directory FD that
@@ -2304,6 +2390,11 @@ fn managed_etc_mutation_check(path: &str) -> Option<i64> {
     crate::userland::etc::is_managed_path(path).then_some(EPERM)
 }
 
+/// The synthesized `/proc` namespace rejects every mutation.
+fn proc_namespace_mutation_check(path: &str) -> Option<i64> {
+    crate::userland::procfs::is_proc_path(path).then_some(EPERM)
+}
+
 pub fn mkdir_handler(args: &mut SyscallArgs) -> i64 {
     let path = match resolve_user_path(args.rdi) {
         Ok(p) => p,
@@ -2313,6 +2404,9 @@ pub fn mkdir_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = managed_etc_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = proc_namespace_mutation_check(&path) {
         return e;
     }
     match crate::fs::vfs::vfs_mkdir(&path) {
@@ -2349,6 +2443,9 @@ pub fn rmdir_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(e) = managed_etc_mutation_check(&path) {
         return e;
     }
+    if let Some(e) = proc_namespace_mutation_check(&path) {
+        return e;
+    }
     if path == "/" {
         return EBUSY;
     }
@@ -2367,6 +2464,9 @@ pub fn unlink_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = managed_etc_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = proc_namespace_mutation_check(&path) {
         return e;
     }
     match crate::fs::vfs::vfs_unlink(&path) {
@@ -2389,6 +2489,9 @@ pub fn unlinkat_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = managed_etc_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = proc_namespace_mutation_check(&path) {
         return e;
     }
     // AT_REMOVEDIR = 0x200
@@ -2421,6 +2524,12 @@ pub fn rename_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = bin_namespace_mutation_check(&new) {
+        return e;
+    }
+    if let Some(e) = proc_namespace_mutation_check(&old) {
+        return e;
+    }
+    if let Some(e) = proc_namespace_mutation_check(&new) {
         return e;
     }
     if let Some(e) = managed_etc_mutation_check(&old) {
@@ -2631,7 +2740,29 @@ pub fn pread64_handler(args: &mut SyscallArgs) -> i64 {
     let offset = args.r10;
     let handle = match with_fd_slot(fd) {
         Some(FdSlot::File { handle, .. }) => handle,
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. }) => return EISDIR,
+        Some(FdSlot::VirtualFile { data, .. }) => {
+            // Positional read from the open-time snapshot; per-fd
+            // cursor untouched, mirroring pread semantics.
+            if len > WRITE_MAX_LEN as u64 {
+                return EFAULT;
+            }
+            if len == 0 {
+                return 0;
+            }
+            let start = (offset as usize).min(data.len());
+            let n = core::cmp::min(len as usize, data.len() - start);
+            if n > 0 {
+                if let Err(e) =
+                    crate::userland::usercopy::copy_to_user(ptr, &data[start..start + n])
+                {
+                    return e;
+                }
+            }
+            return n as i64;
+        }
         Some(_) | None => return EBADF,
     };
     if len > WRITE_MAX_LEN as u64 {
@@ -2837,6 +2968,36 @@ pub fn lseek_handler(args: &mut SyscallArgs) -> i64 {
             return ESPIPE;
         }
         Some(FdSlot::PipeRead(_, _)) | Some(FdSlot::PipeWrite(_, _)) => return ESPIPE,
+        Some(FdSlot::VirtualFile { data, cursor, .. }) => {
+            // Snapshot-backed /proc file: seek within [0, len].
+            let new_pos: i64 = match whence {
+                SEEK_SET => offset,
+                SEEK_CUR => (cursor as i64).saturating_add(offset),
+                SEEK_END => (data.len() as i64).saturating_add(offset),
+                _ => return EINVAL,
+            };
+            if new_pos < 0 {
+                return EINVAL;
+            }
+            let clamped = (new_pos as usize).min(data.len());
+            with_fd_table_mut(|t| {
+                if let Some(FdSlot::VirtualFile { cursor: c, .. }) = t.get_mut(fd) {
+                    *c = clamped;
+                }
+            });
+            return clamped as i64;
+        }
+        Some(FdSlot::VirtualDir { .. }) => {
+            if whence == SEEK_SET && offset == 0 {
+                with_fd_table_mut(|t| {
+                    if let Some(FdSlot::VirtualDir { cursor, .. }) = t.get_mut(fd) {
+                        *cursor = 0;
+                    }
+                });
+                return 0;
+            }
+            return ESPIPE;
+        }
         Some(_) => return ESPIPE,
         None => return EBADF,
     };
@@ -2991,6 +3152,12 @@ pub fn stat_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(st) = stat_virtual_bin(&path) {
         return write_stat(out_ptr, &st);
     }
+    if crate::userland::procfs::is_proc_path(&path) {
+        return match stat_virtual_proc(&path) {
+            Some(st) => write_stat(out_ptr, &st),
+            None => ENOENT,
+        };
+    }
     let meta = match crate::fs::vfs::vfs_unix_metadata(&path) {
         Ok(m) => m,
         Err(ref e) => return map_filesystem_err(e),
@@ -3007,11 +3174,37 @@ pub fn lstat_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(stat) = stat_virtual_bin(&path) {
         return write_stat(args.rsi, &stat);
     }
+    if crate::userland::procfs::is_proc_path(&path) {
+        return match stat_virtual_proc(&path) {
+            Some(stat) => write_stat(args.rsi, &stat),
+            None => ENOENT,
+        };
+    }
     let metadata = match crate::fs::vfs::vfs_symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(ref error) => return map_filesystem_err(error),
     };
     write_stat(args.rsi, &fill_unix_stat(&metadata))
+}
+
+/// Synthesize a `LinuxStat` for the `/proc` namespace. Files report
+/// `st_size = 0` like Linux procfs — readers must loop `read()` to
+/// EOF rather than sizing buffers off stat.
+fn stat_virtual_proc(path: &str) -> Option<LinuxStat> {
+    let kind = crate::userland::procfs::classify(path)?;
+    let mut st = LinuxStat::default();
+    match kind {
+        crate::userland::procfs::ProcNodeKind::Dir => {
+            st.st_mode = S_IFDIR | PERM_RX_ALL;
+            st.st_nlink = 2;
+        }
+        crate::userland::procfs::ProcNodeKind::File => {
+            st.st_mode = S_IFREG | PERM_READ_ALL;
+            st.st_nlink = 1;
+        }
+    }
+    st.st_blksize = 4096;
+    Some(st)
 }
 
 /// Synthesize a `LinuxStat` for the virtual `/bin` namespace. Returns
@@ -3115,6 +3308,24 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
             let st = stat_virtual_bin("/bin").expect("/bin is always virtual");
             write_stat(out_ptr, &st)
         }
+        Some(FdSlot::VirtualFile { data, .. }) => {
+            // For an open fd we know the snapshot length — report it,
+            // unlike path-stat which returns 0 (Linux procfs parity).
+            let mut st = LinuxStat::default();
+            st.st_mode = S_IFREG | PERM_READ_ALL;
+            st.st_nlink = 1;
+            st.st_size = data.len() as i64;
+            st.st_blksize = 4096;
+            st.st_blocks = (st.st_size + 511) / 512;
+            write_stat(out_ptr, &st)
+        }
+        Some(FdSlot::VirtualDir { .. }) => {
+            let mut st = LinuxStat::default();
+            st.st_mode = S_IFDIR | PERM_RX_ALL;
+            st.st_nlink = 2;
+            st.st_blksize = 4096;
+            write_stat(out_ptr, &st)
+        }
         None => EBADF,
     }
 }
@@ -3139,6 +3350,12 @@ pub fn newfstatat_handler(args: &mut SyscallArgs) -> i64 {
     };
     if let Some(st) = stat_virtual_bin(&path) {
         return write_stat(out_ptr, &st);
+    }
+    if crate::userland::procfs::is_proc_path(&path) {
+        return match stat_virtual_proc(&path) {
+            Some(st) => write_stat(out_ptr, &st),
+            None => ENOENT,
+        };
     }
     let meta = match if flags & AT_SYMLINK_NOFOLLOW != 0 {
         crate::fs::vfs::vfs_symlink_metadata(&path)
@@ -3180,6 +3397,13 @@ fn access_common(path_ptr: u64) -> i64 {
         || crate::userland::bin_namespace::apply_bin_rewrite(&path).is_some()
     {
         return 0;
+    }
+    if crate::userland::procfs::is_proc_path(&path) {
+        return if crate::userland::procfs::classify(&path).is_some() {
+            0
+        } else {
+            ENOENT
+        };
     }
     if crate::fs::exists(&path) {
         0
@@ -3271,7 +3495,11 @@ pub fn clock_gettime_handler(args: &mut SyscallArgs) -> i64 {
     if clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC {
         return EINVAL;
     }
-    let ns = monotonic_ns();
+    let ns = if clk == CLOCK_REALTIME {
+        crate::time::realtime_ns()
+    } else {
+        crate::time::monotonic_ns()
+    };
     let ts = LinuxTimespec {
         tv_sec: (ns / 1_000_000_000) as i64,
         tv_nsec: (ns % 1_000_000_000) as i64,
@@ -3285,7 +3513,7 @@ pub fn gettimeofday_handler(args: &mut SyscallArgs) -> i64 {
     if tv_ptr == 0 {
         return 0;
     }
-    let ns = monotonic_ns();
+    let ns = crate::time::realtime_ns();
     let tv = LinuxTimeval {
         tv_sec: (ns / 1_000_000_000) as i64,
         tv_usec: ((ns % 1_000_000_000) / 1_000) as i64,
@@ -3308,7 +3536,7 @@ pub fn getrandom_handler(args: &mut SyscallArgs) -> i64 {
     let cap = core::cmp::min(len, 4096);
     let mut bytes = alloc::vec![0u8; cap as usize];
     // xorshift64* — small, fast, deterministic enough for libc seed needs.
-    let mut state: u64 = monotonic_ns() ^ 0x9E37_79B9_7F4A_7C15;
+    let mut state: u64 = crate::time::monotonic_ns() ^ 0x9E37_79B9_7F4A_7C15;
     if state == 0 {
         state = 0xDEAD_BEEF_CAFE_BABE;
     }
@@ -3453,6 +3681,71 @@ fn getdents64_virtual_bin(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
     )
 }
 
+/// `getdents64` dispatch for synthesized `/proc` directories
+/// (`FdSlot::VirtualDir`). Same record format and cursor encoding as
+/// `getdents64_virtual_bin`: cursor 0/1 emit `.`/`..`, cursor `n ≥ 2`
+/// emits `entries[n - 2]`. Returns `None` to fall through.
+fn getdents64_virtual_dir(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
+    let (entries, dir_path, start) = with_fd_table_mut(|t| match t.get(fd) {
+        Some(FdSlot::VirtualDir {
+            entries,
+            path,
+            cursor,
+            ..
+        }) => Some((entries.clone(), path.clone(), *cursor)),
+        _ => None,
+    })?;
+    let total_records = entries.len() + 2;
+    if start >= total_records {
+        return Some(0);
+    }
+
+    let mut staging: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(cap);
+    let mut cursor = start;
+    let parent_seed = fnv1a_64(0xcbf2_9ce4_8422_2325, dir_path.as_bytes());
+
+    while cursor < total_records {
+        let (name, d_type) = match cursor {
+            0 => (".".as_bytes(), DT_DIR),
+            1 => ("..".as_bytes(), DT_DIR),
+            n => {
+                let (name, is_dir) = &entries[n - 2];
+                (name.as_bytes(), if *is_dir { DT_DIR } else { DT_REG })
+            }
+        };
+        let reclen = align_up_8(DIRENT_HEADER_SIZE + name.len() + 1);
+        if staging.len() + reclen > cap {
+            break;
+        }
+        let d_ino = fnv1a_64(parent_seed, name);
+        let next_cursor = (cursor + 1) as u64;
+        staging.extend_from_slice(&d_ino.to_ne_bytes());
+        staging.extend_from_slice(&next_cursor.to_ne_bytes());
+        staging.extend_from_slice(&(reclen as u16).to_ne_bytes());
+        staging.push(d_type);
+        staging.extend_from_slice(name);
+        staging.push(0);
+        while staging.len() % 8 != 0 {
+            staging.push(0);
+        }
+        cursor += 1;
+    }
+
+    if staging.is_empty() {
+        return Some(EINVAL);
+    }
+
+    with_fd_table_mut(|t| {
+        if let Some(FdSlot::VirtualDir { cursor: c, .. }) = t.get_mut(fd) {
+            *c = cursor;
+        }
+    });
+    Some(
+        crate::userland::usercopy::copy_to_user(dirp, &staging)
+            .map_or_else(|e| e, |_| staging.len() as i64),
+    )
+}
+
 pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
     use crate::fs::filesystem::FileType;
     let fd = args.rdi as i32;
@@ -3470,6 +3763,11 @@ pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
     // Virtual /bin dispatches before the FAT directory path because its
     // FD slot is a different variant — no FAT entries to read.
     if let Some(written) = getdents64_virtual_bin(fd, dirp, cap as usize) {
+        return written;
+    }
+    // Synthetic /proc directories carry their listing snapshot in the
+    // fd slot itself.
+    if let Some(written) = getdents64_virtual_dir(fd, dirp, cap as usize) {
         return written;
     }
 
@@ -3851,6 +4149,7 @@ fn resolve_proc_self_fd(fd: i32) -> Option<String> {
         FdSlot::PipeRead(_, _) | FdSlot::PipeWrite(_, _) => String::from("pipe:[0]"),
         FdSlot::VirtualBinDir { .. } => String::from("/bin"),
         FdSlot::Socket { handle, .. } => alloc::format!("socket:[{}]", handle.id()),
+        FdSlot::VirtualFile { path, .. } | FdSlot::VirtualDir { path, .. } => String::clone(&path),
     })
 }
 
@@ -3941,6 +4240,48 @@ pub fn getrusage_handler(args: &mut SyscallArgs) -> i64 {
     }
     let zero = LinuxRusage::default();
     crate::userland::usercopy::write_unaligned(out_ptr, &zero).map_or_else(|e| e, |_| 0)
+}
+
+/// Linux `struct sysinfo` layout (x86-64, musl-compatible): 112 bytes.
+/// BusyBox `free` and `uptime` read `uptime`, `totalram`/`freeram`/
+/// `sharedram`, `procs`, and `mem_unit`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct LinuxSysinfo {
+    uptime: i64,
+    loads: [u64; 3],
+    totalram: u64,
+    freeram: u64,
+    sharedram: u64,
+    bufferram: u64,
+    totalswap: u64,
+    freeswap: u64,
+    procs: u16,
+    pad: u16,
+    pad2: u32,
+    totalhigh: u64,
+    freehigh: u64,
+    mem_unit: u32,
+    tail_pad: u32,
+}
+const _SYSINFO_SIZE: () = assert!(core::mem::size_of::<LinuxSysinfo>() == 112);
+
+/// `sysinfo(*info) -> int`. Real uptime + physical-memory numbers from
+/// the frame allocator; load averages and swap report zero (we track
+/// neither). `mem_unit = 1` → all ram fields are bytes.
+pub fn sysinfo_handler(args: &mut SyscallArgs) -> i64 {
+    let out_ptr = args.rdi;
+    let (uptime, totalram, freeram, sharedram, procs) = crate::userland::procfs::sysinfo_snapshot();
+    let info = LinuxSysinfo {
+        uptime,
+        totalram,
+        freeram,
+        sharedram,
+        procs,
+        mem_unit: 1,
+        ..Default::default()
+    };
+    crate::userland::usercopy::write_unaligned(out_ptr, &info).map_or_else(|e| e, |_| 0)
 }
 
 /// Linux `struct itimerval` (matches musl's layout: two `timeval` pairs,
@@ -4047,12 +4388,26 @@ pub fn setitimer_handler(args: &mut SyscallArgs) -> i64 {
 /// Blocks the calling ring-3 process until the requested duration elapses
 /// against the monotonic 100 Hz PIT, then returns 0. The duration is rounded
 /// up to whole ticks so a sub-tick request still yields the CPU rather than
-/// busy-spinning — self-driven ring-3 animation loops (e.g. `PAINTING.ELF`)
-/// and zsh's `sleep`/`usleep` builtins both depend on this.
+/// busy-spinning — self-driven ring-3 animation loops (`PAINTING.ELF`,
+/// `TASKMGR.ELF`) and zsh's `sleep`/`usleep` builtins all depend on this.
 ///
-/// Signal interruption (`-EINTR` + remaining time in `rem`) is not modeled: a
-/// woken-but-not-yet-elapsed sleeper simply re-blocks for the remainder. If
-/// `rem` is non-null on completion, a zeroed timespec is written.
+/// Restart mechanics: blocking parks the process as
+/// `Ring3BlockReason::Sleeping { deadline_tick }` with RIP rewound so the
+/// SYSCALL re-fires on wake. The absolute deadline is restart-stable via
+/// `Process.sleep_deadline` (see [`nanosleep_deadline`]), so a
+/// woken-and-re-blocked sleeper cannot extend its own timeout;
+/// `process_expired_sleeps` (PIT ISR + housekeeping backstops) readies the
+/// process at the deadline.
+///
+/// Signals: `wake_ring3_for_signal` / ITIMER expiry unblock the sleeper,
+/// clear `sleep_deadline`, and set `pending_syscall_interrupt` — the
+/// re-fired SYSCALL enters the dispatcher as `-EINTR` and the signal
+/// (handler or fatal default) is processed there. POSIX gap: `rem` is not
+/// populated on EINTR (callers that loop on EINTR re-sleep the full
+/// duration); acceptable until a consumer needs it.
+///
+/// Synthetic dispatch (tests, sentinel PID 0) cannot yield — a valid
+/// request from that context returns 0 immediately.
 pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
     /// PIT period: 100 Hz ⇒ 10 ms ⇒ 10,000,000 ns per tick.
     const NS_PER_TICK: u64 = 10_000_000;
@@ -4060,22 +4415,37 @@ pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
 
     let req_ptr = args.rdi;
     let rem_ptr = args.rsi;
-
-    let requested_ticks = if req_ptr == 0 {
-        0
-    } else {
-        match crate::userland::usercopy::read_unaligned::<LinuxTimespec>(req_ptr) {
-            Ok(ts) => {
-                let sec = ts.tv_sec.max(0) as u64;
-                let nsec = ts.tv_nsec.clamp(0, 999_999_999) as u64;
-                // Round the sub-second remainder up so any positive request
-                // sleeps at least one tick.
-                let frac_ticks = nsec.div_ceil(NS_PER_TICK);
-                sec.saturating_mul(TICKS_PER_SEC).saturating_add(frac_ticks)
-            }
-            Err(e) => return e,
-        }
+    if req_ptr == 0 {
+        return EFAULT;
+    }
+    let req: LinuxTimespec = match crate::userland::usercopy::read_unaligned(req_ptr) {
+        Ok(ts) => ts,
+        Err(e) => return e,
     };
+    if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1_000_000_000 {
+        return EINVAL;
+    }
+    // Round the sub-second remainder up so any positive request sleeps
+    // at least one tick.
+    let requested_ticks = (req.tv_sec as u64)
+        .saturating_mul(TICKS_PER_SEC)
+        .saturating_add((req.tv_nsec as u64).div_ceil(NS_PER_TICK));
+
+    let write_zero_rem = || -> i64 {
+        if rem_ptr == 0 {
+            return 0;
+        }
+        let zero = LinuxTimespec::default();
+        crate::userland::usercopy::write_unaligned(rem_ptr, &zero).map_or_else(|e| e, |_| 0)
+    };
+
+    // No scheduler context to yield from in synthetic dispatch.
+    if !matches!(
+        crate::userland::lifecycle::current_user_pid(),
+        Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID
+    ) {
+        return write_zero_rem();
+    }
 
     match crate::userland::lifecycle::nanosleep_deadline(requested_ticks) {
         Some(deadline) => unsafe {
@@ -4086,14 +4456,8 @@ pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
                 },
             )
         },
-        None => {
-            if rem_ptr != 0 {
-                let zero = LinuxTimespec::default();
-                return crate::userland::usercopy::write_unaligned(rem_ptr, &zero)
-                    .map_or_else(|e| e, |_| 0);
-            }
-            0
-        }
+        // Elapsed (or zero-length) — done.
+        None => write_zero_rem(),
     }
 }
 

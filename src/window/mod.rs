@@ -409,6 +409,11 @@ pub trait Window: Send {
         None
     }
 
+    /// VirGL client texture attached to this ring-3 content well, if any.
+    fn external_gl_client(&self) -> Option<crate::graphics::composition::ClientGlId> {
+        None
+    }
+
     /// Typed accessor used by app code (e.g. File Explorer) to mutate
     /// a `MultiColumnList`'s rows through the manager.
     #[allow(dead_code)]

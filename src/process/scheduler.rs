@@ -31,8 +31,6 @@ pub struct ProcessInfo {
     pub total_runtime: u64,
     /// Stack size in bytes
     pub stack_size: usize,
-    /// Cached CPU percentage (0-100)
-    pub cpu_percentage: u8,
 }
 
 /// What the scheduler can pick to run next. Kernel threads continue to
@@ -413,28 +411,8 @@ impl Scheduler {
                 state: pcb.state,
                 total_runtime: pcb.total_runtime,
                 stack_size: pcb.stack_size,
-                cpu_percentage: pcb.cpu_percentage,
             })
             .collect()
-    }
-
-    /// Update CPU percentages for all processes
-    ///
-    /// Call this periodically (every ~50 ticks / 500ms) to calculate CPU usage.
-    /// The percentage represents CPU time used in the elapsed window.
-    ///
-    /// # Arguments
-    /// * `elapsed_ticks` - Number of timer ticks since last update
-    pub fn update_cpu_percentages(&mut self, elapsed_ticks: u64) {
-        for pcb in self.processes.values_mut() {
-            let delta = pcb.total_runtime.saturating_sub(pcb.runtime_last_sample);
-            pcb.cpu_percentage = if elapsed_ticks > 0 {
-                ((delta * 100) / elapsed_ticks).min(100) as u8
-            } else {
-                0
-            };
-            pcb.runtime_last_sample = pcb.total_runtime;
-        }
     }
 
     // =========================================================================

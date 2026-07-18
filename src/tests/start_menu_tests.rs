@@ -86,7 +86,14 @@ fn test_menu_model_order_and_geometry() {
             action: StartMenuAction::ShutDown
         }
     ));
-    assert_eq!(START_MENU_PROGRAM_ITEMS.len(), 5);
+    assert_eq!(START_MENU_PROGRAM_ITEMS.len(), 7);
+    assert!(matches!(
+        START_MENU_PROGRAM_ITEMS[6],
+        StartMenuItem::Action {
+            label: "Task Manager",
+            action: StartMenuAction::TaskManager
+        }
+    ));
     assert_eq!(StartMenuWindow::root_height(), 172);
     assert_eq!(
         StartMenuWindow::maximum_width(),
@@ -121,6 +128,12 @@ fn test_enabled_and_disabled_dispatch() {
     menu.handle_event(mouse(MouseEventType::ButtonDown, calc));
     menu.handle_event(mouse(MouseEventType::ButtonUp, calc));
     assert_eq!(*LAST_ACTION.lock(), Some(StartMenuAction::Calc));
+
+    *LAST_ACTION.lock() = None;
+    let gl_arena = program_row_center(5);
+    menu.handle_event(mouse(MouseEventType::ButtonDown, gl_arena));
+    menu.handle_event(mouse(MouseEventType::ButtonUp, gl_arena));
+    assert_eq!(*LAST_ACTION.lock(), Some(StartMenuAction::GlGame));
 
     *LAST_ACTION.lock() = None;
     let documents = root_row_center(1);

@@ -687,27 +687,57 @@ fn test_dispatch_setitimer_real_arms_queries_and_validates() {
     crate::userland::abi::clear_user_va_bounds();
 }
 
-/// `nanosleep` returns 0 without blocking when there is nothing to wait for:
-/// a null (zero-length) request, or a re-fired call whose absolute deadline
-/// has already elapsed. The genuinely-blocking path diverges via
+/// `nanosleep` request validation and the non-blocking return paths.
+/// The genuinely-blocking path diverges via
 /// `block_current_ring3_and_yield`, so it can't run in this synchronous
-/// dispatcher harness — only the immediate-return paths are exercised here.
-fn test_dispatch_nanosleep_returns_zero_without_blocking() {
-    // A null request pointer is treated as a zero-length sleep: immediate 0.
+/// dispatcher harness — validation, the synthetic-dispatch
+/// short-circuit, and the elapsed-deadline restart machinery are
+/// exercised instead.
+fn test_dispatch_nanosleep_validation_and_synthetic_return() {
+    // NULL req → EFAULT.
     let mut args = SyscallArgs::default();
     args.rax = crate::userland::abi::nr::NANOSLEEP;
-    args.rdi = 0; // req NULL
-    args.rsi = 0; // rem NULL
-    assert_eq!(syscall_dispatch(&mut args), 0);
+    args.rdi = 0;
+    args.rsi = 0;
+    assert_eq!(syscall_dispatch(&mut args), crate::userland::abi::EFAULT);
 
-    // Simulate a re-fired nanosleep whose deadline has already elapsed: the
-    // restart machinery observes `now >= sleep_deadline`, returns 0, and
-    // clears the per-process deadline.
+    // Invalid tv_nsec → EINVAL.
+    let bad: [i64; 2] = [0, 1_000_000_000];
+    let bad_ptr = bad.as_ptr() as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: bad_ptr,
+        end: bad_ptr + 16,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::NANOSLEEP;
+    args.rdi = bad_ptr;
+    args.rsi = 0;
+    assert_eq!(syscall_dispatch(&mut args), crate::userland::abi::EINVAL);
+    crate::userland::abi::clear_user_va_bounds();
+
+    // Valid 50 ms request from synthetic context → immediate 0 (no
+    // scheduler context to yield from).
+    let req: [i64; 2] = [0, 50_000_000];
+    let req_ptr = req.as_ptr() as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: req_ptr,
+        end: req_ptr + 16,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::NANOSLEEP;
+    args.rdi = req_ptr;
+    args.rsi = 0;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    crate::userland::abi::clear_user_va_bounds();
+
+    // Restart machinery: a re-fired sleep whose absolute deadline has
+    // already elapsed observes `now >= sleep_deadline`, reports done,
+    // and clears the per-process deadline.
     let now = crate::arch::x86_64::interrupts::get_timer_ticks();
     crate::userland::lifecycle::with_current_process(|process| {
         process.sleep_deadline = Some(now);
     });
-    assert_eq!(syscall_dispatch(&mut args), 0);
+    assert_eq!(crate::userland::lifecycle::nanosleep_deadline(5), None);
     crate::userland::lifecycle::with_current_process(|process| {
         assert!(process.sleep_deadline.is_none());
     });
@@ -2096,6 +2126,33 @@ fn test_dispatch_clock_gettime_invalid_clock_einval() {
     teardown_phase2_active_user();
 }
 
+fn test_dispatch_clock_realtime_uses_rtc_epoch() {
+    setup_phase2_active_user();
+    let buf = [0u8; 16];
+    let ptr = buf.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + 16,
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::CLOCK_GETTIME;
+    args.rdi = 0; // CLOCK_REALTIME
+    args.rsi = ptr;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let sec_bytes: [u8; 8] = buf[0..8].try_into().unwrap();
+    let seconds = i64::from_ne_bytes(sec_bytes);
+    assert!(
+        seconds > 1_500_000_000,
+        "realtime did not use the RTC-backed Unix epoch: {}",
+        seconds
+    );
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
 fn test_dispatch_getrandom_fills_buffer() {
     setup_phase2_active_user();
     let buf = [0u8; 32];
@@ -2457,6 +2514,9 @@ fn test_dispatch_rt_sigsuspend_null_mask_efaults() {
 }
 
 /// `kill(self, SIGUSR1)` sets SIGUSR1 pending on the current process.
+/// The signal is blocked first: an unblocked SIGUSR1 with no handler
+/// now takes its fatal default action at the dispatcher tail, which
+/// would tear the process down mid-test.
 fn test_dispatch_kill_self_sets_pending() {
     use crate::userland::signal::SIGUSR1;
     reset_active_user();
@@ -2468,6 +2528,10 @@ fn test_dispatch_kill_self_sets_pending() {
         .expect("enter_user_mode_with");
     // Don't release yet — we want the Process slot populated for the
     // signal-state inspection.
+
+    crate::userland::lifecycle::with_current_process(|p| {
+        p.signal_state.blocked |= 1u64 << (SIGUSR1 - 1);
+    });
 
     let me = crate::userland::lifecycle::current_pid();
     let mut args = SyscallArgs::default();
@@ -2549,6 +2613,8 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4321,6 +4387,8 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4382,6 +4450,8 @@ fn test_has_children_sees_live_child() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4529,6 +4599,8 @@ fn test_remove_process_cleans_ring3_queues() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4558,6 +4630,8 @@ fn test_remove_process_cleans_ring3_queues() {
         signal_state: crate::userland::signal::SignalState::new(),
         kernel_stack: None,
         exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
         stack_top: 0,
         stack_bottom: 0,
         stack_mapped_bottom: 0,
@@ -4671,7 +4745,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_prlimit64_null_old_returns_zero,
         &test_dispatch_getrusage_self_zero_fills_and_rejects_unknown_who,
         &test_dispatch_setitimer_real_arms_queries_and_validates,
-        &test_dispatch_nanosleep_returns_zero_without_blocking,
+        &test_dispatch_nanosleep_validation_and_synthetic_return,
         &test_write_handler_valid_slice,
         &test_write_handler_rejects_unknown_fd,
         &test_write_handler_rejects_kernel_pointer,
@@ -4751,6 +4825,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_lseek_on_stream_returns_espipe,
         &test_dispatch_clock_gettime_writes_timespec,
         &test_dispatch_clock_gettime_invalid_clock_einval,
+        &test_dispatch_clock_realtime_uses_rtc_epoch,
         &test_dispatch_getrandom_fills_buffer,
         &test_dispatch_uname_writes_sysname_linux,
         &test_dispatch_fcntl_getfd_setfd_roundtrip,

@@ -52,6 +52,8 @@ pub mod network_userland;
 #[cfg(feature = "test")]
 pub mod path_bar_tests;
 #[cfg(feature = "test")]
+pub mod procfs;
+#[cfg(feature = "test")]
 pub mod progress_bar_tests;
 #[cfg(feature = "test")]
 pub mod retained_scene;
@@ -66,7 +68,11 @@ pub mod start_menu_tests;
 #[cfg(feature = "test")]
 pub mod surface_alpha;
 #[cfg(feature = "test")]
+pub mod taskbar_tests;
+#[cfg(feature = "test")]
 pub mod text_editor_migration_tests;
+#[cfg(feature = "test")]
+pub mod time;
 #[cfg(feature = "test")]
 pub mod toolbar_status_tests;
 #[cfg(feature = "test")]
@@ -121,6 +127,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("fat_write", fat_write::get_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
+    ("procfs", procfs::get_tests),
     ("gui_userland", gui_userland::get_tests),
     ("vm", vm::get_tests),
     ("compiler_compat", compiler_compat::get_tests),
@@ -151,6 +158,8 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("tree_view", tree_view_tests::get_tests),
     ("splitter", splitter_tests::get_tests),
     ("start_menu", start_menu_tests::get_tests),
+    ("taskbar", taskbar_tests::get_tests),
+    ("time", time::get_tests),
     ("toolbar_status", toolbar_status_tests::get_tests),
     ("path_bar", path_bar_tests::get_tests),
     ("icon_view", icon_view_tests::get_tests),

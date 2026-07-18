@@ -172,6 +172,22 @@ Screen (GUI Mode)
     └── StatusBar
 ```
 
+The production GUI screen also roots the desktop shell hierarchy:
+
+```text
+DesktopWindow
+├── FrameWindow / RemoteSurface application windows
+├── StartMenuWindow (while open)
+└── TaskbarWindow
+    ├── Start Button
+    ├── dynamic frame buttons
+    └── TaskbarTrayWindow (HH:MM UTC / YYYY-MM-DD)
+```
+
+The tray is right-anchored and owns its minute-level clock invalidation. Shared
+pure geometry in `windows/taskbar.rs` reserves its span before GUIShell divides
+the remaining width among frame buttons, so the two areas cannot overlap.
+
 ## Event System
 
 ### Event Types

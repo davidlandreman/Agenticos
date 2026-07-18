@@ -29,11 +29,13 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.
 - `keyboard.rs` — PS/2 scancode-set-2 → `KeyCode` conversion *for window events* (distinct from the lower-level driver in `src/input/`).
 - `terminal.rs`, `terminal_factory.rs` — terminal-window support; the factory wires terminal windows up to the shell.
-- `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background), and `start_menu.rs` (classic root menu plus Programs fly-out in one active popup).
+- `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background), `start_menu.rs` (classic root menu plus Programs fly-out in one active popup), and `taskbar.rs` (task-button geometry plus the minute-updated UTC tray).
 - `windows/remote_surface.rs` — server-decorated client surface for ring-3
   apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
   events to the owning PID's GUI queue. Its enclosing frame title can be
-  updated through the ownership-checked ring-3 GUI ABI.
+  updated through the ownership-checked ring-3 GUI ABI. Under strict VirGL it
+  may instead own a logical GL client ID whose front texture is inserted as an
+  external retained layer clipped to the content well.
 - `adapters/` — `GraphicsDevice` implementations: `direct_framebuffer.rs` (fast, used for cursor) and `double_buffered.rs` (smooth).
 - `dialogs/` — kernel dialog-window scaffolding, including the non-blocking Run dialog. Run keeps input state outside the manager registry and launches submitted text through zsh `-c`.
 
@@ -47,7 +49,8 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
 | `StartMenuWindow` | GUIShell Start popup | Windows 95/98 ButtonFace panels, blue rotated `AgenticOS` banner, typed disabled/separator/action rows, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
-| `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer; close requests are delivered to the client. |
+| `TaskbarTrayWindow` | Right-side notification tray | Recessed classic panel with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
+| `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer or one attached VirGL client texture; close requests are delivered to the client. |
 
 All windows derive from `WindowBase` for consistent parent-child tracking.
 
@@ -58,9 +61,11 @@ Boot lands in GUI mode:
 - `DesktopWindow` (full-screen). Reads `/WALLPAPR.BMP` from the FAT root via `window::load_default_wallpaper` during `init_guishell`; on success, the BMP is stretched to the full screen via `GraphicsDevice::draw_image_scaled`. Missing or malformed wallpaper degrades to the legacy solid-blue fill — never panics.
 - `FrameWindow` titled "AgenticOS Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller).
 - `TerminalWindow` inside the frame.
-- Bottom taskbar with a Start button. Start opens the classic menu; Programs
-  launches the five pinned apps, Run opens a modal command field, and Shut Down
-  is an explicit safe placeholder until a clean power-off path exists.
+- Bottom taskbar with a Start button, dynamically-sized frame buttons, and a
+  recessed right-side UTC date/time tray. Start opens the classic menu;
+  Programs launches the six pinned apps (including GL Arena), Run opens a modal command field, and
+  Shut Down is an explicit safe placeholder until a clean power-off path
+  exists. Task-button layout reserves the tray span and never overlaps it.
 
 ## TerminalWindow ↔ terminal subsystem
 

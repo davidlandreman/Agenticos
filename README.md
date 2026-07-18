@@ -14,7 +14,10 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 - **Memory Management**: Virtual memory, demand paging, per-process address spaces, and heap allocation
 - **Filesystem**: FAT12/16/32 plus a Linux-compatible writable ext2 `/data`, with persistent overlay writes
 - **Input**: VirtIO tablet (seamless in QEMU) with PS/2 fallback
-- **Graphics**: Framebuffer with double buffering, multiple fonts, BMP images
+- **Graphics**: Framebuffer/retained composition, qualified VirGL acceleration,
+  and a bounded OpenGL-style ring-3 client path
+- **3D Game**: `GL Arena` runs as `GLGAME.ELF` inside a normal movable,
+  clipped, resizable desktop window
 - **Networking**: Modern VirtIO-net, DHCPv4, DHCP-backed DNS resolution, ICMP, UDP, TCP, Linux socket FDs, and BusyBox `ping`/`nc`/`nslookup`/HTTP `wget`
 
 ### Not Yet Implemented
@@ -49,6 +52,11 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 # Boot without a NIC
 AGENTICOS_NETWORK=off ./build.sh
 ```
+
+`GL Arena` requires the qualified strict VirGL path. On a provisioned macOS
+host, launch it with the pinned QEMU described in
+`docs/macos-virgl-qualification.md`, then choose Start → Programs → GL Arena
+or run `glgame` from zsh.
 
 ### Testing
 

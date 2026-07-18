@@ -1,5 +1,5 @@
 use super::image::{Image, ImageFormat, PixelFormat};
-use crate::debug_info;
+use crate::debug_trace;
 use crate::graphics::color::Color;
 use core::mem::size_of;
 
@@ -52,7 +52,7 @@ pub struct BmpImage<'a> {
 
 impl<'a> BmpImage<'a> {
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, BmpError> {
-        debug_info!("BMP: Parsing BMP file, data size: {} bytes", data.len());
+        debug_trace!("BMP: Parsing BMP file, data size: {} bytes", data.len());
 
         if data.len() < size_of::<BmpFileHeader>() + size_of::<BmpInfoHeader>() {
             return Err(BmpError::InsufficientData);
@@ -62,7 +62,7 @@ impl<'a> BmpImage<'a> {
 
         let file_size = file_header.file_size;
         let data_offset = file_header.data_offset;
-        debug_info!(
+        debug_trace!(
             "BMP: Signature: {:?}, File size: {}, Data offset: {}",
             file_header.signature,
             file_size,
@@ -80,7 +80,7 @@ impl<'a> BmpImage<'a> {
         let height = info_header.height;
         let bits_per_pixel = info_header.bits_per_pixel;
         let compression = info_header.compression;
-        debug_info!(
+        debug_trace!(
             "BMP: Width: {}, Height: {}, BPP: {}, Compression: {}",
             width,
             height,
@@ -138,7 +138,7 @@ impl<'a> BmpImage<'a> {
             None
         };
 
-        debug_info!(
+        debug_trace!(
             "BMP: Palette present: {}, bits_per_pixel: {}",
             palette.is_some(),
             bits_per_pixel

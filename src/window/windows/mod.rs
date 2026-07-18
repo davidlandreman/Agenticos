@@ -13,7 +13,6 @@ pub mod label;
 pub mod layout;
 #[cfg(feature = "test")]
 pub mod list;
-pub mod menu;
 #[allow(dead_code)]
 pub mod menu_bar;
 pub mod menu_bar_popup;
@@ -44,7 +43,6 @@ pub use desktop::DesktopWindow;
 pub use frame::FrameWindow;
 pub use label::Label;
 pub use layout::{HBox, Padding, SizeHint, Spacer, VBox};
-pub use menu::MenuWindow;
 #[allow(unused_imports)]
 pub use menu_bar::{MenuBar, MenuItemDef, PendingPopup, MENU_BAR_HEIGHT};
 pub use menu_bar_popup::MenuBarPopup;
@@ -60,7 +58,7 @@ pub use splitter::{Splitter, SplitterOrientation};
 pub use start_menu::{StartMenuAction, StartMenuItem, StartMenuWindow};
 #[allow(unused_imports)]
 pub use status_bar::StatusBar;
-pub use taskbar::TaskbarWindow;
+pub use taskbar::{TaskbarTrayWindow, TaskbarWindow};
 pub use terminal::TerminalWindow;
 #[allow(unused_imports)]
 pub use text_editor::TextEditor;

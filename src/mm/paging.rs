@@ -552,6 +552,44 @@ impl MemoryMapper {
         debug_assert!(released.is_ok(), "user page table must be allocator-owned");
     }
 
+    /// Count resident user leaf pages in the address space rooted at
+    /// `l4_frame` (RSS, in 4 KiB pages). Read-only mirror of
+    /// [`Self::destroy_user_address_space`]'s traversal: walks every
+    /// non-kernel-reserved lower-half PML4 slot down to level 1 and
+    /// counts present leaf entries. COW-shared leaves count in every
+    /// address space that maps them (standard RSS semantics). Works
+    /// regardless of which CR3 is active — tables are read through the
+    /// physical-memory offset alias, never the active mapping.
+    pub fn count_user_resident_pages(&self, l4_frame: PhysFrame<Size4KiB>) -> u64 {
+        let l4 = unsafe { &*self.table_ptr(l4_frame) };
+        let mut total = 0u64;
+        for slot in 0..256 {
+            if is_kernel_reserved_slot(slot) || l4[slot].is_unused() {
+                continue;
+            }
+            let child = PhysFrame::containing_address(l4[slot].addr());
+            total += unsafe { self.count_user_table_leaves(child, 3) };
+        }
+        total
+    }
+
+    unsafe fn count_user_table_leaves(&self, frame: PhysFrame<Size4KiB>, level: u8) -> u64 {
+        let table = &*self.table_ptr(frame);
+        let mut total = 0u64;
+        for entry in table.iter() {
+            if entry.is_unused() || !entry.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            if level == 1 {
+                total += 1;
+            } else {
+                let child = PhysFrame::containing_address(entry.addr());
+                total += self.count_user_table_leaves(child, level - 1);
+            }
+        }
+        total
+    }
+
     /// Read-only accessor for the bootloader's physical-memory offset.
     /// Used when mapping a freshly-allocated frame through the
     /// kernel-visible alias to zero or copy into it.
@@ -663,7 +701,7 @@ impl MemoryMapper {
             frames.push(frame);
         }
 
-        debug_info!(
+        debug_trace!(
             "map_user_region: {} pages at {:?} ({:?})",
             num_pages,
             virt_start,

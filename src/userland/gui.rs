@@ -60,6 +60,17 @@ impl GuiProcessState {
 static GUI_STATES: InterruptMutex<BTreeMap<u32, GuiProcessState>> =
     InterruptMutex::new(BTreeMap::new());
 
+/// Owned `(pid, window_count, queued_events)` rows for
+/// `/proc/agenticos/gui`. One short critical section; no per-window
+/// detail leaves this module.
+pub fn ownership_snapshot() -> alloc::vec::Vec<(u32, usize, usize)> {
+    let states = GUI_STATES.lock();
+    states
+        .iter()
+        .map(|(&pid, state)| (pid, state.windows.len(), state.events.len()))
+        .collect()
+}
+
 pub fn allocate_handle(pid: u32) -> Result<u32, i64> {
     if pid == KERNEL_PID {
         return Err(crate::userland::abi::EPERM);
@@ -162,6 +173,7 @@ fn wake_ring3_blocked_on_gui_event(pid: u32) {
 /// Drain GUI state before taking the window-manager lock, keeping lock order
 /// one-way even when cleanup follows a fault.
 pub fn cleanup_process(pid: u32) {
+    crate::userland::gui_gl::cleanup_process(pid);
     let records: Vec<GuiWindowRecord> = GUI_STATES
         .lock()
         .remove(&pid)
@@ -500,6 +512,7 @@ fn key_char(key: KeyCode, shift: bool) -> char {
 #[cfg(feature = "test")]
 pub fn reset_for_test() {
     GUI_STATES.lock().clear();
+    super::gui_gl::reset_for_test();
 }
 
 #[cfg(feature = "test")]

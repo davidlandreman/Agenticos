@@ -274,6 +274,13 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     // Increment tick counter
     let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
+    // Wake any ring-3 sleeper whose nanosleep deadline has passed.
+    // Must run here, not only in main-loop housekeeping: the kernel
+    // main loop can starve for seconds while kernel threads hop
+    // between each other, but this ISR fires every tick. Bounded
+    // try_lock scan, same class of work as `check_sleep_queue` below.
+    crate::userland::lifecycle::process_expired_sleeps();
+
     // Ring-3 timer trap (U5): the user app was running. Refresh the
     // active PCB's last_activity_tick so the watchdog doesn't reap a
     // CPU-bound but otherwise healthy app, EOI the PIC, then ask the
@@ -294,6 +301,18 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     // and double-fault. The `return` here keeps that invariant.
     let frame = unsafe { &*stack_frame };
     if (frame.cs & 3) == 3 {
+        // Charge this tick to the running ring-3 process's CPU-time
+        // accounting. `current_user_pid` names the interrupted process
+        // (resume_ring3's atomic swap invariant). try_lock only: with
+        // IF cleared here no holder can be preempted mid-hold, but a
+        // dropped sample under contention is harmless for accounting.
+        if let Some(mut table) = crate::userland::lifecycle::PROCESS_TABLE.try_lock() {
+            if let Some(pid) = table.current_user_pid {
+                if let Some(p) = table.by_pid.get_mut(&pid) {
+                    p.utime_ticks = p.utime_ticks.saturating_add(1);
+                }
+            }
+        }
         if let Some(mut sched) = crate::process::scheduler::SCHEDULER.try_lock() {
             if let Some(current_pid) = sched.current() {
                 if let Some(pcb) = sched.get_process_mut(current_pid) {

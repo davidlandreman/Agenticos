@@ -31,10 +31,26 @@ pub const SIGSEGV: i32 = 11;
 #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub const SIGUSR2: i32 = 12;
 pub const SIGALRM: i32 = 14;
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
+pub const SIGTERM: i32 = 15;
 pub const SIGCHLD: i32 = 17;
+pub const SIGCONT: i32 = 18;
 pub const SIGBUS: i32 = 7;
 pub const SIGSTOP: i32 = 19;
+pub const SIGURG: i32 = 23;
 pub const SIGWINCH: i32 = 28;
+
+/// Signals whose Linux default disposition terminates the process
+/// (with or without core — we don't dump cores, so the distinction
+/// collapses). Everything not listed here and not in
+/// [`default_action_ignores`] is treated as terminate too, matching
+/// Linux where "ignore by default" is the short list.
+pub fn default_action_ignores(sig: i32) -> bool {
+    // SIGSTOP/SIGCONT job control is unimplemented — treating a
+    // pending SIGSTOP/SIGCONT as ignorable (rather than wedging the
+    // pending bit forever) is the least-surprising degradation.
+    matches!(sig, SIGCHLD | SIGCONT | SIGSTOP | SIGURG | SIGWINCH)
+}
 
 // ---- well-known sa_handler sentinels ----
 pub const SIG_DFL: u64 = 0;
@@ -187,6 +203,60 @@ impl SignalState {
             }
         }
         None
+    }
+
+    /// Scan for a pending signal whose disposition is `SIG_DFL` and
+    /// whose default action terminates the process. SIGKILL and
+    /// SIGSTOP bits ignore the blocked mask (POSIX: unblockable).
+    /// Ignored signals (`SIG_IGN`, or `SIG_DFL` with an ignore default
+    /// like SIGCHLD) are skipped but left pending — kernel code (e.g.
+    /// the SIGCHLD-after-fork tests) observes the pending bit as the
+    /// notification record. The returned signal's bit is also left set
+    /// — the process is about to die, nothing re-examines it.
+    pub fn take_fatal_default(&mut self) -> Option<i32> {
+        let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
+        let mut bits = self.pending & (!self.blocked | unblockable);
+        while bits != 0 {
+            let lowest = bits.trailing_zeros() as i32 + 1;
+            let mask = 1u64 << (lowest - 1);
+            bits &= !mask;
+            let act = self.action(lowest).unwrap_or_default();
+            if act.sa_handler == SIG_IGN {
+                continue;
+            }
+            if act.sa_handler != SIG_DFL {
+                continue; // real handler — the delivery path owns it
+            }
+            if default_action_ignores(lowest) {
+                continue;
+            }
+            return Some(lowest);
+        }
+        None
+    }
+
+    /// Whether any pending signal would actually do something if this
+    /// process reached the dispatcher now — either a deliverable user
+    /// handler or a fatal default action. Used by `kill(2)` to decide
+    /// whether a blocked target must be woken.
+    pub fn has_actionable_pending(&self) -> bool {
+        let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
+        let mut bits = self.pending & (!self.blocked | unblockable);
+        while bits != 0 {
+            let lowest = bits.trailing_zeros() as i32 + 1;
+            bits &= !(1u64 << (lowest - 1));
+            let act = self.action(lowest).unwrap_or_default();
+            if act.sa_handler == SIG_IGN {
+                continue;
+            }
+            if act.sa_handler != SIG_DFL {
+                return true; // deliverable user handler
+            }
+            if !default_action_ignores(lowest) {
+                return true; // fatal default
+            }
+        }
+        false
     }
 }
 

@@ -11,8 +11,8 @@ fn test_stable_scene_order() {
     scene.push(top);
     scene.push(first);
     scene.sort_by_z();
-    assert_eq!(scene.layers[0].surface_id, SurfaceId(1));
-    assert_eq!(scene.layers[1].surface_id, SurfaceId(2));
+    assert_eq!(scene.layers[0].canonical_surface_id(), Some(SurfaceId(1)));
+    assert_eq!(scene.layers[1].canonical_surface_id(), Some(SurfaceId(2)));
 }
 
 fn test_translation_and_effect_damage_bounds() {
