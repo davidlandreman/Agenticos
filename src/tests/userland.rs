@@ -687,9 +687,12 @@ fn test_dispatch_setitimer_real_arms_queries_and_validates() {
     crate::userland::abi::clear_user_va_bounds();
 }
 
-/// `nanosleep` request validation, plus the synthetic-dispatch
-/// short-circuit: with no ring-3 scheduler context to yield from, a
-/// valid request returns 0 immediately instead of blocking.
+/// `nanosleep` request validation and the non-blocking return paths.
+/// The genuinely-blocking path diverges via
+/// `block_current_ring3_and_yield`, so it can't run in this synchronous
+/// dispatcher harness — validation, the synthetic-dispatch
+/// short-circuit, and the elapsed-deadline restart machinery are
+/// exercised instead.
 fn test_dispatch_nanosleep_validation_and_synthetic_return() {
     // NULL req → EFAULT.
     let mut args = SyscallArgs::default();
@@ -712,7 +715,8 @@ fn test_dispatch_nanosleep_validation_and_synthetic_return() {
     assert_eq!(syscall_dispatch(&mut args), crate::userland::abi::EINVAL);
     crate::userland::abi::clear_user_va_bounds();
 
-    // Valid 50 ms request from synthetic context → immediate 0.
+    // Valid 50 ms request from synthetic context → immediate 0 (no
+    // scheduler context to yield from).
     let req: [i64; 2] = [0, 50_000_000];
     let req_ptr = req.as_ptr() as u64;
     crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
@@ -725,6 +729,18 @@ fn test_dispatch_nanosleep_validation_and_synthetic_return() {
     args.rsi = 0;
     assert_eq!(syscall_dispatch(&mut args), 0);
     crate::userland::abi::clear_user_va_bounds();
+
+    // Restart machinery: a re-fired sleep whose absolute deadline has
+    // already elapsed observes `now >= sleep_deadline`, reports done,
+    // and clears the per-process deadline.
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    crate::userland::lifecycle::with_current_process(|process| {
+        process.sleep_deadline = Some(now);
+    });
+    assert_eq!(crate::userland::lifecycle::nanosleep_deadline(5), None);
+    crate::userland::lifecycle::with_current_process(|process| {
+        assert!(process.sleep_deadline.is_none());
+    });
 }
 
 /// `write(1, valid_ptr, len)` succeeds and returns `len`. The active
@@ -2563,6 +2579,7 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -4336,6 +4353,7 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -4398,6 +4416,7 @@ fn test_has_children_sees_live_child() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -4546,6 +4565,7 @@ fn test_remove_process_cleans_ring3_queues() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -4576,6 +4596,7 @@ fn test_remove_process_cleans_ring3_queues() {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,

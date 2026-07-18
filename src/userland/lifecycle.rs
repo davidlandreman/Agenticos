@@ -99,6 +99,10 @@ pub struct Process {
     pub network_wait: Option<NetworkWaitState>,
     /// Linux ITIMER_REAL state, represented against the monotonic 100 Hz PIT.
     pub real_timer: RealTimerState,
+    /// Restart-stable absolute PIT deadline for a blocking `nanosleep`. Set
+    /// on the first entry, checked on every SYSCALL re-fire, and cleared when
+    /// the sleep completes. See [`Ring3BlockReason::Sleeping`].
+    pub sleep_deadline: Option<u64>,
     /// Set when an asynchronous signal wakes a re-fire-based blocking syscall.
     /// The next dispatcher entry delivers the signal with `-EINTR` instead of
     /// running the syscall handler and immediately blocking again.
@@ -299,21 +303,21 @@ pub enum Ring3BlockReason {
     WaitingForNetwork {
         deadline_tick: Option<u64>,
     },
-    /// `nanosleep(req, …)` until the absolute PIT tick `deadline_tick`.
-    /// Woken by [`wake_ring3_due_sleepers`] (kernel housekeeping) at or
-    /// after the deadline, or early by a signal via
-    /// [`wake_ring3_for_signal`] — the re-fired SYSCALL then observes
-    /// `pending_syscall_interrupt` and delivers `-EINTR`.
+    /// `nanosleep` with a not-yet-elapsed absolute PIT deadline. Woken by
+    /// [`process_expired_sleeps`] (PIT ISR + compositor/housekeeping
+    /// backstops) once `now >= deadline_tick` — the re-fired SYSCALL then
+    /// sees its `sleep_deadline` elapsed and returns 0 — or early by a
+    /// signal via [`wake_ring3_for_signal`], which clears the deadline and
+    /// delivers `-EINTR` through `pending_syscall_interrupt`.
     Sleeping {
         deadline_tick: u64,
     },
 }
 
-/// Restart-stable deadline state for a re-firing blocking syscall.
-/// Originally network-only (hence the name); `nanosleep` reuses it so a
-/// woken sleeper's re-fired SYSCALL resumes the ORIGINAL absolute
-/// deadline instead of restarting the full duration. Keyed by
-/// `(syscall_nr, identity)`; a mismatched re-entry clears the state.
+/// Restart-stable deadline state for a re-firing blocking network
+/// syscall. Keyed by `(syscall_nr, identity)`; a mismatched re-entry
+/// clears the state. (`nanosleep`'s analogous restart state is the
+/// dedicated `Process.sleep_deadline` field.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetworkWaitState {
     pub syscall_nr: u64,
@@ -396,6 +400,7 @@ impl Process {
             fd_table: FdTable::new(),
             network_wait: None,
             real_timer: RealTimerState::disarmed(),
+            sleep_deadline: None,
             pending_syscall_interrupt: false,
             cwd: String::new(),
             address_space: None,
@@ -793,44 +798,6 @@ pub fn wake_ring3_blocked_on_network(state_changed: bool) {
     }
 }
 
-/// Wake every `Sleeping` process whose deadline has passed. Marks the
-/// sleeper's wait state expired so its re-fired `nanosleep` SYSCALL
-/// observes completion and returns 0.
-///
-/// Called from the PIT ISR every tick (same precedent as the
-/// kernel-thread `check_sleep_queue`) — the kernel *main loop* is NOT
-/// a reliable periodic context: kernel threads hop between each other
-/// via `sleep_ticks`' direct thread→thread switch and can starve it
-/// for seconds. Also called from main-loop / inline-launcher
-/// housekeeping as a redundant backstop. Bounded: one `try_lock`, one
-/// scan of the (small) blocked map; a contended tick retries next
-/// tick.
-pub fn wake_ring3_due_sleepers() {
-    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
-    let Some(mut g) = PROCESS_TABLE.try_lock() else {
-        return;
-    };
-    let waking: alloc::vec::Vec<u32> = g
-        .ring3_blocked
-        .iter()
-        .filter_map(|(pid, reason)| match reason {
-            Ring3BlockReason::Sleeping { deadline_tick } if now >= *deadline_tick => Some(*pid),
-            _ => None,
-        })
-        .collect();
-    for pid in waking {
-        if let Some(process) = g.by_pid.get_mut(&pid) {
-            if let Some(wait) = process.network_wait.as_mut() {
-                wait.expired = true;
-            }
-        }
-        g.ring3_blocked.remove(&pid);
-        if !g.ring3_ready.iter().any(|ready| *ready == pid) {
-            g.ring3_ready.push_back(pid);
-        }
-    }
-}
-
 /// Whether any ring-3 process is waiting in the ready queue. Used by
 /// `sleep_ticks`' switch-target decision: when ring-3 work is pending,
 /// a voluntarily-sleeping kernel thread bounces through the kernel
@@ -890,11 +857,16 @@ pub fn process_due_real_timers() {
             continue;
         };
         if let Some(process) = g.by_pid.get_mut(&pid) {
-            if matches!(
-                reason,
-                Ring3BlockReason::WaitingForNetwork { .. } | Ring3BlockReason::Sleeping { .. }
-            ) {
+            if matches!(reason, Ring3BlockReason::WaitingForNetwork { .. }) {
                 process.network_wait = None;
+            }
+            // A signal-interrupted nanosleep returns via the dispatcher's
+            // -EINTR path without re-entering the handler, so clear its
+            // restart-stable deadline here (mirroring `network_wait`) — else a
+            // later nanosleep would see the stale elapsed deadline and return
+            // 0 immediately instead of sleeping.
+            if matches!(reason, Ring3BlockReason::Sleeping { .. }) {
+                process.sleep_deadline = None;
             }
             process.pending_syscall_interrupt = true;
         }
@@ -902,6 +874,67 @@ pub fn process_due_real_timers() {
             g.ring3_ready.push_back(pid);
         }
     }
+}
+
+/// Wake every ring-3 process whose `nanosleep` deadline has elapsed. Called
+/// primarily from the PIT ISR every tick (same class of bounded work as the
+/// kernel-thread `check_sleep_queue` there): the kernel main loop is the idle
+/// task under U10 and can starve for seconds while kernel threads hop between
+/// each other via `sleep_ticks`' direct thread→thread switch, so housekeeping
+/// alone wakes self-timed loops seconds late. Also called from the compositor
+/// loop, the main loop, and the inline ring-3 dispatch loop as redundant
+/// backstops. Bounded: one `try_lock` and one scan of the (small) blocked
+/// map; a contended tick retries next tick. The woken process's re-fired
+/// SYSCALL observes its `sleep_deadline` as elapsed (via
+/// [`nanosleep_deadline`]) and returns 0.
+pub fn process_expired_sleeps() {
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let waking: alloc::vec::Vec<u32> = g
+        .ring3_blocked
+        .iter()
+        .filter_map(|(pid, reason)| match reason {
+            Ring3BlockReason::Sleeping { deadline_tick } if now >= *deadline_tick => Some(*pid),
+            _ => None,
+        })
+        .collect();
+    for pid in waking {
+        g.ring3_blocked.remove(&pid);
+        if !g.ring3_ready.iter().any(|ready| *ready == pid) {
+            g.ring3_ready.push_back(pid);
+        }
+    }
+}
+
+/// Restart-stable `nanosleep` state machine for the current ring-3 process.
+///
+/// `requested_ticks` is the sleep length rounded up to whole PIT ticks (0 ⇒
+/// return immediately). Returns `Some(deadline)` if the caller should block
+/// with [`Ring3BlockReason::Sleeping`], or `None` if the sleep is already
+/// satisfied (elapsed, or zero-length) and the handler should return 0.
+///
+/// The absolute deadline is recorded on the first entry and preserved across
+/// SYSCALL re-fires so a woken-and-re-blocked sleeper cannot extend its own
+/// timeout, mirroring [`prepare_network_wait`].
+pub fn nanosleep_deadline(requested_ticks: u64) -> Option<u64> {
+    with_current_process(|process| {
+        let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+        if let Some(deadline) = process.sleep_deadline {
+            if now >= deadline {
+                process.sleep_deadline = None;
+                return None;
+            }
+            return Some(deadline);
+        }
+        if requested_ticks == 0 {
+            return None;
+        }
+        let deadline = now.saturating_add(requested_ticks);
+        process.sleep_deadline = Some(deadline);
+        Some(deadline)
+    })
 }
 
 /// Return a restart-stable absolute deadline for a blocking network syscall.
@@ -975,11 +1008,14 @@ pub fn wake_ring3_for_signal(pid: u32) {
         return;
     };
     if let Some(process) = g.by_pid.get_mut(&pid) {
-        if matches!(
-            reason,
-            Ring3BlockReason::WaitingForNetwork { .. } | Ring3BlockReason::Sleeping { .. }
-        ) {
+        if matches!(reason, Ring3BlockReason::WaitingForNetwork { .. }) {
             process.network_wait = None;
+        }
+        // Signal-interrupted sleep: drop the restart-stable deadline so
+        // the -EINTR return doesn't leave a stale elapsed deadline for
+        // the next nanosleep call.
+        if matches!(reason, Ring3BlockReason::Sleeping { .. }) {
+            process.sleep_deadline = None;
         }
         process.pending_syscall_interrupt = true;
     }
@@ -1206,6 +1242,7 @@ pub fn install_new_process_opt(
         fd_table,
         network_wait: None,
         real_timer: RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: String::from("/host"),
         address_space,

@@ -275,11 +275,11 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
     // Wake any ring-3 sleeper whose nanosleep deadline has passed.
-    // Must run here, not in main-loop housekeeping: the kernel main
-    // loop can starve for seconds while kernel threads hop between
-    // each other, but this ISR fires every tick. Bounded try_lock
-    // scan, same class of work as `check_sleep_queue` below.
-    crate::userland::lifecycle::wake_ring3_due_sleepers();
+    // Must run here, not only in main-loop housekeeping: the kernel
+    // main loop can starve for seconds while kernel threads hop
+    // between each other, but this ISR fires every tick. Bounded
+    // try_lock scan, same class of work as `check_sleep_queue` below.
+    crate::userland::lifecycle::process_expired_sleeps();
 
     // Ring-3 timer trap (U5): the user app was running. Refresh the
     // active PCB's last_activity_tick so the watchdog doesn't reap a

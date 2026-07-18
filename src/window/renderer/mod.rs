@@ -12,6 +12,7 @@ use crate::drivers::fw_cfg;
 
 const COMPOSITOR_PATH: &str = "opt/agenticos/compositor";
 const GPU_STRICT_PATH: &str = "opt/agenticos/gpu_strict";
+const RENDER_STATS_PATH: &str = "opt/agenticos/render_stats";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -78,6 +79,7 @@ pub enum SelectionError {
 static REQUEST: AtomicU8 = AtomicU8::new(CompositorRequest::Legacy as u8);
 static STRICT: AtomicBool = AtomicBool::new(false);
 static INVALID_REQUEST: AtomicBool = AtomicBool::new(false);
+static RENDER_STATS: AtomicBool = AtomicBool::new(false);
 
 /// Read boot rendering policy before display/window-manager initialization.
 /// Missing policy intentionally keeps legacy as the first-release default.
@@ -100,6 +102,16 @@ pub fn init_boot_policy() {
             );
         }
     }
+
+    let mut stats_buf = [0u8; 8];
+    if let Some(len) = fw_cfg::read_file(RENDER_STATS_PATH, &mut stats_buf) {
+        if let Some(value) = trimmed_str(&stats_buf[..len]) {
+            RENDER_STATS.store(
+                matches!(value, "1" | "true" | "yes" | "on"),
+                Ordering::Release,
+            );
+        }
+    }
 }
 
 pub fn boot_request() -> CompositorRequest {
@@ -116,6 +128,10 @@ pub fn boot_strict() -> bool {
 }
 pub fn invalid_boot_request() -> bool {
     INVALID_REQUEST.load(Ordering::Acquire)
+}
+
+pub fn render_stats_enabled() -> bool {
+    RENDER_STATS.load(Ordering::Acquire)
 }
 
 pub fn select_renderer(
@@ -211,10 +227,15 @@ pub enum RendererState {
 }
 
 impl RendererState {
-    pub const fn kind(&self) -> RendererKind {
+    pub fn kind(&self) -> RendererKind {
         match self {
             Self::Legacy => RendererKind::Legacy,
-            Self::Retained(_) => RendererKind::RetainedCpu,
+            Self::Retained(renderer) => match renderer.engine_kind() {
+                crate::graphics::composition::CompositionEngineKind::Cpu => {
+                    RendererKind::RetainedCpu
+                }
+                crate::graphics::composition::CompositionEngineKind::Virgl => RendererKind::Virgl,
+            },
         }
     }
 }

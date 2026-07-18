@@ -84,6 +84,8 @@ pub mod userland_fixtures;
 #[cfg(feature = "test")]
 pub mod userland_switch;
 #[cfg(feature = "test")]
+pub mod virgl_integration;
+#[cfg(feature = "test")]
 pub mod virtio_gpu_protocol;
 #[cfg(feature = "test")]
 pub mod vm;
@@ -136,7 +138,6 @@ static MODULES: &[(&str, GetTestsFn)] = &[
         "gui_launch_table",
         crate::commands::gui_launch_table::gui_launch_table_tests,
     ),
-    ("painting", crate::commands::painting::get_tests),
     ("fonts", fonts::get_tests),
     ("window_clipping", window_clipping::get_tests),
     ("graphics_device_image", graphics_device_image::get_tests),
@@ -172,6 +173,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("compositor_selection", compositor_selection::get_tests),
     ("window_theme", window_theme::get_tests),
     ("virtio_gpu_protocol", virtio_gpu_protocol::get_tests),
+    ("virgl_integration", virgl_integration::get_tests),
     ("filter", filter::get_tests),
     ("terminal", crate::terminal::get_tests),
     ("vte", crate::terminal::vte::get_tests),

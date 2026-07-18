@@ -29,6 +29,7 @@ fn synthetic_process(pid: u32) -> Process {
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
+        sleep_deadline: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         pending_syscall_interrupt: false,
         cwd: String::from("/"),
@@ -429,11 +430,13 @@ fn test_kill_any_pid() {
     remove_synthetic(PID);
 }
 
-/// `wake_ring3_due_sleepers` wakes exactly the sleepers whose deadline
-/// has passed, marks their restart-stable wait state expired, and
-/// requeues them as ready.
+/// `process_expired_sleeps` wakes exactly the sleepers whose deadline
+/// has passed and requeues them as ready; future sleepers stay parked.
+/// The woken process's restart-stable `sleep_deadline` remains set for
+/// the re-fired SYSCALL, which observes it elapsed via
+/// `nanosleep_deadline` and returns 0.
 fn test_sleeper_wake_at_deadline() {
-    use crate::userland::lifecycle::{wake_ring3_due_sleepers, NetworkWaitState, Ring3BlockReason};
+    use crate::userland::lifecycle::{process_expired_sleeps, Ring3BlockReason};
     const DUE: u32 = 700006;
     const NOT_DUE: u32 = 700007;
     let now = crate::arch::x86_64::interrupts::get_timer_ticks();
@@ -443,12 +446,7 @@ fn test_sleeper_wake_at_deadline() {
     {
         let mut g = PROCESS_TABLE.lock();
         for (pid, deadline) in [(DUE, now.saturating_sub(1)), (NOT_DUE, now + 10_000)] {
-            g.by_pid.get_mut(&pid).unwrap().network_wait = Some(NetworkWaitState {
-                syscall_nr: crate::userland::abi::nr::NANOSLEEP,
-                identity: 0x1000,
-                deadline_tick: Some(deadline),
-                expired: false,
-            });
+            g.by_pid.get_mut(&pid).unwrap().sleep_deadline = Some(deadline);
             g.ring3_blocked.insert(
                 pid,
                 Ring3BlockReason::Sleeping {
@@ -458,7 +456,7 @@ fn test_sleeper_wake_at_deadline() {
         }
     }
 
-    wake_ring3_due_sleepers();
+    process_expired_sleeps();
 
     {
         let g = PROCESS_TABLE.lock();
@@ -471,21 +469,8 @@ fn test_sleeper_wake_at_deadline() {
             "due sleeper should be ready"
         );
         assert!(
-            g.by_pid.get(&DUE).unwrap().network_wait.unwrap().expired,
-            "due sleeper's wait state should be marked expired"
-        );
-        assert!(
             g.ring3_blocked.contains_key(&NOT_DUE),
             "future sleeper must stay blocked"
-        );
-        assert!(
-            !g.by_pid
-                .get(&NOT_DUE)
-                .unwrap()
-                .network_wait
-                .unwrap()
-                .expired,
-            "future sleeper's wait state must not expire"
         );
     }
 

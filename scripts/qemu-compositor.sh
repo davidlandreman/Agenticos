@@ -10,7 +10,9 @@ agenticos_configure_qemu() {
     local theme=${AGENTICOS_THEME:-auto}
     local virtio_2d=${AGENTICOS_QEMU_2D:-auto}
     local gl_mode=${AGENTICOS_QEMU_GL:-es}
-    local device_help display_help host_os
+    local render_stats=${AGENTICOS_RENDER_STATS:-0}
+    local device_help display_help host_os preflight_script
+    local macos_gpu_preflight_passed=0
 
     case "$compositor" in
         legacy|retained|gpu|auto) ;;
@@ -23,8 +25,22 @@ agenticos_configure_qemu() {
     case "$theme" in classic|aero|auto) ;; *) echo "Invalid AGENTICOS_THEME '$theme' (expected classic, aero, or auto)" >&2; return 2 ;; esac
     case "$virtio_2d" in auto|on|off) ;; *) echo "AGENTICOS_QEMU_2D must be auto, on, or off" >&2; return 2 ;; esac
     case "$gl_mode" in es|core) ;; *) echo "AGENTICOS_QEMU_GL must be es or core" >&2; return 2 ;; esac
+    case "$render_stats" in 0|1) ;; *) echo "AGENTICOS_RENDER_STATS must be 0 or 1" >&2; return 2 ;; esac
 
     host_os=$(uname -s)
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/qemu-virgl-preflight.sh"
+
+    # An explicit GPU request is a request for the qualified host stack, not
+    # merely for a QEMU binary that happens to list a GL-flavoured device.
+    # Auto remains opportunistic and can choose retained CPU below.
+    if [[ "$compositor" == gpu && "$host_os" == Darwin ]]; then
+        if ! "$preflight_script" "$qemu_bin"; then
+            echo "Explicit GPU request refused: the selected macOS QEMU did not pass VirGL preflight" >&2
+            return 2
+        fi
+        macos_gpu_preflight_passed=1
+    fi
+
     device_help=${AGENTICOS_QEMU_DEVICE_HELP_OVERRIDE:-$("$qemu_bin" -device help 2>&1)}
     display_help=${AGENTICOS_QEMU_DISPLAY_HELP_OVERRIDE:-$("$qemu_bin" -display cocoa,help 2>&1 || true)}
 
@@ -33,6 +49,7 @@ agenticos_configure_qemu() {
         -fw_cfg "name=opt/agenticos/compositor,string=$compositor"
         -fw_cfg "name=opt/agenticos/gpu_strict,string=$strict"
         -fw_cfg "name=opt/agenticos/theme,string=$theme"
+        -fw_cfg "name=opt/agenticos/render_stats,string=$render_stats"
     )
 
     local has_gl_device=0
@@ -58,7 +75,11 @@ agenticos_configure_qemu() {
     if [[ "$compositor" == gpu || "$compositor" == auto ]]; then
         if [[ $has_gl_device -eq 1 ]]; then
             if [[ "$host_os" == Darwin ]]; then
-                if grep -q 'gl' <<<"$display_help"; then
+                # The pinned QEMU accepts and initializes cocoa,gl=es but its
+                # cocoa,help path says that backend help is unavailable. An
+                # explicit GPU request has already proved the live GL path in
+                # preflight, which is stronger evidence than help text.
+                if [[ $macos_gpu_preflight_passed -eq 1 ]] || grep -q 'gl' <<<"$display_help"; then
                     AGENTICOS_QEMU_RENDER_ARGS=(-vga none -display "cocoa,gl=$gl_mode" -device virtio-vga-gl)
                 elif [[ "$compositor" == gpu && "$strict" == 1 ]]; then
                     echo "Selected QEMU does not advertise Cocoa GL mode" >&2
@@ -70,6 +91,10 @@ agenticos_configure_qemu() {
         elif [[ "$compositor" == gpu && "$strict" == 1 ]]; then
             echo "Selected QEMU does not provide virtio-vga-gl; strict GPU launch refused" >&2
             return 2
+        fi
+
+        if [[ "$compositor" == auto && ${#AGENTICOS_QEMU_RENDER_ARGS[@]} -eq 0 ]]; then
+            echo "GPU host candidate unavailable: selected QEMU lacks a usable GL frontend; fallback=retained CPU"
         fi
 
         # A plain VirtIO VGA device is useful for the 2D presenter but is not

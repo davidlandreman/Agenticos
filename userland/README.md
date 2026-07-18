@@ -39,6 +39,8 @@ userland/
     ├── guidemo/        # minimal ring-3 GUI reference client
     ├── notepad/        # standalone editor with userland dialogs + working Save
     ├── taskmgr/        # tabbed task manager over /proc (graphs, End Task)
+    ├── calc/           # standalone four-operation calculator
+    ├── painting/       # standalone bouncing-shapes GUI demo (self-driven frame loop)
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
@@ -71,25 +73,26 @@ resolve into multicall or direct binaries staged under `host_share/`:
 
 - **`BB.ELF` — BusyBox** (core utilities plus IPv4 `ping`, `nc`, `nslookup`,
   and HTTP-only `wget`; IPv6 and TLS are not available).
-- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`painting`, `calc`,
-  `explorer`).
-- **`NOTEPAD.ELF` / `TASKMGR.ELF` — direct standalone ring-3 applications**
-  (`notepad`; `taskmgr` with legacy alias `tasks`).
+- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`explorer` only).
+- **`CALC.ELF` / `NOTEPAD.ELF` / `PAINTING.ELF` / `TASKMGR.ELF` — direct
+  standalone ring-3 applications** (`calc`, `notepad`, `painting`;
+  `taskmgr` with legacy alias `tasks`).
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
 to `BB.ELF` with `argv[0]` overwritten to `"ls"`; BusyBox's own
-dispatcher picks the right applet. `execve("/bin/painting", argv,
+dispatcher picks the right applet. `execve("/bin/explorer", argv,
 envp)` resolves to `GLAUNCH.ELF` with `argv[0]` overwritten to
-`"painting"`; GUILAUNCH's `_start` issues the AgenticOS-internal
-`sys_gui_launch("painting")` syscall, which spawns the kernel-side
-`PaintingProcess`. No symlinks, no per-applet ELF copies — the
+`"explorer"`; GUILAUNCH's `_start` issues the AgenticOS-internal
+`sys_gui_launch("explorer")` syscall, which spawns the kernel-side
+explorer process. No symlinks, no per-applet ELF copies — the
 namespace is pure kernel synthesis.
 
-`execve("/bin/notepad", ...)` instead rewrites directly to
-`/host/NOTEPAD.ELF`; there is no `GLAUNCH` round trip or kernel notepad.
-`/bin/taskmgr` and `/bin/tasks` both rewrite to `/host/TASKMGR.ELF` the same
-way.
+`execve("/bin/notepad", ...)`, `execve("/bin/calc", ...)`, and
+`execve("/bin/painting", ...)` instead rewrite directly to
+`/host/NOTEPAD.ELF` / `/host/CALC.ELF` / `/host/PAINTING.ELF`; there is no
+`GLAUNCH` round trip or kernel-side process for any of them. `/bin/taskmgr`
+and `/bin/tasks` both rewrite to `/host/TASKMGR.ELF` the same way.
 
 `stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
 directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
@@ -250,7 +253,8 @@ deferring the surprise to a confusing kernel-side rejection at run time.
 
 ## Adding a ring-3 GUI app
 
-Use `apps/guidemo` as the minimal reference and `apps/notepad` as the
+Use `apps/guidemo` as the minimal reference, `apps/calc` as a compact
+single-window canvas-and-hit-test reference, and `apps/notepad` as the
 multi-window/filesystem reference. `gui::Window` creates a server-decorated
 window, `Canvas` renders XRGB8888 pixels, `gui::next_event()` blocks without
 polling, and `Window::present()` performs a full-surface copy. Resize events

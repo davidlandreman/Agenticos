@@ -1188,6 +1188,8 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         network_wait: None,
         // POSIX timers are not inherited across fork.
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        // A fresh child is not mid-nanosleep.
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: parent.cwd.clone(),
         address_space: Some(child_aspace),
@@ -4295,30 +4297,34 @@ pub fn setitimer_handler(args: &mut SyscallArgs) -> i64 {
 
 /// `nanosleep(*req: *const timespec, *rem: *mut timespec) -> int`
 ///
-/// Real blocking sleep against the 100 Hz PIT (10 ms granularity,
-/// durations round UP so a nonzero request always sleeps ≥ 1 tick).
+/// Blocks the calling ring-3 process until the requested duration elapses
+/// against the monotonic 100 Hz PIT, then returns 0. The duration is rounded
+/// up to whole ticks so a sub-tick request still yields the CPU rather than
+/// busy-spinning — self-driven ring-3 animation loops (`PAINTING.ELF`,
+/// `TASKMGR.ELF`) and zsh's `sleep`/`usleep` builtins all depend on this.
 ///
 /// Restart mechanics: blocking parks the process as
-/// `Ring3BlockReason::Sleeping { deadline_tick }` with RIP rewound so
-/// the SYSCALL re-fires on wake. The absolute deadline is made
-/// restart-stable through the per-process wait-state slot
-/// (`prepare_network_wait` keyed by `(NANOSLEEP, req_ptr)`), so a
-/// woken sleeper resumes the ORIGINAL deadline instead of restarting
-/// the full duration. `wake_ring3_due_sleepers` (kernel housekeeping)
-/// marks the state expired at the deadline; the re-fired call observes
-/// that and returns 0.
+/// `Ring3BlockReason::Sleeping { deadline_tick }` with RIP rewound so the
+/// SYSCALL re-fires on wake. The absolute deadline is restart-stable via
+/// `Process.sleep_deadline` (see [`nanosleep_deadline`]), so a
+/// woken-and-re-blocked sleeper cannot extend its own timeout;
+/// `process_expired_sleeps` (PIT ISR + housekeeping backstops) readies the
+/// process at the deadline.
 ///
-/// Signals: `wake_ring3_for_signal` / ITIMER expiry unblock the
-/// sleeper, clear the wait state, and set `pending_syscall_interrupt`
-/// — the re-fired SYSCALL enters the dispatcher as `-EINTR` and the
-/// signal (handler or fatal default) is processed there. POSIX gap:
-/// `rem` is not populated on EINTR (callers that loop on EINTR
-/// re-sleep the full duration); acceptable until a consumer needs it.
+/// Signals: `wake_ring3_for_signal` / ITIMER expiry unblock the sleeper,
+/// clear `sleep_deadline`, and set `pending_syscall_interrupt` — the
+/// re-fired SYSCALL enters the dispatcher as `-EINTR` and the signal
+/// (handler or fatal default) is processed there. POSIX gap: `rem` is not
+/// populated on EINTR (callers that loop on EINTR re-sleep the full
+/// duration); acceptable until a consumer needs it.
 ///
 /// Synthetic dispatch (tests, sentinel PID 0) cannot yield — a valid
-/// request from that context returns 0 immediately, matching the old
-/// stub.
+/// request from that context returns 0 immediately.
 pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
+    /// PIT period: 100 Hz ⇒ 10 ms ⇒ 10,000,000 ns per tick.
+    const NS_PER_TICK: u64 = 10_000_000;
+    const TICKS_PER_SEC: u64 = 100;
+
     let req_ptr = args.rdi;
     let rem_ptr = args.rsi;
     if req_ptr == 0 {
@@ -4331,10 +4337,12 @@ pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
     if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1_000_000_000 {
         return EINVAL;
     }
-    // 10 ms per tick; round the nanosecond part up.
-    let ticks = (req.tv_sec as u64)
-        .saturating_mul(100)
-        .saturating_add((req.tv_nsec as u64).div_ceil(10_000_000));
+    // Round the sub-second remainder up so any positive request sleeps
+    // at least one tick.
+    let requested_ticks = (req.tv_sec as u64)
+        .saturating_mul(TICKS_PER_SEC)
+        .saturating_add((req.tv_nsec as u64).div_ceil(NS_PER_TICK));
+
     let write_zero_rem = || -> i64 {
         if rem_ptr == 0 {
             return 0;
@@ -4342,9 +4350,7 @@ pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
         let zero = LinuxTimespec::default();
         crate::userland::usercopy::write_unaligned(rem_ptr, &zero).map_or_else(|e| e, |_| 0)
     };
-    if ticks == 0 {
-        return write_zero_rem();
-    }
+
     // No scheduler context to yield from in synthetic dispatch.
     if !matches!(
         crate::userland::lifecycle::current_user_pid(),
@@ -4353,23 +4359,17 @@ pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
         return write_zero_rem();
     }
 
-    crate::userland::lifecycle::clear_stale_network_wait(crate::userland::abi::nr::NANOSLEEP);
-    match crate::userland::lifecycle::prepare_network_wait(
-        crate::userland::abi::nr::NANOSLEEP,
-        req_ptr,
-        Some(ticks),
-    ) {
-        // Expired: the deadline passed while we were parked — done.
-        Err(()) => write_zero_rem(),
-        Ok(deadline) => {
-            let deadline_tick = deadline.expect("nanosleep always installs a finite deadline");
-            unsafe {
-                crate::userland::switch::block_current_ring3_and_yield(
-                    args,
-                    crate::userland::lifecycle::Ring3BlockReason::Sleeping { deadline_tick },
-                );
-            }
-        }
+    match crate::userland::lifecycle::nanosleep_deadline(requested_ticks) {
+        Some(deadline) => unsafe {
+            crate::userland::switch::block_current_ring3_and_yield(
+                args,
+                crate::userland::lifecycle::Ring3BlockReason::Sleeping {
+                    deadline_tick: deadline,
+                },
+            )
+        },
+        // Elapsed (or zero-length) — done.
+        None => write_zero_rem(),
     }
 }
 

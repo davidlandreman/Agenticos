@@ -5,16 +5,17 @@
 //! - **GUILAUNCH** (`GLAUNCH.ELF`) — one ring-3 launcher binary that
 //!   takes an applet name in `argv[0]` and issues the
 //!   `gui_launch` syscall, spawning the matching kernel-side GUI app
-//!   (`painting`, `calc`, `explorer`).
-//! - **Direct apps** — standalone native ELFs such as `NOTEPAD.ELF` and
-//!   `TASKMGR.ELF` (aliased as both `taskmgr` and `tasks`).
+//!   (`explorer` only, today).
+//! - **Direct apps** — standalone native ELFs: `CALC.ELF`,
+//!   `NOTEPAD.ELF`, `PAINTING.ELF`, and `TASKMGR.ELF` (aliased as both
+//!   `taskmgr` and `tasks`).
 //!
 //! The kernel exposes a single virtual `/bin` directory whose entries
 //! resolve into either binary based on which list the name belongs to.
 //! `execve("/bin/ls", ["ls", ...], envp)` rewrites to
-//! `execve("/host/BB.ELF", ["ls", ...], envp)`; `execve("/bin/painting",
-//! ["painting"], envp)` rewrites to `execve("/host/GLAUNCH.ELF",
-//! ["painting"], envp)`. The respective multicall dispatcher then takes
+//! `execve("/host/BB.ELF", ["ls", ...], envp)`; `execve("/bin/explorer",
+//! ["explorer"], envp)` rewrites to `execve("/host/GLAUNCH.ELF",
+//! ["explorer"], envp)`. The respective multicall dispatcher then takes
 //! over.
 //!
 //! No symlinks, no directory mirror in `host_share/` — the namespace is
@@ -46,6 +47,10 @@ pub const NOTEPAD_HOST_PATH: &str = "/host/NOTEPAD.ELF";
 
 pub const TASKMGR_HOST_PATH: &str = "/host/TASKMGR.ELF";
 
+pub const PAINTING_HOST_PATH: &str = "/host/PAINTING.ELF";
+
+pub const CALC_HOST_PATH: &str = "/host/CALC.ELF";
+
 /// Sorted list of kernel-side GUI app names exposed under `/bin/<name>`.
 /// MUST stay in sync with the match arms in
 /// [`crate::commands::gui_launch_table::spawn_by_name`]; a test in
@@ -53,13 +58,13 @@ pub const TASKMGR_HOST_PATH: &str = "/host/TASKMGR.ELF";
 ///
 /// Names MUST NOT collide with [`APPLETS`] or [`DIRECT_APPLETS`]. The
 /// disjoint-list invariant is asserted at test time.
-pub const GUI_APPLETS: &[&str] = &["calc", "explorer", "painting"];
+pub const GUI_APPLETS: &[&str] = &["explorer"];
 
 /// Sorted standalone executables synthesized into `/bin` without a multicall
 /// launcher. `apply_bin_rewrite` maps each name directly to its staged ELF.
 /// `taskmgr` and `tasks` are aliases for the ring-3 Task Manager —
 /// `tasks` preserves the retired kernel app's name.
-pub const DIRECT_APPLETS: &[&str] = &["notepad", "taskmgr", "tasks"];
+pub const DIRECT_APPLETS: &[&str] = &["calc", "notepad", "painting", "taskmgr", "tasks"];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
 /// `/bin/<name>`. Binary-searched on every lookup. MUST stay sorted —
@@ -342,7 +347,9 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
     let index = DIRECT_APPLETS.binary_search(&name).ok()?;
     let canonical = DIRECT_APPLETS[index];
     let path = match canonical {
+        "calc" => CALC_HOST_PATH,
         "notepad" => NOTEPAD_HOST_PATH,
+        "painting" => PAINTING_HOST_PATH,
         "taskmgr" | "tasks" => TASKMGR_HOST_PATH,
         _ => return None,
     };
@@ -635,15 +642,34 @@ mod tests_internal {
     }
 
     fn test_apply_bin_rewrite_dispatches_gui_app() {
-        let (path, applet) = apply_bin_rewrite("/bin/painting").expect("must resolve");
+        let (path, applet) = apply_bin_rewrite("/bin/explorer").expect("must resolve");
         assert_eq!(path, "/host/GLAUNCH.ELF");
-        assert_eq!(applet, "painting");
+        assert_eq!(applet, "explorer");
     }
 
     fn test_apply_bin_rewrite_dispatches_direct_app() {
         let (path, applet) = apply_bin_rewrite("/bin/notepad").expect("must resolve");
         assert_eq!(path, "/host/NOTEPAD.ELF");
         assert_eq!(applet, "notepad");
+
+        // painting migrated from a kernel GUI applet to a standalone ring-3
+        // ELF, so it now rewrites directly instead of via GLAUNCH.ELF.
+        let (path, applet) = apply_bin_rewrite("/bin/painting").expect("must resolve");
+        assert_eq!(path, "/host/PAINTING.ELF");
+        assert_eq!(applet, "painting");
+
+        let (path, applet) = apply_bin_rewrite("/bin/calc").expect("must resolve");
+        assert_eq!(path, "/host/CALC.ELF");
+        assert_eq!(applet, "calc");
+
+        // The Task Manager rewrites under both its own name and the
+        // retired kernel app's `tasks` alias.
+        let (path, applet) = apply_bin_rewrite("/bin/taskmgr").expect("must resolve");
+        assert_eq!(path, "/host/TASKMGR.ELF");
+        assert_eq!(applet, "taskmgr");
+        let (path, applet) = apply_bin_rewrite("/bin/tasks").expect("must resolve");
+        assert_eq!(path, "/host/TASKMGR.ELF");
+        assert_eq!(applet, "tasks");
     }
 
     fn test_apply_bin_rewrite_busybox_still_resolves() {
@@ -675,16 +701,22 @@ mod tests_internal {
                 win[1],
             );
         }
-        // Spot-check that both lists' entries are present.
+        // Spot-check that all three lists' entries are present.
         assert!(
             entries.contains(&"ls"),
             "merged stream missing BusyBox 'ls'"
         );
         assert!(
-            entries.contains(&"painting"),
-            "merged stream missing GUI 'painting'"
+            entries.contains(&"explorer"),
+            "merged stream missing GUI 'explorer'"
         );
+        assert!(
+            entries.contains(&"tasks"),
+            "merged stream missing direct 'tasks' alias"
+        );
+        assert!(entries.contains(&"calc"));
         assert!(entries.contains(&"notepad"));
+        assert!(entries.contains(&"painting"));
     }
 
     pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {

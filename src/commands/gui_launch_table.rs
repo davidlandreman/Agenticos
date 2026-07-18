@@ -3,8 +3,8 @@
 //!
 //! ## Why this exists
 //!
-//! The remaining kernel GUI app launchers (`painting`, `calc`,
-//! `explorer`) were previously reachable only as kernel-shell commands
+//! The remaining kernel GUI app launcher
+//! (`explorer`) was previously reachable only as a kernel-shell command
 //! registered in `src/process/manager.rs::ProcessManager`. With zsh as
 //! the default shell, those typed names need to resolve through ring-3
 //! PATH lookup. The `/bin/<gui_applet>` rewrite in
@@ -33,9 +33,7 @@ use alloc::{boxed::Box, string::String, vec::Vec};
 /// [`crate::userland::bin_namespace::GUI_APPLETS`].
 pub fn spawn_by_name(name: &str) -> Result<ProcessId, i64> {
     let factory: fn(Vec<String>) -> Box<dyn RunnableProcess> = match name {
-        "calc" => crate::commands::calc::create_calc_process,
         "explorer" => crate::commands::explorer::create_explorer_process,
-        "painting" => crate::commands::painting::create_painting_process,
         _ => return Err(ENOENT),
     };
     let process_name = String::from(name);
@@ -80,7 +78,7 @@ mod tests_internal {
     /// assert coverage without spawning.
     fn handler_for(name: &str) -> Option<()> {
         match name {
-            "calc" | "explorer" | "painting" => Some(()),
+            "explorer" => Some(()),
             _ => None,
         }
     }

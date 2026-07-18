@@ -13,8 +13,9 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `renderer/` — boot policy and two real renderer siblings. `legacy` preserves
   the dirty framebuffer/cursor path; `retained` rasterizes the desktop and each
   visible top-level subtree into separate premultiplied surfaces, builds a flat
-  scene, CPU-composes damage, and presents through the boot framebuffer or
-  VirtIO-GPU 2D.
+  scene, and uses either the CPU reference engine or the qualified VirGL engine.
+  CPU output presents through the boot framebuffer or VirtIO-GPU 2D; VirGL
+  presents its host texture directly and uses the VirtIO hardware cursor.
 - `theme/` — boot-selected frame theme. `classic` renders Windows 98 "Windows
   Standard" chrome — a raised 3D bevel border, a horizontal caption gradient
   (navy→blue active, grey inactive), an 8pt-ish bold caption font, and a raised
@@ -82,11 +83,16 @@ recomposed; it never restores framebuffer background.
 
 `build.sh` passes `opt/agenticos/compositor` (`legacy`, `retained`, `gpu`, or
 `auto`) and `opt/agenticos/gpu_strict` through QEMU `fw_cfg`. Missing policy
-defaults to `legacy`. `gpu` and `auto` currently fall back to retained CPU
-because accelerated mode is not exposed without a passing VirGL capset and
-alpha/readback smoke test. Strict GPU mode fails initialization instead.
-`AGENTICOS_THEME=classic|aero|auto` is passed as `opt/agenticos/theme`; `auto`
-selects Aero for retained rendering and Classic for legacy rendering.
+defaults to `legacy`. `gpu` and `auto` select VirGL after capset, clear,
+alpha/readback, and lifecycle qualification; non-strict requests fall back to
+retained CPU if qualification or runtime composition fails. Strict GPU mode
+fails initialization or panics on a runtime GPU failure instead.
+On macOS, an explicit host-side `gpu` request must first pass the pinned custom
+QEMU verifier; see `docs/macos-virgl-qualification.md`.
+`AGENTICOS_THEME=classic|aero|auto` is passed as `opt/agenticos/theme`. Explicit
+Aero is available on retained CPU and VirGL; the VirGL variant accelerates
+rounded translucent chrome and shadows but leaves backdrop blur disabled.
+Legacy falls back to Classic, and `auto` keeps Classic on VirGL.
 
 ## Implementation status
 

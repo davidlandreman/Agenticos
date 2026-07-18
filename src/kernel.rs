@@ -670,10 +670,10 @@ fn restore_overlay_upper_from_data() {
 pub fn run() -> ! {
     debug_info!("Kernel initialization complete.");
 
-    // Legacy GUI app launchers (painting, calc, explorer) are invoked via
-    // `GLAUNCH.ELF`; notepad and the task manager are standalone ring-3 GUI
-    // ELFs. File-utility commands are BusyBox applets. zsh drives the
-    // synthetic /bin namespace.
+    // The legacy GUI app launcher (`GLAUNCH.ELF`) now serves only
+    // `explorer`; calc, notepad, painting, and the task manager are
+    // standalone ring-3 GUI ELFs. File-utility commands are BusyBox
+    // applets. zsh drives the synthetic /bin namespace.
 
     // Force an initial render to display the desktop
     window::render_frame();
@@ -753,7 +753,7 @@ pub fn run() -> ! {
         }
 
         crate::userland::lifecycle::process_due_real_timers();
-        crate::userland::lifecycle::wake_ring3_due_sleepers();
+        crate::userland::lifecycle::process_expired_sleeps();
 
         // === PROCESS SCHEDULING ===
         // Run any ready processes (GUIShell, spawned commands, etc.)

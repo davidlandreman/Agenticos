@@ -53,8 +53,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
   to BusyBox, the remaining kernel-side GUI apps through `GLAUNCH.ELF`, or
-  standalone ELFs such as `/host/NOTEPAD.ELF` and `/host/TASKMGR.ELF`
-  (`taskmgr` + legacy `tasks` alias).
+  standalone ELFs: `/host/CALC.ELF`, `/host/NOTEPAD.ELF`,
+  `/host/PAINTING.ELF`, and `/host/TASKMGR.ELF` (`taskmgr` + legacy
+  `tasks` alias).
 - `procfs.rs` — synthetic read-only `/proc` namespace, modeled on the
   `/bin` synthesis pattern. Linux-shaped files (`uptime`, `meminfo`,
   `stat`, `loadavg`, `net/dev`, `/proc/<pid>/{stat,status,cmdline,statm}`
@@ -97,17 +98,7 @@ Each process owns:
 - `saved_user_state` (U4 snapshot used by `resume_ring3`).
 - `network_wait` (restart-stable absolute deadline for a blocked socket
   syscall; cleared on success, close, signal, exit, or syscall identity
-  change). Despite the name it is now also `nanosleep`'s restart-stable
-  deadline slot: a real blocking sleep parks as
-  `Ring3BlockReason::Sleeping { deadline_tick }` (10 ms PIT granularity,
-  round-up), is woken by `wake_ring3_due_sleepers` **in the PIT ISR**
-  (the kernel main loop is not a reliable periodic context — kernel
-  threads hopping via `sleep_ticks` can starve it for seconds; the
-  same `sleep_ticks` now bounces through the main loop whenever
-  ring-3 work is ready so dispatch stays prompt), and the re-fired
-  SYSCALL observes the expired state and returns 0. Signals interrupt
-  a sleeper through the ordinary `wake_ring3_for_signal` → `-EINTR`
-  path (`rem` is not populated — known POSIX gap).
+  change).
 - `real_timer` plus `pending_syscall_interrupt` for 100 Hz ITIMER_REAL /
   SIGALRM delivery. Timer expiry is processed by kernel housekeeping and the
   inline test dispatcher; a signal-woken blocking syscall re-enters the
@@ -116,6 +107,21 @@ Each process owns:
   process at CPL=3 — sampled, so sub-tick syscall time is unattributed) and
   `cmdline` (retained argv, capped at `CMDLINE_MAX_BYTES`), both read by
   `/proc/<pid>/*` generators.
+- `sleep_deadline` — restart-stable absolute PIT deadline for a blocking
+  `nanosleep`. Set on first entry, checked on every SYSCALL re-fire, cleared
+  on completion (`lifecycle::nanosleep_deadline`) or signal interruption. The
+  process parks on `Ring3BlockReason::Sleeping { deadline_tick }`;
+  `process_expired_sleeps()` wakes it at the deadline. That wake pass runs
+  from the PIT ISR every tick — the kernel main loop is the idle task under
+  U10 and can starve for seconds while kernel threads hop between each other
+  via `sleep_ticks`' direct thread→thread switch — with the compositor loop,
+  main loop, and inline dispatch loop as redundant backstops. Prompt dispatch
+  of the woken process comes from `sleep_ticks`' `has_ready_ring3()` check: a
+  voluntarily-sleeping kernel thread bounces through the kernel main loop
+  (whose gate runs `save_kernel_and_resume_ring3`) whenever ring-3 work is
+  pending. Self-driven ring-3 animation loops (`PAINTING.ELF`,
+  `TASKMGR.ELF`) and zsh's `sleep`/`usleep` depend on this. On EINTR the
+  remaining time is not written to `rem` (known POSIX gap).
 
 Signals: `kill(2)` addresses **any** live ring-3 PID (single-user model, no
 permission checks) and wakes a blocked target via `wake_ring3_for_signal`.

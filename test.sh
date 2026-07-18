@@ -52,10 +52,14 @@ Environment:
   AGENTICOS_TEST_MEMORY  QEMU RAM for tests (default: 256M; use 128M for
                          reclamation stress runs).
   AGENTICOS_TEST_NETWORK Set to off for an explicit no-NIC boot smoke.
+  AGENTICOS_TEST_VIRGL  Set to 1 only through scripts/test-virgl-integration.sh
+                        to attach the qualified GL device and enable the
+                        destructive render/readback integration test.
   AGENTICOS_QEMU_BIN     Exact qemu-system-x86_64 binary to launch.
   AGENTICOS_COMPOSITOR   Boot policy: legacy (default), retained, gpu, or auto.
   AGENTICOS_GPU_STRICT   Set to 1 to make unavailable GPU mode fail loudly.
   AGENTICOS_THEME        Frame theme: classic, aero, or auto (default auto).
+  AGENTICOS_RENDER_STATS Set to 1 to log retained-render stage counters.
 EOF
 }
 
@@ -147,10 +151,29 @@ QEMU_ARGS=(
     -drive "format=raw,file=$DATA_IMAGE,if=ide,index=2,snapshot=on"
     -serial stdio
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
-    -display none
     -no-reboot
     -m "${AGENTICOS_TEST_MEMORY:-256M}"
 )
+if [ "${AGENTICOS_TEST_VIRGL:-0}" = "1" ]; then
+    # Reuse the same host qualification and display/device selection as an
+    # interactive GPU launch. Keep the guest compositor legacy here: this
+    # integration test owns the VirtIO-GPU device directly before the
+    # production renderer is allowed to select it.
+    source scripts/qemu-compositor.sh
+    TEST_QEMU_BIN="${AGENTICOS_QEMU_BIN:-$(command -v qemu-system-x86_64 || true)}"
+    if [ -z "$TEST_QEMU_BIN" ] || [ ! -x "$TEST_QEMU_BIN" ]; then
+        echo "VirGL integration QEMU is missing: ${TEST_QEMU_BIN:-<unset>}" >&2
+        exit 1
+    fi
+    AGENTICOS_COMPOSITOR=gpu AGENTICOS_GPU_STRICT=1 agenticos_configure_qemu "$TEST_QEMU_BIN" || exit $?
+    QEMU_ARGS+=("${AGENTICOS_QEMU_RENDER_ARGS[@]}")
+    QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/virgl_test,string=1")
+    if [ "${AGENTICOS_TEST_VIRGL_SCANOUT:-0}" = "1" ]; then
+        QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/virgl_scanout_test,string=1")
+    fi
+else
+    QEMU_ARGS+=(-display none)
+fi
 if [ "${AGENTICOS_TEST_NETWORK:-on}" = "off" ]; then
     QEMU_ARGS+=(-nic none)
     echo "Test networking disabled (AGENTICOS_TEST_NETWORK=off)"
@@ -168,12 +191,18 @@ fi
 COMPOSITOR_REQUEST="${AGENTICOS_COMPOSITOR:-legacy}"
 GPU_STRICT="${AGENTICOS_GPU_STRICT:-0}"
 THEME_REQUEST="${AGENTICOS_THEME:-auto}"
+RENDER_STATS="${AGENTICOS_RENDER_STATS:-0}"
 case "$COMPOSITOR_REQUEST" in legacy|retained|gpu|auto) ;; *) echo "Invalid AGENTICOS_COMPOSITOR: $COMPOSITOR_REQUEST" >&2; exit 2 ;; esac
 case "$GPU_STRICT" in 0|1) ;; *) echo "AGENTICOS_GPU_STRICT must be 0 or 1" >&2; exit 2 ;; esac
 case "$THEME_REQUEST" in classic|aero|auto) ;; *) echo "Invalid AGENTICOS_THEME: $THEME_REQUEST" >&2; exit 2 ;; esac
+case "$RENDER_STATS" in 0|1) ;; *) echo "AGENTICOS_RENDER_STATS must be 0 or 1" >&2; exit 2 ;; esac
 QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/compositor,string=$COMPOSITOR_REQUEST")
 QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/gpu_strict,string=$GPU_STRICT")
 QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/theme,string=$THEME_REQUEST")
+QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/render_stats,string=$RENDER_STATS")
+if [ -n "${AGENTICOS_QMP_SOCK:-}" ]; then
+    QEMU_ARGS+=(-qmp "unix:${AGENTICOS_QMP_SOCK},server=on,wait=off")
+fi
 
 QEMU_BIN="${AGENTICOS_QEMU_BIN:-$(command -v qemu-system-x86_64 || true)}"
 if [ -z "$QEMU_BIN" ] || [ ! -x "$QEMU_BIN" ]; then

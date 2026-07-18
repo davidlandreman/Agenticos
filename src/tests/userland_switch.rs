@@ -44,6 +44,7 @@ fn synthetic_process(pid: u32) -> Process {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -295,6 +296,7 @@ fn insert_synthetic(pid: u32) {
         fd_table: crate::userland::fdtable::FdTable::new(),
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: alloc::string::String::from("/"),
         address_space: None,
@@ -632,6 +634,50 @@ fn test_real_timer_expiry_respects_signal_mask() {
     remove_process(9321);
 }
 
+/// A `nanosleep` whose absolute deadline has elapsed is moved from the
+/// blocked set to the ready queue by `process_expired_sleeps` (kernel
+/// housekeeping); the re-fired SYSCALL then returns 0.
+fn test_expired_nanosleep_wakes_blocked_process() {
+    use crate::userland::lifecycle::{
+        mark_ring3_blocked, pop_next_ring3, process_expired_sleeps, remove_process,
+        Ring3BlockReason,
+    };
+
+    let _g = PreemptTestGuard::new();
+    insert_synthetic(9330);
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    mark_ring3_blocked(9330, Ring3BlockReason::Sleeping { deadline_tick: now });
+
+    process_expired_sleeps();
+
+    assert_eq!(pop_next_ring3(), Some(9330));
+    remove_process(9330);
+}
+
+/// A `nanosleep` whose deadline is still in the future stays blocked when
+/// housekeeping runs — it must not wake early.
+fn test_unexpired_nanosleep_stays_blocked() {
+    use crate::userland::lifecycle::{
+        mark_ring3_blocked, pop_next_ring3, process_expired_sleeps, remove_process,
+        Ring3BlockReason,
+    };
+
+    let _g = PreemptTestGuard::new();
+    insert_synthetic(9331);
+    let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+    mark_ring3_blocked(
+        9331,
+        Ring3BlockReason::Sleeping {
+            deadline_tick: now.saturating_add(1_000_000),
+        },
+    );
+
+    process_expired_sleeps();
+
+    assert!(pop_next_ring3().is_none());
+    remove_process(9331);
+}
+
 /// Closing a terminal window must tear down the whole ring-3 tree bound
 /// to that terminal — the shell plus everything it forked (they all
 /// inherit the parent's `terminal_id` across `fork`). Processes on a
@@ -700,6 +746,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_signal_delivery_consumes_from_current_only,
         &test_real_timer_expiry_wakes_blocked_network_syscall,
         &test_real_timer_expiry_respects_signal_mask,
+        &test_expired_nanosleep_wakes_blocked_process,
+        &test_unexpired_nanosleep_stays_blocked,
         &test_kill_ring3_processes_on_terminal_removes_whole_tree,
     ]
 }

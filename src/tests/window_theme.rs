@@ -26,6 +26,13 @@ fn test_theme_selection_and_fallback_matrix() {
         theme::select_theme(ThemeRequest::Auto, RendererKind::RetainedCpu).selected,
         ThemeKind::Aero
     );
+    let virgl = theme::select_theme(ThemeRequest::Aero, RendererKind::Virgl);
+    assert_eq!(virgl.selected, ThemeKind::Aero);
+    assert!(virgl.fallback_reason.is_none());
+    assert_eq!(
+        theme::select_theme(ThemeRequest::Auto, RendererKind::Virgl).selected,
+        ThemeKind::Classic
+    );
 }
 
 fn test_metrics_and_decoration_geometry() {

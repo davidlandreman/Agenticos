@@ -1,28 +1,29 @@
 # `src/commands/` — Kernel-side GUI policy and legacy apps
 
-This directory now contains three kernel-side GUI applications (`painting`,
-`calc`, `explorer`) plus `guishell`, the desktop/taskbar policy layer.
-`notepad` was the first application migrated to the ring-3 GUI platform
-(`userland/apps/notepad/`); the Task Manager followed as the second
-(`userland/apps/taskmgr/`, replacing the kernel-side `tasks` app — see
-`docs/plans/2026-07-18-003-feat-ring3-task-manager-and-procfs-plan.md`).
+This directory now contains one kernel-side GUI application (`explorer`) plus
+`guishell`, the desktop/taskbar policy layer. `notepad` was the first
+application migrated to the ring-3 GUI platform; `calc`, `painting`, and the
+Task Manager (`userland/apps/taskmgr/`, replacing the kernel-side `tasks` app
+— see `docs/plans/2026-07-18-003-feat-ring3-task-manager-and-procfs-plan.md`)
+followed. All four live under `userland/apps/`.
 
-`gui_launch_table` still dispatches the three legacy applications for
+`gui_launch_table` still dispatches the one legacy application for
 `GLAUNCH.ELF` and syscall 5000. Its names must match `GUI_APPLETS` in
-`src/userland/bin_namespace.rs`. Notepad and taskmgr are deliberately absent:
-`/bin/notepad` rewrites directly to `/host/NOTEPAD.ELF`, and both
+`src/userland/bin_namespace.rs`. The migrated apps are deliberately absent:
+`/bin/calc`, `/bin/notepad`, and `/bin/painting` rewrite directly to
+`/host/CALC.ELF`, `/host/NOTEPAD.ELF`, and `/host/PAINTING.ELF`, and both
 `/bin/taskmgr` and the legacy alias `/bin/tasks` rewrite to
 `/host/TASKMGR.ELF`.
 
 ## Launch paths
 
-- Start → Notepad / Start → Task Manager call
-  `terminal_factory::spawn_gui_user_app`, which launches the standalone ELF on
-  a blocking kernel wrapper thread.
-- zsh `notepad` / `taskmgr` / `tasks` resolve through the synthetic `/bin`
-  namespace directly to the staged ELFs.
+- Start → Notepad, Start → Calc, Start → Painting, and Start → Task Manager
+  call `terminal_factory::spawn_gui_user_app`, which launches the standalone
+  ELF on a blocking kernel wrapper thread.
+- zsh `notepad` / `calc` / `painting` / `taskmgr` / `tasks` resolve through
+  the synthetic `/bin` namespace directly to the staged ELFs.
 - Explorer launches `NOTEPAD.ELF` with the selected text path as `argv[1]`.
-- The three remaining kernel apps continue through `GLAUNCH.ELF` →
+- Explorer itself continues through `GLAUNCH.ELF` →
   `sys_gui_launch` → `gui_launch_table::spawn_by_name`.
 
 The old kernel `tasks` app could kill arbitrary kernel threads (including the

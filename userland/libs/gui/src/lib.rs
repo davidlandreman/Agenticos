@@ -193,6 +193,26 @@ pub fn next_event() -> Result<GuiEvent, i64> {
     }
 }
 
+/// `-EAGAIN`, returned by `gui_next_event` under `GUI_NONBLOCK` when the
+/// per-process event queue is empty.
+const EAGAIN: i64 = -11;
+
+/// Non-blocking variant of [`next_event`]. Returns `Ok(None)` when the event
+/// queue is empty instead of parking the process. Lets a self-driven app
+/// (e.g. an animation) drain input each frame and keep rendering on its own
+/// clock via `runtime::nanosleep`, rather than blocking until the next event.
+pub fn try_next_event() -> Result<Option<GuiEvent>, i64> {
+    let mut event = GuiEvent::default();
+    let result = runtime::gui_next_event(&mut event, runtime::GUI_NONBLOCK);
+    if result == EAGAIN {
+        Ok(None)
+    } else if result < 0 {
+        Err(result)
+    } else {
+        Ok(Some(event))
+    }
+}
+
 pub struct MenuBar<'a> {
     pub label: &'a str,
     pub items: &'a [&'a str],

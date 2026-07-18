@@ -365,7 +365,7 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
         );
 
         crate::userland::lifecycle::process_due_real_timers();
-        crate::userland::lifecycle::wake_ring3_due_sleepers();
+        crate::userland::lifecycle::process_expired_sleeps();
 
         // Tests and other non-kernel-thread launchers use this inline loop,
         // so the ordinary `net-rx-tx` kernel worker is not scheduled while
