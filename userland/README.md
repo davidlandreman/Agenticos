@@ -30,7 +30,9 @@ userland/
 ├── linker.ld           # ENTRY(_start), base 0x40_0000, no PT_INTERP
 ├── build-support/      # shared per-binary linker-argument helper
 ├── runtime/            # syscall ABI, startup parsing, brk allocator, GUI events
-├── libs/gui/           # Window, Canvas, bitmap text, menus, directory listing
+├── libs/
+│   ├── gui/            # Window, Canvas, bitmap text, menus, widgets, dir listing
+│   └── dialogs/        # FileDialog, MessageBox, ColorPicker modal compositions
 └── apps/
     ├── hello/          # rust app — prints "hello\n", exits 0
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
@@ -255,6 +257,45 @@ polling, and `Window::present()` performs a full-surface copy. Resize events
 must resize the canvas before the next present; Close remains an application
 decision. Add a direct `/bin` rewrite only when the app should be discoverable
 through `PATH`.
+
+`libs/gui` also ships retained-mode widgets — `Button`, `TextField`,
+`ListView`, and `MenuBar` — as manually-positioned structs (no layout engine).
+Each draws itself and exposes hit-testing / key routing helpers.
+
+## Using dialogs (`libs/dialogs`)
+
+`libs/dialogs` composes the widgets into four modal dialogs: `FileDialog`
+(Open/Save), `MessageBox` (Ok / OkCancel / YesNo), and `ColorPicker`. Each
+dialog owns its own `gui::Window` (created in its constructor, destroyed on
+drop) and is driven by the retained-mode pattern:
+
+```rust
+let mut modal = Some(dialogs::Modal::File(FileDialog::open("/host/")?));
+// in the host event loop:
+if event.window == main_window.handle() {
+    // main window stays live but ignores key/mouse while a modal is open
+} else if let Some(m) = modal.as_mut() {
+    if event.window == m.window_handle() {
+        if let DialogStatus::Done(outcome) = m.handle_event(&event) {
+            modal = None;                 // Window dropped → destroyed
+            // act on `outcome` (None = cancelled)
+        }
+    }
+}
+```
+
+Because each process has **one** GUI event queue, dialogs cannot block: the
+host keeps its own loop and routes events by `event.window`. There is no
+kernel modality — the host must ignore input to its own main window while a
+modal is open (it may still service Resize/Close/Focus). `Modal` is the
+four-way convenience wrapper for single-modal apps; hold an `Option<Modal>`
+and keep a small app-side enum for *why* the dialog is open so you can route
+its outcome. `apps/notepad` (file dialogs + message boxes) and `apps/guidemo`
+(color picker + message box) are the reference clients.
+
+To add a new dialog, add a module under `libs/dialogs/src/`, follow the
+`window_handle()` + `handle_event() -> DialogStatus<T>` shape, and extend the
+`Modal`/`ModalOutcome` wrapper if single-modal hosts should reach it.
 
 ## Adding a new C++ app
 

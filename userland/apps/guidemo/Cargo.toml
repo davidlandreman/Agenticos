@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 runtime = { path = "../../runtime" }
 gui = { path = "../../libs/gui" }
+dialogs = { path = "../../libs/dialogs" }
 
 [build-dependencies]
 userland-build-support = { path = "../../build-support" }

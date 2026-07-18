@@ -236,6 +236,395 @@ impl<'a> MenuBar<'a> {
     }
 }
 
+/// Byte index of the character boundary immediately before `index`.
+///
+/// Shared caret helper used by `TextField` and text-editing apps; moves one
+/// grapheme-free `char` to the left, clamped at 0.
+pub fn previous_boundary(text: &str, index: usize) -> usize {
+    text[..index]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+/// Byte index of the character boundary immediately after `index`.
+///
+/// Moves one `char` to the right, clamped at `text.len()`.
+pub fn next_boundary(text: &str, index: usize) -> usize {
+    text[index..]
+        .char_indices()
+        .nth(1)
+        .map(|(next, _)| index + next)
+        .unwrap_or(text.len())
+}
+
+/// A clickable push button: filled panel + border + centered 8×8 label.
+///
+/// Positioned manually by the caller (no layout engine), matching the
+/// `MenuBar` idiom. `draw(canvas, hot)` renders the default/hot variant;
+/// `hit(x, y)` hit-tests a click. Mouse + accelerator keys only — no focus
+/// traversal.
+pub struct Button {
+    pub label: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Button {
+    pub fn new(label: &str, x: i32, y: i32, w: u32, h: u32) -> Self {
+        Self {
+            label: String::from(label),
+            x,
+            y,
+            w,
+            h,
+        }
+    }
+
+    pub fn hit(&self, x: i32, y: i32) -> bool {
+        x >= self.x
+            && x < self.x + self.w as i32
+            && y >= self.y
+            && y < self.y + self.h as i32
+    }
+
+    pub fn draw(&self, canvas: &mut Canvas, hot: bool) {
+        let fill = if hot { COLOR_HIGHLIGHT } else { COLOR_PANEL };
+        let text_color = if hot { COLOR_WHITE } else { COLOR_TEXT };
+        canvas.fill_rect(self.x, self.y, self.w, self.h, fill);
+        canvas.rect(self.x, self.y, self.w, self.h, COLOR_BORDER);
+        let text_width = self.label.chars().count() as i32 * 8;
+        let text_x = self.x + (self.w as i32 - text_width) / 2;
+        let text_y = self.y + (self.h as i32 - 8) / 2;
+        canvas.draw_text(text_x.max(self.x + 2), text_y, &self.label, text_color);
+    }
+}
+
+/// A single-line editable text field with a byte-index caret.
+///
+/// Owns its `text` and renders a box, clipped/scrolled text (so the caret is
+/// always visible), and a caret line. No selection in v1. Feed keyboard with
+/// [`TextField::key`] and clicks with [`TextField::click`].
+pub struct TextField {
+    pub text: String,
+    pub caret: usize,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    scroll: usize,
+}
+
+impl TextField {
+    const PAD: i32 = 5;
+
+    pub fn new(x: i32, y: i32, w: u32, h: u32, text: &str) -> Self {
+        let text = String::from(text);
+        let caret = text.len();
+        Self {
+            text,
+            caret,
+            x,
+            y,
+            w,
+            h,
+            scroll: 0,
+        }
+    }
+
+    pub fn set_text(&mut self, text: &str) {
+        self.text = String::from(text);
+        self.caret = self.text.len();
+        self.scroll = 0;
+    }
+
+    /// Number of `char`s in `text[..self.caret]` — the caret's column.
+    fn caret_column(&self) -> usize {
+        self.text[..self.caret].chars().count()
+    }
+
+    fn visible_columns(&self) -> usize {
+        ((self.w as i32 - Self::PAD * 2) / 8).max(1) as usize
+    }
+
+    pub fn hit(&self, x: i32, y: i32) -> bool {
+        x >= self.x
+            && x < self.x + self.w as i32
+            && y >= self.y
+            && y < self.y + self.h as i32
+    }
+
+    /// Place the caret nearest the pixel column of `x` (window coordinates).
+    pub fn click(&mut self, x: i32) {
+        let column = ((x - self.x - Self::PAD).max(0) / 8) as usize + self.scroll;
+        self.caret = self
+            .text
+            .char_indices()
+            .nth(column)
+            .map(|(index, _)| index)
+            .unwrap_or(self.text.len());
+    }
+
+    /// Handle a key press. Returns `true` if the text content changed.
+    pub fn key(&mut self, key: u32, character: char) -> bool {
+        match key {
+            runtime::KEY_LEFT => {
+                if self.caret > 0 {
+                    self.caret = previous_boundary(&self.text, self.caret);
+                }
+                false
+            }
+            runtime::KEY_RIGHT => {
+                if self.caret < self.text.len() {
+                    self.caret = next_boundary(&self.text, self.caret);
+                }
+                false
+            }
+            runtime::KEY_HOME => {
+                self.caret = 0;
+                false
+            }
+            runtime::KEY_END => {
+                self.caret = self.text.len();
+                false
+            }
+            runtime::KEY_BACKSPACE => {
+                if self.caret > 0 {
+                    let previous = previous_boundary(&self.text, self.caret);
+                    self.text.replace_range(previous..self.caret, "");
+                    self.caret = previous;
+                    true
+                } else {
+                    false
+                }
+            }
+            runtime::KEY_DELETE => {
+                if self.caret < self.text.len() {
+                    let next = next_boundary(&self.text, self.caret);
+                    self.text.replace_range(self.caret..next, "");
+                    true
+                } else {
+                    false
+                }
+            }
+            _ if character >= ' ' && character != '\u{7f}' => {
+                self.text.insert(self.caret, character);
+                self.caret += character.len_utf8();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn draw(&mut self, canvas: &mut Canvas, focused: bool) {
+        let column = self.caret_column();
+        let visible = self.visible_columns();
+        if column < self.scroll {
+            self.scroll = column;
+        } else if column >= self.scroll + visible {
+            self.scroll = column + 1 - visible;
+        }
+        canvas.fill_rect(self.x, self.y, self.w, self.h, COLOR_WHITE);
+        canvas.rect(self.x, self.y, self.w, self.h, COLOR_BORDER);
+        let text_y = self.y + (self.h as i32 - 8) / 2;
+        let mut pixel_x = self.x + Self::PAD;
+        for character in self.text.chars().skip(self.scroll).take(visible) {
+            canvas.draw_char(pixel_x, text_y, character, COLOR_TEXT);
+            pixel_x += 8;
+        }
+        if focused {
+            let caret_x = self.x + Self::PAD + (column - self.scroll) as i32 * 8;
+            canvas.vertical_line(caret_x, self.y + 4, self.h.saturating_sub(8), COLOR_TEXT);
+        }
+    }
+}
+
+/// Result of routing a click or key into a [`ListView`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ListEvent {
+    /// Nothing happened (click outside the rows, no selection to move).
+    None,
+    /// The selection moved to this row.
+    Selected(usize),
+    /// This row was activated (Enter on a selection, or a second click on the
+    /// already-selected row).
+    Activated(usize),
+}
+
+/// A scrollable single-column list over `Vec<String>` rows.
+///
+/// Handles wheel scroll, click-to-select, keyboard selection movement, and
+/// activation. The selected row is drawn inverted; a minimal scrollbar gutter
+/// appears when the rows overflow the visible page.
+pub struct ListView {
+    pub rows: Vec<String>,
+    pub first_row: usize,
+    pub selected: Option<usize>,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl ListView {
+    pub const ROW_HEIGHT: u32 = 16;
+
+    pub fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
+        Self {
+            rows: Vec::new(),
+            first_row: 0,
+            selected: None,
+            x,
+            y,
+            w,
+            h,
+        }
+    }
+
+    pub fn set_rows(&mut self, rows: Vec<String>) {
+        self.rows = rows;
+        self.first_row = 0;
+        self.selected = None;
+    }
+
+    pub fn visible_rows(&self) -> usize {
+        (self.h / Self::ROW_HEIGHT).max(1) as usize
+    }
+
+    fn ensure_visible(&mut self) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        let visible = self.visible_rows();
+        if selected < self.first_row {
+            self.first_row = selected;
+        } else if selected >= self.first_row + visible {
+            self.first_row = selected + 1 - visible;
+        }
+    }
+
+    pub fn scroll(&mut self, delta: i32) {
+        if delta < 0 {
+            self.first_row = self.first_row.saturating_sub((-delta) as usize);
+        } else {
+            let max_first = self.rows.len().saturating_sub(self.visible_rows());
+            self.first_row = (self.first_row + delta as usize).min(max_first);
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let last = self.rows.len() - 1;
+        let next = match self.selected {
+            None => {
+                if delta < 0 {
+                    last
+                } else {
+                    0
+                }
+            }
+            Some(current) => {
+                if delta < 0 {
+                    current.saturating_sub((-delta) as usize)
+                } else {
+                    (current + delta as usize).min(last)
+                }
+            }
+        };
+        self.selected = Some(next);
+        self.ensure_visible();
+    }
+
+    /// Handle a key press. Returns [`ListEvent::Activated`] on Enter over a
+    /// selected row, [`ListEvent::Selected`] on a movement, else `None`.
+    pub fn key(&mut self, key: u32) -> ListEvent {
+        let page = self.visible_rows() as isize;
+        match key {
+            runtime::KEY_UP => self.move_selection(-1),
+            runtime::KEY_DOWN => self.move_selection(1),
+            runtime::KEY_PAGE_UP => self.move_selection(-page),
+            runtime::KEY_PAGE_DOWN => self.move_selection(page),
+            runtime::KEY_HOME => self.move_selection(-(self.rows.len() as isize)),
+            runtime::KEY_END => self.move_selection(self.rows.len() as isize),
+            runtime::KEY_ENTER => {
+                if let Some(selected) = self.selected {
+                    return ListEvent::Activated(selected);
+                }
+                return ListEvent::None;
+            }
+            _ => return ListEvent::None,
+        }
+        self.selected.map(ListEvent::Selected).unwrap_or(ListEvent::None)
+    }
+
+    pub fn hit(&self, x: i32, y: i32) -> bool {
+        x >= self.x
+            && x < self.x + self.w as i32
+            && y >= self.y
+            && y < self.y + self.h as i32
+    }
+
+    /// Route a click. A click on the already-selected row activates it
+    /// (second-click idiom); a click on a different row selects it.
+    pub fn click(&mut self, x: i32, y: i32) -> ListEvent {
+        if !self.hit(x, y) {
+            return ListEvent::None;
+        }
+        let row = self.first_row + ((y - self.y) / Self::ROW_HEIGHT as i32) as usize;
+        if row >= self.rows.len() {
+            return ListEvent::None;
+        }
+        if self.selected == Some(row) {
+            ListEvent::Activated(row)
+        } else {
+            self.selected = Some(row);
+            ListEvent::Selected(row)
+        }
+    }
+
+    pub fn draw(&self, canvas: &mut Canvas) {
+        canvas.fill_rect(self.x, self.y, self.w, self.h, COLOR_WHITE);
+        let visible = self.visible_rows();
+        let overflow = self.rows.len() > visible;
+        let gutter = if overflow { 6 } else { 0 };
+        let text_width = self.w as i32 - gutter - 4;
+        let max_chars = (text_width / 8).max(1) as usize;
+        for slot in 0..visible {
+            let row = self.first_row + slot;
+            let Some(text) = self.rows.get(row) else {
+                break;
+            };
+            let row_y = self.y + slot as i32 * Self::ROW_HEIGHT as i32;
+            let (bg, fg) = if self.selected == Some(row) {
+                (COLOR_HIGHLIGHT, COLOR_WHITE)
+            } else {
+                (COLOR_WHITE, COLOR_TEXT)
+            };
+            if bg != COLOR_WHITE {
+                canvas.fill_rect(self.x, row_y, self.w - gutter as u32, Self::ROW_HEIGHT, bg);
+            }
+            let clipped: String = text.chars().take(max_chars).collect();
+            canvas.draw_text(self.x + 4, row_y + 4, &clipped, fg);
+        }
+        canvas.rect(self.x, self.y, self.w, self.h, COLOR_BORDER);
+        if overflow {
+            let gutter_x = self.x + self.w as i32 - gutter;
+            canvas.vertical_line(gutter_x, self.y, self.h, COLOR_BORDER);
+            let total = self.rows.len();
+            let track = self.h as i32 - 2;
+            let thumb_h = ((visible * track as usize) / total).max(8) as i32;
+            let max_first = total.saturating_sub(visible).max(1);
+            let thumb_y = self.y + 1 + (self.first_row as i32 * (track - thumb_h)) / max_first as i32;
+            canvas.fill_rect(gutter_x + 1, thumb_y, gutter as u32 - 2, thumb_h as u32, COLOR_BORDER);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DirEntry {
     pub name: String,

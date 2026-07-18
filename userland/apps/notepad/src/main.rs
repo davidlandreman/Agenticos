@@ -8,10 +8,11 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use dialogs::{DialogStatus, FileDialog, MessageBox, MessageChoice, Modal, ModalOutcome};
 use gui::{
-    Canvas, MenuBar, Window, COLOR_BORDER, COLOR_HIGHLIGHT, COLOR_PANEL, COLOR_TEXT, COLOR_WHITE,
-    GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_RESIZE, GUI_MOUSE_DOWN,
-    GUI_MOUSE_SCROLL,
+    next_boundary, previous_boundary, Canvas, MenuBar, Window, COLOR_BORDER, COLOR_HIGHLIGHT,
+    COLOR_PANEL, COLOR_TEXT, COLOR_WHITE, GUI_EVENT_CLOSE, GUI_EVENT_KEY, GUI_EVENT_MOUSE,
+    GUI_EVENT_RESIZE, GUI_MOUSE_DOWN, GUI_MOUSE_SCROLL,
 };
 
 const FILE_ITEMS: &[&str] = &["New", "Open...", "Save", "Save As...", "Exit"];
@@ -200,32 +201,14 @@ impl Editor {
     }
 }
 
+/// Why the current modal is open, so `on_modal_done` knows how to act on its
+/// outcome. The library dialog itself is purpose-agnostic.
 #[derive(Clone, Copy)]
-enum PathMode {
+enum ModalPurpose {
     Open,
     SaveAs,
-}
-
-enum Modal {
-    Path {
-        window: Window,
-        mode: PathMode,
-        input: String,
-        entries: Vec<gui::DirEntry>,
-    },
-    Message {
-        window: Window,
-        text: String,
-        confirm_exit: bool,
-    },
-}
-
-impl Modal {
-    fn handle(&self) -> u32 {
-        match self {
-            Modal::Path { window, .. } | Modal::Message { window, .. } => window.handle(),
-        }
-    }
+    ExitConfirm,
+    Dismiss,
 }
 
 struct Notepad {
@@ -236,6 +219,7 @@ struct Notepad {
     dirty: bool,
     focused: bool,
     modal: Option<Modal>,
+    modal_purpose: ModalPurpose,
 }
 
 impl Notepad {
@@ -252,6 +236,7 @@ impl Notepad {
             dirty: false,
             focused: true,
             modal: None,
+            modal_purpose: ModalPurpose::Dismiss,
         };
         if let Some(path) = initial_path {
             app.load_from(&path);
@@ -268,8 +253,8 @@ impl Notepad {
             };
             let exit = if event.window == self.window.handle() {
                 self.handle_main(event)
-            } else if self.modal.as_ref().map(Modal::handle) == Some(event.window) {
-                self.handle_modal(event)
+            } else if self.modal.as_ref().map(Modal::window_handle) == Some(event.window) {
+                self.handle_modal(&event)
             } else {
                 false
             };
@@ -343,8 +328,8 @@ impl Notepad {
         if ctrl {
             match character.to_ascii_lowercase() {
                 'n' => self.new_file(),
-                'o' => self.open_path_dialog(PathMode::Open),
-                's' if shift => self.open_path_dialog(PathMode::SaveAs),
+                'o' => self.open_dialog(),
+                's' if shift => self.save_as_dialog(),
                 's' => self.save(),
                 _ => {}
             }
@@ -418,9 +403,9 @@ impl Notepad {
         if let Some(index) = self.menu.click(x, y) {
             match index {
                 0 => self.new_file(),
-                1 => self.open_path_dialog(PathMode::Open),
+                1 => self.open_dialog(),
                 2 => self.save(),
-                3 => self.open_path_dialog(PathMode::SaveAs),
+                3 => self.save_as_dialog(),
                 4 => return self.request_exit(),
                 _ => {}
             }
@@ -450,7 +435,7 @@ impl Notepad {
         if let Some(path) = self.path.clone() {
             self.save_to(&path);
         } else {
-            self.open_path_dialog(PathMode::SaveAs);
+            self.save_as_dialog();
         }
     }
 
@@ -463,7 +448,7 @@ impl Notepad {
             0o644,
         );
         if fd < 0 {
-            self.show_error(format!("Save failed ({fd})"));
+            self.show_error(&format!("Save failed ({fd})"));
             return;
         }
         let fd = fd as i32;
@@ -473,7 +458,7 @@ impl Notepad {
             let written = runtime::write(fd, &bytes[offset..]);
             if written <= 0 {
                 let _ = runtime::close(fd);
-                self.show_error(format!("Write failed ({written})"));
+                self.show_error(&format!("Write failed ({written})"));
                 return;
             }
             offset += written as usize;
@@ -487,7 +472,7 @@ impl Notepad {
         let cpath = gui::c_path(path);
         let fd = runtime::openat(runtime::AT_FDCWD, &cpath, runtime::O_RDONLY, 0);
         if fd < 0 {
-            self.show_error(format!("Open failed ({fd})"));
+            self.show_error(&format!("Open failed ({fd})"));
             return;
         }
         let fd = fd as i32;
@@ -497,7 +482,7 @@ impl Notepad {
             let count = runtime::read(fd, &mut chunk);
             if count < 0 {
                 let _ = runtime::close(fd);
-                self.show_error(format!("Read failed ({count})"));
+                self.show_error(&format!("Read failed ({count})"));
                 return;
             }
             if count == 0 {
@@ -512,49 +497,41 @@ impl Notepad {
                 self.path = Some(path.to_string());
                 self.dirty = false;
             }
-            Err(_) => self.show_error("File is not UTF-8 text".to_string()),
+            Err(_) => self.show_error("File is not UTF-8 text"),
         }
     }
 
-    fn open_path_dialog(&mut self, mode: PathMode) {
+    fn open_dialog(&mut self) {
         if self.modal.is_some() {
             return;
         }
-        let input = match mode {
-            PathMode::Open => "/host/".to_string(),
-            PathMode::SaveAs => self
-                .path
-                .clone()
-                .unwrap_or_else(|| "/UNTITLED.TXT".to_string()),
-        };
-        let directory = directory_for_input(&input);
-        let entries = gui::list_dir(directory).unwrap_or_default();
-        let title = match mode {
-            PathMode::Open => "Open File",
-            PathMode::SaveAs => "Save File As",
-        };
-        match Window::new(540, 360, title) {
-            Ok(window) => {
-                self.modal = Some(Modal::Path {
-                    window,
-                    mode,
-                    input,
-                    entries,
-                });
-                self.render_modal();
+        match FileDialog::open("/host/") {
+            Ok(dialog) => {
+                self.modal_purpose = ModalPurpose::Open;
+                self.modal = Some(Modal::File(dialog));
             }
-            Err(error) => self.show_error(format!("Dialog failed ({error})")),
+            Err(error) => self.show_error(&format!("Dialog failed ({error})")),
         }
     }
 
-    fn show_error(&mut self, text: String) {
-        if let Ok(window) = Window::new(420, 150, "Notepad") {
-            self.modal = Some(Modal::Message {
-                window,
-                text,
-                confirm_exit: false,
-            });
-            self.render_modal();
+    fn save_as_dialog(&mut self) {
+        if self.modal.is_some() {
+            return;
+        }
+        let suggested = self.path.as_deref().unwrap_or("/UNTITLED.TXT");
+        match FileDialog::save(suggested) {
+            Ok(dialog) => {
+                self.modal_purpose = ModalPurpose::SaveAs;
+                self.modal = Some(Modal::File(dialog));
+            }
+            Err(error) => self.show_error(&format!("Dialog failed ({error})")),
+        }
+    }
+
+    fn show_error(&mut self, text: &str) {
+        if let Ok(dialog) = MessageBox::error(text) {
+            self.modal_purpose = ModalPurpose::Dismiss;
+            self.modal = Some(Modal::Message(dialog));
         }
     }
 
@@ -563,179 +540,43 @@ impl Notepad {
             return true;
         }
         if self.modal.is_none() {
-            if let Ok(window) = Window::new(460, 160, "Unsaved Changes") {
-                self.modal = Some(Modal::Message {
-                    window,
-                    text: "Unsaved changes. Enter exits; Esc returns.".to_string(),
-                    confirm_exit: true,
-                });
-                self.render_modal();
+            if let Ok(dialog) = MessageBox::confirm(
+                "Unsaved Changes",
+                "This document has unsaved changes. Exit without saving?",
+            ) {
+                self.modal_purpose = ModalPurpose::ExitConfirm;
+                self.modal = Some(Modal::Message(dialog));
             }
         }
         false
     }
 
-    fn render_modal(&mut self) {
+    fn handle_modal(&mut self, event: &runtime::GuiEvent) -> bool {
         let Some(modal) = self.modal.as_mut() else {
-            return;
-        };
-        match modal {
-            Modal::Path {
-                window,
-                mode,
-                input,
-                entries,
-            } => {
-                let canvas = window.canvas_mut();
-                canvas.clear(COLOR_PANEL);
-                canvas.draw_text(
-                    12,
-                    14,
-                    match mode {
-                        PathMode::Open => "Open path:",
-                        PathMode::SaveAs => "Save path:",
-                    },
-                    COLOR_TEXT,
-                );
-                canvas.fill_rect(12, 34, canvas.width().saturating_sub(24), 24, COLOR_WHITE);
-                canvas.rect(12, 34, canvas.width().saturating_sub(24), 24, COLOR_BORDER);
-                canvas.draw_text(18, 42, input, COLOR_TEXT);
-                canvas.draw_text(12, 70, "Directory entries (click to choose):", COLOR_TEXT);
-                for (index, entry) in entries.iter().take(24).enumerate() {
-                    let x = 14 + (index / 12) as i32 * 260;
-                    let y = 88 + (index % 12) as i32 * 20;
-                    if entry.is_dir {
-                        canvas.draw_text(x, y, "[DIR]", COLOR_HIGHLIGHT);
-                    }
-                    canvas.draw_text(
-                        x + if entry.is_dir { 48 } else { 0 },
-                        y,
-                        &entry.name,
-                        COLOR_TEXT,
-                    );
-                }
-                canvas.draw_text(
-                    12,
-                    canvas.height() as i32 - 20,
-                    "Enter confirms - Esc cancels",
-                    COLOR_TEXT,
-                );
-                let _ = window.present();
-            }
-            Modal::Message {
-                window,
-                text,
-                confirm_exit,
-            } => {
-                let canvas = window.canvas_mut();
-                canvas.clear(COLOR_PANEL);
-                canvas.draw_text(18, 28, text, COLOR_TEXT);
-                canvas.draw_text(
-                    18,
-                    92,
-                    if *confirm_exit {
-                        "Enter: Exit    Esc: Cancel"
-                    } else {
-                        "Enter or Esc: Close"
-                    },
-                    COLOR_TEXT,
-                );
-                let _ = window.present();
-            }
-        }
-    }
-
-    fn handle_modal(&mut self, event: runtime::GuiEvent) -> bool {
-        let Some(mut modal) = self.modal.take() else {
             return false;
         };
-        let mut keep = true;
-        let mut exit = false;
-        match &mut modal {
-            Modal::Message { confirm_exit, .. } => match event.kind {
-                GUI_EVENT_CLOSE => keep = false,
-                GUI_EVENT_KEY if event.payload[3] != 0 => {
-                    if *confirm_exit && event.payload[0] == runtime::KEY_ENTER {
-                        exit = true;
-                    }
-                    keep = false;
-                }
-                GUI_EVENT_RESIZE => {
-                    if let Modal::Message { window, .. } = &mut modal {
-                        window.resize(event.payload[0], event.payload[1]);
-                    }
-                }
-                _ => {}
-            },
-            Modal::Path {
-                mode,
-                input,
-                entries,
-                window,
-            } => match event.kind {
-                GUI_EVENT_CLOSE => keep = false,
-                GUI_EVENT_RESIZE => window.resize(event.payload[0], event.payload[1]),
-                GUI_EVENT_KEY if event.payload[3] != 0 => {
-                    let key = event.payload[0];
-                    let character = char::from_u32(event.payload[1]).unwrap_or('\0');
-                    if key == runtime::KEY_ESCAPE {
-                        keep = false;
-                    } else if key == runtime::KEY_BACKSPACE {
-                        input.pop();
-                    } else if key == runtime::KEY_ENTER {
-                        let path = input.clone();
-                        let action = *mode;
-                        keep = false;
-                        match action {
-                            PathMode::Open => self.load_from(&path),
-                            PathMode::SaveAs => self.save_to(&path),
-                        }
-                    } else if character >= ' ' {
-                        input.push(character);
-                    }
-                }
-                GUI_EVENT_MOUSE if event.payload[3] == GUI_MOUSE_DOWN => {
-                    let x = event.payload[0] as usize;
-                    let y = event.payload[1] as i32;
-                    if y >= 88 {
-                        let column = if x >= 274 { 1 } else { 0 };
-                        let row = ((y - 88) / 20).max(0) as usize;
-                        let index = column * 12 + row;
-                        if let Some(entry) = entries.get(index).cloned() {
-                            let directory = directory_for_input(input);
-                            *input = join_path(directory, &entry.name, entry.is_dir);
-                            if entry.is_dir {
-                                *entries = gui::list_dir(input).unwrap_or_default();
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            },
+        if let DialogStatus::Done(outcome) = modal.handle_event(event) {
+            self.modal = None;
+            let exit = self.on_modal_done(outcome);
+            self.render();
+            return exit;
         }
-        if keep {
-            self.modal = Some(modal);
-            self.render_modal();
-        }
-        self.render();
-        exit
+        false
     }
-}
 
-fn previous_boundary(text: &str, index: usize) -> usize {
-    text[..index]
-        .char_indices()
-        .next_back()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
-fn next_boundary(text: &str, index: usize) -> usize {
-    text[index..]
-        .char_indices()
-        .nth(1)
-        .map(|(next, _)| index + next)
-        .unwrap_or(text.len())
+    /// Act on a finished modal according to why it was opened. Returns `true`
+    /// when the app should exit (dirty-close confirmed).
+    fn on_modal_done(&mut self, outcome: Option<ModalOutcome>) -> bool {
+        match (self.modal_purpose, outcome) {
+            (ModalPurpose::Open, Some(ModalOutcome::Path(path))) => self.load_from(&path),
+            (ModalPurpose::SaveAs, Some(ModalOutcome::Path(path))) => self.save_to(&path),
+            (ModalPurpose::ExitConfirm, Some(ModalOutcome::Choice(MessageChoice::Yes))) => {
+                return true
+            }
+            _ => {}
+        }
+        false
+    }
 }
 
 fn line_col_at(text: &str, index: usize) -> (usize, usize) {
@@ -770,39 +611,6 @@ fn index_for_line_col(text: &str, target_line: usize, target_column: usize) -> u
         }
     }
     text.len()
-}
-
-fn parent_directory(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(0) | None => "/",
-        Some(index) => &trimmed[..index],
-    }
-}
-
-fn directory_for_input(path: &str) -> &str {
-    if path.ends_with('/') {
-        let directory = path.trim_end_matches('/');
-        if directory.is_empty() {
-            "/"
-        } else {
-            directory
-        }
-    } else {
-        parent_directory(path)
-    }
-}
-
-fn join_path(directory: &str, name: &str, is_dir: bool) -> String {
-    let mut path = if directory == "/" {
-        format!("/{name}")
-    } else {
-        format!("{directory}/{name}")
-    };
-    if is_dir {
-        path.push('/');
-    }
-    path
 }
 
 #[unsafe(naked)]
