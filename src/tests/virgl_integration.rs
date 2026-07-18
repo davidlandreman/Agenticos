@@ -217,7 +217,7 @@ fn test_clear_and_readback() {
     assert!(production_stats.vertex_buffer_capacity >= 2 * 6 * 32);
     assert_eq!(production_stats.gpu_readback_bytes, 0);
     assert_eq!(production_stats.gpu_readback_cycles, 0);
-    assert_eq!(production_stats.backdrop_scratch_bytes, 8 * 8 * 4 * 2);
+    assert_eq!(production_stats.backdrop_scratch_bytes, 8 * 8 * 4 * 3);
     let readback_bytes = virgl
         .readback_output()
         .expect("explicit VirGL diagnostic readback failed");

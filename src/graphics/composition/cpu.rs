@@ -3,7 +3,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::graphics::scene::{
-    backdrop_box_radii, backdrop_halo, inflate_rect, LayerEffect, LayerSource, SceneFrame,
+    backdrop_box_radii, backdrop_halo, backdrop_targets, inflate_rect, LayerEffect, LayerSource,
+    SceneFrame,
 };
 use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
 use crate::window::Rect;
@@ -15,6 +16,12 @@ use super::{
 /// Pixel-correct reference compositor and fallback engine.
 pub struct CpuCompositionEngine {
     output: Surface,
+}
+
+struct BlurredRegion {
+    target: Rect,
+    sample: Rect,
+    pixels: Vec<PremulArgb>,
 }
 
 impl CpuCompositionEngine {
@@ -129,7 +136,31 @@ impl CompositionEngine for CpuCompositionEngine {
                 let blurred = match layer.effect {
                     LayerEffect::BackdropSample { radius } => {
                         let blur_started = timestamp_cycles();
-                        let blurred = self.blurred_backdrop(work_rect, radius);
+                        let mut blurred = Vec::new();
+                        for target in backdrop_targets(scene, layer, work_rect, output_bounds) {
+                            let sample = inflate_rect(target, radius as u32)
+                                .intersection(&output_bounds)
+                                .unwrap_or(target);
+                            let pixels = self.blurred_backdrop(sample, radius);
+                            stats.backdrop_copies = stats.backdrop_copies.saturating_add(1);
+                            stats.backdrop_copy_pixels =
+                                stats.backdrop_copy_pixels.saturating_add(sample.area());
+                            let pass_count = backdrop_box_radii(radius)
+                                .iter()
+                                .filter(|&&pass| pass != 0)
+                                .count() as u64
+                                * 2;
+                            stats.backdrop_blur_passes =
+                                stats.backdrop_blur_passes.saturating_add(pass_count);
+                            stats.backdrop_blur_pixels = stats
+                                .backdrop_blur_pixels
+                                .saturating_add(sample.area().saturating_mul(pass_count));
+                            blurred.push(BlurredRegion {
+                                target,
+                                sample,
+                                pixels,
+                            });
+                        }
                         stats.backdrop_blur_cycles = stats
                             .backdrop_blur_cycles
                             .saturating_add(timestamp_cycles().saturating_sub(blur_started));
@@ -162,7 +193,16 @@ impl CompositionEngine for CpuCompositionEngine {
                         let dst = if src.a() > 0 && src.a() < u8::MAX {
                             blurred
                                 .as_ref()
-                                .map(|pixels| pixels[region_index(work_rect, x, y)])
+                                .and_then(|regions| {
+                                    regions.iter().find_map(|region| {
+                                        region
+                                            .target
+                                            .contains_point(crate::window::Point::new(x, y))
+                                            .then(|| {
+                                                region.pixels[region_index(region.sample, x, y)]
+                                            })
+                                    })
+                                })
                                 .unwrap_or(output_dst)
                         } else {
                             output_dst

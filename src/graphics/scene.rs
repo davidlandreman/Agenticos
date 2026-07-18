@@ -1,5 +1,6 @@
 //! Backend-neutral retained scene description.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::graphics::composition::ClientGlId;
@@ -49,6 +50,16 @@ pub enum LayerEffect {
     BackdropSample {
         radius: u16,
     },
+}
+
+/// Conservative source-local coverage for pixels that need a backdrop sample.
+/// `Regions` may include opaque/transparent neighbors, but it must contain every
+/// pixel whose effective alpha is strictly between zero and 255.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackdropCoverage {
+    Empty,
+    Full,
+    Regions(Vec<Rect>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +162,7 @@ pub fn backdrop_halo(layers: &[Layer]) -> u32 {
 pub struct SceneFrame {
     pub output_size: (u32, u32),
     pub layers: Vec<Layer>,
+    backdrop_coverage: BTreeMap<SurfaceId, BackdropCoverage>,
 }
 
 impl SceneFrame {
@@ -158,6 +170,7 @@ impl SceneFrame {
         Self {
             output_size: (width, height),
             layers: Vec::new(),
+            backdrop_coverage: BTreeMap::new(),
         }
     }
 
@@ -165,9 +178,63 @@ impl SceneFrame {
         self.layers.push(layer);
     }
 
+    pub fn set_backdrop_coverage(&mut self, surface_id: SurfaceId, coverage: BackdropCoverage) {
+        self.backdrop_coverage.insert(surface_id, coverage);
+    }
+
+    pub fn backdrop_coverage(&self, layer: &Layer) -> Option<&BackdropCoverage> {
+        let LayerSource::Canonical(surface_id) = layer.source else {
+            return None;
+        };
+        self.backdrop_coverage.get(&surface_id)
+    }
+
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn sort_by_z(&mut self) {
         // Stable sort preserves tree order among equal-z layers.
         self.layers.sort_by_key(|layer| layer.z_index);
+    }
+}
+
+/// Return output-space regions in which `layer` may need its backdrop effect.
+/// Missing metadata deliberately falls back to the whole layer.
+pub fn backdrop_targets(
+    scene: &SceneFrame,
+    layer: &Layer,
+    damage: Rect,
+    output_bounds: Rect,
+) -> Vec<Rect> {
+    let layer_bounds = layer.output_bounds();
+    let Some(draw) = damage
+        .intersection(&layer_bounds)
+        .and_then(|rect| rect.intersection(&layer.clip_rect))
+        .and_then(|rect| rect.intersection(&output_bounds))
+    else {
+        return Vec::new();
+    };
+
+    let Some(coverage) = scene.backdrop_coverage(layer) else {
+        return alloc::vec![draw];
+    };
+    match coverage {
+        BackdropCoverage::Empty => Vec::new(),
+        BackdropCoverage::Full => alloc::vec![draw],
+        BackdropCoverage::Regions(regions) => regions
+            .iter()
+            .filter_map(|source| {
+                let source = source.intersection(&layer.source_rect)?;
+                let output = Rect::new(
+                    layer_bounds
+                        .x
+                        .saturating_add(source.x.saturating_sub(layer.source_rect.x)),
+                    layer_bounds
+                        .y
+                        .saturating_add(source.y.saturating_sub(layer.source_rect.y)),
+                    source.width,
+                    source.height,
+                );
+                output.intersection(&draw)
+            })
+            .collect(),
     }
 }

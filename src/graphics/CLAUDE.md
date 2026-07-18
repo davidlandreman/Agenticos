@@ -20,9 +20,10 @@ Drawing primitives, text rendering, image loading, and compositor for the frameb
   persistent sampler view. The framebuffer surface, shaders, vertex elements,
   blend/depth/rasterizer/sampler state, and a geometrically growing vertex
   resource survive across frames and are torn down before their context.
-  Two fixed render-target/sampler scratch textures and bounded separable TGSI
-  shader variants implement the CPU reference's three-box backdrop blur for
-  effect-expanded damage. Engine construction qualifies the exact copy,
+  A fixed backdrop snapshot plus two render-target/sampler blur textures and
+  bounded separable TGSI shader variants implement the CPU reference's
+  three-box backdrop blur for effect-expanded damage. Engine construction
+  qualifies the exact copy,
   ping-pong, multi-sampler combine, transparent-discard, and readback path.
   Each clipped output-damage rectangle is cleared by a scissored transparent
   overwrite quad, then only intersecting textured layers are drawn with

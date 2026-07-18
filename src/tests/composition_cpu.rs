@@ -1,8 +1,10 @@
 use alloc::collections::BTreeMap;
 
 use crate::graphics::composition::{CompositionEngine, CpuCompositionEngine};
-use crate::graphics::scene::{Layer, SceneFrame};
-use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
+use crate::graphics::scene::{Layer, LayerEffect, SceneFrame};
+use crate::graphics::surface::{
+    fractional_alpha_coverage, PremulArgb, Surface, SurfaceDesc, SurfaceId,
+};
 use crate::window::Rect;
 
 fn solid_surface(width: u32, height: u32, pixel: PremulArgb) -> Surface {
@@ -199,6 +201,61 @@ fn test_backdrop_damage_uses_current_neighborhood() {
     assert_ne!(engine.output().pixel(3, 0).unwrap(), before);
 }
 
+fn test_backdrop_coverage_preserves_pixels_and_reduces_work() {
+    let backdrop_id = SurfaceId(21);
+    let glass_id = SurfaceId(22);
+    let mut backdrop = Surface::new(SurfaceDesc::new(128, 96)).unwrap();
+    for y in 0..96 {
+        for x in 0..128 {
+            backdrop.set_pixel(
+                x,
+                y,
+                PremulArgb::from_rgba((x * 2) as u8, (y * 2) as u8, (x + y) as u8, 255),
+            );
+        }
+    }
+    let mut glass = Surface::new(SurfaceDesc::new(128, 96)).unwrap();
+    let tint = PremulArgb::from_rgba(190, 220, 245, 160);
+    glass.clear(Rect::new(0, 0, 128, 8), tint);
+    glass.clear(Rect::new(0, 88, 128, 8), tint);
+    glass.clear(Rect::new(0, 8, 8, 80), tint);
+    glass.clear(Rect::new(120, 8, 8, 80), tint);
+    glass.clear(
+        Rect::new(8, 8, 112, 80),
+        PremulArgb::from_rgba(32, 32, 32, 255),
+    );
+    let coverage = fractional_alpha_coverage(&glass);
+
+    let mut surfaces = BTreeMap::new();
+    surfaces.insert(backdrop_id, backdrop);
+    surfaces.insert(glass_id, glass);
+    let background = Layer::opaque(backdrop_id, Rect::new(0, 0, 128, 96));
+    let mut glass_layer = Layer::opaque(glass_id, Rect::new(0, 0, 128, 96));
+    glass_layer.effect = LayerEffect::BackdropSample { radius: 4 };
+
+    let mut full_scene = SceneFrame::new(128, 96);
+    full_scene.push(background);
+    full_scene.push(glass_layer);
+    let damage = [Rect::new(0, 0, 128, 96)];
+    let mut full = CpuCompositionEngine::new(128, 96).unwrap();
+    let full_stats = full.compose(&full_scene, &surfaces, &damage).unwrap();
+
+    let mut cropped_scene = SceneFrame::new(128, 96);
+    cropped_scene.push(background);
+    cropped_scene.push(glass_layer);
+    cropped_scene.set_backdrop_coverage(glass_id, coverage);
+    let mut cropped = CpuCompositionEngine::new(128, 96).unwrap();
+    let cropped_stats = cropped.compose(&cropped_scene, &surfaces, &damage).unwrap();
+
+    assert_eq!(cropped.output().pixels(), full.output().pixels());
+    assert!(
+        cropped_stats.backdrop_blur_pixels * 2 < full_stats.backdrop_blur_pixels,
+        "cropped={} full={}",
+        cropped_stats.backdrop_blur_pixels,
+        full_stats.backdrop_blur_pixels,
+    );
+}
+
 pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
     &[
         &test_half_red_over_blue_oracle,
@@ -208,5 +265,6 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_backdrop_blur_uniform_is_identity,
         &test_backdrop_blur_spreads_impulse,
         &test_backdrop_damage_uses_current_neighborhood,
+        &test_backdrop_coverage_preserves_pixels_and_reduces_work,
     ]
 }

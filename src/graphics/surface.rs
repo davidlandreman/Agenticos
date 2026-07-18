@@ -3,12 +3,15 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::graphics::scene::BackdropCoverage;
 use crate::window::Rect;
 
 /// Bound the number of transfer rectangles a surface can accumulate between
 /// successful composition frames. Beyond this point one full upload is less
 /// risky than an unbounded stream of tiny VirtIO commands.
 const MAX_DAMAGE_REGIONS: usize = 16;
+const BACKDROP_COVERAGE_TILE: u32 = 8;
+const MAX_BACKDROP_COVERAGE_REGIONS: usize = 64;
 
 /// Stable identity shared by scene layers and composition engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -266,6 +269,72 @@ impl Surface {
     fn clip(&self, rect: Rect) -> Option<Rect> {
         rect.intersection(&Rect::new(0, 0, self.desc.width, self.desc.height))
     }
+}
+
+/// Conservatively coalesce tiles containing fractional-alpha pixels. The
+/// result is cached by the retained renderer, so this O(surface pixels) scan
+/// occurs after content damage, never for a position-only frame.
+pub fn fractional_alpha_coverage(surface: &Surface) -> BackdropCoverage {
+    let width = surface.width();
+    let height = surface.height();
+    let tiles_x = width.div_ceil(BACKDROP_COVERAGE_TILE);
+    let tiles_y = height.div_ceil(BACKDROP_COVERAGE_TILE);
+    let mut regions = Vec::<Rect>::new();
+
+    for tile_y in 0..tiles_y {
+        let y = tile_y * BACKDROP_COVERAGE_TILE;
+        let tile_height = BACKDROP_COVERAGE_TILE.min(height - y);
+        let mut tile_x = 0;
+        while tile_x < tiles_x {
+            if !tile_has_fractional_alpha(surface, tile_x, tile_y) {
+                tile_x += 1;
+                continue;
+            }
+            let run_start = tile_x;
+            tile_x += 1;
+            while tile_x < tiles_x && tile_has_fractional_alpha(surface, tile_x, tile_y) {
+                tile_x += 1;
+            }
+            let x = run_start * BACKDROP_COVERAGE_TILE;
+            let run_right = (tile_x * BACKDROP_COVERAGE_TILE).min(width);
+            let run_width = run_right - x;
+            if let Some(existing) = regions.iter_mut().rev().find(|rect| {
+                rect.x == x as i32 && rect.width == run_width && rect.bottom() == y as i32
+            }) {
+                existing.height = existing.height.saturating_add(tile_height);
+            } else {
+                regions.push(Rect::new(x as i32, y as i32, run_width, tile_height));
+                if regions.len() > MAX_BACKDROP_COVERAGE_REGIONS {
+                    return BackdropCoverage::Full;
+                }
+            }
+        }
+    }
+
+    if regions.is_empty() {
+        BackdropCoverage::Empty
+    } else {
+        BackdropCoverage::Regions(regions)
+    }
+}
+
+fn tile_has_fractional_alpha(surface: &Surface, tile_x: u32, tile_y: u32) -> bool {
+    let left = tile_x * BACKDROP_COVERAGE_TILE;
+    let top = tile_y * BACKDROP_COVERAGE_TILE;
+    let right = (left + BACKDROP_COVERAGE_TILE).min(surface.width());
+    let bottom = (top + BACKDROP_COVERAGE_TILE).min(surface.height());
+    for y in top..bottom {
+        let Some(row) = surface.row(y) else {
+            continue;
+        };
+        if row[left as usize..right as usize]
+            .iter()
+            .any(|pixel| pixel.a() != 0 && pixel.a() != u8::MAX)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn touches_or_overlaps(a: Rect, b: Rect) -> bool {

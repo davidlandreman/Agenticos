@@ -1,5 +1,7 @@
+use crate::graphics::scene::BackdropCoverage;
 use crate::graphics::surface::{
-    PremulArgb, Surface, SurfaceBudget, SurfaceClass, SurfaceDesc, SurfaceError,
+    fractional_alpha_coverage, PremulArgb, Surface, SurfaceBudget, SurfaceClass, SurfaceDesc,
+    SurfaceError,
 };
 use crate::window::Rect;
 
@@ -96,6 +98,34 @@ fn test_budget_rejection_and_accounting() {
     assert_eq!(budget.visible_bytes(), 40);
 }
 
+fn test_fractional_alpha_coverage_excludes_opaque_interior() {
+    let mut surface = Surface::new(SurfaceDesc::new(32, 32)).unwrap();
+    let glass = PremulArgb::from_rgba(180, 220, 250, 128);
+    surface.clear(Rect::new(0, 0, 32, 8), glass);
+    surface.clear(Rect::new(0, 24, 32, 8), glass);
+    surface.clear(Rect::new(0, 8, 8, 16), glass);
+    surface.clear(Rect::new(24, 8, 8, 16), glass);
+    surface.clear(
+        Rect::new(8, 8, 16, 16),
+        PremulArgb::from_rgba(20, 30, 40, 255),
+    );
+
+    let BackdropCoverage::Regions(regions) = fractional_alpha_coverage(&surface) else {
+        panic!("expected coalesced fractional-alpha regions");
+    };
+    assert_eq!(
+        regions.len(),
+        4,
+        "expected four frame-ring bands: {regions:?}"
+    );
+    assert!(regions
+        .iter()
+        .any(|rect| rect.contains_point(crate::window::Point::new(4, 4))));
+    assert!(!regions
+        .iter()
+        .any(|rect| rect.contains_point(crate::window::Point::new(16, 16))));
+}
+
 pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
     &[
         &test_premultiply_round_trip,
@@ -106,5 +136,6 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_surface_damage_acknowledgement_is_transactional,
         &test_surface_damage_region_count_is_bounded,
         &test_budget_rejection_and_accounting,
+        &test_fractional_alpha_coverage_excludes_opaque_interior,
     ]
 }
