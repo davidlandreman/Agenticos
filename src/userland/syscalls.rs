@@ -221,7 +221,9 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
         // /proc snapshots are read-only.
-        Some(FdSlot::VirtualFile { .. }) | Some(FdSlot::Urandom { .. }) => return EBADF,
+        Some(FdSlot::VirtualFile { .. })
+        | Some(FdSlot::Urandom { .. })
+        | Some(FdSlot::GuiEvents { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
 
@@ -325,7 +327,9 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
         // /proc snapshots are read-only.
-        Some(FdSlot::VirtualFile { .. }) | Some(FdSlot::Urandom { .. }) => return EBADF,
+        Some(FdSlot::VirtualFile { .. })
+        | Some(FdSlot::Urandom { .. })
+        | Some(FdSlot::GuiEvents { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
     if iovcnt < 0 || iovcnt as usize > WRITEV_MAX_IOV {
@@ -584,6 +588,42 @@ fn read_fd_once(args: &SyscallArgs, fd: i32, ptr: u64, len: u64) -> i64 {
                 });
             }
             n as i64
+        }
+        Some(FdSlot::GuiEvents { handle, .. }) => {
+            let event_size = core::mem::size_of::<crate::userland::gui::GuiEvent>();
+            if cap < event_size as u64 {
+                return EINVAL;
+            }
+            if crate::userland::lifecycle::current_user_pid() != Some(handle.owner_pid()) {
+                return EBADF;
+            }
+            let max_events = cap as usize / event_size;
+            if let Err(error) = validate_user_slice(ptr, (max_events * event_size) as u64) {
+                return error;
+            }
+            let mut events = alloc::vec::Vec::with_capacity(max_events);
+            while events.len() < max_events {
+                match crate::userland::gui::pop_event(handle.owner_pid()) {
+                    Some(event) => events.push(event),
+                    None => break,
+                }
+            }
+            if events.is_empty() {
+                if handle.nonblocking() {
+                    return EAGAIN;
+                }
+                unsafe {
+                    crate::userland::switch::block_current_ring3_and_yield(
+                        args,
+                        crate::userland::lifecycle::Ring3BlockReason::WaitingForGuiEvent,
+                    );
+                }
+            }
+            let byte_len = events.len() * event_size;
+            let bytes =
+                unsafe { core::slice::from_raw_parts(events.as_ptr().cast::<u8>(), byte_len) };
+            crate::userland::usercopy::copy_to_user(ptr, bytes)
+                .map_or_else(|error| error, |_| byte_len as i64)
         }
         Some(FdSlot::PipeRead(handle, _)) => {
             // Drain bytes from the pipe. EOF when empty *and* no
@@ -1393,7 +1433,7 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         brk_current: parent.brk_current,
         brk_base: parent.brk_base,
         mmap_next: parent.mmap_next,
-        fd_table: parent.fd_table.clone(),
+        fd_table: parent.fd_table.fork_clone(),
         umask: parent.umask,
         network_wait: None,
         // POSIX timers are not inherited across fork.
@@ -3407,6 +3447,9 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
             Some(FdSlot::PipeWrite(handle, _)) => {
                 (O_WRONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
             }
+            Some(FdSlot::GuiEvents { handle, .. }) => {
+                (O_RDONLY | if handle.nonblocking() { O_NONBLOCK } else { 0 }) as i64
+            }
             Some(_) => O_RDONLY as i64,
             None => EBADF,
         },
@@ -3431,6 +3474,10 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
                     (*status_flags & O_ACCMODE) | (arg as u32 & (O_APPEND | O_NONBLOCK));
                 0
             }),
+            Some(FdSlot::GuiEvents { handle, .. }) => {
+                handle.set_nonblocking(arg & O_NONBLOCK as u64 != 0);
+                0
+            }
             Some(_) => 0,
             None => EBADF,
         },
@@ -3696,6 +3743,14 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
         }
         Some(FdSlot::Urandom { .. }) => {
             let st = stat_virtual_dev("/dev/urandom").expect("urandom is always virtual");
+            write_stat(out_ptr, &st)
+        }
+        Some(FdSlot::GuiEvents { .. }) => {
+            let st = LinuxStat {
+                st_mode: S_IFCHR | 0o600,
+                st_blksize: core::mem::size_of::<crate::userland::gui::GuiEvent>() as i64,
+                ..LinuxStat::default()
+            };
             write_stat(out_ptr, &st)
         }
         None => EBADF,
@@ -4517,6 +4572,15 @@ fn fd_readiness(fd: i32) -> Result<FdReady, i64> {
             readable: true,
             ..FdReady::default()
         }),
+        FdSlot::GuiEvents { handle, .. } => {
+            if crate::userland::lifecycle::current_user_pid() != Some(handle.owner_pid()) {
+                return Err(EBADF);
+            }
+            Ok(FdReady {
+                readable: crate::userland::gui::has_events(handle.owner_pid()),
+                ..FdReady::default()
+            })
+        }
         FdSlot::File { .. }
         | FdSlot::VirtualFile { .. }
         | FdSlot::Directory { .. }
@@ -4885,6 +4949,7 @@ fn resolve_proc_self_fd(fd: i32) -> Option<String> {
         FdSlot::VirtualDevDir { .. } => String::from("/dev"),
         FdSlot::Urandom { .. } => String::from("/dev/urandom"),
         FdSlot::Socket { handle, .. } => alloc::format!("socket:[{}]", handle.id()),
+        FdSlot::GuiEvents { .. } => String::from("anon_inode:[agenticos-gui]"),
         FdSlot::VirtualFile { path, .. } | FdSlot::VirtualDir { path, .. } => String::clone(&path),
     })
 }

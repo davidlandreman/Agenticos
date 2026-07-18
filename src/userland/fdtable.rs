@@ -13,6 +13,7 @@ use crate::fs::file_handle::{Directory, File};
 use crate::lib::arc::Arc;
 use crate::net::socket::SocketHandle;
 use crate::userland::pipe::{PipeReadHandle, PipeWriteHandle};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Maximum file descriptors per process. Bounded to keep the table size
 /// in `ActiveUser` small and predictable. zsh during a basic interactive
@@ -22,6 +23,36 @@ pub const FD_TABLE_SIZE: usize = 32;
 pub const STDIN_FD: i32 = 0;
 pub const STDOUT_FD: i32 = 1;
 pub const STDERR_FD: i32 = 2;
+
+/// Shared open-file state for a process's GUI event queue. `dup` shares this
+/// object (and therefore `O_NONBLOCK`) just like a Linux open-file
+/// description. The queue itself remains owned by `userland::gui` and keyed
+/// by `owner_pid`.
+pub struct GuiEventHandle {
+    owner_pid: u32,
+    nonblocking: AtomicBool,
+}
+
+impl GuiEventHandle {
+    pub fn new(owner_pid: u32, nonblocking: bool) -> Arc<Self> {
+        Arc::new(Self {
+            owner_pid,
+            nonblocking: AtomicBool::new(nonblocking),
+        })
+    }
+
+    pub fn owner_pid(&self) -> u32 {
+        self.owner_pid
+    }
+
+    pub fn nonblocking(&self) -> bool {
+        self.nonblocking.load(Ordering::Acquire)
+    }
+
+    pub fn set_nonblocking(&self, value: bool) {
+        self.nonblocking.store(value, Ordering::Release);
+    }
+}
 
 /// One file-descriptor slot. The standard streams are sentinel variants
 /// because they don't have an `Arc<File>` backing — `read(0)` consults
@@ -97,6 +128,11 @@ pub enum FdSlot {
     Urandom {
         cloexec: bool,
     },
+    /// Selectable view of the owning process's fixed-size GUI event queue.
+    GuiEvents {
+        handle: Arc<GuiEventHandle>,
+        cloexec: bool,
+    },
 }
 
 impl FdSlot {}
@@ -160,6 +196,21 @@ impl FdTable {
         None
     }
 
+    /// Clone descriptors for `fork`. GUI event queues are process-owned and
+    /// cannot safely be consumed by a child, so those descriptor numbers are
+    /// intentionally left closed in the child.
+    pub fn fork_clone(&self) -> Self {
+        let mut cloned = Self::new();
+        for (index, slot) in self.slots.iter().enumerate() {
+            cloned.slots[index] = match slot {
+                Some(FdSlot::GuiEvents { .. }) => None,
+                Some(slot) => Some(slot.clone()),
+                None => None,
+            };
+        }
+        cloned
+    }
+
     /// Remove the slot at `fd`. Returns `Err(EBADF)` if the slot is
     /// already empty or the fd is out of range.
     pub fn close(&mut self, fd: i32) -> Result<(), i64> {
@@ -213,6 +264,7 @@ impl FdTable {
             FdSlot::VirtualDir { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::VirtualDevDir { cloexec: ce, .. } => *ce = cloexec,
             FdSlot::Urandom { cloexec: ce } => *ce = cloexec,
+            FdSlot::GuiEvents { cloexec: ce, .. } => *ce = cloexec,
             _ => {}
         }
         Ok(())
@@ -230,6 +282,7 @@ impl FdTable {
             FdSlot::VirtualDir { cloexec, .. } => *cloexec,
             FdSlot::VirtualDevDir { cloexec, .. } => *cloexec,
             FdSlot::Urandom { cloexec } => *cloexec,
+            FdSlot::GuiEvents { cloexec, .. } => *cloexec,
             _ => false,
         })
     }

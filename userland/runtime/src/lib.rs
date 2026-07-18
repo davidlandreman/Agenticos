@@ -97,6 +97,10 @@ const NR_GUI_GL_SUBMIT_FRAME: u64 = 5007;
 const NR_GUI_GL_GET_INFO: u64 = 5008;
 const NR_GUI_GL_CONTEXT_DESTROY: u64 = 5009;
 const NR_SYSTEM_CONTROL: u64 = 5010;
+const NR_GUI_EVENT_OPEN: u64 = 5011;
+
+pub const GUI_EVENT_OPEN_NONBLOCK: u64 = 0x800;
+pub const GUI_EVENT_OPEN_CLOEXEC: u64 = 0x80000;
 
 pub const SYSTEM_CONTROL_GET_SNAPSHOT: u64 = 0;
 pub const SYSTEM_CONTROL_GET_WALLPAPER_PATH: u64 = 1;
@@ -424,6 +428,11 @@ pub fn gui_next_event(event: &mut GuiEvent, flags: u64) -> i64 {
             flags,
         )
     }
+}
+
+/// Open a poll/select-compatible descriptor for the process GUI queue.
+pub fn gui_event_open(flags: u64) -> i64 {
+    unsafe { syscall1(NR_GUI_EVENT_OPEN, flags) }
 }
 
 pub fn gui_win_destroy(handle: u32) -> i64 {

@@ -63,7 +63,7 @@ userland/
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
     ├── tcc/            # prebuilt-managed TinyCC + /host/sysroot assembly
-    ├── links2/         # prebuilt-managed Links text/HTTP browser
+    ├── links2/         # prebuilt-managed Links text + native GUI browser
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
     ├── network-test/   # static-musl socket test fixture
     └── hello-cpp/      # C++ app — std::cout, exits 0
@@ -108,7 +108,8 @@ resolve into multicall or direct binaries staged under `host_share/`:
   or `/data` (cwd starts at read-only `/host`). See
   `userland/apps/tcc/README.md`.
 - **`LINKS.ELF` — Links 2.30** (`links` and `links2`). Interactive text-mode
-  browsing and `-dump` work over IPv4 HTTP with DNS. TLS is deliberately
+  and native AgenticOS GUI browsing (Start → Programs → Web Browser) plus
+  `-dump` work over IPv4 HTTP with DNS. TLS is deliberately
   disabled here; the entropy prerequisite has landed, while the TLS stack,
   CA roots, hostname verification, and trusted-time policy remain a separate
   follow-up. See
