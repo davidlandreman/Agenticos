@@ -759,8 +759,15 @@ pub fn mmap_handler(args: &mut SyscallArgs) -> i64 {
     if length == 0 || length > MMAP_MAX_LEN {
         return EINVAL;
     }
-    if (flags & MAP_PRIVATE) == 0 || flags & MAP_FIXED != 0 {
+    if (flags & MAP_PRIVATE) == 0 {
         return ENOSYS;
+    }
+    let fixed = flags & MAP_FIXED != 0;
+    if fixed && (addr_hint & 0xfff != 0 || addr_hint == 0) {
+        // MAP_FIXED demands an exact page-aligned address; musl's
+        // mallocng meta allocator and aligned-allocation trim path both
+        // rely on it. A misaligned or null fixed address is EINVAL.
+        return EINVAL;
     }
     if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         return EINVAL;
@@ -804,46 +811,82 @@ pub fn mmap_handler(args: &mut SyscallArgs) -> i64 {
         return EBADF;
     }
 
-    crate::userland::lifecycle::with_current_group(|process| {
-        let Some(space) = process.address_space.as_mut() else {
-            return ENOMEM;
-        };
-        let stack_floor = space
-            .vmas()
-            .as_slice()
-            .iter()
-            .find_map(|vma| matches!(vma.backing, VmaBacking::Stack { .. }).then_some(vma.start))
-            .unwrap_or(crate::mm::paging::USER_STACK_TOP);
-        let hinted_end = addr_hint.checked_add(len);
-        let addr = if addr_hint & 0xfff == 0
-            && hinted_end.is_some_and(|end| space.vmas().is_free(addr_hint, end))
-        {
-            addr_hint
-        } else {
-            match space
+    // `(result, Some(l4))` when a MAP_FIXED insert replaced an existing
+    // range and its resident leaves must be torn down after the VMA
+    // mutation (same split-then-unmap ordering as munmap).
+    use x86_64::structures::paging::{PhysFrame, Size4KiB};
+    let (result, fixed_l4): (i64, Option<PhysFrame<Size4KiB>>) =
+        crate::userland::lifecycle::with_current_group(|process| {
+            let Some(space) = process.address_space.as_mut() else {
+                return (ENOMEM, None);
+            };
+            let stack_floor = space
                 .vmas()
-                .find_gap_top_down(len, stack_floor.saturating_sub(1024 * 1024))
+                .as_slice()
+                .iter()
+                .find_map(|vma| {
+                    matches!(vma.backing, VmaBacking::Stack { .. }).then_some(vma.start)
+                })
+                .unwrap_or(crate::mm::paging::USER_STACK_TOP);
+            let hinted_end = addr_hint.checked_add(len);
+            let (addr, replaced_l4) = if fixed {
+                // MAP_FIXED: place at exactly addr_hint, evicting any
+                // VMAs already there (Linux semantics). Removing the
+                // range first also splits partial overlaps.
+                let Some(end) = hinted_end else {
+                    return (EINVAL, None);
+                };
+                let l4 = space.l4_frame();
+                if space.vmas_mut().remove(addr_hint, end).is_err() {
+                    return (EINVAL, None);
+                }
+                (addr_hint, Some(l4))
+            } else if addr_hint & 0xfff == 0
+                && hinted_end.is_some_and(|end| space.vmas().is_free(addr_hint, end))
             {
-                Ok(address) => address,
-                Err(_) => return ENOMEM,
+                (addr_hint, None)
+            } else {
+                match space
+                    .vmas()
+                    .find_gap_top_down(len, stack_floor.saturating_sub(1024 * 1024))
+                {
+                    Ok(address) => (address, None),
+                    Err(_) => return (ENOMEM, None),
+                }
+            };
+            let backing = match file {
+                Some(ref handle) => VmaBacking::FilePrivate {
+                    file: handle.clone(),
+                    file_offset: offset,
+                    file_size: handle.size(),
+                },
+                None => VmaBacking::Anonymous,
+            };
+            let Ok(vma) = Vma::new(addr, addr + len, vm_prot, backing) else {
+                return (ENOMEM, None);
+            };
+            if space.vmas_mut().insert(vma).is_err() {
+                return (ENOMEM, None);
             }
-        };
-        let backing = match file {
-            Some(ref handle) => VmaBacking::FilePrivate {
-                file: handle.clone(),
-                file_offset: offset,
-                file_size: handle.size(),
-            },
-            None => VmaBacking::Anonymous,
-        };
-        let Ok(vma) = Vma::new(addr, addr + len, vm_prot, backing) else {
-            return ENOMEM;
-        };
-        if space.vmas_mut().insert(vma).is_err() {
-            return ENOMEM;
-        }
-        addr as i64
-    })
+            (addr as i64, replaced_l4)
+        });
+
+    // Drop stale hardware leaves under a replaced MAP_FIXED range so the
+    // fresh mapping (often PROT_NONE) faults in cleanly instead of
+    // exposing the old page contents.
+    if let Some(l4) = fixed_l4 {
+        let end = result as u64 + len;
+        crate::mm::memory::with_memory_mapper(|mapper| {
+            let mut page = result as u64;
+            while page < end {
+                if mapper.leaf_info(l4, VirtAddr::new(page)).is_some() {
+                    let _ = mapper.unmap_page_from(l4, VirtAddr::new(page));
+                }
+                page += 0x1000;
+            }
+        });
+    }
+    result
 }
 
 /// `munmap(addr, length) -> int`
@@ -1372,6 +1415,16 @@ pub fn getppid_handler(_: &mut SyscallArgs) -> i64 {
 /// This intentionally does not support concurrency between parent and
 /// child — pipelines and `cmd &` need a real scheduler (Phase 5+).
 pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
+    fork_like(args, None)
+}
+
+/// Shared body of `fork`, `vfork`, and the posix_spawn `clone` profile.
+/// `child_rsp_override` is the caller-supplied child stack for the spawn
+/// profile (`clone(CLONE_VM|CLONE_VFORK|SIGCHLD, stack, ...)`): the child
+/// resumes at the post-SYSCALL instruction with rax=0 and RSP switched to
+/// that stack, exactly what musl's `__clone` asm expects before it pops
+/// the argument and calls the child function.
+fn fork_like(args: &mut SyscallArgs, child_rsp_override: Option<u64>) -> i64 {
     use crate::userland::lifecycle::{
         alloc_pid, insert_process, mark_ring3_ready, with_current_process, ExitKind,
     };
@@ -1434,7 +1487,9 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         r9: args.r9,
         rbx: saved.rbx,
         rbp: saved.rbp,
-        rsp: saved.r12_register, // = user RSP from gs:[8]
+        // Spawn-profile clone switches the child onto its caller-supplied
+        // stack; plain fork keeps the parent's RSP.
+        rsp: child_rsp_override.unwrap_or(saved.r12_register), // = user RSP from gs:[8]
         r12: user_r12,
         r13: saved.r13,
         r14: saved.r14,
@@ -1585,6 +1640,25 @@ pub fn clone_handler(args: &mut SyscallArgs) -> i64 {
         | CLONE_DETACHED;
 
     let flags = args.rdi;
+
+    // musl posix_spawn profile: clone(CLONE_VM|CLONE_VFORK|SIGCHLD,
+    // stack, 0, 0, 0). Like vfork_handler we substitute copy semantics
+    // for the shared-VM/parent-suspend contract: musl's spawn protocol
+    // never reads parent memory written by the child — success/failure
+    // travels over a CLOEXEC status pipe — so a COW-fork child that
+    // resumes on the caller-supplied stack is observationally correct.
+    // libiberty's pex (the GCC driver), musl system(), and popen() all
+    // spawn subprocesses through this profile.
+    const CLONE_VFORK: u64 = 0x0000_4000;
+    const SIGCHLD: u64 = 17;
+    const MUSL_SPAWN_FLAGS: u64 = CLONE_VM | CLONE_VFORK | SIGCHLD;
+    if flags == MUSL_SPAWN_FLAGS {
+        if args.rsi == 0 {
+            return EINVAL;
+        }
+        return fork_like(args, Some(args.rsi));
+    }
+
     if flags != MUSL_THREAD_FLAGS || args.rsi == 0 || args.rdx == 0 || args.r10 == 0 {
         return EINVAL;
     }
@@ -1834,7 +1908,17 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     // BusyBox multicall: argv[0] picks the applet, regardless of what
     // the caller passed. See bin_applet computation above.
     if let Some(applet) = bin_applet {
-        argv_refs[0] = applet;
+        // GCC self-relocates: it derives GCC_EXEC_PREFIX from argv[0] and
+        // set_std_prefix REPLACES the configured /host/gcc prefix with the
+        // derived one. A bare "gcc" resolved via /bin would derive "/" and
+        // the driver could no longer find cc1/collect2. Handing it its
+        // real staged path makes make_relative_prefix derive exactly the
+        // configured prefix. Every other applet gets the plain name.
+        argv_refs[0] = if applet == "gcc" {
+            resolved_path.as_str()
+        } else {
+            applet
+        };
     }
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
     let user_rsp = super::build_initial_stack(
@@ -1865,6 +1949,10 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         // points at the new program. argv[0] is the canonical name.
         p.exe_path = Some(String::from(argv_refs[0]));
         p.cmdline = crate::userland::lifecycle::capped_cmdline(&argv_refs);
+        // POSIX: exec closes every descriptor with FD_CLOEXEC set. musl
+        // posix_spawn's success signal is the CLOEXEC status pipe
+        // closing here.
+        p.fd_table.close_on_exec();
         // Phase 5 PR-B: POSIX semantics — exec resets signal
         // dispositions but preserves the blocked mask. Pending
         // signals are also preserved across exec.

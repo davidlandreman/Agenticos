@@ -20,8 +20,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Maximum file descriptors per process. Bounded to keep the table size
 /// in `ActiveUser` small and predictable. zsh during a basic interactive
-/// session opens ~10–15 fds; 32 is comfortable headroom.
-pub const FD_TABLE_SIZE: usize = 32;
+/// session opens ~10–15 fds; 64 leaves headroom for GCC's driver →
+/// collect2 → ld fd-inheritance chain on top of that.
+pub const FD_TABLE_SIZE: usize = 64;
 
 pub const STDIN_FD: i32 = 0;
 pub const STDOUT_FD: i32 = 1;
@@ -154,6 +155,27 @@ pub enum FdSlot {
 }
 
 impl FdSlot {
+    /// The per-descriptor FD_CLOEXEC bit. The standard-stream sentinels
+    /// never carry it.
+    pub fn is_cloexec(&self) -> bool {
+        match self {
+            Self::Stdin | Self::Stdout | Self::Stderr => false,
+            Self::File { cloexec, .. }
+            | Self::Directory { cloexec, .. }
+            | Self::VirtualBinDir { cloexec, .. }
+            | Self::Socket { cloexec, .. }
+            | Self::VirtualFile { cloexec, .. }
+            | Self::VirtualDir { cloexec, .. }
+            | Self::VirtualDevDir { cloexec, .. }
+            | Self::Urandom { cloexec }
+            | Self::GuiEvents { cloexec, .. }
+            | Self::EventFd { cloexec, .. }
+            | Self::Epoll { cloexec, .. }
+            | Self::LocalStream { cloexec, .. } => *cloexec,
+            Self::PipeRead(_, cloexec) | Self::PipeWrite(_, cloexec) => *cloexec,
+        }
+    }
+
     /// Whether two descriptor slots refer to the same Linux open-file
     /// description. Per-descriptor close-on-exec bits are intentionally
     /// ignored.
@@ -248,6 +270,18 @@ impl FdTable {
             return None;
         }
         self.slots[fd as usize].as_mut()
+    }
+
+    /// Drop every slot whose FD_CLOEXEC bit is set. Runs at the execve
+    /// commit point — closing the write end of musl posix_spawn's
+    /// CLOEXEC status pipe is what signals a successful exec to the
+    /// spawning parent.
+    pub fn close_on_exec(&mut self) {
+        for slot in self.slots.iter_mut() {
+            if slot.as_ref().is_some_and(FdSlot::is_cloexec) {
+                *slot = None;
+            }
+        }
     }
 
     /// Insert `slot` at the lowest available index ≥ 3 and return the

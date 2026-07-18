@@ -2150,6 +2150,23 @@ fn test_fdtable_alloc_and_close() {
     assert_eq!(t.close(99).err(), Some(EBADF));
 }
 
+fn test_fdtable_capacity_64() {
+    use crate::userland::fdtable::FD_TABLE_SIZE;
+    assert_eq!(FD_TABLE_SIZE, 64, "GCC driver chains rely on 64 fd slots");
+    let mut t = FdTable::new();
+    t.install_default_streams();
+    for expected in 3..FD_TABLE_SIZE as i32 {
+        assert_eq!(t.alloc(FdSlot::Stdin), Some(expected));
+    }
+    assert_eq!(t.alloc(FdSlot::Stdin), None, "table must cap at 64 slots");
+    assert!(t.close(FD_TABLE_SIZE as i32 - 1).is_ok());
+    assert_eq!(
+        t.alloc(FdSlot::Stdin),
+        Some(FD_TABLE_SIZE as i32 - 1),
+        "top slot must be reusable after close"
+    );
+}
+
 fn test_fdtable_dup_and_dup2() {
     let mut t = FdTable::new();
     t.install_default_streams();
@@ -6086,6 +6103,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         // Phase 2: FD table
         &test_fdtable_install_default_streams,
         &test_fdtable_alloc_and_close,
+        &test_fdtable_capacity_64,
         &test_fdtable_dup_and_dup2,
         // Phase 2: path utilities
         &test_normalize_path_absolute_keeps_path,
