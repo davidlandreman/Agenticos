@@ -9,9 +9,8 @@
 // wrappers; this module exposes the small set of operations the SYSCALL
 // path actually performs so callers don't repeat the same `unsafe` boilerplate.
 //
-// Single-CPU only. SMP support would re-run `program_syscall_msrs` and
-// `init_gs_base` per AP at bringup; the per-CPU struct address would also
-// have to come from a per-AP allocation rather than a single `static mut`.
+// SMP bring-up re-runs `program_syscall_msrs` and `init_gs_base` on every
+// processor, using that CPU's stable `CpuLocal` slot for both GS bases.
 
 use x86_64::registers::model_specific::{
     Efer, EferFlags, FsBase, GsBase, KernelGsBase, LStar, SFMask, Star,

@@ -1,6 +1,6 @@
 use crate::userland::lifecycle::{cleanup_user_process, frame_is_user, AbnormalExit};
-use crate::{debug_error, debug_info, debug_trace, println};
-use core::sync::atomic::{AtomicU64, Ordering};
+use crate::{debug_error, debug_info, debug_trace, debug_warn, println};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin::Mutex;
@@ -39,6 +39,10 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 pub static PICS: Mutex<ChainedPics> =
     Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+
+const CONTROLLER_PIC: u8 = 0;
+const CONTROLLER_APIC: u8 = 1;
+static INTERRUPT_CONTROLLER: AtomicU8 = AtomicU8::new(CONTROLLER_PIC);
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -108,6 +112,20 @@ lazy_static! {
         idt[PIC_1_OFFSET as usize + 13].set_handler_fn(pci_irq13_handler);
         idt[PIC_1_OFFSET as usize + 14].set_handler_fn(pci_irq14_handler);
         idt[PIC_1_OFFSET as usize + 15].set_handler_fn(pci_irq15_handler);
+        unsafe {
+            use crate::arch::x86_64::preemption::timer_interrupt_handler_preemptive;
+            idt[crate::arch::x86_64::lapic::LAPIC_TIMER_VECTOR as usize].set_handler_addr(
+                x86_64::VirtAddr::new(timer_interrupt_handler_preemptive as usize as u64),
+            );
+        }
+        idt[crate::arch::x86_64::lapic::RESCHEDULE_VECTOR as usize]
+            .set_handler_fn(reschedule_interrupt_handler);
+        idt[crate::arch::x86_64::lapic::HALT_VECTOR as usize]
+            .set_handler_fn(halt_interrupt_handler);
+        idt[crate::arch::x86_64::lapic::ERROR_VECTOR as usize]
+            .set_handler_fn(lapic_error_interrupt_handler);
+        idt[crate::arch::x86_64::lapic::SPURIOUS_VECTOR as usize]
+            .set_handler_fn(lapic_spurious_interrupt_handler);
 
         // The legacy `int 0x80` IDT vector that PR #12 installed has been
         // removed: userland now enters the kernel via the `syscall` instruction
@@ -122,6 +140,12 @@ lazy_static! {
 pub fn enable_pci_irq(irq: u8) -> bool {
     if irq >= 16 || matches!(irq, 0 | 1 | 2 | 12) {
         return false;
+    }
+    if INTERRUPT_CONTROLLER.load(Ordering::Acquire) == CONTROLLER_APIC {
+        return crate::arch::x86_64::ioapic::route_pci_irq(
+            irq,
+            crate::arch::x86_64::acpi::topology().bsp_lapic_id,
+        );
     }
     x86_64::instructions::interrupts::without_interrupts(|| unsafe {
         use x86_64::instructions::port::Port;
@@ -139,7 +163,7 @@ pub fn enable_pci_irq(irq: u8) -> bool {
 
 fn handle_pci_irq(irq: u8) {
     crate::drivers::virtio::block::handle_interrupt(irq);
-    unsafe { PICS.lock().notify_end_of_interrupt(PIC_1_OFFSET + irq) };
+    eoi(PIC_1_OFFSET + irq);
 }
 
 macro_rules! pci_irq_handlers {
@@ -219,15 +243,42 @@ pub fn init_idt() {
 
     IDT.load();
     debug_info!("IDT loaded successfully");
+}
 
+pub fn load_idt_on_ap() {
+    IDT.load();
+}
+
+/// Configure the clock and external interrupt controller, then enable IRQs.
+/// The IDT must already be loaded and the memory mapper/ACPI topology must be
+/// initialized so the APIC MMIO pages can be installed.
+pub fn init_interrupt_controllers() {
+    configure_pit();
+
+    let topology = crate::arch::x86_64::acpi::topology();
+    let apic_ready = crate::arch::x86_64::lapic::init(topology.lapic_mmio_base)
+        && crate::arch::x86_64::ioapic::init(topology);
+    if apic_ready {
+        mask_legacy_pic();
+        INTERRUPT_CONTROLLER.store(CONTROLLER_APIC, Ordering::Release);
+        debug_info!("interrupt delivery switched to LAPIC + IOAPIC");
+    } else {
+        init_legacy_pic();
+        INTERRUPT_CONTROLLER.store(CONTROLLER_PIC, Ordering::Release);
+        debug_warn!("APIC unavailable; retaining legacy PIC interrupt delivery");
+    }
+
+    debug_info!("Enabling interrupts...");
+    x86_64::instructions::interrupts::enable();
+    debug_info!("Interrupts enabled - system ready for hardware events");
+}
+
+fn init_legacy_pic() {
     debug_info!("Initializing PIC...");
     unsafe {
         PICS.lock().initialize();
     }
     debug_info!("PIC initialized successfully");
-
-    // Configure timer frequency BEFORE enabling interrupts
-    configure_pit();
 
     // Configure PIC masks
     debug_info!("Configuring PIC interrupt masks...");
@@ -287,10 +338,26 @@ pub fn init_idt() {
             debug_info!("  - Mouse (IRQ12) enabled");
         }
     }
+}
 
-    debug_info!("Enabling interrupts...");
-    x86_64::instructions::interrupts::enable();
-    debug_info!("Interrupts enabled - system ready for hardware events");
+fn mask_legacy_pic() {
+    unsafe {
+        // Remap first so a late/in-service legacy edge cannot collide with an
+        // exception vector, then mask every input permanently.
+        PICS.lock().initialize();
+        use x86_64::instructions::port::Port;
+        Port::<u8>::new(0x21).write(0xff);
+        Port::<u8>::new(0xa1).write(0xff);
+    }
+}
+
+#[inline]
+pub fn eoi(vector: u8) {
+    if INTERRUPT_CONTROLLER.load(Ordering::Acquire) == CONTROLLER_APIC {
+        crate::arch::x86_64::lapic::eoi();
+    } else {
+        unsafe { PICS.lock().notify_end_of_interrupt(vector) };
+    }
 }
 
 // Exception Handlers
@@ -579,10 +646,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         crate::debug_warn!("Input queue full, dropping scancode 0x{:02x}", scancode);
     }
 
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
-    }
+    eoi(InterruptIndex::Keyboard.as_u8());
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
@@ -601,8 +665,47 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
         crate::debug_warn!("Input queue full, dropping mouse byte 0x{:02x}", data);
     }
 
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());
+    eoi(InterruptIndex::Mouse.as_u8());
+}
+
+static LAPIC_TIMER_TICKS: [AtomicU64; crate::arch::x86_64::acpi::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::acpi::MAX_CPUS];
+
+extern "x86-interrupt" fn reschedule_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::arch::x86_64::lapic::eoi();
+    crate::userland::syscalls::maybe_terminate_pending_fatal_signal();
+}
+
+extern "x86-interrupt" fn halt_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::arch::x86_64::lapic::eoi();
+    x86_64::instructions::interrupts::disable();
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+extern "x86-interrupt" fn lapic_error_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::debug_warn!(
+        "local APIC error interrupt on CPU {}",
+        crate::arch::x86_64::percpu::cpu_id()
+    );
+    crate::arch::x86_64::lapic::eoi();
+}
+
+extern "x86-interrupt" fn lapic_spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Intel specifies that spurious interrupts do not receive an EOI.
+}
+
+#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "SMP telemetry API"))]
+pub fn lapic_timer_ticks(cpu: usize) -> u64 {
+    LAPIC_TIMER_TICKS
+        .get(cpu)
+        .map(|ticks| ticks.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+pub fn record_lapic_timer_tick(cpu: usize) {
+    if let Some(ticks) = LAPIC_TIMER_TICKS.get(cpu) {
+        ticks.fetch_add(1, Ordering::Relaxed);
     }
 }

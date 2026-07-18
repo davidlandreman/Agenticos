@@ -96,6 +96,10 @@ pub struct Process {
     /// Phase 2: file-descriptor table. Slots 0/1/2 are pinned to the
     /// standard streams; slots 3..N hold `Arc<File>` opened via `openat`.
     pub fd_table: FdTable,
+    /// Process file-creation mask. Inherited across fork and retained across
+    /// execve, matching POSIX process state even though filesystem permission
+    /// enforcement remains intentionally minimal.
+    pub umask: u32,
     /// Restart-stable deadline state for a blocking network syscall.
     pub network_wait: Option<NetworkWaitState>,
     /// Linux ITIMER_REAL state, represented against the monotonic 100 Hz PIT.
@@ -246,10 +250,6 @@ static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 /// between entries to time-slice between ring-3 processes.
 pub struct ProcessTable {
     pub by_pid: BTreeMap<u32, Process>,
-    /// PID of the process whose registers are currently loaded into the
-    /// CPU (its CR3, kernel stack, FS_BASE, FPU). `None` when the kernel
-    /// is running and no ring-3 process is current.
-    pub current_user_pid: Option<u32>,
     /// Domain-specific wait reasons. Runnable ownership lives exclusively in
     /// `process::scheduler`; this map is an index for targeted userland wakes.
     pub ring3_blocked: BTreeMap<u32, Ring3BlockReason>,
@@ -259,7 +259,6 @@ impl ProcessTable {
     const fn empty() -> Self {
         Self {
             by_pid: BTreeMap::new(),
-            current_user_pid: None,
             ring3_blocked: BTreeMap::new(),
         }
     }
@@ -406,6 +405,7 @@ impl Process {
             brk_base: 0,
             mmap_next: 0,
             fd_table: FdTable::new(),
+            umask: 0o022,
             network_wait: None,
             real_timer: RealTimerState::disarmed(),
             sleep_deadline: None,
@@ -445,7 +445,7 @@ impl Process {
 pub fn with_current_process<R>(f: impl FnOnce(&mut Process) -> R) -> R {
     let mut g = PROCESS_TABLE.lock();
     ensure_sentinel(&mut g);
-    let pid = g.current_user_pid.unwrap_or(KERNEL_PID);
+    let pid = crate::arch::x86_64::percpu::current_user_pid().unwrap_or(KERNEL_PID);
     let p = g.by_pid.get_mut(&pid).expect("sentinel invariant violated");
     f(p)
 }
@@ -471,7 +471,7 @@ pub fn with_active_user<R>(f: impl FnOnce(&mut Process) -> R) -> R {
 /// Distinct from [`current_pid`] which folds `None` into `KERNEL_PID`
 /// (0) for the long tail of callers that want a `u32` directly.
 pub fn current_user_pid() -> Option<u32> {
-    PROCESS_TABLE.lock().current_user_pid
+    crate::arch::x86_64::percpu::current_user_pid()
 }
 
 /// Set which process is "currently loaded" — i.e., whose CR3 / kernel
@@ -479,12 +479,8 @@ pub fn current_user_pid() -> Option<u32> {
 /// path today; U4/U5 will also call this from the ring-3 switch
 /// primitive when time-slicing between processes.
 pub fn set_current_user_pid(pid: Option<u32>) {
-    let previous = {
-        let mut table = PROCESS_TABLE.lock();
-        let previous = table.current_user_pid;
-        table.current_user_pid = pid;
-        previous
-    };
+    let previous = crate::arch::x86_64::percpu::current_user_pid();
+    crate::arch::x86_64::percpu::set_current_user_pid(pid);
     let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
     match pid {
         Some(pid) if pid != KERNEL_PID => {
@@ -522,13 +518,14 @@ pub fn remove_process(pid: u32) -> Option<Process> {
         debug_assert!(false, "attempted to remove sentinel process at PID 0");
         return None;
     }
+    let was_current = current_user_pid() == Some(pid);
     let mut g = PROCESS_TABLE.lock();
-    if g.current_user_pid == Some(pid) {
-        g.current_user_pid = None;
-    }
     g.ring3_blocked.remove(&pid);
     let removed = g.by_pid.remove(&pid)?;
     drop(g);
+    if was_current {
+        crate::arch::x86_64::percpu::set_current_user_pid(None);
+    }
     crate::process::timer::cancel_entity(crate::process::entity::EntityId::UserProcess(pid));
     crate::process::scheduler::SCHEDULER
         .lock()
@@ -625,17 +622,98 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
 }
 
 /// Wake the one ring-3 continuation waiting for this completed block request.
-pub fn wake_ring3_blocked_on_io(token: u64) {
-    let mut table = PROCESS_TABLE.lock();
-    let waiting = table.ring3_blocked.iter().find_map(|(pid, reason)| {
-        matches!(reason, Ring3BlockReason::WaitingForBlockIo { token: awaited } if *awaited == token)
-            .then_some(*pid)
-    });
-    if let Some(pid) = waiting {
-        table.ring3_blocked.remove(&pid);
-        drop(table);
-        mark_ring3_ready(pid);
+const RING3_IO_WAKE_SLOTS: usize = 64;
+
+struct Ring3IoWakeSlot {
+    pid: core::sync::atomic::AtomicU32,
+    token: core::sync::atomic::AtomicU64,
+}
+
+impl Ring3IoWakeSlot {
+    const fn empty() -> Self {
+        Self {
+            pid: core::sync::atomic::AtomicU32::new(0),
+            token: core::sync::atomic::AtomicU64::new(0),
+        }
     }
+}
+
+static PENDING_RING3_IO_WAKES: [Ring3IoWakeSlot; RING3_IO_WAKE_SLOTS] =
+    [const { Ring3IoWakeSlot::empty() }; RING3_IO_WAKE_SLOTS];
+
+/// Queue a completion from PCI interrupt context. Delivery is deferred until
+/// the target has committed its scheduler state to Blocked, closing the
+/// notify-before-block race on another CPU.
+pub fn queue_ring3_io_wake(pid: u32, token: u64) {
+    use core::sync::atomic::Ordering;
+    for slot in &PENDING_RING3_IO_WAKES {
+        if slot
+            .pid
+            .compare_exchange(0, pid, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            slot.token.store(token, Ordering::Release);
+            return;
+        }
+    }
+    crate::debug_error!("ring-3 I/O wake queue full for PID {} token {}", pid, token);
+}
+
+pub fn drain_ring3_io_wakes() -> bool {
+    use core::sync::atomic::Ordering;
+    let mut woke = false;
+    for slot in &PENDING_RING3_IO_WAKES {
+        let pid = slot.pid.load(Ordering::Acquire);
+        let token = slot.token.load(Ordering::Acquire);
+        if pid == 0 || token == 0 || !try_wake_ring3_blocked_on_io(pid, token) {
+            continue;
+        }
+        // Clear the token before releasing the slot for another producer.
+        slot.token.store(0, Ordering::Release);
+        slot.pid.store(0, Ordering::Release);
+        woke = true;
+    }
+    woke
+}
+
+fn try_wake_ring3_blocked_on_io(pid: u32, token: u64) -> bool {
+    let entity = crate::process::entity::EntityId::UserProcess(pid);
+    {
+        let table = PROCESS_TABLE.lock();
+        let Some(process) = table.by_pid.get(&pid) else {
+            return true;
+        };
+        if !matches!(process.exit_kind, ExitKind::None) {
+            return true;
+        }
+        if !matches!(
+            table.ring3_blocked.get(&pid),
+            Some(Ring3BlockReason::WaitingForBlockIo { token: awaited }) if *awaited == token
+        ) {
+            return false;
+        }
+    }
+
+    // Completion may beat block_current_ring3_on_io's scheduler transition.
+    // Retain the queue entry until Blocked is visible; waking earlier would
+    // be overwritten by the losing CPU's subsequent block_entity call.
+    if crate::process::scheduler::SCHEDULER
+        .lock()
+        .entity_state(entity)
+        != Some(crate::process::entity::RunState::Blocked)
+    {
+        return false;
+    }
+
+    let removed = PROCESS_TABLE.lock().ring3_blocked.remove(&pid);
+    if !matches!(
+        removed,
+        Some(Ring3BlockReason::WaitingForBlockIo { token: awaited }) if awaited == token
+    ) {
+        return false;
+    }
+    mark_ring3_ready(pid);
+    true
 }
 
 /// Pop the front of the ring-3 ready queue, if any. Used by U5's
@@ -716,7 +794,10 @@ pub fn wake_ring3_blocked_on_input(terminal_id: Option<crate::window::WindowId>)
         .ring3_blocked
         .iter()
         .filter_map(|(pid, reason)| {
-            if matches!(reason, Ring3BlockReason::WaitingForInput) {
+            if matches!(
+                reason,
+                Ring3BlockReason::WaitingForInput | Ring3BlockReason::WaitingForNetwork { .. }
+            ) {
                 Some(*pid)
             } else {
                 None
@@ -847,7 +928,12 @@ pub fn kill_ring3_processes_on_terminal(terminal_id: crate::window::WindowId) {
 /// follow-up wake after the lock is released (see
 /// `close_handler` / `dup2_handler`). Spin-deadlock-safe.
 pub fn wake_ring3_blocked_on_pipe_readable() {
-    wake_ring3_blocked_by(|r| matches!(r, Ring3BlockReason::WaitingForPipeRead));
+    wake_ring3_blocked_by(|r| {
+        matches!(
+            r,
+            Ring3BlockReason::WaitingForPipeRead | Ring3BlockReason::WaitingForNetwork { .. }
+        )
+    });
 }
 
 /// Wake every ring-3 process blocked on a pipe write. Called when a
@@ -856,7 +942,35 @@ pub fn wake_ring3_blocked_on_pipe_readable() {
 /// `try_lock` discipline matches
 /// [`wake_ring3_blocked_on_pipe_readable`].
 pub fn wake_ring3_blocked_on_pipe_writable() {
-    wake_ring3_blocked_by(|r| matches!(r, Ring3BlockReason::WaitingForPipeWrite));
+    wake_ring3_blocked_by(|r| {
+        matches!(
+            r,
+            Ring3BlockReason::WaitingForPipeWrite | Ring3BlockReason::WaitingForNetwork { .. }
+        )
+    });
+}
+
+/// Wake the owner of a GUI queue when a new event becomes readable. This
+/// covers both the legacy blocking `gui_next_event` syscall and processes
+/// parked in poll/select on a GUI event descriptor.
+pub fn wake_ring3_blocked_on_gui_event(pid: u32) {
+    if pid == KERNEL_PID {
+        return;
+    }
+    let Some(mut table) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let should_wake = matches!(
+        table.ring3_blocked.get(&pid),
+        Some(Ring3BlockReason::WaitingForGuiEvent | Ring3BlockReason::WaitingForNetwork { .. })
+    );
+    if should_wake {
+        table.ring3_blocked.remove(&pid);
+    }
+    drop(table);
+    if should_wake {
+        mark_ring3_ready(pid);
+    }
 }
 
 /// Wake network waiters after a socket state change. Deadline expiration is
@@ -1148,6 +1262,23 @@ pub fn wake_ring3_for_signal(pid: u32) {
     if !actionable {
         return;
     }
+    let running_cpu = {
+        let scheduler = crate::process::scheduler::SCHEDULER.lock();
+        (0..crate::arch::x86_64::smp::online_cpu_count()).find(|cpu| {
+            scheduler.current_entity_on_cpu(*cpu)
+                == Some(crate::process::entity::EntityId::UserProcess(pid))
+        })
+    };
+    if let Some(cpu) = running_cpu {
+        let topology = crate::arch::x86_64::acpi::topology();
+        if cpu != crate::arch::x86_64::percpu::cpu_id() && cpu < topology.cpu_count {
+            crate::arch::x86_64::lapic::send_fixed(
+                topology.cpus[cpu].lapic_id,
+                crate::arch::x86_64::lapic::RESCHEDULE_VECTOR,
+            );
+            crate::arch::x86_64::percpu::record_reschedule_ipi(cpu);
+        }
+    }
     let Some(reason) = g.ring3_blocked.remove(&pid) else {
         return;
     };
@@ -1290,7 +1421,9 @@ pub fn clear_ring3_queues_for_test() {
 pub fn try_preempt_ring3(
     frame: &crate::arch::x86_64::preemption::InterruptStackFrame,
 ) -> Option<u32> {
-    let cur = PROCESS_TABLE.try_lock()?.current_user_pid?;
+    let cur = current_user_pid()?;
+    let _guard = PROCESS_TABLE.try_lock()?;
+    drop(_guard);
     if cur == KERNEL_PID {
         return None;
     }
@@ -1340,7 +1473,7 @@ pub fn preempt_ring3_to_kernel(
     let Some(mut g) = PROCESS_TABLE.try_lock() else {
         return false;
     };
-    let Some(cur) = g.current_user_pid else {
+    let Some(cur) = current_user_pid() else {
         return false;
     };
     if cur == KERNEL_PID {
@@ -1353,8 +1486,8 @@ pub fn preempt_ring3_to_kernel(
     // No ring-3 address space is considered loaded after the caller switches
     // to KERNEL_CONTEXT. Clearing this under the same lock keeps the ready
     // queue and current marker coherent for the main-loop dispatcher.
-    g.current_user_pid = None;
     drop(g);
+    crate::arch::x86_64::percpu::set_current_user_pid(None);
     crate::process::scheduler::SCHEDULER
         .lock()
         .yield_entity(crate::process::entity::EntityId::UserProcess(cur));
@@ -1392,6 +1525,7 @@ pub fn install_new_process_opt(
         brk_base,
         mmap_next: mmap_base,
         fd_table,
+        umask: 0o022,
         network_wait: None,
         real_timer: RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -1428,9 +1562,8 @@ pub fn install_new_process_opt(
         stack_max_growth_floor,
         crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES,
     );
-    let mut g = PROCESS_TABLE.lock();
-    g.by_pid.insert(pid, p);
-    g.current_user_pid = Some(pid);
+    PROCESS_TABLE.lock().by_pid.insert(pid, p);
+    crate::arch::x86_64::percpu::set_current_user_pid(Some(pid));
     pid
 }
 
@@ -1538,7 +1671,7 @@ pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
         // `stack_top == 0` early return below and the caller routes to
         // the normal fault path. The sentinel is also where test
         // helpers (stage_stack_window) stage synthetic stack windows.
-        let cur_pid = guard.current_user_pid.unwrap_or(KERNEL_PID);
+        let cur_pid = current_user_pid().unwrap_or(KERNEL_PID);
         let p = guard
             .by_pid
             .get_mut(&cur_pid)
@@ -1630,7 +1763,7 @@ pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
     // pages it doesn't own.
     if let Some(mut guard) = PROCESS_TABLE.try_lock() {
         ensure_sentinel(&mut guard);
-        let cur_pid = guard.current_user_pid.unwrap_or(KERNEL_PID);
+        let cur_pid = current_user_pid().unwrap_or(KERNEL_PID);
         if let Some(p) = guard.by_pid.get_mut(&cur_pid) {
             if new_page < p.stack_bottom {
                 p.stack_bottom = new_page;

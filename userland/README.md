@@ -45,6 +45,7 @@ userland/
 ├── build-support/      # shared per-binary linker-argument helper
 ├── runtime/            # syscall ABI, startup parsing, brk allocator, GUI events
 ├── libs/
+│   ├── gui-core/       # host-testable control geometry, input, scrolling, text edit models
 │   ├── gui/            # Window, Canvas, system TTF text, menus, widgets, dir listing
 │   ├── gl/             # bounded fixed-function OpenGL-style VirGL frontend
 │   └── dialogs/        # FileDialog, MessageBox, ColorPicker modal compositions
@@ -62,6 +63,7 @@ userland/
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
     ├── tcc/            # prebuilt-managed TinyCC + /host/sysroot assembly
+    ├── links2/         # prebuilt-managed Links text + native GUI browser
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
     ├── network-test/   # static-musl socket test fixture
     └── hello-cpp/      # C++ app — std::cout, exits 0
@@ -79,7 +81,7 @@ invoke its `Makefile` separately.
 Apps that fetch upstream tarballs and / or take long enough that
 rebuilding on every kernel iteration is friction ship as **committed
 binaries** under `userland/prebuilt/`. Current entries: `ZSH.ELF`,
-`BB.ELF` (BusyBox), and `TCC.ELF` (TinyCC, plus its companion
+`BB.ELF` (BusyBox), `LINKS.ELF` (Links), and `TCC.ELF` (TinyCC, plus its companion
 `tcc-sysroot.tar.gz` extracted to `host_share/sysroot/`); future Linux
 ports (bash, vim, …) belong here too.
 The committed binary is what `build.sh` / `test.sh` copy into
@@ -105,6 +107,13 @@ resolve into multicall or direct binaries staged under `host_share/`:
   the staged musl sysroot at `/host/sysroot`; write output to `/work`
   or `/data` (cwd starts at read-only `/host`). See
   `userland/apps/tcc/README.md`.
+- **`LINKS.ELF` — Links 2.30** (`links` and `links2`). Interactive text-mode
+  and native AgenticOS GUI browsing (Start → Programs → Web Browser) plus
+  `-dump` work over IPv4 HTTP with DNS. TLS is deliberately
+  disabled here; the entropy prerequisite has landed, while the TLS stack,
+  CA roots, hostname verification, and trusted-time policy remain a separate
+  follow-up. See
+  `userland/apps/links2/README.md`.
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
@@ -112,6 +121,7 @@ to `BB.ELF` with `argv[0]` overwritten to `"ls"`; BusyBox's own
 dispatcher picks the right applet. No symlinks or per-applet ELF copies
 are needed; the namespace is pure kernel synthesis.
 
+`execve("/bin/links", ...)` (or `/bin/links2`),
 `execve("/bin/explorer", ...)`, `execve("/bin/notepad", ...)`,
 `execve("/bin/control", ...)` (or `/bin/settings`),
 `execve("/bin/calc", ...)`, `execve("/bin/glgame", ...)`,
@@ -173,6 +183,7 @@ upstream app and do NOT probe for the musl toolchain.
 ```sh
 ./build.sh --rebuild-userland     # all prebuilt-managed apps
 REBUILD_ZSH=1 ./build.sh          # just zsh
+REBUILD_LINKS2=1 ./build.sh       # just Links
 ```
 
 When the prebuilt ELF is missing, the scripts fall through to a rebuild
@@ -294,14 +305,38 @@ frame packets, and attaches the resulting VirGL texture to the normal GUI
 window. Context creation requires the strict qualified GPU compositor; the app
 shows a CPU-canvas launch hint when that prerequisite is absent.
 
-`libs/gui` also ships retained-mode widgets — `Button`, `TextField`,
-`ListView`, `MenuBar`, `TabBar`, `ColumnListView` (multi-column, sortable
-headers, key-stable selection), and `TimeSeriesGraph` (ring-buffer area
-chart, fixed or autoscaling y-axis, dual series) — as manually-positioned
-structs (no layout engine). Each draws itself and exposes hit-testing / key
-routing helpers. `apps/taskmgr` is the reference client for the monitoring
-widgets and for the poll-and-sleep (`GUI_NONBLOCK` + `nanosleep`) loop an
-animating app needs instead of the blocking `next_event()`.
+`libs/gui` also ships retained-mode controls — `Button`, `TextField`,
+`TextArea`, `Scrollbar`, `Slider`, `ListView`, `MenuBar`, `TabBar`,
+`ColumnListView` (multi-column, sortable headers, key-stable selection), and
+`TimeSeriesGraph` (ring-buffer area chart, fixed or autoscaling y-axis, dual
+series) — as manually-positioned structs (no layout engine). Controls consume
+typed `ControlInput` values produced by `decode_control_input`; applications no
+longer need to decode signed wheel deltas, button bits, or key modifiers from
+raw GUI payload arrays. Controls report `consumed`, `repaint`, and a typed
+action so domain state changes only for actions such as `Changed` or
+`Activated`.
+
+`TextField` is the single-line control with horizontal caret scrolling and
+selection. `TextArea` is the multiline control used by Notepad; it provides
+selection, line-aware navigation, visible-line rendering, and independent
+`ScrollbarPolicy::{Never, Auto, Always}` settings for both axes. Scrollbars are
+interactive controls with arrow, track-page, wheel, and draggable-thumb input.
+Custom browser views can reuse the same behavior through
+`file_ui::BrowserScrollbar`.
+
+`apps/guidemo` is the reference control gallery. `apps/taskmgr` is the
+reference client for the monitoring widgets and for the poll-and-sleep
+(`GUI_NONBLOCK` + `nanosleep`) loop an animating app needs instead of the
+blocking `next_event()`.
+
+Pure control-model tests run natively without linking the syscall runtime:
+
+```sh
+./userland/test-gui-core.sh
+```
+
+The script invokes `gui-core` outside the repository's forced bare-metal Cargo
+target while retaining the pinned Rust toolchain.
 
 ## Using dialogs (`libs/dialogs`)
 

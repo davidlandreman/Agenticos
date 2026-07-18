@@ -22,6 +22,8 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 - **Cryptographic randomness**: Host-backed modern VirtIO RNG in QEMU with
   x86-64 RDRAND fallback, feeding `AT_RANDOM`, `getrandom(2)`,
   `/dev/urandom`, and network seeds
+- **Text browser**: Static-musl Links 2.30 (`links` or `links2`) with interactive
+  text-mode IPv4 HTTP and DNS; HTTPS remains a separate TLS trust-stack follow-up
 
 ### Not Yet Implemented
 

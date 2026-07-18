@@ -60,6 +60,21 @@ stage_zsh_config() {
     echo "Staged runtime /etc zsh sources: zshrc, agnoster, and $count functions"
 }
 
+# Stage small source fixtures used by the booted GNU binutils integration
+# tests. They are ordinary read-only guest inputs, not generated prebuilts.
+stage_binutils_fixtures() {
+    local source_dir="$REPO_ROOT/userland/apps/binutils/tests"
+    local dest="$HOST_SHARE_STAGE/BINUTILS"
+    [ -f "$source_dir/exit42.s" ] && [ -f "$source_dir/archive-main.s" ] && [ -f "$source_dir/symbols.c" ] || {
+        echo "Missing GNU binutils test fixtures under $source_dir" >&2
+        return 1
+    }
+    mkdir -p "$dest"
+    _stage_atomic_copy "$source_dir/exit42.s" "$dest/EXIT42.S"
+    _stage_atomic_copy "$source_dir/archive-main.s" "$dest/ARCHMAIN.S"
+    _stage_atomic_copy "$source_dir/symbols.c" "$dest/SYMBOLS.C"
+}
+
 _readelf_command() {
     local candidate
     for candidate in "${MUSL_CC:-x86_64-linux-musl-gcc}" "${MUSL_GXX:-x86_64-linux-musl-g++}"; do
@@ -85,6 +100,14 @@ validate_exec_elf() {
     et_type=$($readelf -h "$binary" 2>/dev/null | awk '/Type:/ { print $2 }')
     if [ "$et_type" != EXEC ]; then
         echo "$binary is ${et_type:-unknown}, expected EXEC" >&2
+        return 1
+    fi
+    if "$readelf" -l "$binary" 2>/dev/null | grep -q ' INTERP '; then
+        echo "$binary contains PT_INTERP; expected a static executable" >&2
+        return 1
+    fi
+    if "$readelf" -d "$binary" 2>/dev/null | grep -q '(NEEDED)'; then
+        echo "$binary contains DT_NEEDED; expected no dynamic dependencies" >&2
         return 1
     fi
 }
@@ -158,6 +181,11 @@ _stage_one() {
             prebuilt_path="$REPO_ROOT/userland/$prebuilt"
             rebuild_var="REBUILD_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
             eval "rebuild_value=\${$rebuild_var:-0}"
+            case "$name" in
+                binutils-*)
+                    if [ "${REBUILD_BINUTILS:-0}" = 1 ]; then rebuild_value=1; fi
+                    ;;
+            esac
             if [ "${REBUILD_USERLAND:-0}" = 1 ] || [ "$rebuild_value" = 1 ] || [ ! -f "$prebuilt_path" ]; then
                 if _make_app "$source" "$toolchain" && validate_exec_elf "$output_path"; then
                     _stage_atomic_copy "$output_path" "$prebuilt_path" || return 1
@@ -242,6 +270,7 @@ stage_userland() {
     # a single ELF, so it has its own staging helper. Soft-fail like other
     # non-fixture apps.
     stage_tcc_sysroot || echo "Warning: tcc sysroot was not staged" >&2
+    stage_binutils_fixtures || echo "Warning: binutils fixtures were not staged" >&2
     return 0
 }
 

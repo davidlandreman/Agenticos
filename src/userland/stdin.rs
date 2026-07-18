@@ -58,6 +58,10 @@ pub fn pop_into_for_current_process(dst: &mut [u8]) -> usize {
     slave.read(dst)
 }
 
+pub fn queued_len_for_current_process() -> usize {
+    current_slave().map(|slave| slave.readable()).unwrap_or(0)
+}
+
 fn current_slave() -> Option<pty::PtySlave> {
     let tid = crate::userland::lifecycle::with_current_process(|p| p.terminal_id)?;
     pty::slave_for_terminal(tid)

@@ -240,6 +240,18 @@ pub trait Filesystem: Sync {
         Err(FilesystemError::UnsupportedOperation)
     }
 
+    /// Update access and modification timestamps for a path. `None` preserves
+    /// the corresponding existing value. Filesystems may store coarser
+    /// precision than the Linux syscall ABI supplies.
+    fn set_times(
+        &self,
+        _path: &str,
+        _accessed: Option<u64>,
+        _modified: Option<u64>,
+    ) -> Result<(), FilesystemError> {
+        Err(FilesystemError::UnsupportedOperation)
+    }
+
     fn sync_handle(&self, _handle: &FileHandle, _data_only: bool) -> Result<(), FilesystemError> {
         self.sync()
     }

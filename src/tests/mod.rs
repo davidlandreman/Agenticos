@@ -6,6 +6,8 @@ pub mod arc;
 #[cfg(feature = "test")]
 pub mod basic;
 #[cfg(feature = "test")]
+pub mod binutils;
+#[cfg(feature = "test")]
 pub mod compiler_compat;
 #[cfg(feature = "test")]
 pub mod composition_cpu;
@@ -64,6 +66,8 @@ pub mod scroll_view_tests;
 #[cfg(feature = "test")]
 pub mod selection_tests;
 #[cfg(feature = "test")]
+pub mod smp;
+#[cfg(feature = "test")]
 pub mod splitter_tests;
 #[cfg(feature = "test")]
 pub mod start_menu_tests;
@@ -118,6 +122,7 @@ type GetTestsFn = fn() -> &'static [&'static dyn crate::lib::test_utils::Testabl
 #[cfg(feature = "test")]
 static MODULES: &[(&str, GetTestsFn)] = &[
     ("basic", basic::get_tests),
+    ("binutils", binutils::get_tests),
     ("memory", memory::get_tests),
     ("network", network::get_tests),
     ("resolver", crate::net::resolver_tests),
@@ -192,6 +197,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("svg_image", svg_image::get_tests),
     ("retained_scene", retained_scene::get_tests),
     ("scheduler", scheduler::get_tests),
+    ("smp", smp::get_tests),
     ("composition_cpu", composition_cpu::get_tests),
     ("compositor_selection", compositor_selection::get_tests),
     ("window_theme", window_theme::get_tests),

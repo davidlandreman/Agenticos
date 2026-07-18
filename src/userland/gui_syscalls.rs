@@ -1,11 +1,13 @@
-//! AgenticOS ring-3 GUI syscall handlers (5001-5005).
+//! AgenticOS ring-3 GUI syscall handlers (5001-5005 and selectable events at
+//! 5011).
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
 
 use crate::arch::x86_64::syscall::SyscallArgs;
-use crate::userland::abi::{EFAULT, EINVAL, EIO, ENOENT};
+use crate::userland::abi::{EFAULT, EINVAL, EIO, EMFILE, ENOENT};
+use crate::userland::fdtable::{FdSlot, GuiEventHandle};
 use crate::userland::gui::{self, GuiEvent, GuiWindowRecord, GUI_NONBLOCK};
 use crate::window::windows::{FrameWindow, RemoteSurface};
 use crate::window::{Rect, Window};
@@ -47,6 +49,26 @@ pub(crate) fn caller_pid() -> Result<u32, i64> {
             }
         }
     }
+}
+
+/// `(flags) -> selectable_fd | -errno`.
+pub fn gui_event_open_handler(args: &mut SyscallArgs) -> i64 {
+    const O_NONBLOCK: u64 = 0x800;
+    const O_CLOEXEC: u64 = 0x80000;
+    let flags = args.rdi;
+    if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
+        return EINVAL;
+    }
+    let pid = match caller_pid() {
+        Ok(pid) => pid,
+        Err(error) => return error,
+    };
+    let slot = FdSlot::GuiEvents {
+        handle: GuiEventHandle::new(pid, flags & O_NONBLOCK != 0),
+        cloexec: flags & O_CLOEXEC != 0,
+    };
+    crate::userland::lifecycle::with_active_user(|process| process.fd_table.alloc(slot))
+        .map_or(EMFILE, i64::from)
 }
 
 /// `(width, height, title_ptr, title_len, flags) -> handle | -errno`.

@@ -5,8 +5,8 @@ use crate::mm::paging::{
 };
 use crate::tests::userland_fixtures as fix;
 use crate::userland::abi::{
-    self, nr, syscall_dispatch, validate_user_slice, UserVaBounds, EBADF, EFAULT, EINVAL, ENOENT,
-    ENOSYS, ENOTTY, EPERM, ERANGE, EROFS, LAST_EXIT_CODE,
+    self, nr, syscall_dispatch, validate_user_slice, UserVaBounds, EAGAIN, EBADF, EFAULT, EINVAL,
+    ENOENT, ENOSYS, ENOTTY, EPERM, ERANGE, EROFS, LAST_EXIT_CODE,
 };
 use crate::userland::error::LoaderError;
 use crate::userland::fdtable::{FdSlot, FdTable};
@@ -274,8 +274,8 @@ fn test_unknown_syscall_trace_mode_capacity_overflow() {
 
 // ---------- U3: musl-init / zsh-startup syscalls ----------
 
-/// `poll` on three valid stream fds with POLLIN|POLLOUT requested
-/// reports all three ready (revents = requested bits) and returns 3.
+/// `poll` reports only the direction that is currently usable: an empty
+/// stdin is not readable, while stdout/stderr are writable.
 fn test_dispatch_poll_streams_ready() {
     install_streams_for_dispatcher_test();
     // Three pollfd entries on stdin/stdout/stderr asking for read+write.
@@ -314,11 +314,88 @@ fn test_dispatch_poll_streams_ready() {
     args.rdi = ptr;
     args.rsi = fds.len() as u64;
     let ret = syscall_dispatch(&mut args);
-    assert_eq!(ret, 3);
-    for entry in fds.iter() {
-        assert_eq!(entry.revents, 0x0001 | 0x0004);
-    }
+    assert_eq!(ret, 2);
+    assert_eq!(fds[0].revents, 0);
+    assert_eq!(fds[1].revents, 0x0004);
+    assert_eq!(fds[2].revents, 0x0004);
     crate::userland::abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// `select` uses the same descriptor readiness model as `poll`.
+fn test_dispatch_select_streams_ready() {
+    #[repr(C)]
+    struct Timeval {
+        seconds: i64,
+        microseconds: i64,
+    }
+
+    install_streams_for_dispatcher_test();
+    let mut read_mask = 1u64 << 0;
+    let mut write_mask = (1u64 << 1) | (1u64 << 2);
+    let timeout = Timeval {
+        seconds: 0,
+        microseconds: 0,
+    };
+    let read_ptr = &mut read_mask as *mut u64 as u64;
+    let write_ptr = &mut write_mask as *mut u64 as u64;
+    let timeout_ptr = &timeout as *const Timeval as u64;
+    let start = core::cmp::min(read_ptr, core::cmp::min(write_ptr, timeout_ptr));
+    let end = core::cmp::max(
+        read_ptr + 8,
+        core::cmp::max(
+            write_ptr + 8,
+            timeout_ptr + core::mem::size_of::<Timeval>() as u64,
+        ),
+    );
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::SELECT;
+    args.rdi = 3;
+    args.rsi = read_ptr;
+    args.rdx = write_ptr;
+    args.r8 = timeout_ptr;
+    assert_eq!(syscall_dispatch(&mut args), 2);
+    assert_eq!(read_mask, 0);
+    assert_eq!(write_mask, (1u64 << 1) | (1u64 << 2));
+
+    abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
+/// Linux `select` rejects a requested descriptor that is not open.
+fn test_dispatch_select_unknown_fd_returns_ebadf() {
+    #[repr(C)]
+    struct Timeval {
+        seconds: i64,
+        microseconds: i64,
+    }
+
+    install_streams_for_dispatcher_test();
+    let read_mask = 1u64 << 3;
+    let timeout = Timeval {
+        seconds: 0,
+        microseconds: 0,
+    };
+    let read_ptr = &read_mask as *const u64 as u64;
+    let timeout_ptr = &timeout as *const Timeval as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: core::cmp::min(read_ptr, timeout_ptr),
+        end: core::cmp::max(
+            read_ptr + 8,
+            timeout_ptr + core::mem::size_of::<Timeval>() as u64,
+        ),
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::SELECT;
+    args.rdi = 4;
+    args.rsi = read_ptr;
+    args.r8 = timeout_ptr;
+    assert_eq!(syscall_dispatch(&mut args), EBADF);
+
+    abi::clear_user_va_bounds();
     clear_streams_after_dispatcher_test();
 }
 
@@ -1796,6 +1873,43 @@ fn test_run_zsh_global_rc_agnoster_prompt() {
     assert_eq!(code, 0, "agnoster startup/prompt command failed");
 }
 
+/// Launch the committed Links binary through the normal userland loader.
+/// `-version` exits before opening the interactive event loop, making this a
+/// deterministic smoke test for staging, static-musl startup, and the binary's
+/// command-line path.
+fn test_run_links_version() {
+    let path = crate::userland::bin_namespace::LINKS_HOST_PATH;
+    if !crate::fs::exists(path) {
+        crate::debug_info!("[links2] {} not staged; skipping", path);
+        return;
+    }
+    let prior_trace = crate::userland::abi::is_trace_mode();
+    crate::userland::abi::set_trace_mode(true);
+    crate::userland::abi::reset_unknown_syscall_trace();
+    let result = crate::userland::launcher::launch_user_binary(
+        path,
+        &[path, "-version"],
+        &crate::userland::process_service::DEFAULT_USER_ENV,
+    )
+    .expect("launch staged Links");
+    crate::userland::abi::set_trace_mode(prior_trace);
+
+    assert!(matches!(
+        result.0,
+        crate::userland::lifecycle::ExitKind::Cooperative
+    ));
+    assert_eq!(result.1, 0);
+    let still_active = crate::userland::lifecycle::with_active_user(|au| au.image.is_some());
+    assert!(
+        !still_active,
+        "active-user slot should be empty after Links exits"
+    );
+    assert!(
+        crate::fs::exists("/root/.links"),
+        "Links should create its configuration directory under HOME=/root"
+    );
+}
+
 fn test_run_fault_gp() {
     reset_active_user();
     let bytes = fix::fault_gp_elf();
@@ -2181,6 +2295,97 @@ fn test_dispatch_open_writable_flag_returns_erofs() {
     teardown_phase2_active_user();
 }
 
+fn test_dispatch_regular_file_fcntl_reports_write_access() {
+    setup_phase2_active_user();
+    let path = b"/fcntl-status.tmp\0";
+    let ptr = path.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + path.len() as u64,
+    });
+
+    let mut open = SyscallArgs::default();
+    open.rax = nr::OPEN;
+    open.rdi = ptr;
+    open.rsi = 0o1101; // O_WRONLY|O_CREAT|O_TRUNC
+    let fd = syscall_dispatch(&mut open);
+    assert!(fd >= 0, "open for write failed: {}", fd);
+
+    let mut fcntl = SyscallArgs::default();
+    fcntl.rax = nr::FCNTL;
+    fcntl.rdi = fd as u64;
+    fcntl.rsi = 3; // F_GETFL
+    assert_eq!(syscall_dispatch(&mut fcntl), 1, "expected O_WRONLY");
+
+    let mut close = SyscallArgs::default();
+    close.rax = nr::CLOSE;
+    close.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut close), 0);
+    crate::fs::vfs::vfs_unlink("/fcntl-status.tmp").expect("unlink fcntl fixture");
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_readv_regular_file_scatter() {
+    setup_phase2_active_user();
+    let fixture = crate::fs::File::create("/readv.tmp").expect("create readv fixture");
+    assert_eq!(fixture.write(b"scatter").expect("write readv fixture"), 7);
+
+    let path = b"/readv.tmp\0";
+    let path_ptr = path.as_ptr() as u64;
+    let mut first = [0u8; 3];
+    let mut second = [0u8; 4];
+    let iovecs = [
+        first.as_mut_ptr() as u64,
+        first.len() as u64,
+        second.as_mut_ptr() as u64,
+        second.len() as u64,
+    ];
+    let iov_ptr = iovecs.as_ptr() as u64;
+    let start = [
+        path_ptr,
+        first.as_ptr() as u64,
+        second.as_ptr() as u64,
+        iov_ptr,
+    ]
+    .into_iter()
+    .min()
+    .unwrap();
+    let end = [
+        path_ptr + path.len() as u64,
+        first.as_ptr() as u64 + first.len() as u64,
+        second.as_ptr() as u64 + second.len() as u64,
+        iov_ptr + 32,
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut open = SyscallArgs::default();
+    open.rax = nr::OPEN;
+    open.rdi = path_ptr;
+    let fd = syscall_dispatch(&mut open);
+    assert!(fd >= 0, "open readv fixture failed: {}", fd);
+
+    let mut readv = SyscallArgs::default();
+    readv.rax = nr::READV;
+    readv.rdi = fd as u64;
+    readv.rsi = iov_ptr;
+    readv.rdx = 2;
+    assert_eq!(syscall_dispatch(&mut readv), 7);
+    assert_eq!(&first, b"sca");
+    assert_eq!(&second, b"tter");
+
+    let mut close = SyscallArgs::default();
+    close.rax = nr::CLOSE;
+    close.rdi = fd as u64;
+    assert_eq!(syscall_dispatch(&mut close), 0);
+    crate::fs::vfs::vfs_unlink("/readv.tmp").expect("unlink readv fixture");
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
 /// The kernel-owned runtime `/etc/passwd` is directly visible to userland.
 fn test_dispatch_open_runtime_etc_passwd() {
     setup_phase2_active_user();
@@ -2442,6 +2647,114 @@ fn test_dispatch_clock_realtime_uses_rtc_epoch() {
     teardown_phase2_active_user();
 }
 
+fn test_dispatch_umask_roundtrip_and_masks_bits() {
+    setup_phase2_active_user();
+    crate::userland::lifecycle::with_active_user(|process| process.umask = 0o022);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::UMASK;
+    args.rdi = 0o1077;
+    assert_eq!(syscall_dispatch(&mut args), 0o022);
+    assert_eq!(
+        crate::userland::lifecycle::with_active_user(|process| process.umask),
+        0o077
+    );
+
+    args.rdi = 0o022;
+    assert_eq!(syscall_dispatch(&mut args), 0o077);
+    teardown_phase2_active_user();
+}
+
+fn test_dispatch_utimensat_values_now_omit_and_errors() {
+    const AT_FDCWD: u64 = (-100i64) as u64;
+    const UTIME_NOW: i64 = 0x3fff_ffff;
+    const UTIME_OMIT: i64 = 0x3fff_fffe;
+
+    setup_phase2_active_user();
+    let fixture = crate::fs::File::create("/utimens.tmp").expect("create utimens fixture");
+    assert_eq!(fixture.write(b"x").expect("write utimens fixture"), 1);
+    let data_fixture =
+        crate::fs::File::create("/data/utimens-data.tmp").expect("create ext2 utimens fixture");
+    assert_eq!(
+        data_fixture
+            .write(b"x")
+            .expect("write ext2 utimens fixture"),
+        1
+    );
+    crate::fs::vfs::vfs_set_times("/utimens.tmp", Some(11), Some(22)).expect("seed timestamps");
+
+    let path = b"/utimens.tmp\0";
+    let data_path = b"/data/utimens-data.tmp\0";
+    let missing = b"/utimens-missing.tmp\0";
+    let host = b"/host/BB.ELF\0";
+    let explicit = [123i64, 0, 456, 0];
+    let sentinels = [0i64, UTIME_OMIT, 0, UTIME_NOW];
+    let pointers = [
+        path.as_ptr() as u64,
+        data_path.as_ptr() as u64,
+        missing.as_ptr() as u64,
+        host.as_ptr() as u64,
+        explicit.as_ptr() as u64,
+        sentinels.as_ptr() as u64,
+    ];
+    let start = *pointers.iter().min().unwrap();
+    let end = [
+        path.as_ptr() as u64 + path.len() as u64,
+        data_path.as_ptr() as u64 + data_path.len() as u64,
+        missing.as_ptr() as u64 + missing.len() as u64,
+        host.as_ptr() as u64 + host.len() as u64,
+        explicit.as_ptr() as u64 + 32,
+        sentinels.as_ptr() as u64 + 32,
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::UTIMENSAT;
+    args.rdi = AT_FDCWD;
+    args.rsi = path.as_ptr() as u64;
+    args.rdx = explicit.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let metadata = crate::fs::vfs::vfs_unix_metadata("/utimens.tmp").expect("explicit stat");
+    assert_eq!(metadata.accessed, 123);
+    assert_eq!(metadata.modified, 456);
+
+    args.rsi = data_path.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let data_metadata =
+        crate::fs::vfs::vfs_unix_metadata("/data/utimens-data.tmp").expect("ext2 explicit stat");
+    assert_eq!(data_metadata.accessed, 123);
+    assert_eq!(data_metadata.modified, 456);
+    args.rsi = path.as_ptr() as u64;
+
+    args.rdx = sentinels.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let metadata = crate::fs::vfs::vfs_unix_metadata("/utimens.tmp").expect("sentinel stat");
+    assert_eq!(metadata.accessed, 123, "UTIME_OMIT must preserve atime");
+    assert!(
+        metadata.modified > 1_500_000_000,
+        "UTIME_NOW must use realtime"
+    );
+
+    args.r10 = 1;
+    assert_eq!(syscall_dispatch(&mut args), EINVAL);
+    args.r10 = 0;
+    args.rdx = u64::MAX - 15;
+    assert_eq!(syscall_dispatch(&mut args), EFAULT);
+    args.rdx = explicit.as_ptr() as u64;
+    args.rsi = missing.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), ENOENT);
+    args.rsi = host.as_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut args), EROFS);
+
+    crate::fs::vfs::vfs_unlink("/utimens.tmp").expect("unlink utimens fixture");
+    crate::fs::vfs::vfs_unlink("/data/utimens-data.tmp").expect("unlink ext2 utimens fixture");
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
 fn test_dispatch_getrandom_fills_buffer() {
     setup_phase2_active_user();
     let buf = [0u8; 32];
@@ -2481,6 +2794,30 @@ fn test_dispatch_dev_urandom_read_stat_and_seek() {
     args.rdi = path_ptr;
     let fd = syscall_dispatch(&mut args);
     assert!(fd >= 3, "open(/dev/urandom) failed: {}", fd);
+
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    let mut pollfd = PollFd {
+        fd: fd as i32,
+        events: 0x0001 | 0x0004,
+        revents: 0,
+    };
+    let pollfd_ptr = &mut pollfd as *mut PollFd as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: pollfd_ptr,
+        end: pollfd_ptr + core::mem::size_of::<PollFd>() as u64,
+    });
+    args = SyscallArgs::default();
+    args.rax = nr::POLL;
+    args.rdi = pollfd_ptr;
+    args.rsi = 1;
+    args.rdx = 0;
+    assert_eq!(syscall_dispatch(&mut args), 1);
+    assert_eq!(pollfd.revents, 0x0001, "/dev/urandom is read-only-ready");
 
     let bytes = [0u8; 32];
     let bytes_ptr = bytes.as_ptr() as u64;
@@ -3046,6 +3383,7 @@ fn test_notify_parent_of_exit_files_zombie_and_raises_sigchld() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -3219,8 +3557,8 @@ fn test_pipe_basic_write_then_read() {
     use crate::userland::pipe::{Pipe, PipeReadHandle, PipeWriteHandle};
 
     let pipe = Pipe::new();
-    let writer = PipeWriteHandle::new(pipe.clone());
-    let reader = PipeReadHandle::new(pipe);
+    let writer = PipeWriteHandle::new(pipe.clone(), false);
+    let reader = PipeReadHandle::new(pipe, false);
 
     let n = writer.pipe().write(b"hello pipe");
     assert_eq!(n, 10);
@@ -3240,8 +3578,8 @@ fn test_pipe_handle_clone_drop_tracks_counts() {
     use crate::userland::pipe::{Pipe, PipeReadHandle, PipeWriteHandle};
 
     let pipe = Pipe::new();
-    let writer1 = PipeWriteHandle::new(pipe.clone());
-    let reader1 = PipeReadHandle::new(pipe.clone());
+    let writer1 = PipeWriteHandle::new(pipe.clone(), false);
+    let reader1 = PipeReadHandle::new(pipe.clone(), false);
     assert_eq!(writer1.pipe().writers(), 1);
     assert_eq!(reader1.pipe().readers(), 1);
 
@@ -3268,7 +3606,7 @@ fn test_pipe_short_write_at_capacity() {
     use crate::userland::pipe::{Pipe, PipeWriteHandle, PIPE_CAPACITY};
 
     let pipe = Pipe::new();
-    let writer = PipeWriteHandle::new(pipe);
+    let writer = PipeWriteHandle::new(pipe, false);
 
     let big: alloc::vec::Vec<u8> = alloc::vec![0xABu8; PIPE_CAPACITY + 100];
     let n = writer.pipe().write(&big);
@@ -3348,6 +3686,186 @@ fn test_dispatch_pipe2_round_trip() {
     args.rsi = dst_ptr;
     args.rdx = 64;
     assert_eq!(syscall_dispatch(&mut args), 0);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// `pipe2(O_NONBLOCK)` returns `EAGAIN` for an empty live pipe and exposes
+/// mutable status flags through `fcntl`. Duplicates share the read endpoint's
+/// open-file status, while the write endpoint remains independent.
+fn test_dispatch_pipe2_nonblocking_and_fcntl_status() {
+    const O_NONBLOCK: u64 = 0o4000;
+    const O_WRONLY: i64 = 1;
+    const F_DUPFD: u64 = 0;
+    const F_GETFL: u64 = 3;
+    const F_SETFL: u64 = 4;
+
+    setup_phase2_active_user();
+    let mut fds_buf = [0u8; 8];
+    let fds_ptr = fds_buf.as_mut_ptr() as u64;
+    let mut byte = 0u8;
+    let byte_ptr = &mut byte as *mut u8 as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: core::cmp::min(fds_ptr, byte_ptr),
+        end: core::cmp::max(fds_ptr + 8, byte_ptr + 1),
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::PIPE2;
+    args.rdi = fds_ptr;
+    args.rsi = O_NONBLOCK;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let read_fd = i32::from_ne_bytes(fds_buf[0..4].try_into().unwrap());
+    let write_fd = i32::from_ne_bytes(fds_buf[4..8].try_into().unwrap());
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::READ;
+    args.rdi = read_fd as u64;
+    args.rsi = byte_ptr;
+    args.rdx = 1;
+    assert_eq!(syscall_dispatch(&mut args), EAGAIN);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCNTL;
+    args.rdi = read_fd as u64;
+    args.rsi = F_GETFL;
+    assert_eq!(syscall_dispatch(&mut args), O_NONBLOCK as i64);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCNTL;
+    args.rdi = write_fd as u64;
+    args.rsi = F_GETFL;
+    assert_eq!(syscall_dispatch(&mut args), O_WRONLY | O_NONBLOCK as i64);
+
+    let payload = alloc::vec![0xABu8; crate::userland::pipe::PIPE_CAPACITY];
+    let payload_ptr = payload.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: payload_ptr,
+        end: payload_ptr + payload.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::WRITE;
+    args.rdi = write_fd as u64;
+    args.rsi = payload_ptr;
+    args.rdx = payload.len() as u64;
+    assert_eq!(syscall_dispatch(&mut args), payload.len() as i64);
+
+    abi::set_user_va_bounds(UserVaBounds {
+        start: byte_ptr,
+        end: byte_ptr + 1,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::WRITE;
+    args.rdi = write_fd as u64;
+    args.rsi = byte_ptr;
+    args.rdx = 1;
+    assert_eq!(syscall_dispatch(&mut args), EAGAIN);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCNTL;
+    args.rdi = read_fd as u64;
+    args.rsi = F_DUPFD;
+    let duplicate = syscall_dispatch(&mut args);
+    assert!(duplicate >= 3);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCNTL;
+    args.rdi = read_fd as u64;
+    args.rsi = F_SETFL;
+    args.rdx = 0;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCNTL;
+    args.rdi = duplicate as u64;
+    args.rsi = F_GETFL;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::FCNTL;
+    args.rdi = write_fd as u64;
+    args.rsi = F_GETFL;
+    assert_eq!(syscall_dispatch(&mut args), O_WRONLY | O_NONBLOCK as i64);
+
+    abi::clear_user_va_bounds();
+    teardown_phase2_active_user();
+}
+
+/// Pipe readiness changes as bytes enter the buffer: the write end starts
+/// writable, and the read end becomes readable after a write.
+fn test_dispatch_select_pipe_readiness() {
+    #[repr(C)]
+    struct Timeval {
+        seconds: i64,
+        microseconds: i64,
+    }
+
+    setup_phase2_active_user();
+    let mut fds_buf = [0u8; 8];
+    let fds_ptr = fds_buf.as_mut_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: fds_ptr,
+        end: fds_ptr + 8,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::PIPE2;
+    args.rdi = fds_ptr;
+    assert_eq!(syscall_dispatch(&mut args), 0);
+    let read_fd = i32::from_ne_bytes(fds_buf[0..4].try_into().unwrap());
+    let write_fd = i32::from_ne_bytes(fds_buf[4..8].try_into().unwrap());
+
+    let mut read_mask = 1u64 << read_fd;
+    let mut write_mask = 1u64 << write_fd;
+    let timeout = Timeval {
+        seconds: 0,
+        microseconds: 0,
+    };
+    let read_ptr = &mut read_mask as *mut u64 as u64;
+    let write_ptr = &mut write_mask as *mut u64 as u64;
+    let timeout_ptr = &timeout as *const Timeval as u64;
+    let start = core::cmp::min(read_ptr, core::cmp::min(write_ptr, timeout_ptr));
+    let end = core::cmp::max(
+        read_ptr + 8,
+        core::cmp::max(
+            write_ptr + 8,
+            timeout_ptr + core::mem::size_of::<Timeval>() as u64,
+        ),
+    );
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::SELECT;
+    args.rdi = (core::cmp::max(read_fd, write_fd) + 1) as u64;
+    args.rsi = read_ptr;
+    args.rdx = write_ptr;
+    args.r8 = timeout_ptr;
+    assert_eq!(syscall_dispatch(&mut args), 1);
+    assert_eq!(read_mask, 0);
+    assert_eq!(write_mask, 1u64 << write_fd);
+
+    let byte = b"x";
+    let byte_ptr = byte.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: byte_ptr,
+        end: byte_ptr + 1,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::WRITE;
+    args.rdi = write_fd as u64;
+    args.rsi = byte_ptr;
+    args.rdx = 1;
+    assert_eq!(syscall_dispatch(&mut args), 1);
+
+    read_mask = 1u64 << read_fd;
+    abi::set_user_va_bounds(UserVaBounds { start, end });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::SELECT;
+    args.rdi = (read_fd + 1) as u64;
+    args.rsi = read_ptr;
+    args.r8 = timeout_ptr;
+    assert_eq!(syscall_dispatch(&mut args), 1);
+    assert_eq!(read_mask, 1u64 << read_fd);
 
     abi::clear_user_va_bounds();
     teardown_phase2_active_user();
@@ -4874,6 +5392,7 @@ fn test_save_restore_user_cpu_state_roundtrips_fs_base() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -4938,6 +5457,7 @@ fn test_has_children_sees_live_child() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -5088,6 +5608,7 @@ fn test_remove_process_cleans_ring3_queues() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -5120,6 +5641,7 @@ fn test_remove_process_cleans_ring3_queues() {
         brk_base: 0,
         mmap_next: 0,
         fd_table: crate::userland::fdtable::FdTable::new(),
+        umask: 0o022,
         network_wait: None,
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
         sleep_deadline: None,
@@ -5236,6 +5758,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_poll_negative_fd_is_ignored,
         &test_dispatch_poll_zero_nfds_returns_zero,
         &test_dispatch_poll_nfds_over_cap_returns_einval,
+        &test_dispatch_select_streams_ready,
+        &test_dispatch_select_unknown_fd_returns_ebadf,
         &test_dispatch_readlink_proc_self_exe,
         &test_dispatch_readlink_proc_self_fd_stdin,
         &test_dispatch_readlink_proc_self_fd_negative_rejected,
@@ -5293,6 +5817,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_run_zsh_pwd,
         &test_run_zsh_external_ls,
         &test_run_zsh_global_rc_agnoster_prompt,
+        &test_run_links_version,
         &test_run_fault_pf,
         &test_run_fault_gp,
         &test_run_bad_pointer_syscall,
@@ -5321,6 +5846,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_chdir_nonexistent_returns_enoent,
         &test_dispatch_open_nonexistent_returns_enoent,
         &test_dispatch_open_writable_flag_returns_erofs,
+        &test_dispatch_regular_file_fcntl_reports_write_access,
+        &test_dispatch_readv_regular_file_scatter,
         &test_dispatch_open_runtime_etc_passwd,
         &test_dispatch_stat_runtime_zsh_config,
         &test_dispatch_open_etc_unmanaged_file_returns_enoent,
@@ -5333,6 +5860,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_clock_gettime_writes_timespec,
         &test_dispatch_clock_gettime_invalid_clock_einval,
         &test_dispatch_clock_realtime_uses_rtc_epoch,
+        &test_dispatch_umask_roundtrip_and_masks_bits,
+        &test_dispatch_utimensat_values_now_omit_and_errors,
         &test_dispatch_getrandom_fills_buffer,
         &test_dispatch_dev_urandom_read_stat_and_seek,
         &test_dispatch_dev_directory_lists_urandom,
@@ -5371,6 +5900,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_pipe_handle_clone_drop_tracks_counts,
         &test_pipe_short_write_at_capacity,
         &test_dispatch_pipe2_round_trip,
+        &test_dispatch_pipe2_nonblocking_and_fcntl_status,
+        &test_dispatch_select_pipe_readiness,
         &test_dispatch_writev_pipe_round_trip,
         // Phase 5 PR-B: signal foundation
         &test_dispatch_rt_sigaction_round_trip,

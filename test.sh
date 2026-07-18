@@ -22,7 +22,7 @@
 # wildcard. Patterns are passed to QEMU via `-fw_cfg` and read at boot — no
 # rebuild required when the filter changes.
 
-set -u
+set -eu
 
 usage() {
     cat <<'EOF'
@@ -40,9 +40,9 @@ at the start and/or end:
 Flags:
   --skip-userland     Skip building optional userland apps and hello-cpp
                       (mandatory committed compiler-compat, network, and
-                      BusyBox fixtures are still staged). Wins over
+                      prebuilt-managed fixtures are still staged). Wins over
                       --rebuild-userland if both are passed.
-  --rebuild-userland  Force rebuild of prebuilt-managed userland apps (zsh).
+  --rebuild-userland  Force rebuild of prebuilt-managed userland apps.
                       Default copies the committed userland/prebuilt/ELF into
                       host_share/. Equivalent: REBUILD_USERLAND=1 env.
   -l, --list          Print available modules and exit (no build/QEMU).
@@ -51,6 +51,7 @@ Flags:
 Environment:
   AGENTICOS_TEST_MEMORY  QEMU RAM for tests (default: 256M; use 128M for
                          reclamation stress runs).
+  AGENTICOS_QEMU_SMP     QEMU CPUs for tests, 1-8 (default: 4).
   AGENTICOS_TEST_NETWORK Set to off for an explicit no-NIC boot smoke.
   AGENTICOS_TEST_VIRGL  Set to 1 only through scripts/test-virgl-integration.sh
                         to attach the qualified GL device and enable the
@@ -169,6 +170,10 @@ QEMU_ARGS=(
     -rtc "base=utc"
     -m "${AGENTICOS_TEST_MEMORY:-256M}"
 )
+QEMU_SMP="${AGENTICOS_QEMU_SMP:-4}"
+case "$QEMU_SMP" in 1|2|3|4|5|6|7|8) ;; *) echo "AGENTICOS_QEMU_SMP must be 1-8" >&2; exit 2 ;; esac
+QEMU_ARGS+=(-smp "$QEMU_SMP")
+echo "Test CPUs: $QEMU_SMP"
 if [ -n "${AGENTICOS_LEGACY_DATA_IMAGE:-}" ]; then
     QEMU_ARGS+=(
         -drive "format=raw,file=$AGENTICOS_LEGACY_DATA_IMAGE,if=none,id=agenticos-legacy,readonly=on,snapshot=on"

@@ -79,6 +79,11 @@ impl InputQueue {
     /// - We only write to slots that consumer has finished reading
     #[inline]
     pub fn push(&self, event: RawInputEvent) -> bool {
+        debug_assert_eq!(
+            crate::arch::x86_64::percpu::cpu_id(),
+            0,
+            "input IRQ producer must remain pinned to the BSP"
+        );
         let head = self.head.load(Ordering::Relaxed);
         let next_head = (head + 1) & (QUEUE_SIZE - 1); // Fast modulo for power of 2
 

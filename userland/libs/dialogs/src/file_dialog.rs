@@ -7,10 +7,13 @@ use core::cmp::Ordering;
 
 use gui::file_ui::{
     capabilities, classify_file, draw_clipped, draw_file_icon, file_extension, format_modified,
-    format_size, BreadcrumbBar, FileIconKind, FilePlace, FileUiColors, IconButton, NavIcon,
-    PlaceIcon, PlacesSidebar, UiRect,
+    format_size, BreadcrumbBar, BrowserScrollbar, FileIconKind, FilePlace, FileUiColors,
+    IconButton, NavIcon, PlaceIcon, PlacesSidebar, UiRect,
 };
-use gui::{theme, Button, ButtonState, Canvas, TextField, Window};
+use gui::{
+    decode_control_input, theme, Button, ButtonAction, Canvas, ControlInput, PointerKind,
+    TextField, Window,
+};
 
 use crate::DialogStatus;
 
@@ -185,6 +188,7 @@ pub struct FileDialog {
     descending: bool,
     view: FileView,
     scroll: usize,
+    browser_scroll: BrowserScrollbar,
     focus: FocusTarget,
     location: TextField,
     filter: TextField,
@@ -260,6 +264,7 @@ impl FileDialog {
             descending: false,
             view: options.initial_view,
             scroll: 0,
+            browser_scroll: BrowserScrollbar::new(),
             focus: FocusTarget::Content,
             location: TextField::new(0, 0, 0, 0, &current_dir),
             filter: TextField::new(0, 0, 0, 0, ""),
@@ -520,6 +525,7 @@ impl FileDialog {
         let safe_width = width.max(MIN_W);
         let safe_height = height.max(MIN_H);
         let content_bottom = safe_height - FOOTER_H;
+        self.sync_browser_scroll();
         let colors = self.colors();
         let mut canvas = core::mem::replace(self.window.canvas_mut(), Canvas::new(1, 1));
         canvas.clear(colors.background);
@@ -576,6 +582,7 @@ impl FileDialog {
             FileView::Details => self.draw_details(&mut canvas, safe_width, content_bottom, colors),
             FileView::Grid => self.draw_grid(&mut canvas, safe_width, content_bottom, colors),
         }
+        self.browser_scroll.draw(&mut canvas);
         self.draw_footer(&mut canvas, safe_width, content_bottom, colors);
         if let Some(editor) = self.folder_editor.as_mut() {
             canvas.fill_rect(SIDEBAR_W + 12, TOOLBAR_H + 30, 350, 52, colors.surface);
@@ -875,22 +882,11 @@ impl FileDialog {
             colors.muted,
         );
 
-        self.confirm.draw_state(
-            canvas,
-            if !self.can_confirm() {
-                ButtonState::Disabled
-            } else {
-                ButtonState::Hot
-            },
-        );
-        self.cancel.draw_state(
-            canvas,
-            if self.focus == FocusTarget::Cancel {
-                ButtonState::Hot
-            } else {
-                ButtonState::Normal
-            },
-        );
+        let can_confirm = self.can_confirm();
+        self.confirm.set_enabled(can_confirm);
+        self.confirm.draw_control(canvas, can_confirm);
+        self.cancel
+            .draw_control(canvas, self.focus == FocusTarget::Cancel);
         if self.type_open {
             self.draw_type_dropdown(canvas, colors);
         }
@@ -1131,6 +1127,33 @@ impl FileDialog {
         ((self.window.canvas().width() as i32).max(MIN_W) - SIDEBAR_W)
             .div_euclid(TILE_W)
             .max(1) as usize
+    }
+
+    fn sync_browser_scroll(&mut self) {
+        let width = (self.window.canvas().width() as i32).max(MIN_W);
+        let height = (self.window.canvas().height() as i32).max(MIN_H);
+        let bottom = height - FOOTER_H;
+        let (top, page, step) = match self.view {
+            FileView::Details => {
+                let top = TOOLBAR_H + HEADER_H;
+                (top, ((bottom - top) / ROW_H).max(1) as usize, 1)
+            }
+            FileView::Grid => {
+                let columns = self.grid_columns();
+                let rows = ((bottom - TOOLBAR_H) / TILE_H).max(1) as usize;
+                (TOOLBAR_H, rows * columns, columns)
+            }
+        };
+        self.browser_scroll.configure(
+            width - 2,
+            top + 2,
+            (bottom - top - 4).max(1) as u32,
+            self.visible.len(),
+            page,
+            self.scroll,
+            step,
+        );
+        self.scroll = self.browser_scroll.first();
     }
 
     fn entry_position_at(&self, x: i32, y: i32) -> Option<usize> {
@@ -1448,13 +1471,13 @@ impl FileDialog {
         DialogStatus::Pending
     }
 
-    fn handle_mouse(&mut self, payload: [u32; 6]) -> DialogStatus<String> {
-        let x = payload[0] as i32;
-        let y = payload[1] as i32;
-        let action = payload[3];
+    fn handle_mouse(&mut self, event: &runtime::GuiEvent) -> DialogStatus<String> {
+        let x = event.payload[0] as i32;
+        let y = event.payload[1] as i32;
+        let action = event.payload[3];
 
         if self.overwrite.is_some() {
-            if action == runtime::GUI_MOUSE_DOWN && payload[2] & 1 != 0 {
+            if action == runtime::GUI_MOUSE_DOWN && event.payload[2] & 1 != 0 {
                 let width = (self.window.canvas().width() as i32).max(MIN_W);
                 let height = (self.window.canvas().height() as i32).max(MIN_H);
                 let panel = UiRect::new((width - 420) / 2, (height - 130) / 2, 420, 130);
@@ -1470,10 +1493,39 @@ impl FileDialog {
         }
 
         if let Some(editor) = self.folder_editor.as_mut() {
-            if action == runtime::GUI_MOUSE_DOWN && payload[2] & 1 != 0 && editor.hit(x, y) {
+            if action == runtime::GUI_MOUSE_DOWN && event.payload[2] & 1 != 0 && editor.hit(x, y) {
                 editor.click(x);
             }
             return DialogStatus::Pending;
+        }
+
+        self.sync_browser_scroll();
+        if let Some(ControlInput::Pointer(input)) = decode_control_input(event) {
+            if matches!(input.kind, PointerKind::Down) {
+                if self.confirm.hit(input.x, input.y) {
+                    self.focus = FocusTarget::Confirm;
+                } else if self.cancel.hit(input.x, input.y) {
+                    self.focus = FocusTarget::Cancel;
+                }
+            }
+            let confirm = self.confirm.handle_pointer(input);
+            if confirm.action == Some(ButtonAction::Activated) {
+                return if self.can_confirm() {
+                    self.commit()
+                } else {
+                    self.status = "Choose a valid file first".to_string();
+                    DialogStatus::Pending
+                };
+            }
+            let cancel = self.cancel.handle_pointer(input);
+            if cancel.action == Some(ButtonAction::Activated) {
+                return DialogStatus::Done(None);
+            }
+            let response = self.browser_scroll.handle_pointer(input);
+            if response.consumed {
+                self.scroll = self.browser_scroll.first();
+                return DialogStatus::Pending;
+            }
         }
 
         if action == runtime::GUI_MOUSE_SCROLL {
@@ -1485,14 +1537,14 @@ impl FileDialog {
                 FileView::Details => 3,
                 FileView::Grid => self.grid_columns(),
             };
-            if (payload[5] as i32) < 0 {
+            if (event.payload[5] as i32) < 0 {
                 self.scroll = self.scroll.saturating_sub(step);
             } else {
                 self.scroll = (self.scroll + step).min(self.visible.len().saturating_sub(1));
             }
             return DialogStatus::Pending;
         }
-        if action != runtime::GUI_MOUSE_DOWN || payload[2] & 1 == 0 {
+        if action != runtime::GUI_MOUSE_DOWN || event.payload[2] & 1 == 0 {
             return DialogStatus::Pending;
         }
 
@@ -1585,18 +1637,6 @@ impl FileDialog {
             self.type_open = !self.type_open;
             return DialogStatus::Pending;
         }
-        if self.confirm.hit(x, y) {
-            self.focus = FocusTarget::Confirm;
-            return if self.can_confirm() {
-                self.commit()
-            } else {
-                self.status = "Choose a valid file first".to_string();
-                DialogStatus::Pending
-            };
-        }
-        if self.cancel.hit(x, y) {
-            return DialogStatus::Done(None);
-        }
         if x >= SIDEBAR_W
             && self.view == FileView::Details
             && (TOOLBAR_H..TOOLBAR_H + HEADER_H).contains(&y)
@@ -1614,7 +1654,7 @@ impl FileDialog {
         self.select_position(position);
         self.focus = FocusTarget::Content;
         let path = self.entries[self.visible[position]].path.clone();
-        let tick = payload[4] as u64 | ((payload[5] as u64) << 32);
+        let tick = event.payload[4] as u64 | ((event.payload[5] as u64) << 32);
         let double = self.last_click.as_ref().is_some_and(|last| {
             last.path == path
                 && tick.saturating_sub(last.tick) <= 50
@@ -1637,7 +1677,7 @@ impl FileDialog {
                 DialogStatus::Pending
             }
             runtime::GUI_EVENT_KEY if event.payload[3] != 0 => self.handle_key(event.payload),
-            runtime::GUI_EVENT_MOUSE => self.handle_mouse(event.payload),
+            runtime::GUI_EVENT_MOUSE => self.handle_mouse(event),
             _ => return DialogStatus::Pending,
         };
         if matches!(&status, DialogStatus::Pending) {

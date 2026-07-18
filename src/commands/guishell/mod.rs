@@ -53,6 +53,7 @@ pub enum PendingAction {
     SpawnNotepad,
     SpawnTaskmgr,
     SpawnFileManager,
+    SpawnWebBrowser,
     SpawnControl,
     OpenRunDialog,
     ShowShutdownNotice,
@@ -287,6 +288,7 @@ fn show_start_menu() {
         menu.on_select(|action| match action {
             StartMenuAction::Settings => queue_action(PendingAction::SpawnControl),
             StartMenuAction::FileManager => queue_action(PendingAction::SpawnFileManager),
+            StartMenuAction::WebBrowser => queue_action(PendingAction::SpawnWebBrowser),
             StartMenuAction::Terminal => queue_action(PendingAction::SpawnTerminal),
             StartMenuAction::Notepad => queue_action(PendingAction::SpawnNotepad),
             StartMenuAction::Painting => queue_action(PendingAction::SpawnPainting),
@@ -401,17 +403,31 @@ fn spawn_file_manager() {
     spawn_gui_user_app("/host/FILEMAN.ELF", "explorer");
 }
 
+fn spawn_web_browser() {
+    crate::debug_info!("GUIShell: Spawning Links web browser...");
+    let argv = web_browser_argv();
+    spawn_gui_user_app_with_args("/host/LINKS.ELF", "web browser", &argv);
+}
+
+pub(crate) const fn web_browser_argv() -> [&'static str; 5] {
+    ["links2", "-g", "-driver", "agenticos", "-no-connect"]
+}
+
 fn spawn_control() {
     crate::debug_info!("GUIShell: Spawning Settings...");
     spawn_gui_user_app("/host/CONTROL.ELF", "control");
 }
 
 fn spawn_gui_user_app(path: &'static str, name: &'static str) {
+    let argv = [name];
+    spawn_gui_user_app_with_args(path, name, &argv);
+}
+
+fn spawn_gui_user_app_with_args(path: &'static str, name: &'static str, argv: &[&str]) {
     use crate::userland::process_service::{LaunchOutcome, LaunchSpec, DEFAULT_USER_ENV};
 
-    let argv = [name];
     let spec =
-        LaunchSpec::new(path, &argv, &DEFAULT_USER_ENV).on_complete(Box::new(move |outcome| {
+        LaunchSpec::new(path, argv, &DEFAULT_USER_ENV).on_complete(Box::new(move |outcome| {
             match outcome {
                 LaunchOutcome::Exited {
                     pid, kind, code, ..
@@ -796,6 +812,10 @@ fn process_pending_actions() {
             PendingAction::SpawnFileManager => {
                 close_start_menu();
                 spawn_file_manager();
+            }
+            PendingAction::SpawnWebBrowser => {
+                close_start_menu();
+                spawn_web_browser();
             }
             PendingAction::SpawnControl => {
                 close_start_menu();

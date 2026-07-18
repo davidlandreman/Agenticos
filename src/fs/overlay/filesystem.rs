@@ -519,6 +519,18 @@ impl Filesystem for Overlay {
         Ok(())
     }
 
+    fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<u64>,
+        modified: Option<u64>,
+    ) -> Result<(), FilesystemError> {
+        if self.upper.stat(path).is_err() {
+            self.copy_up(path)?;
+        }
+        self.upper.set_times(path, accessed, modified)
+    }
+
     fn handle_metadata(
         &self,
         handle: &FileHandle,

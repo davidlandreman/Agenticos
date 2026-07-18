@@ -25,6 +25,11 @@ Block device (src/drivers/block.rs, ide.rs)
 
 Block devices and the VirtIO-blk driver live in `src/drivers/` — see `src/drivers/CLAUDE.md`. The `Arc` used in handles is the kernel's custom impl in `src/lib/arc.rs` (NOT `alloc::sync::Arc`) — see `src/lib/CLAUDE.md`.
 
+The global mount table and backing filesystem slots are protected by one
+coarse `PreemptionMutex`. Do not hold its guard while calling a filesystem
+operation that can re-enter VFS; copy out the selected filesystem handle or
+mount metadata first, then drop the guard.
+
 ## File handle API
 
 ```rust
@@ -67,6 +72,12 @@ Writes under `/` go through copy-up into tmpfs; persistence happens via the `syn
 Copy-up is size-capped at 64 KiB (`overlay::filesystem::MAX_COPY_UP_BYTES`) to bound the heap-burst risk — bigger files surface as `EFBIG`.
 
 Writes directly to `/data/<file>` skip the overlay and go straight to ext2. `fsync`, `fdatasync`, or `sync` checkpoints the filesystem clean bit and flushes the device.
+
+`Filesystem::set_times` is the path-based timestamp mutation hook behind
+`utimensat(2)`. `None` preserves a field. Tmpfs retains atime/mtime seconds in
+a side map, overlay copies lower nodes up before a legal mutation, and ext2
+updates inode atime/mtime plus ctime. Read-only FAT/vvfat mounts are rejected
+by VFS policy before reaching the filesystem implementation.
 
 ## tmpfs and overlay
 

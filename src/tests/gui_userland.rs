@@ -1,6 +1,7 @@
 use crate::arch::x86_64::syscall::SyscallArgs;
 use crate::graphics::composition::{ClientGlDraw, ClientGlVertex, CLIENT_GL_DRAW_DEPTH_TEST};
 use crate::userland::abi::{UserVaBounds, EAGAIN, EFAULT, EINVAL, ENOENT};
+use crate::userland::fdtable::{FdSlot, FdTable, GuiEventHandle};
 use crate::userland::gui::{
     self, GuiEvent, GuiWindowRecord, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_QUEUE_CAPACITY,
     GUI_EVENT_SETTINGS_CHANGED, GUI_EVENT_THEME_CHANGED, GUI_MOUSE_MOVE, GUI_NONBLOCK,
@@ -203,6 +204,70 @@ fn test_gui_queue_drops_oldest_at_capacity() {
     }
     assert_eq!(gui::event_count_for_test(pid), GUI_EVENT_QUEUE_CAPACITY);
     assert_eq!(gui::pop_event(pid).unwrap().window, 2);
+}
+
+fn test_gui_event_descriptor_open_flags_and_fork_ownership() {
+    const O_NONBLOCK: u64 = 0x800;
+    const O_CLOEXEC: u64 = 0x80000;
+    let mut invalid = SyscallArgs::default();
+    invalid.rdi = 1;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_event_open_handler(&mut invalid),
+        EINVAL
+    );
+
+    let mut args = SyscallArgs::default();
+    args.rdi = O_NONBLOCK | O_CLOEXEC;
+    let fd = crate::userland::gui_syscalls::gui_event_open_handler(&mut args);
+    assert!(fd >= 3, "GUI event open failed with {fd}");
+    crate::userland::lifecycle::with_active_user(|process| {
+        match process.fd_table.get(fd as i32).expect("event fd") {
+            FdSlot::GuiEvents { handle, cloexec } => {
+                assert_eq!(
+                    handle.owner_pid(),
+                    crate::userland::gui_syscalls::TEST_GUI_CALLER_PID
+                );
+                assert!(handle.nonblocking());
+                assert!(*cloexec);
+            }
+            _ => panic!("wrong descriptor type"),
+        }
+        process.fd_table.close(fd as i32).expect("close event fd");
+    });
+
+    let handle = GuiEventHandle::new(77, false);
+    let mut table = FdTable::new();
+    let original = table
+        .alloc(FdSlot::GuiEvents {
+            handle: handle.clone(),
+            cloexec: false,
+        })
+        .expect("allocate event fd");
+    let duplicate = table.dup(original).expect("duplicate event fd");
+    handle.set_nonblocking(true);
+    match table.get(duplicate).expect("duplicated event fd") {
+        FdSlot::GuiEvents { handle, .. } => assert!(handle.nonblocking()),
+        _ => panic!("wrong duplicate type"),
+    }
+    assert!(table.fork_clone().get(original).is_none());
+    assert!(table.fork_clone().get(duplicate).is_none());
+}
+
+fn test_gui_event_descriptor_readiness_tracks_queue() {
+    gui::reset_for_test();
+    let pid = 78;
+    assert!(!gui::has_events(pid));
+    gui::enqueue_event(
+        pid,
+        GuiEvent {
+            kind: GUI_EVENT_KEY,
+            window: 4,
+            payload: [1, 'a' as u32, 0, 1, 0, 0],
+        },
+    );
+    assert!(gui::has_events(pid));
+    assert!(gui::pop_event(pid).is_some());
+    assert!(!gui::has_events(pid));
 }
 
 fn test_theme_broadcast_targets_gui_owners_and_coalesces() {
@@ -424,6 +489,8 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_gui_mouse_button_encodes_timestamp_and_modifiers,
         &test_gui_queue_coalesces_mouse_moves,
         &test_gui_queue_drops_oldest_at_capacity,
+        &test_gui_event_descriptor_open_flags_and_fork_ownership,
+        &test_gui_event_descriptor_readiness_tracks_queue,
         &test_theme_broadcast_targets_gui_owners_and_coalesces,
         &test_settings_broadcast_targets_gui_owners_and_coalesces,
         &test_gui_cleanup_releases_pid_state,

@@ -1,3 +1,4 @@
+use crate::arch::x86_64::interrupt_guard::InterruptMutex;
 use crate::{debug_debug, debug_info};
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind, MemoryRegions};
 use x86_64::VirtAddr;
@@ -156,10 +157,10 @@ impl MemoryManager {
     }
 }
 
-// Global memory manager instance
+// BSP-initialized once before AP startup, then read-only.
 static mut MEMORY_MANAGER: MemoryManager = MemoryManager::new();
 
-// Static storage for memory regions to use with heap allocator
+// BSP-initialized once before AP startup, then read-only.
 static mut STATIC_MEMORY_REGIONS: Option<&'static MemoryRegions> = None;
 
 pub fn init(memory_regions: &'static MemoryRegions, phys_mem_offset: Option<u64>) {
@@ -169,26 +170,33 @@ pub fn init(memory_regions: &'static MemoryRegions, phys_mem_offset: Option<u64>
     }
 }
 
-// Static storage for the mapper
-static mut STATIC_MAPPER: Option<crate::mm::paging::MemoryMapper> = None;
+// Cross-CPU serialization for the page-table mapper and its frame allocator.
+static MAPPER: InterruptMutex<Option<crate::mm::paging::MemoryMapper>> = InterruptMutex::new(None);
 
 pub fn init_heap(phys_mem_offset: u64) {
     unsafe {
         let memory_regions = STATIC_MEMORY_REGIONS.expect("Memory regions not initialized");
 
-        // Create mapper in static storage
-        STATIC_MAPPER = Some(crate::mm::paging::MemoryMapper::new(
-            VirtAddr::new(phys_mem_offset),
-            memory_regions,
-        ));
-
-        // Store pointer globally for page fault handling
-        if let Some(mapper) = &mut *(&raw mut STATIC_MAPPER) {
-            crate::mm::paging::MAPPER = Some(mapper as *mut _);
-
-            // Initialize heap
-            crate::mm::heap::init_heap(mapper).expect("Failed to initialize heap");
+        {
+            let mut mapper_slot = MAPPER.lock();
+            *mapper_slot = Some(crate::mm::paging::MemoryMapper::new(
+                VirtAddr::new(phys_mem_offset),
+                memory_regions,
+            ));
+            // Claim the fixed AP trampoline frame before the heap or any
+            // other mapper consumer can allocate it. The later SMP copy is
+            // idempotent and may still choose not to start APs.
+            mapper_slot
+                .as_mut()
+                .expect("mapper was just installed")
+                .prepare_trampoline_page(x86_64::PhysAddr::new(0x8000))
+                .expect("failed to reserve AP trampoline page");
         }
+
+        // Do not hold the mapper lock while the allocator writes its first
+        // free-list node: that write demand-faults and the page-fault handler
+        // legitimately re-enters `with_memory_mapper`.
+        crate::mm::heap::init_heap().expect("Failed to initialize heap");
 
         // Phase 4 PR-B: capture the bootloader's CR3 as the kernel L4
         // so per-process address spaces can switch back to it on exit.
@@ -223,5 +231,11 @@ pub fn phys_to_virt(phys_addr: u64) -> Option<u64> {
 pub fn with_memory_mapper<R>(
     f: impl FnOnce(&mut crate::mm::paging::MemoryMapper) -> R,
 ) -> Option<R> {
-    unsafe { crate::mm::paging::get_mapper().map(f) }
+    crate::arch::x86_64::percpu::mapper_enter();
+    let result = {
+        let mut mapper = MAPPER.lock();
+        mapper.as_mut().map(f)
+    };
+    crate::arch::x86_64::percpu::mapper_exit();
+    result
 }

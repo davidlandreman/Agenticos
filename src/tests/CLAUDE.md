@@ -20,12 +20,20 @@ This folder holds in-kernel test modules that run under QEMU when the kernel is 
   `.o` round-trip) into `/work`, and executes the fresh binaries through the
   production loader. Uses the committed `TCC.ELF` + `tcc-sysroot.tar.gz`
   prebuilts, staged even with `--skip-userland`.
+- `binutils.rs` — booted GNU binutils end-to-end: launches all fourteen
+  committed static tools, assembles/links/runs a new ELF, creates and links an
+  archive, checks stable inspection output through zsh redirection, preserves
+  timestamps during objcopy, transforms/strips an ELF, and stress-links more
+  inputs than the 32-slot fd table.
 - `network.rs` — Virtqueue ownership/error edges plus bounded registry and
   QEMU-local DHCP coverage.
 - `network_userland.rs` — booted static-musl socket fixture and BusyBox
   numeric IPv4 `ping`, `nc`, and HTTP-only `wget` smokes, including
   zsh→fork/execve regressions for `ping` and `wget`. `test.sh` supplies
   restricted QEMU networking and repository-owned guest-forwarded services.
+- `procfs.rs` — synthetic `/proc`, `sysinfo(2)`, process accounting/signal
+  coverage, plus booted BusyBox `free`, `top -b`, and `reset` capability
+  smokes that keep the committed multicall binary aligned with the kernel ABI.
 - `entropy.rs` — asserts the default QEMU selects modern VirtIO RNG, requests
   distinct broker output, and covers the RDRAND CPUID decoder.
 
@@ -78,7 +86,7 @@ Each test prints its name to serial and `[ok]` on success. Failure triggers the 
 - **Static slices, not `Vec`.** `get_tests()` returns `&'static [...]` — this isn't decorative; some tests run before the heap is up, so the slice must be available without allocation.
 - **Topic-organized.** Add new test functions to the existing topic module that fits, or add a new topic file (then wire its `get_tests()` into the test runner).
 - **Don't write infinite-loop tests.** A hang prevents QEMU from exiting; the harness reads no exit code and reports failure ambiguously.
-- **Booted compatibility inputs are mandatory.** `compiler_compat` and
+- **Booted compatibility inputs are mandatory.** `compiler_compat`, `binutils`, and
   `network_userland` must fail, not skip, when a committed fixture is missing.
   Refresh binaries through their source directories and commit source plus ELF
   together. Networking waits must be PIT-deadline-bounded and must use only

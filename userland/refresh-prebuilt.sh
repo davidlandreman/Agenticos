@@ -5,7 +5,7 @@
 # also refreshes the committed function subset under userland/zsh-config/.
 #
 # Run this AFTER changing the source, Makefile, or build flags of a
-# prebuilt-managed app (currently zsh and BusyBox) plus the committed test
+# prebuilt-managed app (currently zsh, BusyBox, TinyCC, and Links) plus the committed test
 # fixtures. Then `git add` + commit the updated binaries
 # alongside the source-side change so the repo stays consistent.
 #

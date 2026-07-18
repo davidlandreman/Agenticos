@@ -45,7 +45,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   writes short-write at that bound instead (a blocked pipe/socket restarts
   the whole SYSCALL, so chunking would duplicate consumed bytes).
   `chmod`/`fchmod` are validated success no-ops (no permission bits on
-  FAT/tmpfs, no +x check in execve).
+  FAT/tmpfs, no +x check in execve). Native-tool compatibility includes
+  bounded `readv`, per-process `umask`, writable-fd `F_GETFL`, and
+  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` routed through the VFS.
 - `network_syscalls.rs` — finite Linux `AF_INET` socket ABI, sockaddr/iovec
   usercopy, blocking/restart behavior, and socket option mapping. Protocol
   state and buffers remain in `src/net/`.
@@ -55,8 +57,8 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   device reads use the kernel cryptographic random broker.
 - `gui.rs` — per-PID window ownership plus the bounded, coalescing GUI event
   queue and process-death teardown.
-- `gui_syscalls.rs` — syscalls 5001-5005: create, copy-present, next-event,
-  destroy, and update a window title.
+- `gui_syscalls.rs` — syscalls 5001-5005 plus 5011: create, copy-present,
+  next-event, destroy, update a window title, and open a selectable event fd.
 - `gui_gl.rs` — validated GL syscalls 5006-5009, per-PID logical-context
   ownership, bounded packet parsing, mailbox publication, and teardown.
 - `etc.rs` — kernel-managed `/etc` namespace: static account/hosts files,
@@ -73,12 +75,23 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   use VMA-aware user-copy validation. Unknown syscall numbers always return
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
-  to BusyBox or standalone ELFs: `/host/CALC.ELF`, `/host/CONTROL.ELF`
+  to BusyBox or standalone ELFs. BusyBox includes the procfs-backed `free`
+  and `top` monitors, VT `reset`, and `vi`; the namespace adds `vim` as an
+  alias that rewrites `argv[0]` to BusyBox's real `vi` applet. Standalone
+  entries include `/host/CALC.ELF`, `/host/CONTROL.ELF`
   (`control` + `settings` aliases), `/host/FILEMAN.ELF`
   (compat command `explorer`), `/host/GLGAME.ELF`, `/host/NOTEPAD.ELF`,
   `/host/PAINTING.ELF`, `/host/TASKMGR.ELF` (`taskmgr` + legacy
   `tasks` alias), and `/host/TCC.ELF` (TinyCC; both `tcc` and the `cc`
-  alias). The `GLAUNCH.ELF` GUI-applet list is empty today.
+  alias), plus `/host/LINKS.ELF` (Links 2.30; `links` and `links2`, with the
+  Rust-backed `agenticos` graphics driver) and GNU
+  binutils 2.46.0 (`addr2line`, `ar`, `as`, `c++filt`, `elfedit`, `ld`, `nm`,
+  `objcopy`, `objdump`, `ranlib`, `readelf`, `size`, `strings`, `strip`). GNU
+  `strings` owns that name; the conflicting BusyBox applet is disabled. Links
+  supports text and GUI IPv4/HTTP browsing; HTTPS still needs a separate TLS
+  trust-stack
+  integration even though cryptographic entropy is now available.
+  The `GLAUNCH.ELF` GUI-applet list is empty today.
 - `procfs.rs` — synthetic read-only `/proc` namespace, modeled on the
   `/bin` synthesis pattern. Linux-shaped files (`uptime`, `meminfo`,
   `stat`, `loadavg`, `net/dev`, `/proc/<pid>/{stat,status,cmdline,statm}`
@@ -89,7 +102,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   user reads and each open sees one consistent snapshot. Also home to
   the `sysinfo(2)` snapshot helper. Per-process RSS is a read-only
   page-table walk (`MemoryMapper::count_user_resident_pages`), not a
-  maintained counter.
+  maintained counter. `/proc/stat` exposes one `cpuN` row per online logical
+  processor plus an exact aggregate from monotonic per-CPU user/system/idle
+  timer counters; `/proc/uptime` reports the Linux-style sum of CPU idle time.
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
 - `error.rs` — loader-side error enum.
@@ -111,6 +126,7 @@ Each process owns:
 - `signal_state` (dispositions + blocked mask, inherited across fork
   per POSIX; pending cleared per POSIX),
 - `fd_table` (cloned by value across fork),
+- `umask` (initialized to `0o022`, inherited by fork, preserved by exec),
 - `cwd`, a byte-granular `brk_current` and derived `brk_base`, plus an
   AddressSpace-owned VMA set (`mmap_next` is compatibility state only),
 - demand-grown stack bookkeeping (`stack_top`/`stack_bottom`/
@@ -156,8 +172,9 @@ Unhandled fatal-default signals (SIGKILL, SIGTERM-without-trap, …) terminate
 the process at the dispatcher tail (`maybe_deliver_signal`'s fatal check →
 `notify_parent_of_signaled_exit` + `cooperative_exit(128+sig)`). Ignored
 signals (SIGCHLD & co.) stay pending as a notification record but are never
-fatal. Known gap: a CPU-bound ring-3 process that never syscalls can outrun a
-pending fatal signal — the timer ISR does not yet run the fatal check.
+fatal. CPU-bound processes are covered too: a remote signal sends a reschedule
+IPI to the owning CPU, and both that handler and the local timer fallback run
+the fatal-default check before returning to ring 3.
 
 Socket slots hold `Arc<net::socket::SocketHandle>`. The handle is a shared
 open-file description: dup/fork share `O_NONBLOCK` and protocol state, while
@@ -171,19 +188,18 @@ watchdogs remain based on the 100 Hz PIT. `CLOCK_REALTIME` and `gettimeofday`
 use the boot CMOS RTC snapshot advanced by PIT ticks through `crate::time`;
 when RTC validation fails they retain the prior uptime-from-zero fallback.
 
-Processes live in `lifecycle::PROCESS_TABLE`, indexed by PID. The
-single field `current_user_pid: Option<u32>` names which process's
-CR3 / FS_BASE / FPU / kernel-stack are loaded right now. Today only
-one real ring-3 process is ever current; U5 wires the time-slicing
-that makes the "current" field meaningful as a per-instant pointer.
+Processes live in `lifecycle::PROCESS_TABLE`, indexed by PID.
+`CpuLocal.current_user_pid` names the process whose CR3 / FS_BASE / FPU /
+kernel stack is loaded on each CPU. The scheduler's per-CPU current slot owns
+the same tagged entity, so one process cannot be restored on two CPUs.
 `PROCESS_TABLE` uses `InterruptMutex`, not a plain `spin::Mutex`. This is
-load-bearing on the single CPU: timer-preemptible launcher/compositor threads
-and IF-cleared page-fault/SYSCALL paths share the table, so every acquisition
-must mask timer preemption until its guard releases the spinlock.
+load-bearing under SMP: local IF masking prevents same-CPU preemption while
+the spin lock provides exclusion from other CPUs and IF-cleared fault/SYSCALL
+paths.
 
 ## Ring-3 GUI ABI
 
-The AgenticOS-private range extends syscall 5000 with nine GUI calls:
+The AgenticOS-private range extends syscall 5000 with ten GUI calls:
 
 - 5001 `gui_win_create(width, height, title, title_len, flags)`
 - 5002 `gui_win_present(handle, pixels, width, height, stride)`
@@ -194,6 +210,7 @@ The AgenticOS-private range extends syscall 5000 with nine GUI calls:
 - 5007 `gui_gl_submit_frame(context, packet, len, flags)`
 - 5008 `gui_gl_get_info(context, info, len)`
 - 5009 `gui_gl_context_destroy(context)`
+- 5011 `gui_event_open(O_NONBLOCK | O_CLOEXEC)`
 
 Private syscall 5010 is the versioned `system_control` command surface used by
 `CONTROL.ELF` to query renderer/display/personalization state and to apply
@@ -203,10 +220,14 @@ persistent theme or wallpaper changes. Preferences live at
 Pixels are little-endian XRGB8888 (`u32` value `0x00RRGGBB`). Presents copy a
 full client surface into kernel memory. Events use a fixed 32-byte
 `GuiEvent { kind, window, payload[6] }`; an empty blocking read parks on
-`WaitingForGuiEvent`, while `GUI_NONBLOCK` returns `-EAGAIN`. Each PID has a
-128-entry queue: consecutive motion events coalesce and other overflow drops
-the oldest entry. Mouse button events carry a 64-bit PIT tick in payload slots
-4 and 5; mouse modifier bits occupy payload slot 2 above the button-state byte.
+`WaitingForGuiEvent`, while `GUI_NONBLOCK` returns `-EAGAIN`. A selectable
+event descriptor integrates that same queue with poll/select;
+reads contain only whole event records, dup shares `O_NONBLOCK`, and fork drops
+the process-owned descriptor rather than allowing a child to drain the parent.
+Each PID has a 128-entry queue: consecutive motion events coalesce and other
+overflow drops the oldest entry. Mouse button events carry a 64-bit PIT tick
+in payload slots 4 and 5; mouse modifier bits occupy payload slot 2 above the
+button-state byte.
 Title updates and destruction are ownership-checked. Removing a process
 destroys every frame it owns.
 
@@ -230,14 +251,18 @@ cannot starve the compositor or network worker when zsh polls for a child.
    calls `launcher::prepare_user_binary_unstarted`. ELF bytes are read through
    asynchronous VirtIO block I/O before `BINARY_SETUP_MUTEX` serializes the
    CR3-sensitive `AddressSpace::new → activate → load/map ELF → initialize
-   VMAs → build stack/install Process` transaction.
+   VMAs → build stack/install Process` transaction. A per-CPU preemption guard
+   covers the interval where the new CR3 is active, and setup restores the
+   permanent kernel CR3 before publishing the process to another CPU.
 3. Setup installs a complete but unschedulable Process. The service publishes
    the LaunchId→PID record, checks cancellation, then marks the user entity
    Ready. Explicit `terminal_id`, cwd, argv, and env replace wrapper-thread
    inference.
 4. Ring 3 runs on the unified scheduler. On exit it records status, destroys
    GUI ownership, unregisters its entity, marks process-service work pending,
-   and dispatches away without dropping its live kernel stack.
+   and dispatches away without dropping its live kernel stack. Every
+   ring3→kernel handoff installs the permanent kernel CR3 before a remote CPU
+   may reap the old address space.
 5. `process-service` later removes the Process from its own kernel stack,
    freeing the address space, kernel stack, fds, and timers before invoking a
    completion handler outside all locks. Fork children remain parent-owned

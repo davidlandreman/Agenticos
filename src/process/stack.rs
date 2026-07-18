@@ -5,7 +5,8 @@
 //! process memory.
 
 use alloc::vec::Vec;
-use spin::Mutex;
+
+use crate::arch::x86_64::preemption_guard::PreemptionMutex;
 
 /// Size of each process stack (64 KB)
 pub const STACK_SIZE: usize = 64 * 1024;
@@ -23,7 +24,8 @@ const GUARD_PAGE_SIZE: usize = 4096;
 const STACK_SLOT_SIZE: usize = STACK_SIZE + GUARD_PAGE_SIZE;
 
 /// Global stack allocator instance
-pub static STACK_ALLOCATOR: Mutex<StackAllocator> = Mutex::new(StackAllocator::new());
+pub static STACK_ALLOCATOR: PreemptionMutex<StackAllocator> =
+    PreemptionMutex::new(StackAllocator::new());
 
 /// Allocator for process stacks
 ///
