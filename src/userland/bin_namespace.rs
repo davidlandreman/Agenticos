@@ -64,6 +64,9 @@ pub const TCC_HOST_PATH: &str = "/host/TCC.ELF";
 /// Text-mode Links browser. Both command spellings resolve to one ELF.
 pub const LINKS_HOST_PATH: &str = "/host/LINKS.ELF";
 
+/// curl: command-line HTTP/HTTPS transfer tool (static musl + OpenSSL).
+pub const CURL_HOST_PATH: &str = "/host/CURL.ELF";
+
 /// Resolve a GNU binutils command to its FAT-8.3-safe staged ELF path.
 fn binutils_host_path(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -99,8 +102,9 @@ pub const GUI_APPLETS: &[&str] = &[];
 /// `explorer` is the compatibility command for the ring-3 File Manager;
 /// `taskmgr` and `tasks` are aliases for the ring-3 Task Manager —
 /// `tasks` preserves the retired kernel app's name. `tcc` and `cc` are
-/// both TinyCC; `links` and `links2` are the Links text browser. GNU
-/// binutils programs map one-to-one to the staged ELFs above.
+/// both TinyCC; `links` and `links2` are the Links text browser; `curl`
+/// is the standalone HTTP/HTTPS transfer tool. GNU binutils programs map
+/// one-to-one to the staged ELFs above.
 pub const DIRECT_APPLETS: &[&str] = &[
     "addr2line",
     "ar",
@@ -109,6 +113,7 @@ pub const DIRECT_APPLETS: &[&str] = &[
     "calc",
     "cc",
     "control",
+    "curl",
     "elfedit",
     "explorer",
     "glgame",
@@ -431,6 +436,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "calc" => CALC_HOST_PATH,
         "cc" | "tcc" => TCC_HOST_PATH,
         "control" | "settings" => CONTROL_HOST_PATH,
+        "curl" => CURL_HOST_PATH,
         "glgame" => GLGAME_HOST_PATH,
         "links" | "links2" => LINKS_HOST_PATH,
         "explorer" => FILEMAN_HOST_PATH,
@@ -805,6 +811,10 @@ mod tests_internal {
         assert_eq!(path, "/host/LINKS.ELF");
         assert_eq!(applet, "links2");
 
+        let (path, applet) = apply_bin_rewrite("/bin/curl").expect("must resolve");
+        assert_eq!(path, "/host/CURL.ELF");
+        assert_eq!(applet, "curl");
+
         // The Task Manager rewrites under both its own name and the
         // retired kernel app's `tasks` alias.
         let (path, applet) = apply_bin_rewrite("/bin/taskmgr").expect("must resolve");
@@ -889,6 +899,7 @@ mod tests_internal {
             "merged stream missing direct 'tasks' alias"
         );
         assert!(entries.contains(&"calc"));
+        assert!(entries.contains(&"curl"));
         assert!(entries.contains(&"glgame"));
         assert!(entries.contains(&"links"));
         assert!(entries.contains(&"links2"));

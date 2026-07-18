@@ -32,6 +32,10 @@ readiness, and `select(2)` event loop; restricted-QEMU coverage includes valid
 DNS/IP HTTPS, SNI, TLS 1.2, redirects, and strict rejection of mismatched,
 untrusted, expired, and future-dated certificates. BusyBox `wget` remains
 HTTP-only.
+curl 8.21.0 ships as `CURL.ELF` (`/bin/curl`): a fully static musl transfer
+tool scoped to IPv4 HTTP/HTTPS, built against the same pinned OpenSSL 3.5.7
+profile and `/etc/ssl/cert.pem` trust store as Links, with strict certificate
+verification by default and `-k` as the explicit user-typed override.
 Kernel-requested programs use one persistent `process-service`: Start, Run, and Terminal enqueue requests and return immediately, and the service later reaps detached exits from its own stack.
 
 The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.
