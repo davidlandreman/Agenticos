@@ -180,6 +180,23 @@ pub fn notify_work() {
     }
 }
 
+/// Wake one logical CPU when runnable work is affinity-pinned to it.
+pub fn notify_cpu(cpu_id: usize) {
+    if !super::lapic::available()
+        || cpu_id == super::percpu::cpu_id()
+        || cpu_id >= super::acpi::topology().cpu_count
+        || !CHECKED_IN[cpu_id].load(Ordering::Acquire)
+    {
+        return;
+    }
+    let topology = super::acpi::topology();
+    super::lapic::send_fixed(
+        topology.cpus[cpu_id].lapic_id,
+        super::lapic::RESCHEDULE_VECTOR,
+    );
+    super::percpu::record_reschedule_ipi(cpu_id);
+}
+
 pub fn freeze_other_cpus() {
     super::lapic::broadcast_halt();
 }

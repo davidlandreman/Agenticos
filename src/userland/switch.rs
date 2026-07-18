@@ -295,10 +295,14 @@ unsafe fn resume_ring3_inner(pid: u32) -> ! {
     // staying on the kernel L4 + global rsp0 stack.
     let (state_copy, kernel_continuation, l4_frame, kstack_top) = {
         let mut g = PROCESS_TABLE.lock();
+        let tgid = g.thread_groups.get(&pid).copied().unwrap_or(pid);
+        let l4 = g
+            .by_pid
+            .get(&tgid)
+            .and_then(|group| group.address_space.as_ref().map(|a| a.l4_frame()));
         let p = g.by_pid.get_mut(&pid).expect("resume_ring3: unknown pid");
         let state = p.saved_user_state;
         let continuation = p.kernel_continuation.take().map(|saved| *saved);
-        let l4 = p.address_space.as_ref().map(|a| a.l4_frame());
         let top = p.kernel_stack.as_ref().map(|k| k.top());
         (state, continuation, l4, top)
     };

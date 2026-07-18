@@ -176,7 +176,7 @@ pub fn validate_user_slice(ptr: u64, len: u64) -> Result<(), i64> {
     if VirtAddr::try_new(ptr).is_err() || VirtAddr::try_new(end).is_err() {
         return Err(EFAULT);
     }
-    let vma_result = crate::userland::lifecycle::with_current_process(|process| {
+    let vma_result = crate::userland::lifecycle::with_current_group(|process| {
         process.address_space.as_ref().map(|space| {
             space
                 .vmas()
@@ -247,6 +247,8 @@ pub mod nr {
     pub const CHDIR: u64 = 80;
     pub const FCHDIR: u64 = 81;
     pub const ARCH_PRCTL: u64 = 158;
+    pub const GETTID: u64 = 186;
+    pub const FUTEX: u64 = 202;
     pub const GETUID: u64 = 102;
     pub const GETGID: u64 = 104;
     pub const GETEUID: u64 = 107;
@@ -402,6 +404,8 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::ARCH_PRCTL => syscalls::arch_prctl_handler(args),
         nr::SET_TID_ADDRESS => syscalls::set_tid_address_handler(args),
         nr::SET_ROBUST_LIST => syscalls::set_robust_list_handler(args),
+        nr::GETTID => syscalls::gettid_handler(args),
+        nr::FUTEX => crate::userland::futex::handler(args),
         // Phase 2: files
         nr::OPEN => syscalls::open_handler(args),
         nr::OPENAT => syscalls::openat_handler(args),
@@ -436,9 +440,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GETEUID => syscalls::geteuid_handler(args),
         nr::GETEGID => syscalls::getegid_handler(args),
         nr::GETPPID => syscalls::getppid_handler(args),
-        // exit (60) is the single-threaded variant; route to exit_group
-        // so the kernel-side cleanup is identical.
-        nr::EXIT => syscalls::exit_group_handler(args),
+        nr::EXIT => syscalls::exit_thread_handler(args),
         nr::EXIT_GROUP => syscalls::exit_group_handler(args),
         // Phase 4 PR-C: process management. Stubs return -ENOSYS for
         // fork/vfork/clone/execve; wait4 returns -ECHILD so libc's

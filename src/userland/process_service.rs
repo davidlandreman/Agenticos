@@ -241,6 +241,7 @@ fn service_main() {
         WORK_PENDING.store(false, Ordering::Release);
 
         while adopt_one_orphan() {}
+        while crate::userland::lifecycle::reap_one_dead_thread() {}
         while reap_one() {}
 
         // Keep the service-state guard out of `process_request`: that path

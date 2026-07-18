@@ -27,7 +27,12 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
 - `lifecycle.rs` — `Process` PCB, `ProcessTable`, the
   install/teardown flow, zombie filing, the demand-grown user-stack
   page-fault hook, FPU/FS_BASE save/restore orchestrators, and orphan
-  adoption for the kernel reaper.
+  adoption for the kernel reaper. The table also maps task IDs to thread-group
+  IDs, retains clear-child-TID/robust-list state, and defers dead pthread stack
+  reclamation until execution has switched to a safe kernel stack.
+- `futex.rs` — bounded TGID-keyed futex registry implementing musl's
+  wait/wake/requeue profile, relative wait deadlines, signal interruption,
+  and timer-backed timeout completion.
 - `process_service.rs` — persistent kernel launch/reap worker, bounded
   non-blocking request queue, explicit terminal launch context, cancellation,
   and completion delivery.
@@ -114,7 +119,30 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   hard-coded offset. `test_user_state_offsets_match_asm_contract`
   pins the contract.
 
-## Process model
+## Process and pthread model
+
+Linux-visible process identity is the thread-group leader's TGID. Every
+schedulable member has a unique TID and its own saved registers, FS_BASE/FPU
+image, signal mask state, and 64 KiB kernel stack. Secondary task entries map
+back to the leader, which owns the shared address space, VMAs, file table,
+cwd, terminal/GUI resources, executable metadata, and process exit record.
+`getpid` returns the TGID; `gettid` and `set_tid_address` use the current TID.
+
+`clone` deliberately accepts the musl 1.2.5 pthread flag profile only:
+shared VM/FS/files/sighand/thread/sysvsem plus SETTLS, PARENT_SETTID, and
+CHILD_CLEARTID (musl also supplies the ignored historical DETACHED bit).
+`SYS_exit` stops one task and performs clear-child-TID + futex wake;
+`exit_group` stops every member. A group produces one zombie/completion only
+after the final member exits. Multithreaded `fork` and `execve` return
+`EAGAIN` until atfork/de-thread behavior exists.
+
+Musl mutexes, condvars, join, detached threads, and ELF TLS are supported.
+Futex keys are currently group-private even when userspace omits the PRIVATE
+flag; process-shared/PI futexes, robust owner-death walking, WAIT_BITSET, and
+full pthread cancellation remain unsupported. Because user-address-space TLB
+shootdown is not implemented, all members of a group are pinned to the CPU
+where its first pthread was cloned. Other processes and kernel threads remain
+free to run on the other CPUs.
 
 One `Process` per ring-3 program (the "PID 0" sentinel is a never-
 schedulable slot the table keeps to preserve old singleton semantics).

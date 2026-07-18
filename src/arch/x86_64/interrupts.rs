@@ -417,7 +417,7 @@ extern "x86-interrupt" fn page_fault_handler(
             x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION
                 | x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE,
         ) {
-            let cow_target = crate::userland::lifecycle::with_current_process(|process| {
+            let cow_target = crate::userland::lifecycle::with_current_group(|process| {
                 let space = process.address_space.as_ref()?;
                 let writable = space
                     .vmas()
@@ -438,7 +438,7 @@ extern "x86-interrupt" fn page_fault_handler(
                 }
             }
         }
-        let has_address_space = crate::userland::lifecycle::with_current_process(|process| {
+        let has_address_space = crate::userland::lifecycle::with_current_group(|process| {
             process.address_space.is_some()
         });
         if has_address_space

@@ -96,7 +96,7 @@ fn pid_is_live(pid: u32) -> bool {
         return false;
     }
     let g = PROCESS_TABLE.lock();
-    g.by_pid.contains_key(&pid)
+    g.by_pid.contains_key(&pid) && g.thread_groups.get(&pid).copied().unwrap_or(pid) == pid
 }
 
 /// Classify a normalized `/proc` path without generating content.
@@ -193,7 +193,9 @@ fn root_listing() -> Vec<(String, bool)> {
         g.by_pid
             .keys()
             .copied()
-            .filter(|&pid| pid != KERNEL_PID)
+            .filter(|&pid| {
+                pid != KERNEL_PID && g.thread_groups.get(&pid).copied().unwrap_or(pid) == pid
+            })
             .collect()
     };
     for pid in pids {
@@ -222,6 +224,7 @@ pub struct Ring3Snapshot {
     pub vsize_bytes: u64,
     /// Resident 4 KiB pages (RSS).
     pub rss_pages: u64,
+    pub threads: usize,
 }
 
 fn comm_of(exe_path: &Option<String>, cmdline: &[String]) -> String {
@@ -238,6 +241,8 @@ fn snapshot_one(
     pid: u32,
     p: &crate::userland::lifecycle::Process,
     run_state: Option<crate::process::entity::RunState>,
+    threads: usize,
+    utime_ticks: u64,
 ) -> Ring3Snapshot {
     let state = if p.exit_kind != ExitKind::None {
         'Z'
@@ -274,9 +279,10 @@ fn snapshot_one(
         state,
         comm: comm_of(&p.exe_path, &p.cmdline),
         cmdline: p.cmdline.clone(),
-        utime_ticks: p.utime_ticks,
+        utime_ticks,
         vsize_bytes,
         rss_pages,
+        threads,
     }
 }
 
@@ -286,12 +292,34 @@ pub fn ring3_snapshot(pid: u32) -> Option<Ring3Snapshot> {
     if pid == KERNEL_PID {
         return None;
     }
-    let run_state = crate::process::scheduler::SCHEDULER
-        .lock()
-        .entity_state(crate::process::entity::EntityId::UserProcess(pid));
+    let scheduler = crate::process::scheduler::SCHEDULER.lock();
     let g = PROCESS_TABLE.lock();
+    if g.thread_groups.get(&pid).copied().unwrap_or(pid) != pid {
+        return None;
+    }
     let p = g.by_pid.get(&pid)?;
-    Some(snapshot_one(pid, p, run_state))
+    let members = g
+        .by_pid
+        .keys()
+        .copied()
+        .filter(|tid| g.thread_groups.get(tid).copied().unwrap_or(*tid) == pid)
+        .collect::<Vec<_>>();
+    let run_state = members.iter().find_map(|tid| {
+        let state = scheduler.entity_state(crate::process::entity::EntityId::UserProcess(*tid));
+        matches!(
+            state,
+            Some(
+                crate::process::entity::RunState::Ready | crate::process::entity::RunState::Running
+            )
+        )
+        .then_some(state)
+        .flatten()
+    });
+    let utime_ticks = members
+        .iter()
+        .filter_map(|tid| g.by_pid.get(tid))
+        .fold(0u64, |sum, task| sum.saturating_add(task.utime_ticks));
+    Some(snapshot_one(pid, p, run_state, members.len(), utime_ticks))
 }
 
 // ---------------------------------------------------------------
@@ -330,8 +358,13 @@ fn gen_loadavg() -> Vec<u8> {
         .runnable_user_count();
     let (total, last_pid) = {
         let g = PROCESS_TABLE.lock();
-        let total = g.by_pid.len().saturating_sub(1); // minus sentinel
-        let last_pid = g.by_pid.keys().max().copied().unwrap_or(0);
+        let leaders = g
+            .by_pid
+            .keys()
+            .copied()
+            .filter(|pid| g.thread_groups.get(pid).copied().unwrap_or(*pid) == *pid);
+        let total = leaders.clone().count().saturating_sub(1); // minus sentinel
+        let last_pid = leaders.max().unwrap_or(0);
         (total, last_pid)
     };
     // No load-average bookkeeping — report zeros plus the honest
@@ -376,7 +409,11 @@ fn gen_stat() -> Vec<u8> {
             });
     let processes = {
         let g = PROCESS_TABLE.lock();
-        g.by_pid.len().saturating_sub(1)
+        g.by_pid
+            .keys()
+            .filter(|tid| g.thread_groups.get(tid).copied().unwrap_or(**tid) == **tid)
+            .count()
+            .saturating_sub(1)
     };
     let mut out = String::new();
     // Every local scheduling timer runs at 100 Hz, so these counters are
@@ -493,7 +530,7 @@ fn gen_pid_stat(s: &Ring3Snapshot) -> Vec<u8> {
     // 14 utime, 15 stime, 16 cutime, 17 cstime
     out.push_str(&format!(" {} 0 0 0", s.utime_ticks));
     // 18 priority, 19 nice, 20 num_threads, 21 itrealvalue, 22 starttime
-    out.push_str(" 20 0 1 0 0");
+    out.push_str(&format!(" 20 0 {} 0 0", s.threads));
     // 23 vsize (bytes), 24 rss (pages)
     out.push_str(&format!(" {} {}", s.vsize_bytes, s.rss_pages));
     // 25..=52: rsslim … exit_code
@@ -519,7 +556,7 @@ fn gen_pid_status(s: &Ring3Snapshot) -> Vec<u8> {
     out.push_str("Gid:\t0\t0\t0\t0\n");
     out.push_str(&format!("VmSize:\t{:>8} kB\n", s.vsize_bytes / 1024));
     out.push_str(&format!("VmRSS:\t{:>8} kB\n", s.rss_pages * 4));
-    out.push_str("Threads:\t1\n");
+    out.push_str(&format!("Threads:\t{}\n", s.threads));
     out.into_bytes()
 }
 
@@ -548,7 +585,11 @@ pub fn sysinfo_snapshot() -> (i64, u64, u64, u64, u16) {
         .unwrap_or((0, 0, 0));
     let procs = {
         let g = PROCESS_TABLE.lock();
-        g.by_pid.len().saturating_sub(1) as u16
+        g.by_pid
+            .keys()
+            .filter(|tid| g.thread_groups.get(tid).copied().unwrap_or(**tid) == **tid)
+            .count()
+            .saturating_sub(1) as u16
     };
     ((ticks / 100) as i64, total, free, shared, procs)
 }

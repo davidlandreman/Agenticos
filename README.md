@@ -11,6 +11,8 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 - **GUI Desktop**: Boots directly into graphical mode with a blue desktop background
 - **Window System**: Hierarchical window management with mouse support
 - **Terminal**: Windowed terminals running static-musl zsh and BusyBox applets
+- **POSIX threads**: musl pthread creation/join, per-thread TLS/TIDs,
+  mutexes, condition variables, and detached cleanup through clone + futexes
 - **Memory Management**: Virtual memory, demand paging, per-process address spaces, and heap allocation
 - **Filesystem**: FAT12/16/32 plus a Linux-compatible writable ext2 `/data`, with persistent overlay writes
 - **Input**: VirtIO tablet (seamless in QEMU) with PS/2 fallback
@@ -28,7 +30,7 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 
 ### Not Yet Implemented
 
-- SMP and a general async runtime
+- Fine-grained SMP scheduling, user TLB shootdown, and a general async runtime
 - IPv6 and interrupt-driven network I/O
 - Agent runtime
 

@@ -7,8 +7,8 @@
 //!   (anonymous private only), `munmap`, `mprotect` (no-op), `brk`,
 //!   `arch_prctl(ARCH_SET_FS|ARCH_GET_FS)`, `exit_group`, `ioctl(TCGETS)`
 //!   (returns `-ENOTTY` so libstdc++ picks full buffering).
-//! - **Stubbed**: `set_tid_address` (returns fixed tid), `set_robust_list`
-//!   (returns 0), `getuid`/`getgid`/`getpid`/`getppid` (return 0/0/1/1).
+//! - **Thread runtime**: task IDs, TLS-bearing `clone`, clear-child-tid,
+//!   and robust-list registration.
 //!
 //! Stubs are documented in-line at the call site so adding real semantics
 //! later is a one-spot change. Anything outside this surface returns
@@ -290,7 +290,7 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
             // processes (one per terminal), the global is wrong —
             // last-launcher wins, so zsh1's writes would land in
             // terminal 2's window.
-            let dest_terminal = crate::userland::lifecycle::with_current_process(|p| p.terminal_id);
+            let dest_terminal = crate::userland::lifecycle::with_current_group(|p| p.terminal_id);
             let mut emit = |s: &str| match dest_terminal {
                 Some(tid) => crate::window::terminal::write_to_terminal_id(tid, s),
                 None => crate::print!("{}", s),
@@ -364,7 +364,7 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
     // up once outside the loop; only relevant when target is
     // StdoutErr but cheap enough to always compute.
     let dest_terminal = if matches!(target, Target::StdoutErr) {
-        crate::userland::lifecycle::with_current_process(|p| p.terminal_id)
+        crate::userland::lifecycle::with_current_group(|p| p.terminal_id)
     } else {
         None
     };
@@ -756,7 +756,7 @@ pub fn mmap_handler(args: &mut SyscallArgs) -> i64 {
         if fd < 0 {
             return EBADF;
         }
-        crate::userland::lifecycle::with_current_process(|process| {
+        crate::userland::lifecycle::with_current_group(|process| {
             match process.fd_table.get(fd as i32) {
                 Some(FdSlot::File { handle, .. }) => Some(handle.clone()),
                 _ => None,
@@ -772,7 +772,7 @@ pub fn mmap_handler(args: &mut SyscallArgs) -> i64 {
         return EBADF;
     }
 
-    crate::userland::lifecycle::with_current_process(|process| {
+    crate::userland::lifecycle::with_current_group(|process| {
         let Some(space) = process.address_space.as_mut() else {
             return ENOMEM;
         };
@@ -828,7 +828,7 @@ pub fn munmap_handler(args: &mut SyscallArgs) -> i64 {
         Some(end) => end,
         None => return EINVAL,
     };
-    let l4 = crate::userland::lifecycle::with_current_process(|process| {
+    let l4 = crate::userland::lifecycle::with_current_group(|process| {
         let Some(space) = process.address_space.as_mut() else {
             return None;
         };
@@ -880,7 +880,7 @@ pub fn mprotect_handler(args: &mut SyscallArgs) -> i64 {
     if prot & PROT_EXEC != 0 {
         vm_prot = vm_prot.union(VmProt::EXEC);
     }
-    let l4 = crate::userland::lifecycle::with_current_process(|process| {
+    let l4 = crate::userland::lifecycle::with_current_group(|process| {
         let space = process.address_space.as_mut()?;
         space.vmas_mut().protect(addr, end, vm_prot).ok()?;
         Some(space.l4_frame())
@@ -933,7 +933,7 @@ pub fn brk_handler(args: &mut SyscallArgs) -> i64 {
     if new_brk == 0 {
         return cur as i64;
     }
-    let base = crate::userland::lifecycle::with_current_process(|p| p.brk_base);
+    let base = crate::userland::lifecycle::with_current_group(|p| p.brk_base);
     if new_brk < base || new_brk > base + BRK_MAX_BYTES {
         return cur as i64;
     }
@@ -956,7 +956,7 @@ pub fn brk_handler(args: &mut SyscallArgs) -> i64 {
             }
         }
     }
-    let l4 = crate::userland::lifecycle::with_current_process(|process| {
+    let l4 = crate::userland::lifecycle::with_current_group(|process| {
         let Some(space) = process.address_space.as_mut() else {
             return None;
         };
@@ -1124,19 +1124,34 @@ pub fn ioctl_handler(args: &mut SyscallArgs) -> i64 {
     }
 }
 
-// ---------- thread / signal stubs ----------
+// ---------- thread runtime / signals ----------
 
 /// `set_tid_address(tidptr: *mut int) -> pid_t`
 ///
-/// Records nothing; returns the fake tid `1`. musl calls this once during
-/// pthread init even single-threaded.
-pub fn set_tid_address_handler(_args: &mut SyscallArgs) -> i64 {
-    1
+/// Register the word cleared and futex-woken when this task exits.
+pub fn set_tid_address_handler(args: &mut SyscallArgs) -> i64 {
+    let tid = crate::arch::x86_64::percpu::current_user_pid()
+        .unwrap_or(crate::userland::lifecycle::KERNEL_PID);
+    crate::userland::lifecycle::set_clear_child_tid(tid, args.rdi);
+    tid as i64
 }
 
-/// `set_robust_list(head, len) -> int` — no-op stub.
-pub fn set_robust_list_handler(_args: &mut SyscallArgs) -> i64 {
+/// Record musl's per-task robust-list head. Robust owner-death recovery is
+/// deliberately deferred, but retaining the ABI state makes registration
+/// task-correct and leaves a single place to add that recovery later.
+pub fn set_robust_list_handler(args: &mut SyscallArgs) -> i64 {
+    if args.rsi != 24 {
+        return EINVAL;
+    }
+    let tid = crate::arch::x86_64::percpu::current_user_pid()
+        .unwrap_or(crate::userland::lifecycle::KERNEL_PID);
+    crate::userland::lifecycle::set_robust_list(tid, args.rdi, args.rsi as usize);
     0
+}
+
+pub fn gettid_handler(_: &mut SyscallArgs) -> i64 {
+    crate::arch::x86_64::percpu::current_user_pid()
+        .unwrap_or(crate::userland::lifecycle::KERNEL_PID) as i64
 }
 
 /// `rt_sigaction(signum, act, oldact, sigsetsize) -> int`.
@@ -1311,7 +1326,7 @@ pub fn getpid_handler(_: &mut SyscallArgs) -> i64 {
 /// by the `run` shell command, the parent is the kernel itself
 /// (PID 0). Fork-spawned children (PR-C) report their real parent.
 pub fn getppid_handler(_: &mut SyscallArgs) -> i64 {
-    crate::userland::lifecycle::with_current_process(|p| p.parent_pid as i64)
+    crate::userland::lifecycle::with_current_group(|p| p.parent_pid as i64)
 }
 
 // ---------- Phase 4 PR-C2: process management ----------
@@ -1329,6 +1344,11 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         alloc_pid, insert_process, mark_ring3_ready, with_current_process, ExitKind,
     };
     use crate::userland::user_state::UserState;
+
+    let tgid = crate::userland::lifecycle::current_tgid();
+    if crate::userland::lifecycle::group_member_count(tgid) != 1 {
+        return EAGAIN;
+    }
 
     // U7: fork now returns immediately to the parent without iretq'ing
     // into the child. The child is inserted into PROCESS_TABLE with a
@@ -1505,12 +1525,115 @@ pub fn vfork_handler(args: &mut SyscallArgs) -> i64 {
     fork_handler(args)
 }
 
-pub fn clone_handler(_args: &mut SyscallArgs) -> i64 {
-    // glibc/musl wrap fork() as clone(SIGCHLD, 0, ...). For PR-C2 we
-    // treat clone as ENOSYS so libc falls back to the explicit fork
-    // syscall path. Full clone() with thread/CLONE_VM semantics is
-    // Phase 5/6.
-    ENOSYS
+pub fn clone_handler(args: &mut SyscallArgs) -> i64 {
+    use crate::userland::lifecycle::{alloc_pid, register_thread_task, ExitKind, Process};
+    use crate::userland::user_state::UserState;
+
+    const CLONE_VM: u64 = 0x0000_0100;
+    const CLONE_FS: u64 = 0x0000_0200;
+    const CLONE_FILES: u64 = 0x0000_0400;
+    const CLONE_SIGHAND: u64 = 0x0000_0800;
+    const CLONE_THREAD: u64 = 0x0001_0000;
+    const CLONE_SYSVSEM: u64 = 0x0004_0000;
+    const CLONE_SETTLS: u64 = 0x0008_0000;
+    const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+    const CLONE_DETACHED: u64 = 0x0040_0000;
+    const MUSL_THREAD_FLAGS: u64 = CLONE_VM
+        | CLONE_FS
+        | CLONE_FILES
+        | CLONE_SIGHAND
+        | CLONE_THREAD
+        | CLONE_SYSVSEM
+        | CLONE_SETTLS
+        | CLONE_PARENT_SETTID
+        | CLONE_CHILD_CLEARTID
+        | CLONE_DETACHED;
+
+    let flags = args.rdi;
+    if flags != MUSL_THREAD_FLAGS || args.rsi == 0 || args.rdx == 0 || args.r10 == 0 {
+        return EINVAL;
+    }
+
+    let saved =
+        unsafe { crate::userland::user_state::read_user_callee_saved(args as *const SyscallArgs) };
+    let raw = args as *const SyscallArgs as *const u64;
+    let child_state = UserState {
+        rax: 0,
+        rdi: args.rdi,
+        rsi: args.rsi,
+        rdx: args.rdx,
+        r10: args.r10,
+        r8: args.r8,
+        r9: args.r9,
+        rbx: saved.rbx,
+        rbp: saved.rbp,
+        rsp: args.rsi,
+        r12: unsafe { crate::userland::user_state::read_user_r12(args as *const SyscallArgs) },
+        r13: saved.r13,
+        r14: saved.r14,
+        r15: saved.r15,
+        rip: unsafe { core::ptr::read(raw.add(7)) },
+        rflags: unsafe { core::ptr::read(raw.add(8)) },
+        rcx: 0,
+        r11: 0,
+    };
+
+    let tid = alloc_pid();
+    if crate::userland::usercopy::write_unaligned(args.rdx, &tid).is_err() {
+        return EFAULT;
+    }
+    let tgid = crate::userland::lifecycle::current_tgid();
+    // FXSAVE requires 16-byte alignment. Capture into the parent's state in
+    // its heap-backed Process slot, then clone the bytes for the new task;
+    // a local FpuState temporary is not reliably aligned on every syscall
+    // stack entry path.
+    let fpu_state = crate::userland::lifecycle::with_current_process(|parent| {
+        crate::userland::lifecycle::save_user_cpu_state(parent);
+        parent.fpu_state.clone()
+    });
+    let task = crate::userland::lifecycle::with_current_process(|parent| Process {
+        pid: tid,
+        parent_pid: parent.parent_pid,
+        image: None,
+        exit_kind: ExitKind::None,
+        exit_code: 0,
+        brk_current: 0,
+        brk_base: 0,
+        mmap_next: 0,
+        fd_table: FdTable::new(),
+        umask: parent.umask,
+        network_wait: None,
+        real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        sleep_deadline: None,
+        pending_syscall_interrupt: false,
+        cwd: String::new(),
+        address_space: None,
+        signal_state: parent.signal_state.fork_clone(),
+        kernel_stack: Some(crate::userland::kernel_stack::KernelStack::new()),
+        exe_path: None,
+        cmdline: alloc::vec::Vec::new(),
+        utime_ticks: 0,
+        stack_top: 0,
+        stack_bottom: 0,
+        stack_mapped_bottom: 0,
+        stack_max_growth_floor: 0,
+        growth_faults_remaining: 0,
+        fs_base: args.r8,
+        fpu_state,
+        saved_user_state: child_state,
+        kernel_continuation: None,
+        terminal_id: None,
+    });
+
+    if register_thread_task(tid, tgid, task).is_err() {
+        let zero = 0u32;
+        let _ = crate::userland::usercopy::write_unaligned(args.rdx, &zero);
+        return EAGAIN;
+    }
+    crate::userland::lifecycle::set_clear_child_tid(tid, args.r10);
+    crate::userland::lifecycle::mark_ring3_ready(tid);
+    tid as i64
 }
 
 /// `execve(path, argv, envp)`. Replaces the current process's image
@@ -1534,6 +1657,11 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    let tgid = crate::userland::lifecycle::current_tgid();
+    if crate::userland::lifecycle::group_member_count(tgid) != 1 {
+        return EAGAIN;
+    }
+
     // 1. Pull path/argv/envp into kernel memory while the OLD address
     //    space is still active and the user pointers are valid.
     let path_ptr = args.rdi;
@@ -1546,7 +1674,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     };
     // Normalize once before the /bin namespace rewrite. `..` segments must
     // be collapsed before the prefix check.
-    let normalized_path = crate::userland::lifecycle::with_current_process(|p| {
+    let normalized_path = crate::userland::lifecycle::with_current_group(|p| {
         crate::userland::path::normalize_path(&p.cwd, &raw_path)
     });
     // Virtual /bin namespace: rewrite the load path to either BB.ELF
@@ -1596,7 +1724,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     // 4. Detach, but retain, the complete old VM transaction. Nothing in
     // the old image or page tables is modified until the replacement has
     // loaded, its stack has been built, and its VMA set is complete.
-    let (old_image, old_aspace) = crate::userland::lifecycle::with_current_process(|p| {
+    let (old_image, old_aspace) = crate::userland::lifecycle::with_current_group(|p| {
         (p.image.take(), p.address_space.take())
     });
 
@@ -1616,7 +1744,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
                     old.activate();
                 }
             }
-            crate::userland::lifecycle::with_current_process(|p| {
+            crate::userland::lifecycle::with_current_group(|p| {
                 p.image = old_image;
                 p.address_space = old_aspace;
             });
@@ -1633,7 +1761,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
                 old.activate();
             }
         }
-        crate::userland::lifecycle::with_current_process(|p| {
+        crate::userland::lifecycle::with_current_group(|p| {
             p.image = old_image;
             p.address_space = old_aspace;
         });
@@ -1688,7 +1816,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     // 10. Move new image and aspace onto the Process; reset brk/mmap
     //     anchors and exit info. Retain PID, parent_pid, FD table,
     //     cwd, continuation.
-    crate::userland::lifecycle::with_current_process(|p| {
+    crate::userland::lifecycle::with_current_group(|p| {
         p.image = Some(image);
         p.address_space = Some(new_aspace);
         p.brk_current = brk_base;
@@ -2265,6 +2393,18 @@ pub fn wait4_handler(args: &mut SyscallArgs) -> i64 {
 
 // ---------- exit ----------
 
+pub fn exit_thread_handler(args: &mut SyscallArgs) -> i64 {
+    let code = args.rdi as i32 as i64;
+    *LAST_EXIT_CODE.lock() = Some(code);
+    if !matches!(
+        crate::userland::lifecycle::current_user_pid(),
+        Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID
+    ) {
+        return 0;
+    }
+    crate::userland::lifecycle::cooperative_thread_exit(code)
+}
+
 /// `exit_group(status: i32) -> !` — terminate the user process by
 /// long-jumping to the saved kernel continuation. For Phase 4 PR-C2,
 /// if the dying process is a forked child, also record it as a zombie
@@ -2287,7 +2427,7 @@ pub fn exit_group_handler(args: &mut SyscallArgs) -> i64 {
     }
 
     let (pid, parent_pid) =
-        crate::userland::lifecycle::with_active_user(|au| (au.pid, au.parent_pid));
+        crate::userland::lifecycle::with_current_group(|au| (au.pid, au.parent_pid));
 
     // U7: every exit (top-level binary AND forked child) routes
     // through `notify_parent_of_exit` + `cooperative_exit`. The
@@ -2311,7 +2451,7 @@ pub fn exit_group_handler(args: &mut SyscallArgs) -> i64 {
             code
         );
     }
-    crate::userland::lifecycle::notify_parent_of_exit(pid, parent_pid, code);
+    let _ = (pid, parent_pid);
     crate::userland::lifecycle::cooperative_exit(code);
 }
 
@@ -4035,7 +4175,7 @@ pub fn gettimeofday_handler(args: &mut SyscallArgs) -> i64 {
 /// but the state is process-local, inherited across fork, and retained across
 /// exec so BFD and future toolchains observe normal POSIX behavior.
 pub fn umask_handler(args: &mut SyscallArgs) -> i64 {
-    crate::userland::lifecycle::with_current_process(|process| {
+    crate::userland::lifecycle::with_current_group(|process| {
         let old = process.umask;
         process.umask = args.rdi as u32 & 0o777;
         old as i64
@@ -5164,7 +5304,7 @@ pub fn setitimer_handler(args: &mut SyscallArgs) -> i64 {
     }
 
     let now = crate::arch::x86_64::interrupts::get_timer_ticks();
-    let old_value = crate::userland::lifecycle::with_current_process(|process| {
+    let old_value = crate::userland::lifecycle::with_current_group(|process| {
         let remaining_ticks = process
             .real_timer
             .deadline_tick

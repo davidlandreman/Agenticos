@@ -16,6 +16,8 @@ tcc -o hello /host/sysroot/examples/hello.c     # compile + link, no flags neede
 tcc -c /host/sysroot/examples/args.c -o args.o  # separate compile...
 tcc -o args args.o                              # ...and link
 cc -o hello /host/sysroot/examples/hello.c      # `cc` is an alias
+tcc -o pthread_join /host/sysroot/examples/pthread_join.c -lpthread
+./pthread_join
 ```
 
 Defaults compiled in at configure time (no flags, no env, no `-B`):
@@ -42,7 +44,16 @@ The sysroot tarball contains pruned musl + linux-uapi headers (no `c++/`,
 `drm/`, `sound/`, `rdma/`, `scsi/`), `crt1.o`/`crti.o`/`crtn.o`/`libc.a`,
 the empty POSIX compat archives (`libm.a`, `libpthread.a`, …) so `-lm`
 style link lines work, TCC's private headers plus `libtcc1.a` under
-`lib/tcc/`, and the example sources.
+`lib/tcc/`, and the example sources. The sysroot pins musl 1.2.5; pthread
+symbols live in `libc.a`, while `libpthread.a` is its empty link-compatibility
+archive. AgenticOS supports the musl clone profile plus futex wait/wake/requeue;
+PI futexes, robust owner-death recovery, and process-shared futexes remain
+unsupported.
+
+TinyCC currently accepts `_Thread_local` syntax but emits shared storage for
+the acceptance program. The sysroot therefore also contains
+`examples/pthread_tls.elf`, a static-musl cross-built copy of the same source;
+the mutex, condvar, join, and detached programs remain compiled on-target.
 
 ## Source pin
 

@@ -88,6 +88,8 @@ fn test_tcc_binary_and_sysroot_staged() {
         "/host/sysroot/lib/tcc/include/stddef.h",
         "/host/sysroot/examples/hello.c",
         "/host/sysroot/examples/args.c",
+        "/host/sysroot/examples/pthread_join.c",
+        "/host/sysroot/examples/pthread_tls.elf",
     ] {
         assert!(crate::fs::exists(path), "staged artifact missing: {}", path);
     }

@@ -114,6 +114,22 @@ fn test_preemption_without_alternative_keeps_current_private() {
     assert_eq!(scheduler.ready_entity_count(), 0);
 }
 
+fn test_user_affinity_skips_wrong_cpu_without_losing_queue_entry() {
+    let mut scheduler = Scheduler::new();
+    scheduler.init();
+    let tid = 214;
+    let entity = EntityId::UserProcess(tid);
+    let cpu = crate::arch::x86_64::percpu::cpu_id();
+    let wrong_cpu = (cpu + 1) % crate::arch::x86_64::acpi::MAX_CPUS;
+    scheduler.register_user(tid).unwrap();
+    scheduler.set_cpu_affinity(entity, Some(wrong_cpu)).unwrap();
+    scheduler.make_ready(entity, None).unwrap();
+    assert_eq!(scheduler.pop_next_user(), None);
+    assert_eq!(scheduler.ready_entity_count(), 1);
+    scheduler.set_cpu_affinity(entity, Some(cpu)).unwrap();
+    assert_eq!(scheduler.pop_next_user(), Some(tid));
+}
+
 fn test_timer_arm_update_and_cancel() {
     use crate::process::timer::{TimerAction, TimerKey, TimerKind, TimerQueue};
 
@@ -173,6 +189,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_latency_contract_is_one_shot_override,
         &test_preemption_defers_source_until_context_publish,
         &test_preemption_without_alternative_keeps_current_private,
+        &test_user_affinity_skips_wrong_cpu_without_losing_queue_entry,
         &test_timer_arm_update_and_cancel,
         &test_timer_heap_orders_and_bounds_a_deferred_pass,
     ]

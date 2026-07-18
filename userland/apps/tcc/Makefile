@@ -140,6 +140,8 @@ $(SYSROOT_TAR): $(TCC_BUILT) $(wildcard examples/*.c)
 	cp $(TCC_SRC)/include/*.h $(SYSROOT)/lib/tcc/include/
 	cp $(TCC_SRC)/libtcc1.a $(SYSROOT)/lib/tcc/
 	cp examples/*.c $(SYSROOT)/examples/
+	$(MUSL_CC) -O2 -static -pthread examples/pthread_tls.c -o $(SYSROOT)/examples/pthread_tls.elf
+	$(MUSL_STRIP) --strip-all $(SYSROOT)/examples/pthread_tls.elf
 	@echo "🔨 Packing $(SYSROOT_TAR)..."
 	@# Normalize mtimes so repacks diff meaningfully; ownership is zeroed
 	@# by gtar when available, otherwise left to the host tar.
