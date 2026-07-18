@@ -36,6 +36,7 @@ userland/
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
     ├── guidemo/        # minimal ring-3 GUI reference client
     ├── notepad/        # standalone editor with userland dialogs + working Save
+    ├── painting/       # standalone bouncing-shapes GUI demo (self-driven frame loop)
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
     ├── compiler-compat/# tiny C static-musl boot-test fixtures

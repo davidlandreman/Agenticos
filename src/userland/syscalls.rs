@@ -1159,6 +1159,8 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
         network_wait: None,
         // POSIX timers are not inherited across fork.
         real_timer: crate::userland::lifecycle::RealTimerState::disarmed(),
+        // A fresh child is not mid-nanosleep.
+        sleep_deadline: None,
         pending_syscall_interrupt: false,
         cwd: parent.cwd.clone(),
         address_space: Some(child_aspace),
@@ -3167,7 +3169,7 @@ fn chdir_to(path: alloc::string::String) -> i64 {
 // ---------- time / random / uname ----------
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct LinuxTimespec {
     tv_sec: i64,
     tv_nsec: i64,
@@ -3957,18 +3959,57 @@ pub fn setitimer_handler(args: &mut SyscallArgs) -> i64 {
 
 /// `nanosleep(*req: *const timespec, *rem: *mut timespec) -> int`
 ///
-/// Stub: returns 0 immediately, ignoring the requested duration. zsh's
-/// `sleep` builtin and `zselect` are the main consumers; neither is
-/// exercised in our minimum interactive test path. If `rem` is non-null,
-/// write a zeroed timespec (no remaining time, since we "slept" the full
-/// duration in zero wall-clock).
+/// Blocks the calling ring-3 process until the requested duration elapses
+/// against the monotonic 100 Hz PIT, then returns 0. The duration is rounded
+/// up to whole ticks so a sub-tick request still yields the CPU rather than
+/// busy-spinning — self-driven ring-3 animation loops (e.g. `PAINTING.ELF`)
+/// and zsh's `sleep`/`usleep` builtins both depend on this.
+///
+/// Signal interruption (`-EINTR` + remaining time in `rem`) is not modeled: a
+/// woken-but-not-yet-elapsed sleeper simply re-blocks for the remainder. If
+/// `rem` is non-null on completion, a zeroed timespec is written.
 pub fn nanosleep_handler(args: &mut SyscallArgs) -> i64 {
+    /// PIT period: 100 Hz ⇒ 10 ms ⇒ 10,000,000 ns per tick.
+    const NS_PER_TICK: u64 = 10_000_000;
+    const TICKS_PER_SEC: u64 = 100;
+
+    let req_ptr = args.rdi;
     let rem_ptr = args.rsi;
-    if rem_ptr == 0 {
-        return 0;
+
+    let requested_ticks = if req_ptr == 0 {
+        0
+    } else {
+        match crate::userland::usercopy::read_unaligned::<LinuxTimespec>(req_ptr) {
+            Ok(ts) => {
+                let sec = ts.tv_sec.max(0) as u64;
+                let nsec = ts.tv_nsec.clamp(0, 999_999_999) as u64;
+                // Round the sub-second remainder up so any positive request
+                // sleeps at least one tick.
+                let frac_ticks = nsec.div_ceil(NS_PER_TICK);
+                sec.saturating_mul(TICKS_PER_SEC).saturating_add(frac_ticks)
+            }
+            Err(e) => return e,
+        }
+    };
+
+    match crate::userland::lifecycle::nanosleep_deadline(requested_ticks) {
+        Some(deadline) => unsafe {
+            crate::userland::switch::block_current_ring3_and_yield(
+                args,
+                crate::userland::lifecycle::Ring3BlockReason::Sleeping {
+                    deadline_tick: deadline,
+                },
+            )
+        },
+        None => {
+            if rem_ptr != 0 {
+                let zero = LinuxTimespec::default();
+                return crate::userland::usercopy::write_unaligned(rem_ptr, &zero)
+                    .map_or_else(|e| e, |_| 0);
+            }
+            0
+        }
     }
-    let zero = LinuxTimespec::default();
-    crate::userland::usercopy::write_unaligned(rem_ptr, &zero).map_or_else(|e| e, |_| 0)
 }
 
 /// AgenticOS-internal syscall `gui_launch(name_ptr, name_len) -> 0 | -errno`.

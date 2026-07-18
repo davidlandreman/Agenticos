@@ -316,14 +316,14 @@ fn spawn_terminal() {
     }
 }
 
-/// Spawn the painting application via the kernel-side GUI launch table.
-/// Same path the ring-3 `sys_gui_launch` syscall uses, just invoked
-/// from kernel context (no ring-3 round-trip).
+/// Spawn the standalone ring-3 painting ELF on a blocking kernel wrapper
+/// thread, the same path Start → Notepad uses.
 fn spawn_painting() {
     crate::debug_info!("GUIShell: Spawning painting...");
-    if let Err(e) = crate::commands::gui_launch_table::spawn_by_name("painting") {
-        crate::debug_warn!("GUIShell: Failed to spawn painting: errno={}", e);
-    }
+    crate::window::terminal_factory::spawn_gui_user_app(
+        "/host/PAINTING.ELF",
+        alloc::vec![alloc::string::String::from("painting")],
+    );
 }
 
 fn spawn_calc() {

@@ -1,23 +1,25 @@
 # `src/commands/` — Kernel-side GUI policy and legacy apps
 
-This directory now contains four kernel-side GUI applications (`painting`,
-`calc`, `tasks`, `explorer`) plus `guishell`, the desktop/taskbar policy layer.
-`notepad` was the first application migrated to the ring-3 GUI platform and
-lives at `userland/apps/notepad/`.
+This directory now contains three kernel-side GUI applications (`calc`,
+`tasks`, `explorer`) plus `guishell`, the desktop/taskbar policy layer.
+`notepad` and `painting` have been migrated to the ring-3 GUI platform and
+live at `userland/apps/notepad/` and `userland/apps/painting/`.
 
-`gui_launch_table` still dispatches the four legacy applications for
+`gui_launch_table` still dispatches the three legacy applications for
 `GLAUNCH.ELF` and syscall 5000. Its names must match `GUI_APPLETS` in
-`src/userland/bin_namespace.rs`. Notepad is deliberately absent: `/bin/notepad`
-rewrites directly to `/host/NOTEPAD.ELF`.
+`src/userland/bin_namespace.rs`. Notepad and painting are deliberately absent:
+`/bin/notepad` and `/bin/painting` rewrite directly to `/host/NOTEPAD.ELF`
+and `/host/PAINTING.ELF`.
 
 ## Launch paths
 
-- Start → Notepad calls `terminal_factory::spawn_gui_user_app`, which launches
-  the standalone ELF on a blocking kernel wrapper thread.
-- zsh `notepad` resolves through the synthetic `/bin` namespace directly to
-  `NOTEPAD.ELF`.
-- Explorer launches the same ELF with the selected text path as `argv[1]`.
-- The four remaining kernel apps continue through `GLAUNCH.ELF` →
+- Start → Notepad and Start → Painting call
+  `terminal_factory::spawn_gui_user_app`, which launches the standalone ELF on
+  a blocking kernel wrapper thread.
+- zsh `notepad` / `painting` resolve through the synthetic `/bin` namespace
+  directly to `NOTEPAD.ELF` / `PAINTING.ELF`.
+- Explorer launches the notepad ELF with the selected text path as `argv[1]`.
+- The three remaining kernel apps continue through `GLAUNCH.ELF` →
   `sys_gui_launch` → `gui_launch_table::spawn_by_name`.
 
 ## Adding GUI applications
