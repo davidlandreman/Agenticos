@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! `TreeView` — hierarchical-list widget with expand/collapse nodes,
 //! the unified `Selection` model, and keyboard navigation.
 //!

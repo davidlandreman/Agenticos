@@ -196,11 +196,22 @@ pub fn encode_window_event(handle: u32, event: &Event) -> Option<GuiEvent> {
             encoded.payload[1] = mouse.position.y as u32;
             encoded.payload[2] = u32::from(mouse.buttons.left)
                 | (u32::from(mouse.buttons.right) << 1)
-                | (u32::from(mouse.buttons.middle) << 2);
+                | (u32::from(mouse.buttons.middle) << 2)
+                | (modifier_bits(mouse.modifiers) << 8);
             match mouse.event_type {
                 MouseEventType::Move => encoded.payload[3] = GUI_MOUSE_MOVE,
-                MouseEventType::ButtonDown => encoded.payload[3] = GUI_MOUSE_DOWN,
-                MouseEventType::ButtonUp => encoded.payload[3] = GUI_MOUSE_UP,
+                MouseEventType::ButtonDown => {
+                    encoded.payload[3] = GUI_MOUSE_DOWN;
+                    let ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
+                    encoded.payload[4] = ticks as u32;
+                    encoded.payload[5] = (ticks >> 32) as u32;
+                }
+                MouseEventType::ButtonUp => {
+                    encoded.payload[3] = GUI_MOUSE_UP;
+                    let ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
+                    encoded.payload[4] = ticks as u32;
+                    encoded.payload[5] = (ticks >> 32) as u32;
+                }
                 MouseEventType::Scroll { delta_x, delta_y } => {
                     encoded.payload[3] = GUI_MOUSE_SCROLL;
                     encoded.payload[4] = delta_x as u32;

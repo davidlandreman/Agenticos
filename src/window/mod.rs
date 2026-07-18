@@ -328,6 +328,11 @@ pub trait Window: Send {
         None
     }
 
+    /// Typed accessor used by the ring-3 title syscall.
+    fn as_frame_window_mut(&mut self) -> Option<&mut windows::frame::FrameWindow> {
+        None
+    }
+
     /// Grid dimensions if this window renders a text grid.
     /// Returns `Some((rows, cols))` for `TextWindow`/`TerminalWindow`,
     /// `None` otherwise. The terminal factory uses this to size the
@@ -381,6 +386,7 @@ pub trait Window: Send {
     /// overrides it to return `Some(self)`. Following the same opt-in
     /// pattern as `is_scroll_view`, this avoids a generic downcast
     /// machinery while keeping the trait small.
+    #[allow(dead_code)]
     fn as_button_mut(&mut self) -> Option<&mut windows::button::Button> {
         None
     }
@@ -405,6 +411,7 @@ pub trait Window: Send {
 
     /// Typed accessor used by app code (e.g. File Explorer) to mutate
     /// a `MultiColumnList`'s rows through the manager.
+    #[allow(dead_code)]
     fn as_multi_column_list_mut(
         &mut self,
     ) -> Option<&mut windows::multi_column_list::MultiColumnList> {
@@ -413,12 +420,14 @@ pub trait Window: Send {
 
     /// Typed accessor used by app code (e.g. File Explorer) to mutate
     /// a `TreeView` through the manager.
+    #[allow(dead_code)]
     fn as_tree_view_mut(&mut self) -> Option<&mut windows::tree_view::TreeView> {
         None
     }
 
     /// Typed accessor used by app code (e.g. File Explorer) to update
     /// a `PathBar`'s path through the manager.
+    #[allow(dead_code)]
     fn as_path_bar_mut(&mut self) -> Option<&mut windows::path_bar::PathBar> {
         None
     }

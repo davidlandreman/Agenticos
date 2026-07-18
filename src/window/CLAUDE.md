@@ -32,7 +32,8 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background), and `start_menu.rs` (classic root menu plus Programs fly-out in one active popup).
 - `windows/remote_surface.rs` — server-decorated client surface for ring-3
   apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
-  events to the owning PID's GUI queue.
+  events to the owning PID's GUI queue. Its enclosing frame title can be
+  updated through the ownership-checked ring-3 GUI ABI.
 - `adapters/` — `GraphicsDevice` implementations: `direct_framebuffer.rs` (fast, used for cursor) and `double_buffered.rs` (smooth).
 - `dialogs/` — kernel dialog-window scaffolding, including the non-blocking Run dialog. Run keeps input state outside the manager registry and launches submitted text through zsh `-c`.
 
@@ -58,7 +59,7 @@ Boot lands in GUI mode:
 - `FrameWindow` titled "AgenticOS Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller).
 - `TerminalWindow` inside the frame.
 - Bottom taskbar with a Start button. Start opens the classic menu; Programs
-  launches the four pinned apps, Run opens a modal command field, and Shut Down
+  launches the five pinned apps, Run opens a modal command field, and Shut Down
   is an explicit safe placeholder until a clean power-off path exists.
 
 ## TerminalWindow ↔ terminal subsystem

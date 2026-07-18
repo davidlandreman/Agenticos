@@ -162,6 +162,15 @@ impl Window {
         }
     }
 
+    pub fn set_title(&self, title: &str) -> Result<(), i64> {
+        let result = runtime::gui_win_set_title(self.handle, title);
+        if result < 0 {
+            Err(result)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn destroy(&mut self) {
         if self.handle != 0 {
             let _ = runtime::gui_win_destroy(self.handle);
@@ -305,10 +314,7 @@ impl Button {
     }
 
     pub fn hit(&self, x: i32, y: i32) -> bool {
-        x >= self.x
-            && x < self.x + self.w as i32
-            && y >= self.y
-            && y < self.y + self.h as i32
+        x >= self.x && x < self.x + self.w as i32 && y >= self.y && y < self.y + self.h as i32
     }
 
     pub fn draw(&self, canvas: &mut Canvas, hot: bool) {
@@ -371,10 +377,7 @@ impl TextField {
     }
 
     pub fn hit(&self, x: i32, y: i32) -> bool {
-        x >= self.x
-            && x < self.x + self.w as i32
-            && y >= self.y
-            && y < self.y + self.h as i32
+        x >= self.x && x < self.x + self.w as i32 && y >= self.y && y < self.y + self.h as i32
     }
 
     /// Place the caret nearest the pixel column of `x` (window coordinates).
@@ -579,14 +582,13 @@ impl ListView {
             }
             _ => return ListEvent::None,
         }
-        self.selected.map(ListEvent::Selected).unwrap_or(ListEvent::None)
+        self.selected
+            .map(ListEvent::Selected)
+            .unwrap_or(ListEvent::None)
     }
 
     pub fn hit(&self, x: i32, y: i32) -> bool {
-        x >= self.x
-            && x < self.x + self.w as i32
-            && y >= self.y
-            && y < self.y + self.h as i32
+        x >= self.x && x < self.x + self.w as i32 && y >= self.y && y < self.y + self.h as i32
     }
 
     /// Route a click. A click on the already-selected row activates it
@@ -639,8 +641,15 @@ impl ListView {
             let track = self.h as i32 - 2;
             let thumb_h = ((visible * track as usize) / total).max(8) as i32;
             let max_first = total.saturating_sub(visible).max(1);
-            let thumb_y = self.y + 1 + (self.first_row as i32 * (track - thumb_h)) / max_first as i32;
-            canvas.fill_rect(gutter_x + 1, thumb_y, gutter as u32 - 2, thumb_h as u32, COLOR_BORDER);
+            let thumb_y =
+                self.y + 1 + (self.first_row as i32 * (track - thumb_h)) / max_first as i32;
+            canvas.fill_rect(
+                gutter_x + 1,
+                thumb_y,
+                gutter as u32 - 2,
+                thumb_h as u32,
+                COLOR_BORDER,
+            );
         }
     }
 }
@@ -649,6 +658,9 @@ impl ListView {
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
+    pub size: u64,
+    pub modified: i64,
+    pub mode: u32,
 }
 
 pub fn c_path(path: &str) -> Vec<u8> {
@@ -704,7 +716,28 @@ pub fn list_dir(path: &str) -> Result<Vec<DirEntry>, i64> {
                     } else {
                         false
                     };
-                    output.push(DirEntry { name, is_dir });
+                    let mut full_path = String::from(directory.trim_end_matches('/'));
+                    if full_path.is_empty() {
+                        full_path.push('/');
+                    } else {
+                        full_path.push('/');
+                    }
+                    full_path.push_str(&name);
+                    let mut stat = runtime::LinuxStat::default();
+                    let stat_path = c_path(&full_path);
+                    let stat_result =
+                        runtime::newfstatat(runtime::AT_FDCWD, &stat_path, &mut stat, 0);
+                    output.push(DirEntry {
+                        name,
+                        is_dir,
+                        size: if stat_result == 0 && stat.st_size > 0 {
+                            stat.st_size as u64
+                        } else {
+                            0
+                        },
+                        modified: if stat_result == 0 { stat.st_mtime } else { 0 },
+                        mode: if stat_result == 0 { stat.st_mode } else { 0 },
+                    });
                 }
             }
             offset += reclen;

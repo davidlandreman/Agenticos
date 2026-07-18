@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! `StatusBar` — bottom-anchored horizontal strip of `Label` sections.
 //!
 //! `StatusBar` is a thin composition over [`HBox`]. Sections are

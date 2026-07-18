@@ -47,6 +47,7 @@ pub enum PendingAction {
     SpawnPainting,
     SpawnCalc,
     SpawnNotepad,
+    SpawnFileManager,
     OpenRunDialog,
     ShowShutdownNotice,
     FocusWindow(WindowId),
@@ -240,6 +241,7 @@ fn show_start_menu() {
         // Use deferred actions because this callback runs under the window
         // manager lock. Disabled placeholders never emit an action.
         menu.on_select(|action| match action {
+            StartMenuAction::FileManager => queue_action(PendingAction::SpawnFileManager),
             StartMenuAction::Terminal => queue_action(PendingAction::SpawnTerminal),
             StartMenuAction::Notepad => queue_action(PendingAction::SpawnNotepad),
             StartMenuAction::Painting => queue_action(PendingAction::SpawnPainting),
@@ -336,6 +338,14 @@ fn spawn_notepad() {
     crate::window::terminal_factory::spawn_gui_user_app(
         "/host/NOTEPAD.ELF",
         alloc::vec![alloc::string::String::from("notepad")],
+    );
+}
+
+fn spawn_file_manager() {
+    crate::debug_info!("GUIShell: Spawning file manager...");
+    crate::window::terminal_factory::spawn_gui_user_app(
+        "/host/FILEMAN.ELF",
+        alloc::vec![alloc::string::String::from("explorer")],
     );
 }
 
@@ -655,6 +665,10 @@ fn process_pending_actions() {
             PendingAction::SpawnNotepad => {
                 close_start_menu();
                 spawn_notepad();
+            }
+            PendingAction::SpawnFileManager => {
+                close_start_menu();
+                spawn_file_manager();
             }
             PendingAction::OpenRunDialog => {
                 close_start_menu();

@@ -3,8 +3,8 @@
 //!
 //! ## Why this exists
 //!
-//! The remaining kernel GUI app launchers (`tasks`,
-//! `explorer`) were previously reachable only as kernel-shell commands
+//! The remaining kernel GUI app launcher (`tasks`) was previously reachable
+//! only as a kernel-shell command
 //! registered in `src/process/manager.rs::ProcessManager`. With zsh as
 //! the default shell, those typed names need to resolve through ring-3
 //! PATH lookup. The `/bin/<gui_applet>` rewrite in
@@ -12,8 +12,8 @@
 //! multicall binary, which then issues `gui_launch(<name>)`. This
 //! module is where that syscall lands.
 //!
-//! These legacy GUI apps stay kernel-space. New and migrated apps use the
-//! ring-3 GUI ABI directly; notepad is the first migration.
+//! Tasks stays in kernel space. New and migrated apps use the ring-3 GUI ABI
+//! directly; File Manager, Notepad, Calc, and Painting follow that model.
 //!
 //! ## Source of truth for the applet name list
 //!
@@ -33,7 +33,6 @@ use alloc::{boxed::Box, string::String, vec::Vec};
 /// [`crate::userland::bin_namespace::GUI_APPLETS`].
 pub fn spawn_by_name(name: &str) -> Result<ProcessId, i64> {
     let factory: fn(Vec<String>) -> Box<dyn RunnableProcess> = match name {
-        "explorer" => crate::commands::explorer::create_explorer_process,
         "tasks" => crate::commands::tasks::create_tasks_process,
         _ => return Err(ENOENT),
     };
@@ -79,7 +78,7 @@ mod tests_internal {
     /// assert coverage without spawning.
     fn handler_for(name: &str) -> Option<()> {
         match name {
-            "explorer" | "tasks" => Some(()),
+            "tasks" => Some(()),
             _ => None,
         }
     }
