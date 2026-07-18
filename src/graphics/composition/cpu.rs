@@ -191,7 +191,7 @@ impl CompositionEngine for CpuCompositionEngine {
                             .pixel(x as u32, y as u32)
                             .unwrap_or(PremulArgb::TRANSPARENT);
                         let dst = if src.a() > 0 && src.a() < u8::MAX {
-                            blurred
+                            let filtered = blurred
                                 .as_ref()
                                 .and_then(|regions| {
                                     regions.iter().find_map(|region| {
@@ -203,7 +203,13 @@ impl CompositionEngine for CpuCompositionEngine {
                                             })
                                     })
                                 })
-                                .unwrap_or(output_dst)
+                                .unwrap_or(output_dst);
+                            // Use effective source alpha as the effect mask as
+                            // well as the source-over alpha. Without this mix,
+                            // a one-alpha shadow pixel selects a fully blurred
+                            // backdrop and the blur hard-stops at the first
+                            // transparent pixel instead of fading with it.
+                            output_dst.lerp(filtered, src.a())
                         } else {
                             output_dst
                         };

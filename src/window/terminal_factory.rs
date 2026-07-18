@@ -5,7 +5,6 @@
 //! additional terminals.
 
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -24,12 +23,7 @@ pub struct TerminalInstance {
     pub terminal_id: WindowId,
     /// Asynchronous launch associated with this terminal's shell.
     pub shell_launch: Option<LaunchId>,
-    /// Terminal number for display purposes
-    pub number: usize,
 }
-
-/// Counter for terminal numbering
-static TERMINAL_COUNTER: Mutex<usize> = Mutex::new(1);
 
 /// List of all terminal instances
 static TERMINAL_INSTANCES: Mutex<Vec<TerminalInstance>> = Mutex::new(Vec::new());
@@ -40,19 +34,6 @@ static TERMINAL_INSTANCES: Mutex<Vec<TerminalInstance>> = Mutex::new(Vec::new())
 /// * `Ok(TerminalInstance)` - The newly created terminal instance
 /// * `Err(&'static str)` - Error message if creation failed
 pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
-    let terminal_number = {
-        let mut counter = TERMINAL_COUNTER.lock();
-        let num = *counter;
-        *counter += 1;
-        num
-    };
-
-    let title = if terminal_number == 1 {
-        String::from("AgenticOS Terminal")
-    } else {
-        alloc::format!("AgenticOS Terminal {}", terminal_number)
-    };
-
     // Create the terminal window structure
     let instance = with_window_manager(|wm| {
         // Get screen dimensions
@@ -74,7 +55,7 @@ pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
 
         // Create frame window
         let frame_id = wm.create_window(Some(desktop_id));
-        let mut frame_window = Box::new(FrameWindow::new(frame_id, &title));
+        let mut frame_window = Box::new(FrameWindow::new(frame_id, "Terminal"));
         frame_window.set_parent(Some(desktop_id));
         frame_window.set_bounds(Rect::new(frame_x, frame_y, frame_width, frame_height));
 
@@ -125,7 +106,6 @@ pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
             frame_id,
             terminal_id,
             shell_launch: None,
-            number: terminal_number,
         })
     })
     .ok_or("Window manager not initialized")??;
@@ -134,8 +114,7 @@ pub fn spawn_terminal() -> Result<TerminalInstance, &'static str> {
     TERMINAL_INSTANCES.lock().push(instance);
 
     crate::debug_info!(
-        "Terminal factory: Created terminal {} (frame={:?}, terminal={:?})",
-        terminal_number,
+        "Terminal factory: Created terminal (frame={:?}, terminal={:?})",
         instance.frame_id,
         instance.terminal_id
     );
@@ -189,8 +168,8 @@ pub fn spawn_terminal_with_shell() -> Result<TerminalInstance, &'static str> {
     }
 
     crate::debug_info!(
-        "Terminal factory: zsh submitted for terminal {} as {:?}",
-        instance.number,
+        "Terminal factory: zsh submitted for terminal {:?} as {:?}",
+        instance.terminal_id,
         launch
     );
 
@@ -227,8 +206,7 @@ pub fn on_window_destroyed(window_id: WindowId) {
     };
 
     crate::debug_info!(
-        "Terminal factory: closing terminal {} (frame={:?}, terminal={:?}) — killing its ring-3 processes",
-        instance.number,
+        "Terminal factory: closing terminal (frame={:?}, terminal={:?}) — killing its ring-3 processes",
         instance.frame_id,
         instance.terminal_id
     );

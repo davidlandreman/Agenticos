@@ -145,6 +145,77 @@ fn test_links_follows_relative_http_redirect() {
     );
 }
 
+fn run_links_https_success(host: &str, path: &str, output: &str, marker: &str) {
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    let command = alloc::format!(
+        "mkdir -p /work/{0}-home; attempt=0; \
+         until HOME=/work/{0}-home links -ssl.certificates 2 -dump \
+         https://{1}:8443/{2} > /work/{0} 2>&1 && grep -q '{3}' /work/{0}; do \
+             attempt=$((attempt + 1)); \
+             if [ $attempt -ge 3 ]; then cat /work/{0}; exit 1; fi; \
+         done",
+        output,
+        host,
+        path,
+        marker
+    );
+    run_zsh_network_command(&command);
+}
+
+fn run_links_https_rejection(host: &str, output: &str) {
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    let command = alloc::format!(
+        "mkdir -p /work/{0}-home; rm -f /work/{0}; \
+         HOME=/work/{0}-home links -ssl.certificates 2 -dump \
+         https://{1}:8443/ > /work/{0} 2>&1 || :; \
+         grep -qi 'invalid certificate' /work/{0}; \
+         ! grep -q 'AgenticOS HTTPS OK' /work/{0}",
+        output,
+        host
+    );
+    run_zsh_network_command(&command);
+}
+
+fn test_links_https_valid_hostname() {
+    run_links_https_success(
+        "valid.agenticos.test",
+        "",
+        "links-https-valid.txt",
+        "AgenticOS HTTPS OK",
+    );
+}
+
+fn test_links_https_valid_numeric_ip() {
+    run_links_https_success("10.0.2.102", "", "links-https-ip.txt", "AgenticOS HTTPS OK");
+}
+
+fn test_links_https_tls12_server() {
+    run_links_https_success(
+        "tls12.agenticos.test",
+        "",
+        "links-https-tls12.txt",
+        "AgenticOS HTTPS OK",
+    );
+}
+
+fn test_links_https_rejects_hostname_mismatch() {
+    run_links_https_rejection("mismatch.agenticos.test", "links-https-mismatch.txt");
+}
+
+fn test_links_https_rejects_untrusted_root() {
+    run_links_https_rejection("untrusted.agenticos.test", "links-https-untrusted.txt");
+}
+
+fn test_links_https_rejects_expired_certificate() {
+    run_links_https_rejection("expired.agenticos.test", "links-https-expired.txt");
+}
+
+fn test_links_https_rejects_future_certificate() {
+    run_links_https_rejection("future.agenticos.test", "links-https-future.txt");
+}
+
 fn run_zsh_network_command(command: &str) {
     let path = crate::userland::process_service::ZSH_HOST_PATH;
     assert!(
@@ -205,6 +276,13 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_busybox_nc_hostname,
         &test_busybox_wget_numeric_http,
         &test_busybox_wget_hostname,
+        &test_links_https_valid_hostname,
+        &test_links_https_valid_numeric_ip,
+        &test_links_https_tls12_server,
+        &test_links_https_rejects_hostname_mismatch,
+        &test_links_https_rejects_untrusted_root,
+        &test_links_https_rejects_expired_certificate,
+        &test_links_https_rejects_future_certificate,
         &test_links_dump_numeric_http,
         &test_links_dump_hostname_http,
         &test_links_follows_relative_http_redirect,

@@ -79,6 +79,9 @@ impl FontRef {
 /// Default size for the system TTF, in pixels.
 const SYSTEM_FONT_PX: u16 = 14;
 
+/// Slightly larger size used by terminal character grids.
+const TERMINAL_FONT_PX: u16 = 16;
+
 /// Size for the window-caption font, in pixels. Approximates 8 pt MS Sans
 /// Serif bold as used by the Windows 98 classic caption bar.
 const CAPTION_FONT_PX: u16 = 11;
@@ -89,6 +92,11 @@ static SYSTEM_TTF_DATA: &[u8] = include_bytes!("../../../assets/system.ttf");
 /// Boot-set default font. Set exactly once by [`init_fonts`]. Reads before
 /// init fall through to the embedded 8x8 fallback.
 static DEFAULT_FONT: Once<FontRef> = Once::new();
+
+/// Boot-set terminal font (larger instantiation of the same monospaced TTF).
+/// Set once by [`init_fonts`]; reads before init fall through to the embedded
+/// 8x8 fallback.
+static TERMINAL_FONT: Once<FontRef> = Once::new();
 
 /// Boot-set caption font (smaller instantiation of the same TTF). Set once by
 /// [`init_fonts`]; reads before init fall through to the embedded 8x8 fallback.
@@ -124,6 +132,28 @@ pub fn init_fonts() {
         },
     );
 
+    TERMINAL_FONT.call_once(
+        || match TtfFont::from_data(SYSTEM_TTF_DATA, TERMINAL_FONT_PX) {
+            Some(font) => {
+                crate::debug_info!(
+                    "init_fonts: parsed terminal font at {}px (cell {}x{}, ascent {})",
+                    TERMINAL_FONT_PX,
+                    font.cell_width(),
+                    font.line_height(),
+                    font.ascent(),
+                );
+                let leaked: &'static TtfFont = Box::leak(Box::new(font));
+                FontRef::new(leaked)
+            }
+            None => {
+                crate::debug_warn!(
+                    "init_fonts: terminal font failed to parse; using embedded 8x8 fallback"
+                );
+                FontRef::new(&DEFAULT_8X8_FONT as &dyn Font)
+            }
+        },
+    );
+
     CAPTION_FONT.call_once(
         || match TtfFont::from_data(SYSTEM_TTF_DATA, CAPTION_FONT_PX) {
             Some(font) => {
@@ -151,6 +181,15 @@ pub fn init_fonts() {
 /// this returns the embedded 8x8 fallback.
 pub fn get_default_font() -> FontRef {
     if let Some(font) = DEFAULT_FONT.get() {
+        return *font;
+    }
+    get_embedded_font()
+}
+
+/// Return the terminal font. Before [`init_fonts`] runs (or if it fails), this
+/// returns the embedded 8x8 fallback.
+pub fn get_terminal_font() -> FontRef {
+    if let Some(font) = TERMINAL_FONT.get() {
         return *font;
     }
     get_embedded_font()

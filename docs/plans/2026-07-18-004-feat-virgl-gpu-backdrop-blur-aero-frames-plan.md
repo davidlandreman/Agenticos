@@ -19,11 +19,14 @@ related_docs:
 
 ## Implementation result
 
-Implemented on 2026-07-18. VirGL now retains two full-output blur scratch
-resources, executes the shared three-box radius decomposition through bounded
+Implemented on 2026-07-18. VirGL now retains one full-output backdrop snapshot
+plus two full-output blur scratch resources, and executes the shared three-box
+radius decomposition through bounded
 horizontal/vertical TGSI shaders, and combines source plus blurred backdrop
-with transparent discard. Construction qualifies that production path against
-the CPU compositor before VirGL becomes available. Aero radius 4 is selected
+through an effective-alpha mask with transparent discard. The preserved sharp
+snapshot is mixed with the blurred snapshot so soft effect edges fade instead
+of ending abruptly. Construction qualifies that production path against the
+CPU compositor before VirGL becomes available. Aero radius 6 is selected
 automatically for qualified VirGL, telemetry reports copy/pass work and scratch
 bytes, and the hardware-backed integration oracle covers masked, opaque,
 stacked, partial-damage, and unsupported-radius cases.
@@ -232,24 +235,32 @@ The ordinary source-over draw is insufficient because the backdrop is now a
 texture rather than the currently bound output target. Sampling the output
 while it is also the framebuffer is forbidden and host-dependent.
 
-Add an effect fragment shader with two sampler views:
+Add an effect fragment shader with three sampler views:
 
 - slot 0: the canonical layer texture;
 - slot 1: the final blurred scratch texture.
+- slot 2: the preserved sharp backdrop snapshot.
 
-The two textures use different coordinates: slot 0 uses the layer's existing
-source UV, while slot 1 uses absolute output UV because each scratch texture is
-full-screen. Extend the vertex shader with a second generic output derived from
-the NDC position (`output_uv = position.xy * 0.5 + 0.5`). This avoids expanding
-the 32-byte vertex format or baking per-damage coordinates into shader objects.
-Ordinary composition keeps sampling only the original source-UV generic; blur
-and effect shaders consume the derived output-UV generic.
+The source and backdrop textures use different coordinates: slot 0 uses the
+layer's existing source UV, while slots 1 and 2 use absolute output UV because
+each scratch texture is full-screen. Extend the vertex shader with a second
+generic output derived from the NDC position
+(`output_uv = position.xy * 0.5 + 0.5`). This avoids expanding the 32-byte
+vertex format or baking per-damage coordinates into shader objects. Ordinary
+composition keeps sampling only the original source-UV generic; blur and
+effect shaders consume the derived output-UV generic.
 
 It applies layer opacity to all premultiplied source channels, then computes:
 
 ```text
-result = source + blurred_backdrop * (1 - source_alpha)
+effect_backdrop = sharp_backdrop * (1 - source_alpha)
+                + blurred_backdrop * source_alpha
+result = source + effect_backdrop * (1 - source_alpha)
 ```
+
+Using effective source alpha as the effect mask gives translucent decoration
+edges a continuous transition from blurred to sharp backdrop. This is what
+lets the window shadow fade out without leaving a rectangular blur cutoff.
 
 The draw uses replace blending because the shader has already performed
 source-over. A fully transparent source pixel must discard the fragment so the
@@ -363,7 +374,7 @@ An idle or hardware-cursor-only sample remains all zero.
 4. Add `CompositionError::UnsupportedEffect` and require VirGL to match every
    visible effect explicitly.
 
-Acceptance: Classic produces `LayerEffect::None`; Aero produces radius 4; CPU
+Acceptance: Classic produces `LayerEffect::None`; Aero produces radius 6; CPU
 blur tests are unchanged; an out-of-range GPU radius cannot render sharply.
 
 ### M2 — Extend the bounded VirGL encoder
@@ -372,7 +383,7 @@ blur tests are unchanged; an out-of-range GPU radius cannot render sharply.
    protocol dword tests.
 2. Generalize fragment sampler-view and sampler-state binding to bounded
    slices and explicit start slots.
-3. Add exact create/bind/unbind/destroy stream tests for two sampler views.
+3. Add exact create/bind/unbind/destroy stream tests for bounded sampler views.
 4. Keep the existing one-view alpha smoke and production path green.
 
 Acceptance: `virtio_gpu_protocol` proves the byte/dword layout and rejects
@@ -381,7 +392,7 @@ encoder-capacity overflow.
 
 ### M3 — Prove the primitive chain in a hardware blur smoke
 
-1. Build the tiny copy + ping-pong + two-sampler + discard readback fixture.
+1. Build the tiny copy + ping-pong + alpha-masked combine readback fixture.
 2. Compare its pixels with the CPU blur oracle.
 3. Repeat enough times to expose stale handles and framebuffer/sampler hazards.
 4. Inject cleanup failures at each resource/object creation boundary.
@@ -393,7 +404,8 @@ host when available as an independent protocol check.
 
 ### M4 — Add persistent production blur resources and shaders
 
-1. Allocate the two checked scratch resources during engine initialization.
+1. Allocate the checked snapshot and two blur scratch resources during engine
+   initialization.
 2. Create their surfaces and sampler views with the fixed pipeline.
 3. Generate/cache bounded axis/radius shader variants.
 4. Add reverse-order partial-init and `Drop` cleanup.
@@ -408,7 +420,8 @@ dynamic retained-surface sampler views.
 1. Carry effects into `PreparedLayer`.
 2. Copy the current output work region when an effect layer is reached.
 3. Encode the shared three-box horizontal/vertical passes.
-4. Draw the source+blur combine shader with transparent discard.
+4. Draw the source+sharp+blur combine shader with alpha masking and transparent
+   discard.
 5. Keep normal layers on the current fast path and retain one submission.
 6. Acknowledge canonical surface damage only after the full submission.
 
@@ -561,10 +574,10 @@ with the full host-independent suite:
 ## Completion criteria
 
 This plan is complete when the pinned VirGL host passes a deterministic
-copy/ping-pong/two-sampler/discard qualification; production
+copy/ping-pong/alpha-masked-combine qualification; production
 `BackdropSample` matches CPU blur semantics for uniform, impulse, partial
 damage, transparent, opaque, opacity, edge, and stacked-glass scenes; Aero
-radius 4 is selected automatically on qualified VirGL; steady frames reuse all
+radius 6 is selected automatically on qualified VirGL; steady frames reuse all
 surface and blur resources; ordinary frames perform zero readback; strict and
 non-strict failures remain coherent; and the qualification guide records
 before/after telemetry for CPU and GPU Aero at the same resolution and scene.

@@ -2,17 +2,19 @@
 
 This directory cross-builds Links 2.30 as a static-musl, non-PIE executable
 for AgenticOS. It supports both the original terminal UI and a native windowed
-browser backed by a `no_std` Rust graphics/input driver. HTTP and IPv4 are
-enabled; TLS remains intentionally disabled.
+browser backed by a `no_std` Rust graphics/input driver. IPv4 HTTP and HTTPS
+are enabled, including DNS and numeric-IP certificate validation.
 
 ```sh
 make -C userland/apps/links2
 REBUILD_LINKS2=1 ./build.sh -n
 ```
 
-The Links, zlib, and libpng archives and SHA256 values are pinned in
-`Makefile`. Local patches register the AgenticOS driver and select Links'
-existing fork-and-pipe background helper when
+The Links, zlib, libpng, and OpenSSL 3.5.7 archives and SHA256 values are
+pinned in `Makefile`. OpenSSL is linked statically with threads, modules,
+dynamic loading, configuration autoload, legacy providers, and QUIC disabled.
+Local patches register the AgenticOS driver and select Links' existing
+fork-and-pipe background helper when
 `AGENTICOS_NO_PTHREADS` is defined. Musl exposes pthread symbols, but
 AgenticOS does not yet implement the clone/futex/thread-TLS ABI that detached
 pthreads require.
@@ -25,6 +27,7 @@ Inside a terminal:
 
 ```sh
 links http://host/path
+links https://host/path
 links -dump http://host/path
 links2 -g -driver agenticos -no-connect
 ```
@@ -38,9 +41,10 @@ only implements Links' graphics-driver callback table.
 
 Links stores its per-user state under `/root/.links`; `/root` is provisioned
 on the writable overlay at boot. The restricted QEMU tests use the
-repository-owned `agenticos-http.test:8081` HTML fixture and cover numeric
-HTTP, hostname resolution, normalized dump output, and a relative redirect.
-
-HTTPS is not merely a build toggle. Cryptographic entropy is available,
-but a reviewed TLS stack, CA roots, hostname verification, trusted-time policy,
-and HTTPS-specific QEMU coverage remain a separate follow-up.
+repository-owned HTTP and HTTPS fixtures. HTTPS uses the kernel-managed
+`/etc/ssl/cert.pem` Mozilla trust snapshot, rejects invalid certificates by
+default, requires TLS 1.2 or newer, and checks both DNS names and numeric IPs.
+The trust store is withheld when the kernel cannot establish a valid RTC wall
+clock. Hermetic QEMU tests cover valid hostname/IP chains, SNI, redirects,
+TLS 1.2, and rejection of mismatched, untrusted, expired, and future-dated
+certificates. BusyBox `wget` remains HTTP-only.

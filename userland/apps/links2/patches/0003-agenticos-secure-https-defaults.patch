@@ -1,0 +1,27 @@
+--- a/default.c
++++ b/default.c
+@@ -2133 +2133 @@
+-struct ssl_options ssl_options = { SSL_WARN_ON_INVALID_CERTIFICATE,
++struct ssl_options ssl_options = { SSL_REJECT_INVALID_CERTIFICATE,
+--- a/links.h
++++ b/links.h
+@@ -1680 +1680,3 @@
++#ifndef AGENTICOS_SYSTEM_CA_ONLY
+-#define HAVE_BUILTIN_SSL_CERTIFICATES
++#define HAVE_BUILTIN_SSL_CERTIFICATES
++#endif
+--- a/https.c
++++ b/https.c
+@@ -310 +310,8 @@ links_ssl *getSSL(void)
+-#if defined(SSL3_VERSION)
++#if defined(AGENTICOS_SECURE_HTTPS)
++		if (!SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION)) {
++			clear_ssl_errors(__LINE__);
++			SSL_CTX_free(ctx);
++			contexts[idx] = NULL;
++			return NULL;
++		}
++#elif defined(SSL3_VERSION)
+@@ -485 +492 @@ static int verify_ssl_host_name(X509 *server_cert, unsigned char *host)
+-#if 1
++#if !(defined(HAVE_X509_CHECK_HOST) && defined(HAVE_X509_CHECK_IP))

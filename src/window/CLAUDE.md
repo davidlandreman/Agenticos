@@ -30,7 +30,9 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   pipeline's maximum) meeting the content well directly, content flush to
   the window edge inside a 1px dark hairline
   rim (no light borders), 12px-rounded top corners, a soft 22px drop shadow,
-  and a rounded soft-red close button. Its rounded *bottom* corners are
+  and a rounded soft-red close button. Backdrop strength follows the frame's
+  effective alpha, so the blurred shadow gutter fades smoothly to the sharp
+  desktop. Its rounded *bottom* corners are
   carved by `Window::paint_overlay` — a post-children pass the manager runs
   so the frame can replace the client's corner pixels with the shadowed arc
   (surface ARGB writes are exact replacement); `ThemeSpec.draw_frame_overlay`
@@ -79,7 +81,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 |---|---|---|
 | `DesktopWindow` | Full-screen background | Owns optional live-replaceable BMP wallpaper bytes and blits them through `GraphicsDevice::draw_image_scaled`. Falls back to solid blue (RGB `0, 50, 100`) when no wallpaper is provided or parsing fails — boot must succeed in either branch. |
 | `FrameWindow` | Title bar + borders | Metrics and painting come from the active Classic/Aero theme. Aero requires the retained renderer. Uses `WindowBase`. |
-| `TextWindow` | Grid-based text rendering | Cell size derived from the system TTF (`get_default_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. Dark grey background (RGB `32, 32, 32`). |
+| `TextWindow` | Grid-based text rendering | Cell size derived from the terminal TTF (`get_terminal_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. The default `#202020` well is opaque in Classic/Legacy and alpha-232 frosted glass in Aero/Futurism; explicit ANSI cell backgrounds stay opaque. |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
 | `StartMenuWindow` | GUIShell Start popup | Theme-aware popup panels, selection-colored rotated `AgenticOS` banner, typed disabled/separator/action rows, SVG-backed root/program icons, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
@@ -93,7 +95,7 @@ All windows derive from `WindowBase` for consistent parent-child tracking.
 Boot lands in GUI mode:
 
 - `DesktopWindow` (full-screen). Reads `/WALLPAPR.BMP` from the FAT root via `window::load_default_wallpaper` during `init_guishell`; on success, the BMP is stretched to the full screen via `GraphicsDevice::draw_image_scaled`. Missing or malformed wallpaper degrades to the legacy solid-blue fill — never panics.
-- `FrameWindow` titled "AgenticOS Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller).
+- `FrameWindow` titled "Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller). After command submission, its title shows `Terminal - ` followed by the first 40 characters of the command.
 - `TerminalWindow` inside the frame.
 - Bottom taskbar with a Start button, dynamically-sized frame buttons, and a
   recessed right-side UTC date/time tray. Start opens the classic menu;
@@ -103,7 +105,7 @@ Boot lands in GUI mode:
 
 ## TerminalWindow ↔ terminal subsystem
 
-Since the ANSI/VT overhaul (docs/plans/2026-05-24-001-...), `TerminalWindow` owns a `terminal::vte::Vte` parser + `terminal::screen::Screen` and the `TextWindow` is just a renderer. On every `prepare_for_render`, TerminalWindow drains the pty master's output queue, feeds bytes through `Vte → Screen`, pushes DSR replies back into the slave's input, and copies the Screen's visible viewport down to TextWindow via `set_cell`. Local echoes (canonical-mode typing) go through the parser too — single source of truth.
+Since the ANSI/VT overhaul (docs/plans/2026-05-24-001-...), `TerminalWindow` owns a `terminal::vte::Vte` parser + `terminal::screen::Screen` and the `TextWindow` is just a renderer. On every `prepare_for_render`, TerminalWindow drains the pty master's output queue, feeds bytes through `Vte → Screen`, pushes DSR replies back into the slave's input, and copies the Screen's visible viewport down to TextWindow via `set_cell`, preserving whether each background is `ColorSpec::Default`. That semantic bit lets only the default well use the active theme's translucent material; explicit ANSI backgrounds, including indexed black, remain opaque. Local echoes (canonical-mode typing) go through the parser too — single source of truth.
 
 PTY lookup goes through `terminal::pty::master_for_terminal(WindowId)` / `slave_for_terminal(WindowId)`. `userland::stdin` and `userland::tty` are now shims over `terminal::pty`.
 

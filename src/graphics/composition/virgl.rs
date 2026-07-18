@@ -129,18 +129,23 @@ DCL IN[1], GENERIC[1], LINEAR\n\
 DCL OUT[0], COLOR\n\
 DCL SAMP[0]\n\
 DCL SAMP[1]\n\
+DCL SAMP[2]\n\
 DCL SVIEW[0], 2D, FLOAT\n\
 DCL SVIEW[1], 2D, FLOAT\n\
-DCL TEMP[0..3]\n\
+DCL SVIEW[2], 2D, FLOAT\n\
+DCL TEMP[0..4]\n\
 IMM FLT32 { -0.001, 1.0, 0.0, 0.0 }\n\
   0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
   1: MUL TEMP[0], TEMP[0], IN[0].zzzz\n\
   2: ADD TEMP[1], TEMP[0].wwww, IMM[0].xxxx\n\
   3: KILL_IF TEMP[1]\n\
   4: TEX TEMP[2], IN[1], SAMP[1], 2D\n\
-  5: ADD TEMP[3], -TEMP[0].wwww, IMM[0].yyyy\n\
-  6: MAD OUT[0], TEMP[2], TEMP[3], TEMP[0]\n\
-  7: END\n";
+  5: TEX TEMP[3], IN[1], SAMP[2], 2D\n\
+  6: ADD TEMP[4], TEMP[2], -TEMP[3]\n\
+  7: MAD TEMP[2], TEMP[4], TEMP[0].wwww, TEMP[3]\n\
+  8: ADD TEMP[1], -TEMP[0].wwww, IMM[0].yyyy\n\
+  9: MAD OUT[0], TEMP[2], TEMP[1], TEMP[0]\n\
+ 10: END\n";
 
 struct PreparedLayer {
     layer: Layer,
@@ -359,7 +364,7 @@ impl VirglCompositionEngine {
         Ok(engine)
     }
 
-    /// Prove the production copy/ping-pong/two-sampler/discard path before
+    /// Prove the production copy/ping-pong/alpha-masked-combine path before
     /// reporting the engine as available. The output is not scanned out yet,
     /// and the first real frame overwrites this bounded fixture.
     fn qualify_backdrop_pipeline(&mut self) -> Result<(), CompositionError> {
@@ -1152,7 +1157,7 @@ impl VirglCompositionEngine {
                                 encoder.bind_object(OBJECT_BLEND, REPLACE_BLEND_STATE)?;
                                 encoder.set_fragment_sampler_views(
                                     0,
-                                    &[layer.sampler_view, BLUR_SAMPLER_VIEW_C],
+                                    &[layer.sampler_view, BLUR_SAMPLER_VIEW_C, BLUR_SAMPLER_VIEW_A],
                                 )?;
                                 set_encoder_scissor(&mut encoder, target)?;
                                 encoder.draw_triangles_from(layer.first_vertex, 6)?;
@@ -1734,7 +1739,7 @@ fn encode_pipeline_create(
         encoder.link_shaders(VERTEX_SHADER_HANDLE, handle)?;
     }
     encoder.create_nearest_sampler(SAMPLER_STATE)?;
-    encoder.bind_fragment_sampler_states(0, &[SAMPLER_STATE, SAMPLER_STATE])?;
+    encoder.bind_fragment_sampler_states(0, &[SAMPLER_STATE, SAMPLER_STATE, SAMPLER_STATE])?;
     encoder.create_sampler_view(BLUR_SAMPLER_VIEW_A, blur_resource_a, FORMAT_B8G8R8A8_UNORM)?;
     encoder.create_sampler_view(BLUR_SAMPLER_VIEW_B, blur_resource_b, FORMAT_B8G8R8A8_UNORM)?;
     encoder.create_sampler_view(BLUR_SAMPLER_VIEW_C, blur_resource_c, FORMAT_B8G8R8A8_UNORM)?;
@@ -1765,7 +1770,7 @@ fn encode_pipeline_bind(
 fn encode_pipeline_destroy(
     encoder: &mut VirglCommandEncoder,
 ) -> Result<(), crate::drivers::virtio::gpu::GpuError> {
-    encoder.clear_fragment_sampler_views(0, 2)?;
+    encoder.clear_fragment_sampler_views(0, 3)?;
     encoder.destroy_object(OBJECT_SAMPLER_VIEW, BLUR_SAMPLER_VIEW_C)?;
     encoder.destroy_object(OBJECT_SAMPLER_VIEW, BLUR_SAMPLER_VIEW_B)?;
     encoder.destroy_object(OBJECT_SAMPLER_VIEW, BLUR_SAMPLER_VIEW_A)?;

@@ -93,9 +93,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   binutils 2.46.0 (`addr2line`, `ar`, `as`, `c++filt`, `elfedit`, `ld`, `nm`,
   `objcopy`, `objdump`, `ranlib`, `readelf`, `size`, `strings`, `strip`). GNU
   `strings` owns that name; the conflicting BusyBox applet is disabled. Links
-  supports text and GUI IPv4/HTTP browsing; HTTPS still needs a separate TLS
-  trust-stack
-  integration even though cryptographic entropy is now available.
+  supports text and GUI IPv4 HTTP(S) browsing with pinned static OpenSSL,
+  TLS 1.2+, SNI, and strict chain/hostname validation against the
+  kernel-managed `/etc/ssl/cert.pem` trust store.
   The `GLAUNCH.ELF` GUI-applet list is empty today.
 - `procfs.rs` — synthetic read-only `/proc` namespace, modeled on the
   `/bin` synthesis pattern. Linux-shaped files (`uptime`, `meminfo`,

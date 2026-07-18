@@ -1862,7 +1862,7 @@ fn test_run_zsh_external_ls() {
 /// Interactive zsh must source the staged global config and build an Agnoster
 /// prompt in-process, without leaving upstream's per-redraw `$()` fork in PS1.
 fn test_run_zsh_global_rc_agnoster_prompt() {
-    let command = r#"build_prompt; [[ "$PROMPT" == *$'\ue0b0'* ]] || exit 42; [[ "$PROMPT" != *'$('* ]] || exit 43; exit 0"#;
+    let command = r#"build_prompt; [[ "$PROMPT" == *$'\ue0b0'* ]] || exit 42; [[ "$PROMPT" != *'$('* ]] || exit 43; [[ "$PROMPT" == *'%m'*'%~'* ]] || exit 44; [[ -n "${preexec_functions[(r)_agenticos_terminal_title_preexec]}" ]] || exit 45; exit 0"#;
     let Some((kind, code)) = drive_zsh(&["+m", "-ic", command]) else {
         return;
     };

@@ -60,6 +60,45 @@ stage_zsh_config() {
     echo "Staged runtime /etc zsh sources: zshrc, agnoster, and $count functions"
 }
 
+# Stage the reviewed Mozilla trust snapshot. The kernel, rather than userland,
+# owns /etc and imports this read-only source as /etc/ssl/cert.pem at boot.
+stage_ca_certificates() {
+    local source="$REPO_ROOT/userland/ca-certificates/cacert.pem"
+    local destination="$HOST_SHARE_STAGE/ETC/SSL/CERT.PEM"
+    local expected="3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
+    local actual
+
+    [ -f "$source" ] || {
+        echo "Missing committed CA bundle: $source" >&2
+        return 1
+    }
+    actual=$(shasum -a 256 "$source" | awk '{print $1}')
+    [ "$actual" = "$expected" ] || {
+        echo "CA bundle digest mismatch: expected $expected, got $actual" >&2
+        return 1
+    }
+    _stage_atomic_copy "$source" "$destination" || return 1
+    echo "Staged Mozilla CA bundle: $destination ($(wc -c < "$destination" | tr -d ' ') bytes)"
+}
+
+# Publish only the public test root into test host shares. Server certificates
+# and private keys stay outside the guest-visible tree and are used solely by
+# the host-side guestfwd process.
+stage_tls_test_root() {
+    local source="$REPO_ROOT/tools/tls-fixtures/root.pem"
+    local destination="$HOST_SHARE_STAGE/TLS/ROOT.PEM"
+    [ -f "$source" ] || {
+        echo "Missing hermetic TLS test root: $source" >&2
+        return 1
+    }
+    _stage_atomic_copy "$source" "$destination" || return 1
+    if find "$HOST_SHARE_STAGE/TLS" -type f -iname '*.key' | grep -q .; then
+        echo "TLS private key leaked into guest-visible host share" >&2
+        return 1
+    fi
+    echo "Staged hermetic TLS test root: $destination"
+}
+
 # Stage small source fixtures used by the booted GNU binutils integration
 # tests. They are ordinary read-only guest inputs, not generated prebuilts.
 stage_binutils_fixtures() {
@@ -254,6 +293,12 @@ stage_tcc_sysroot() {
 # MODE is `build` or `test`; SKIP_BUILT=1 preserves prebuilt + fixture staging.
 stage_userland() {
     local mode=$1 skip_built=${2:-0} cargo_ok=1
+    if [ "$mode" = test ]; then
+        stage_tls_test_root || return 1
+    else
+        rm -f "$HOST_SHARE_STAGE/TLS/ROOT.PEM"
+        rmdir "$HOST_SHARE_STAGE/TLS" 2>/dev/null || true
+    fi
     if [ "$skip_built" != 1 ]; then
         echo "Building Rust userland workspace..."
         cargo build --release --manifest-path "$REPO_ROOT/userland/Cargo.toml" || cargo_ok=0

@@ -25,12 +25,13 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
   x86-64 RDRAND fallback, feeding `AT_RANDOM`, `getrandom(2)`,
   `/dev/urandom`, and network seeds
 - **Text browser**: Static-musl Links 2.30 (`links` or `links2`) with interactive
-  text-mode IPv4 HTTP and DNS; HTTPS remains a separate TLS trust-stack follow-up
+  text/native-GUI IPv4 HTTP and HTTPS, DNS, TLS 1.2+, and strict certificate
+  chain/hostname validation against a pinned Mozilla trust store
 
 ### Not Yet Implemented
 
 - Fine-grained SMP scheduling, user TLB shootdown, and a general async runtime
-- IPv6, TLS/HTTPS, and interrupt-driven network I/O
+- IPv6 and interrupt-driven network I/O
 - Agent runtime
 
 ## Building
