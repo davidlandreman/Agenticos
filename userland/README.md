@@ -42,6 +42,7 @@ userland/
     ├── painting/       # standalone bouncing-shapes GUI demo (self-driven frame loop)
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
+    ├── tcc/            # prebuilt-managed TinyCC + /host/sysroot assembly
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
     ├── network-test/   # static-musl socket test fixture
     └── hello-cpp/      # C++ app — std::cout, exits 0
@@ -58,8 +59,10 @@ invoke its `Makefile` separately.
 
 Apps that fetch upstream tarballs and / or take long enough that
 rebuilding on every kernel iteration is friction ship as **committed
-binaries** under `userland/prebuilt/`. Current entries: `ZSH.ELF` and
-`BB.ELF` (BusyBox); future Linux ports (bash, vim, …) belong here too.
+binaries** under `userland/prebuilt/`. Current entries: `ZSH.ELF`,
+`BB.ELF` (BusyBox), and `TCC.ELF` (TinyCC, plus its companion
+`tcc-sysroot.tar.gz` extracted to `host_share/sysroot/`); future Linux
+ports (bash, vim, …) belong here too.
 The committed binary is what `build.sh` / `test.sh` copy into
 `host_share/` by default — fresh clones boot a working zsh + coreutils
 without the `x86_64-linux-musl-cross` toolchain installed and without
@@ -76,6 +79,10 @@ resolve into multicall or direct binaries staged under `host_share/`:
   `explorer`).
 - **`CALC.ELF` / `NOTEPAD.ELF` — direct standalone ring-3 applications**
   (`calc`, `notepad`).
+- **`TCC.ELF` — TinyCC** (`tcc` and the `cc` alias). Compiles against
+  the staged musl sysroot at `/host/sysroot`; write output to `/work`
+  or `/data` (cwd starts at read-only `/host`). See
+  `userland/apps/tcc/README.md`.
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves

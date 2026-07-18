@@ -37,7 +37,12 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   multi-ring-3 scheduler. **Not wired into the timer ISR yet** —
   consumed by U5 onward.
 - `syscalls.rs` — every kernel-side syscall handler. ~5k lines;
-  fork/wait4/sigreturn are the most fragile pieces.
+  fork/wait4/sigreturn are the most fragile pieces. File/terminal writes
+  accept arbitrary lengths via kernel-side ≤4 KiB chunking; pipe/socket
+  writes short-write at that bound instead (a blocked pipe/socket restarts
+  the whole SYSCALL, so chunking would duplicate consumed bytes).
+  `chmod`/`fchmod` are validated success no-ops (no permission bits on
+  FAT/tmpfs, no +x check in execve).
 - `network_syscalls.rs` — finite Linux `AF_INET` socket ABI, sockaddr/iovec
   usercopy, blocking/restart behavior, and socket option mapping. Protocol
   state and buffers remain in `src/net/`.
@@ -53,7 +58,8 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   `-ENOSYS`; trace mode changes logging detail only.
 - `bin_namespace.rs` — virtual `/bin/<applet>` namespace that dispatches
   to BusyBox, the remaining kernel-side GUI apps through `GLAUNCH.ELF`, or
-  standalone ELFs such as `/host/CALC.ELF` and `/host/NOTEPAD.ELF`.
+  standalone ELFs such as `/host/CALC.ELF`, `/host/NOTEPAD.ELF`, and
+  `/host/TCC.ELF` (TinyCC; both `tcc` and the `cc` alias).
 - `path.rs` — POSIX-ish path normalization.
 - `pipe.rs`, `stdin.rs`, `tty.rs` — fd-backed I/O endpoints.
 - `error.rs` — loader-side error enum.

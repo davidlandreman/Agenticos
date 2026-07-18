@@ -1,7 +1,7 @@
 ---
 title: "feat: port TinyCC as a static-musl ring-3 compiler with a /host sysroot"
 type: feat
-status: planned
+status: completed
 date: 2026-07-18
 depth: large
 related_docs:
@@ -447,3 +447,38 @@ No changes expected in: `build.sh`, `test.sh`, the loader
 - Live documentation reflects the new syscall semantics, `/work`, and the
   compiler; the GCC follow-up inherits a written list of everything TCC
   surfaced.
+
+---
+
+## Implementation notes (2026-07-18, all units landed)
+
+What actually happened, for the GCC follow-up to inherit:
+
+- **The e2e suite passed on the first full run** once U1–U3 were in. The
+  kernel gaps the audit predicted were the real ones; nothing new
+  surfaced. No unexpected ENOSYS during compile, link, or execution of
+  compiled programs.
+- **Zero TCC source patches.** Three upstream mechanisms covered
+  everything: `--tcc-switches=-static` (default-static without touching
+  `libtcc.c`), host-`cc` pre-generation of `c2str.exe`/`tccdefs_.h`, and
+  `make x86_64-libtcc1-usegcc=yes` for `libtcc1.a`. One configure
+  gotcha: `--cross-prefix` composes with `--cc`, so pass bare
+  `--cc=gcc --ar=ar`.
+- **Kernel gaps actually exercised by TCC:** >4 KiB `write()` (musl
+  `fwrite` direct path — hard blocker, U1), `chmod` on the output
+  executable (U3), and a writable cwd-adjacent output directory (U3's
+  `/work`). Seek-past-EOF (U2) was implemented defensively and did not
+  block TCC's own writer, but is POSIX-required and now covered by
+  tests.
+- **Deviation from plan:** examples live in `userland/apps/tcc/examples/`
+  (not staged loose); `stage_tree` became the tcc-specific
+  `stage_tcc_sysroot` in `stage-lib.sh` (one consumer, simpler); the
+  e2e test is a dedicated `tcc` test module using
+  `launch_user_binary` directly rather than a NETTEST-style fixture ELF.
+- **Known-good for GCC:** fork/execve of arbitrary fresh ELFs, multi-MiB
+  static binaries, `.o` write/read round-trips, argv/envp, exit-code
+  propagation. **Watch list for GCC:** multi-process driver pipeline
+  (cc1/as/ld spawning), temp files (point `TMPDIR` at `/work`; there is
+  no `/tmp`), the 32-fd table, brk capped at 32 MiB (musl falls back to
+  mmap), pipe short-writes under `-pipe`, and FAT PIO header-read
+  latency at GCC's much larger header count.
