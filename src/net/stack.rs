@@ -31,9 +31,12 @@ impl NetworkStack {
     pub(super) fn new() -> Option<Self> {
         let mut device = VirtioNet::discover()?;
         let mac = device.mac_address();
+        let mut random = [0u8; 16];
+        crate::random::fill_bytes(&mut random).ok()?;
         let mut iface_config = Config::new(EthernetAddress(mac).into());
-        iface_config.random_seed =
-            u64::from_be_bytes([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0x4e, 0x54]);
+        iface_config.random_seed = u64::from_ne_bytes(random[..8].try_into().ok()?);
+        let port_seed = u16::from_ne_bytes(random[8..10].try_into().ok()?);
+        let first_ephemeral = 49152 + (port_seed & 0x3fff);
         let now = now();
         let interface = Interface::new(iface_config, &mut device, now);
         let mut sockets = SocketSet::new(Vec::new());
@@ -42,7 +45,7 @@ impl NetworkStack {
             device,
             interface,
             sockets,
-            registry: SocketRegistry::new(),
+            registry: SocketRegistry::new(first_ephemeral),
             dhcp,
             config: NetworkConfig::default(),
         })

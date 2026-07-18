@@ -19,11 +19,14 @@ AgenticOS boots into a GUI desktop with ring-3 zsh terminals. It has working mem
 - **3D Game**: `GL Arena` runs as `GLGAME.ELF` inside a normal movable,
   clipped, resizable desktop window
 - **Networking**: Modern VirtIO-net, DHCPv4, DHCP-backed DNS resolution, ICMP, UDP, TCP, Linux socket FDs, and BusyBox `ping`/`nc`/`nslookup`/HTTP `wget`
+- **Cryptographic randomness**: Host-backed modern VirtIO RNG in QEMU with
+  x86-64 RDRAND fallback, feeding `AT_RANDOM`, `getrandom(2)`,
+  `/dev/urandom`, and network seeds
 
 ### Not Yet Implemented
 
 - SMP and a general async runtime
-- IPv6, TLS, and interrupt-driven network I/O
+- IPv6, TLS/HTTPS, and interrupt-driven network I/O
 - Agent runtime
 
 ## Building

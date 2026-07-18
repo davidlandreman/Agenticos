@@ -31,9 +31,9 @@
 
 use crate::arch::x86_64::syscall::SyscallArgs;
 use crate::userland::abi::{
-    validate_user_slice, EACCES, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINTR, EINVAL, EIO, EISDIR,
-    EMFILE, ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EOPNOTSUPP, EPERM, ERANGE,
-    EROFS, ESPIPE, ESRCH, EXDEV, LAST_EXIT_CODE,
+    validate_user_slice, EACCES, EAGAIN, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINTR, EINVAL, EIO,
+    EISDIR, EMFILE, ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTEMPTY, ENOTTY, EOPNOTSUPP, EPERM,
+    ERANGE, EROFS, ESPIPE, ESRCH, EXDEV, LAST_EXIT_CODE,
 };
 use crate::userland::fdtable::{FdSlot, FdTable, FD_TABLE_SIZE};
 use crate::userland::path::{copy_user_cstr, normalize_path};
@@ -209,12 +209,13 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::File { handle, .. }) => Target::File(handle),
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
-        | Some(FdSlot::VirtualDir { .. }) => return EISDIR,
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
         // /proc snapshots are read-only.
-        Some(FdSlot::VirtualFile { .. }) => return EBADF,
+        Some(FdSlot::VirtualFile { .. }) | Some(FdSlot::Urandom { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
 
@@ -309,12 +310,13 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::File { handle, .. }) => Target::File(handle),
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
-        | Some(FdSlot::VirtualDir { .. }) => return EISDIR,
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(FdSlot::PipeWrite(handle, _)) => Target::Pipe(handle),
         Some(FdSlot::PipeRead(_, _)) => return EBADF,
         Some(FdSlot::Socket { handle, .. }) => Target::Socket(handle.id()),
         // /proc snapshots are read-only.
-        Some(FdSlot::VirtualFile { .. }) => return EBADF,
+        Some(FdSlot::VirtualFile { .. }) | Some(FdSlot::Urandom { .. }) => return EBADF,
         Some(FdSlot::Stdin) | None => return EBADF,
     };
     if iovcnt < 0 || iovcnt as usize > WRITEV_MAX_IOV {
@@ -478,7 +480,19 @@ pub fn read_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => EBADF,
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
-        | Some(FdSlot::VirtualDir { .. }) => EISDIR,
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => EISDIR,
+        Some(FdSlot::Urandom { .. }) => {
+            if let Err(e) = validate_user_slice(ptr, cap) {
+                return e;
+            }
+            let mut staging = vec![0u8; cap as usize];
+            if crate::random::fill_bytes(&mut staging).is_err() {
+                return EIO;
+            }
+            crate::userland::usercopy::copy_to_user(ptr, &staging)
+                .map_or_else(|e| e, |_| staging.len() as i64)
+        }
         Some(FdSlot::VirtualFile { data, cursor, .. }) => {
             // Serve from the open-time snapshot; advance the per-fd
             // cursor. Returns 0 at EOF like a regular file.
@@ -1450,6 +1464,10 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         },
         Err(ref e) => return map_file_err(e),
     };
+    let mut at_random = [0u8; 16];
+    if crate::random::fill_bytes(&mut at_random).is_err() {
+        return EIO;
+    }
 
     // 3. Build a fresh AddressSpace for the new image. If this fails,
     //    we haven't touched the old state yet — return cleanly.
@@ -1537,8 +1555,14 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         argv_refs[0] = applet;
     }
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
-    let user_rsp =
-        super::build_initial_stack(stack_top, &phdr_bytes, e_phnum, &argv_refs, &envp_refs);
+    let user_rsp = super::build_initial_stack(
+        stack_top,
+        &phdr_bytes,
+        e_phnum,
+        &argv_refs,
+        &envp_refs,
+        &at_random,
+    );
 
     // From commit onward the targeted AddressSpace walker is the sole page
     // owner; UserImage remains only executable metadata.
@@ -2240,6 +2264,7 @@ const _STAT_SIZE_CHECK: () = assert!(core::mem::size_of::<LinuxStat>() == 144);
 
 const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
+const S_IFCHR: u32 = 0o020000;
 const PERM_READ_ALL: u32 = 0o444;
 const PERM_RX_ALL: u32 = 0o555;
 
@@ -2353,6 +2378,24 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
     };
     let cloexec = (flags & O_CLOEXEC) != 0;
     let want_write = (flags & O_WRITE_BITS) != 0 || (flags & O_ACCMODE) != O_RDONLY;
+
+    // Resolve the two synthetic nodes before mounted filesystems so no disk
+    // entry can shadow the random device. Other existing `/dev/*` paths (most
+    // importantly the boot image's `/dev/null`) retain their VFS behavior.
+    if let Some(node) = crate::userland::devfs::classify(&path) {
+        if want_write {
+            return EACCES;
+        }
+        let slot = match node {
+            crate::userland::devfs::DeviceNode::Directory => {
+                FdSlot::VirtualDevDir { cursor: 0, cloexec }
+            }
+            crate::userland::devfs::DeviceNode::Urandom => FdSlot::Urandom { cloexec },
+        };
+        return with_fd_table_mut(|t| t.alloc(slot))
+            .map(|fd| fd as i64)
+            .unwrap_or(EMFILE);
+    }
     // /bin namespace is always read-only — userland can't mutate the
     // synthesized applet entries.
     if want_write {
@@ -2527,6 +2570,11 @@ fn proc_namespace_mutation_check(path: &str) -> Option<i64> {
     crate::userland::procfs::is_proc_path(path).then_some(EPERM)
 }
 
+/// The synthesized `/dev` namespace is entirely kernel-owned.
+fn dev_namespace_mutation_check(path: &str) -> Option<i64> {
+    crate::userland::devfs::is_dev_path(path).then_some(EPERM)
+}
+
 pub fn mkdir_handler(args: &mut SyscallArgs) -> i64 {
     let path = match resolve_user_path(args.rdi) {
         Ok(p) => p,
@@ -2539,6 +2587,9 @@ pub fn mkdir_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = proc_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
         return e;
     }
     match crate::fs::vfs::vfs_mkdir(&path) {
@@ -2578,6 +2629,9 @@ pub fn rmdir_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(e) = proc_namespace_mutation_check(&path) {
         return e;
     }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
+        return e;
+    }
     if path == "/" {
         return EBUSY;
     }
@@ -2599,6 +2653,9 @@ pub fn unlink_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = proc_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
         return e;
     }
     match crate::fs::vfs::vfs_unlink(&path) {
@@ -2624,6 +2681,9 @@ pub fn unlinkat_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = proc_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
         return e;
     }
     // AT_REMOVEDIR = 0x200
@@ -2662,6 +2722,12 @@ pub fn rename_handler(args: &mut SyscallArgs) -> i64 {
         return e;
     }
     if let Some(e) = proc_namespace_mutation_check(&new) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&old) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&new) {
         return e;
     }
     if let Some(e) = managed_etc_mutation_check(&old) {
@@ -2709,6 +2775,10 @@ pub fn link_handler(args: &mut SyscallArgs) -> i64 {
         .or_else(|| bin_namespace_mutation_check(&new))
         .or_else(|| managed_etc_mutation_check(&old))
         .or_else(|| managed_etc_mutation_check(&new))
+        .or_else(|| proc_namespace_mutation_check(&old))
+        .or_else(|| proc_namespace_mutation_check(&new))
+        .or_else(|| dev_namespace_mutation_check(&old))
+        .or_else(|| dev_namespace_mutation_check(&new))
     {
         return error;
     }
@@ -2744,8 +2814,10 @@ pub fn symlink_handler(args: &mut SyscallArgs) -> i64 {
         Ok(path) => path,
         Err(error) => return error,
     };
-    if let Some(error) =
-        bin_namespace_mutation_check(&link_path).or_else(|| managed_etc_mutation_check(&link_path))
+    if let Some(error) = bin_namespace_mutation_check(&link_path)
+        .or_else(|| managed_etc_mutation_check(&link_path))
+        .or_else(|| proc_namespace_mutation_check(&link_path))
+        .or_else(|| dev_namespace_mutation_check(&link_path))
     {
         return error;
     }
@@ -2784,7 +2856,10 @@ pub fn ftruncate_handler(args: &mut SyscallArgs) -> i64 {
     let new_size = args.rsi;
     let handle = match with_fd_slot(fd) {
         Some(FdSlot::File { handle, .. }) => handle,
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(_) | None => return EBADF,
     };
     if crate::userland::etc::is_managed_path(&handle.path()) {
@@ -2802,6 +2877,12 @@ pub fn truncate_handler(args: &mut SyscallArgs) -> i64 {
     };
     let new_size = args.rsi;
     if let Some(e) = bin_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = proc_namespace_mutation_check(&path) {
+        return e;
+    }
+    if let Some(e) = dev_namespace_mutation_check(&path) {
         return e;
     }
     if crate::userland::etc::is_managed_path(&path) {
@@ -2874,7 +2955,9 @@ pub fn pread64_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::File { handle, .. }) => handle,
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
-        | Some(FdSlot::VirtualDir { .. }) => return EISDIR,
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
+        Some(FdSlot::Urandom { .. }) => return ESPIPE,
         Some(FdSlot::VirtualFile { data, .. }) => {
             // Positional read from the open-time snapshot; per-fd
             // cursor untouched, mirroring pread semantics.
@@ -2928,7 +3011,10 @@ pub fn pwrite64_handler(args: &mut SyscallArgs) -> i64 {
     let offset = args.r10;
     let handle = match with_fd_slot(fd) {
         Some(FdSlot::File { handle, .. }) => handle,
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(_) | None => return EBADF,
     };
     if len == 0 {
@@ -2972,7 +3058,10 @@ pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
 
     let in_handle = match with_fd_slot(in_fd) {
         Some(FdSlot::File { handle, .. }) => handle,
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(_) => return EINVAL,
         None => return EBADF,
     };
@@ -2986,7 +3075,10 @@ pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Out::StdoutErr,
         Some(FdSlot::File { handle, .. }) => Out::File(handle),
         Some(FdSlot::PipeWrite(h, _)) => Out::Pipe(h),
-        Some(FdSlot::Directory { .. }) | Some(FdSlot::VirtualBinDir { .. }) => return EISDIR,
+        Some(FdSlot::Directory { .. })
+        | Some(FdSlot::VirtualBinDir { .. })
+        | Some(FdSlot::VirtualDir { .. })
+        | Some(FdSlot::VirtualDevDir { .. }) => return EISDIR,
         Some(_) | None => return EBADF,
     };
 
@@ -3112,6 +3204,17 @@ pub fn lseek_handler(args: &mut SyscallArgs) -> i64 {
             if whence == SEEK_SET && offset == 0 {
                 with_fd_table_mut(|t| {
                     if let Some(FdSlot::VirtualDir { cursor, .. }) = t.get_mut(fd) {
+                        *cursor = 0;
+                    }
+                });
+                return 0;
+            }
+            return ESPIPE;
+        }
+        Some(FdSlot::VirtualDevDir { .. }) => {
+            if whence == SEEK_SET && offset == 0 {
+                with_fd_table_mut(|t| {
+                    if let Some(FdSlot::VirtualDevDir { cursor, .. }) = t.get_mut(fd) {
                         *cursor = 0;
                     }
                 });
@@ -3273,6 +3376,9 @@ pub fn stat_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(st) = stat_virtual_bin(&path) {
         return write_stat(out_ptr, &st);
     }
+    if let Some(st) = stat_virtual_dev(&path) {
+        return write_stat(out_ptr, &st);
+    }
     if crate::userland::procfs::is_proc_path(&path) {
         return match stat_virtual_proc(&path) {
             Some(st) => write_stat(out_ptr, &st),
@@ -3293,6 +3399,9 @@ pub fn lstat_handler(args: &mut SyscallArgs) -> i64 {
         Err(error) => return error,
     };
     if let Some(stat) = stat_virtual_bin(&path) {
+        return write_stat(args.rsi, &stat);
+    }
+    if let Some(stat) = stat_virtual_dev(&path) {
         return write_stat(args.rsi, &stat);
     }
     if crate::userland::procfs::is_proc_path(&path) {
@@ -3322,6 +3431,25 @@ fn stat_virtual_proc(path: &str) -> Option<LinuxStat> {
         crate::userland::procfs::ProcNodeKind::File => {
             st.st_mode = S_IFREG | PERM_READ_ALL;
             st.st_nlink = 1;
+        }
+    }
+    st.st_blksize = 4096;
+    Some(st)
+}
+
+/// Synthesize metadata for the kernel-owned `/dev` namespace.
+fn stat_virtual_dev(path: &str) -> Option<LinuxStat> {
+    let mut st = LinuxStat::default();
+    match crate::userland::devfs::classify(path)? {
+        crate::userland::devfs::DeviceNode::Directory => {
+            st.st_mode = S_IFDIR | PERM_RX_ALL;
+            st.st_nlink = 2;
+        }
+        crate::userland::devfs::DeviceNode::Urandom => {
+            st.st_mode = S_IFCHR | PERM_READ_ALL;
+            st.st_nlink = 1;
+            // Linux's /dev/urandom is character device major 1, minor 9.
+            st.st_rdev = (1 << 8) | 9;
         }
     }
     st.st_blksize = 4096;
@@ -3447,6 +3575,14 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
             st.st_blksize = 4096;
             write_stat(out_ptr, &st)
         }
+        Some(FdSlot::VirtualDevDir { .. }) => {
+            let st = stat_virtual_dev("/dev").expect("/dev is always virtual");
+            write_stat(out_ptr, &st)
+        }
+        Some(FdSlot::Urandom { .. }) => {
+            let st = stat_virtual_dev("/dev/urandom").expect("urandom is always virtual");
+            write_stat(out_ptr, &st)
+        }
         None => EBADF,
     }
 }
@@ -3472,6 +3608,9 @@ pub fn newfstatat_handler(args: &mut SyscallArgs) -> i64 {
     if let Some(st) = stat_virtual_bin(&path) {
         return write_stat(out_ptr, &st);
     }
+    if let Some(st) = stat_virtual_dev(&path) {
+        return write_stat(out_ptr, &st);
+    }
     if crate::userland::procfs::is_proc_path(&path) {
         return match stat_virtual_proc(&path) {
             Some(st) => write_stat(out_ptr, &st),
@@ -3492,8 +3631,8 @@ pub fn newfstatat_handler(args: &mut SyscallArgs) -> i64 {
 
 pub fn access_handler(args: &mut SyscallArgs) -> i64 {
     let path_ptr = args.rdi;
-    let _mode = args.rsi as u32;
-    access_common(path_ptr)
+    let mode = args.rsi as u32;
+    access_common(path_ptr, mode)
 }
 
 pub fn faccessat_handler(args: &mut SyscallArgs) -> i64 {
@@ -3502,11 +3641,11 @@ pub fn faccessat_handler(args: &mut SyscallArgs) -> i64 {
         return ENOSYS;
     }
     let path_ptr = args.rsi;
-    let _mode = args.rdx as u32;
-    access_common(path_ptr)
+    let mode = args.rdx as u32;
+    access_common(path_ptr, mode)
 }
 
-fn access_common(path_ptr: u64) -> i64 {
+fn access_common(path_ptr: u64, mode: u32) -> i64 {
     let path = match resolve_user_path(path_ptr) {
         Ok(p) => p,
         Err(e) => return e,
@@ -3525,6 +3664,9 @@ fn access_common(path_ptr: u64) -> i64 {
         } else {
             ENOENT
         };
+    }
+    if crate::userland::devfs::classify(&path).is_some() {
+        return if mode & _W_OK != 0 { EACCES } else { 0 };
     }
     if crate::fs::exists(&path) {
         0
@@ -3676,31 +3818,34 @@ pub fn gettimeofday_handler(args: &mut SyscallArgs) -> i64 {
     crate::userland::usercopy::write_unaligned(tv_ptr, &tv).map_or_else(|e| e, |_| 0)
 }
 
-/// `getrandom(buf, len, flags) -> ssize_t`. Tiny xorshift64 seeded from
-/// the timer; not cryptographically secure but gives libc a non-zero
-/// answer. AT_RANDOM in auxv plays the same role for stack-canary
-/// init — both paths converge here for any extra entropy zsh asks for.
+/// `getrandom(buf, len, flags) -> ssize_t` backed by the kernel's trusted
+/// platform random broker. Unknown flags are rejected; GRND_RANDOM uses the
+/// Linux 512-byte single-call bound while the ordinary source uses 4 KiB.
 pub fn getrandom_handler(args: &mut SyscallArgs) -> i64 {
     let buf = args.rdi;
     let len = args.rsi;
-    let _flags = args.rdx;
+    let flags = args.rdx;
+    const GRND_NONBLOCK: u64 = 0x1;
+    const GRND_RANDOM: u64 = 0x2;
 
+    if flags & !(GRND_NONBLOCK | GRND_RANDOM) != 0 {
+        return EINVAL;
+    }
     if len == 0 {
         return 0;
     }
-    let cap = core::cmp::min(len, 4096);
-    let mut bytes = alloc::vec![0u8; cap as usize];
-    // xorshift64* — small, fast, deterministic enough for libc seed needs.
-    let mut state: u64 = crate::time::monotonic_ns() ^ 0x9E37_79B9_7F4A_7C15;
-    if state == 0 {
-        state = 0xDEAD_BEEF_CAFE_BABE;
+    let max = if flags & GRND_RANDOM != 0 { 512 } else { 4096 };
+    let cap = core::cmp::min(len, max);
+    if let Err(error) = validate_user_slice(buf, cap) {
+        return error;
     }
-    for i in 0..cap {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let byte = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8;
-        bytes[i as usize] = byte;
+    let mut bytes = alloc::vec![0u8; cap as usize];
+    if crate::random::fill_bytes(&mut bytes).is_err() {
+        return if flags & GRND_NONBLOCK != 0 {
+            EAGAIN
+        } else {
+            EIO
+        };
     }
     crate::userland::usercopy::copy_to_user(buf, &bytes).map_or_else(|e| e, |_| cap as i64)
 }
@@ -3739,6 +3884,7 @@ fn pack_utsname_field(field: &mut [u8; 65], s: &str) {
 const DIRENT_HEADER_SIZE: usize = 19;
 
 const DT_UNKNOWN: u8 = 0;
+const DT_CHR: u8 = 2;
 const DT_REG: u8 = 8;
 const DT_DIR: u8 = 4;
 
@@ -3901,6 +4047,53 @@ fn getdents64_virtual_dir(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
     )
 }
 
+/// `getdents64` dispatch for the synthetic `/dev` directory.
+fn getdents64_virtual_dev(fd: i32, dirp: u64, cap: usize) -> Option<i64> {
+    let start = with_fd_table_mut(|t| match t.get(fd) {
+        Some(FdSlot::VirtualDevDir { cursor, .. }) => Some(*cursor),
+        _ => None,
+    })?;
+    const RECORDS: [(&[u8], u8); 3] = [(b".", DT_DIR), (b"..", DT_DIR), (b"urandom", DT_CHR)];
+    if start >= RECORDS.len() {
+        return Some(0);
+    }
+
+    let parent_seed = fnv1a_64(0xcbf2_9ce4_8422_2325, b"/dev");
+    let mut staging = alloc::vec::Vec::with_capacity(cap);
+    let mut cursor = start;
+    while cursor < RECORDS.len() {
+        let (name, d_type) = RECORDS[cursor];
+        let reclen = align_up_8(DIRENT_HEADER_SIZE + name.len() + 1);
+        if staging.len() + reclen > cap {
+            break;
+        }
+        let d_ino = fnv1a_64(parent_seed, name);
+        let next_cursor = (cursor + 1) as u64;
+        staging.extend_from_slice(&d_ino.to_ne_bytes());
+        staging.extend_from_slice(&next_cursor.to_ne_bytes());
+        staging.extend_from_slice(&(reclen as u16).to_ne_bytes());
+        staging.push(d_type);
+        staging.extend_from_slice(name);
+        staging.push(0);
+        while staging.len() % 8 != 0 {
+            staging.push(0);
+        }
+        cursor += 1;
+    }
+    if staging.is_empty() {
+        return Some(EINVAL);
+    }
+    with_fd_table_mut(|t| {
+        if let Some(FdSlot::VirtualDevDir { cursor: c, .. }) = t.get_mut(fd) {
+            *c = cursor;
+        }
+    });
+    Some(
+        crate::userland::usercopy::copy_to_user(dirp, &staging)
+            .map_or_else(|e| e, |_| staging.len() as i64),
+    )
+}
+
 pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
     use crate::fs::filesystem::FileType;
     let fd = args.rdi as i32;
@@ -3923,6 +4116,9 @@ pub fn getdents64_handler(args: &mut SyscallArgs) -> i64 {
     // Synthetic /proc directories carry their listing snapshot in the
     // fd slot itself.
     if let Some(written) = getdents64_virtual_dir(fd, dirp, cap as usize) {
+        return written;
+    }
+    if let Some(written) = getdents64_virtual_dev(fd, dirp, cap as usize) {
         return written;
     }
 
@@ -4180,6 +4376,7 @@ fn poll_common(args: &SyscallArgs, fds_ptr: u64, nfds: u64, timeout_ticks: Optio
                         Err(_) => POLLERR,
                     }
                 }
+                Some(FdSlot::Urandom { .. }) => want & POLLIN,
                 Some(_) => want & (POLLIN | POLLOUT), // preserve existing behavior
                 None => POLLNVAL,
             }
@@ -4305,6 +4502,8 @@ fn resolve_proc_self_fd(fd: i32) -> Option<String> {
         FdSlot::Directory { handle, .. } => handle.path(),
         FdSlot::PipeRead(_, _) | FdSlot::PipeWrite(_, _) => String::from("pipe:[0]"),
         FdSlot::VirtualBinDir { .. } => String::from("/bin"),
+        FdSlot::VirtualDevDir { .. } => String::from("/dev"),
+        FdSlot::Urandom { .. } => String::from("/dev/urandom"),
         FdSlot::Socket { handle, .. } => alloc::format!("socket:[{}]", handle.id()),
         FdSlot::VirtualFile { path, .. } | FdSlot::VirtualDir { path, .. } => String::clone(&path),
     })

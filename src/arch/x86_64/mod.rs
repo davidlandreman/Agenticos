@@ -6,5 +6,6 @@ pub mod interrupts;
 pub mod msr;
 pub mod preemption;
 pub mod preemption_guard;
+pub mod random;
 pub mod rtc;
 pub mod syscall;

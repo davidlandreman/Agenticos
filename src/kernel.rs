@@ -76,6 +76,9 @@ pub fn init(boot_info: &'static mut BootInfo) {
     crate::process::timer::init();
     crate::process::timer::start_service();
 
+    debug_info!("[boot] entropy");
+    crate::random::init();
+
     // Linux ABI syscall surface (write/exit_group, plus the broader set in
     // U9) is dispatched directly from `userland::abi::syscall_dispatch` —
     // no per-syscall registration needed.

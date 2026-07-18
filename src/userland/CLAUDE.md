@@ -51,6 +51,8 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   state and buffers remain in `src/net/`.
 - `signal.rs` — POSIX signal dispositions, blocked/pending masks.
 - `fdtable.rs` — per-process file-descriptor table.
+- `devfs.rs` — exact synthetic `/dev` and `/dev/urandom` classification;
+  device reads use the kernel cryptographic random broker.
 - `gui.rs` — per-PID window ownership plus the bounded, coalescing GUI event
   queue and process-death teardown.
 - `gui_syscalls.rs` — syscalls 5001-5005: create, copy-present, next-event,

@@ -167,11 +167,11 @@ pub(super) fn snapshot_registry(
 }
 
 impl SocketRegistry {
-    pub(super) const fn new() -> Self {
+    pub(super) const fn new(first_ephemeral: u16) -> Self {
         Self {
             entries: BTreeMap::new(),
             next_id: 1,
-            next_ephemeral: 49152,
+            next_ephemeral: first_ephemeral,
         }
     }
 

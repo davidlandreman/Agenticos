@@ -6,6 +6,7 @@
 pub mod abi;
 pub mod address_space;
 pub mod bin_namespace;
+pub mod devfs;
 pub mod error;
 pub mod etc;
 pub mod fdtable;
@@ -47,15 +48,6 @@ const AT_RANDOM: u64 = 25;
 
 const ELF64_PHDR_SIZE: u64 = 56;
 
-/// 16 fixed bytes the initial-stack builder copies onto the user stack
-/// for `AT_RANDOM`. musl reads bytes 8..16 as the stack-canary seed and
-/// hashes the full 16 for other internal uses. A fixed value is acceptable
-/// per the milestone scope ("quality AT_RANDOM entropy is out of scope");
-/// real entropy is a follow-up swap.
-const AT_RANDOM_BYTES: [u8; 16] = [
-    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
-];
-
 /// Default argv[0] when the caller doesn't supply one. Tests and the
 /// zero-arg `enter_user_mode(image)` wrapper use this. Real launches via
 /// the `run` shell command pass the file path as argv[0].
@@ -70,6 +62,8 @@ pub enum EnterError {
     AlreadyActive,
     /// The loader-produced mappings could not be represented as VMAs.
     InvalidVmLayout,
+    /// No trusted source was available for the process AT_RANDOM payload.
+    EntropyUnavailable,
 }
 
 /// Enter ring 3 with `image` as the live user binary.
@@ -152,6 +146,8 @@ pub fn setup_user_process(
     envp: &[&str],
     address_space: Option<crate::userland::address_space::AddressSpace>,
 ) -> Result<u32, EnterError> {
+    let mut at_random = [0u8; 16];
+    crate::random::fill_bytes(&mut at_random).map_err(|_| EnterError::EntropyUnavailable)?;
     let launcher_terminal_id = {
         let sched = crate::process::scheduler::SCHEDULER.lock();
         sched
@@ -159,7 +155,14 @@ pub fn setup_user_process(
             .and_then(|pid| sched.get_process(pid))
             .and_then(|pcb| pcb.terminal_id)
     };
-    let pid = setup_user_process_unstarted(image, argv, envp, address_space, launcher_terminal_id)?;
+    let pid = setup_user_process_unstarted(
+        image,
+        argv,
+        envp,
+        address_space,
+        launcher_terminal_id,
+        &at_random,
+    )?;
     crate::userland::lifecycle::mark_ring3_ready(pid);
     Ok(pid)
 }
@@ -176,6 +179,7 @@ pub(crate) fn setup_user_process_unstarted(
     envp: &[&str],
     mut address_space: Option<crate::userland::address_space::AddressSpace>,
     terminal_id: Option<crate::window::WindowId>,
+    at_random: &[u8; 16],
 ) -> Result<u32, EnterError> {
     // This is the single authoritative VMA initialization point for every
     // entry path. Building it exactly once avoids cloning and then dropping
@@ -206,7 +210,8 @@ pub(crate) fn setup_user_process_unstarted(
     // of the user stack pages. CR3 is already pointing at the new
     // process's L4 (the caller activated it before calling us), so
     // these writes land in the right address space.
-    let user_rsp = build_initial_stack(stack_top, &phdr_bytes, e_phnum, argv_slice, envp);
+    let user_rsp =
+        build_initial_stack(stack_top, &phdr_bytes, e_phnum, argv_slice, envp, at_random);
 
     // Install the new Process. U8: don't make it current — just insert
     // and mark ready. The scheduler picks it up.
@@ -316,6 +321,7 @@ pub(crate) fn build_initial_stack(
     e_phnum: u16,
     argv: &[&str],
     envp: &[&str],
+    at_random: &[u8; 16],
 ) -> u64 {
     let argc = argv.len() as u64;
     let envc = envp.len() as u64;
@@ -437,7 +443,7 @@ pub(crate) fn build_initial_stack(
 
         // Copy AT_RANDOM payload.
         let dst = random_at as *mut u8;
-        core::ptr::copy_nonoverlapping(AT_RANDOM_BYTES.as_ptr(), dst, AT_RANDOM_BYTES.len());
+        core::ptr::copy_nonoverlapping(at_random.as_ptr(), dst, at_random.len());
     }
 
     argc_at
