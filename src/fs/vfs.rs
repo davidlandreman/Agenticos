@@ -12,6 +12,10 @@ static mut MOUNTED_FAT_WRAPPERS: [Option<
     crate::fs::fat::fat_filesystem::FatFilesystemWrapper<'static>,
 >; MAX_FAT_MOUNTS] = [None, None, None, None];
 
+const MAX_EXT2_MOUNTS: usize = 2;
+static mut MOUNTED_EXT2: [Option<crate::fs::ext2::Ext2Filesystem<'static>>; MAX_EXT2_MOUNTS] =
+    [None, None];
+
 /// Static slot for the boot-root tmpfs upper layer. There's only one
 /// overlay at `/` for now; a second slot is cheap if other writable
 /// mounts (e.g. `/tmp` as a separate tmpfs) ever land.
@@ -104,12 +108,20 @@ impl VirtualFilesystem {
     /// Unmount a filesystem
 
     /// Find the filesystem for a given path
-    pub fn find_filesystem<'a>(&'a self, path: &'a str) -> Option<(&'a dyn Filesystem, &'a str)> {
+    pub fn find_filesystem<'a>(&self, path: &'a str) -> Option<(&'static dyn Filesystem, &'a str)> {
         let mut best_match: Option<(&MountPoint, usize)> = None;
 
         // Find the longest matching mount point
         for mount in self.mounts.iter().flatten() {
-            if path.starts_with(mount.path) {
+            let matches = if mount.path == "/" {
+                path.starts_with('/')
+            } else {
+                path == mount.path
+                    || path
+                        .strip_prefix(mount.path)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            };
+            if matches {
                 let mount_len = mount.path.len();
                 if best_match.is_none() || mount_len > best_match.unwrap().1 {
                     best_match = Some((mount, mount_len));
@@ -118,10 +130,12 @@ impl VirtualFilesystem {
         }
 
         best_match.map(|(mount, len)| {
-            let relative_path = if path.len() > len && path.as_bytes()[len] == b'/' {
+            let relative_path = if mount.path == "/" {
+                path
+            } else if path.len() > len && path.as_bytes()[len] == b'/' {
                 &path[len + 1..]
             } else if path.len() == len {
-                ""
+                "/"
             } else {
                 &path[len..]
             };
@@ -213,9 +227,10 @@ pub fn auto_mount(
                 }
             }
         }
-        FilesystemType::Ext2 | FilesystemType::Ext3 | FilesystemType::Ext4 => {
-            debug_info!("Ext filesystem support not yet implemented");
-            Err(FilesystemError::UnsupportedOperation)
+        FilesystemType::Ext2 => mount_ext2(device, mount_path, false, false).map(|_| fs_type),
+        FilesystemType::Ext3 | FilesystemType::Ext4 => {
+            debug_info!("Ext3/ext4 features are not supported by the ext2 driver");
+            Err(FilesystemError::UnsupportedFeature)
         }
         FilesystemType::Ntfs => {
             debug_info!("NTFS filesystem support not yet implemented");
@@ -238,11 +253,15 @@ pub fn auto_mount_writable(
     force_dirty_mount: bool,
 ) -> Result<FilesystemType, FilesystemError> {
     let fs_type = detect_filesystem(device)?;
+    if fs_type == FilesystemType::Ext2 {
+        mount_ext2(device, mount_path, true, force_dirty_mount)?;
+        return Ok(fs_type);
+    }
     if !matches!(
         fs_type,
         FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32
     ) {
-        return Err(FilesystemError::UnsupportedOperation);
+        return Err(FilesystemError::UnsupportedFeature);
     }
     unsafe {
         let wrappers_ptr = &raw mut MOUNTED_FAT_WRAPPERS;
@@ -274,6 +293,36 @@ pub fn auto_mount_writable(
             (*wrappers_ptr)[slot] = None;
             Err(FilesystemError::InvalidFilesystem)
         }
+    }
+}
+
+fn mount_ext2(
+    device: &'static dyn BlockDevice,
+    mount_path: &'static str,
+    writable: bool,
+    force_dirty: bool,
+) -> Result<(), FilesystemError> {
+    unsafe {
+        let slots = &raw mut MOUNTED_EXT2;
+        let slot = (0..MAX_EXT2_MOUNTS)
+            .find(|&index| (*slots)[index].is_none())
+            .ok_or(FilesystemError::DiskFull)?;
+        let filesystem = crate::fs::ext2::Ext2Filesystem::new(device, writable, force_dirty)?;
+        (*slots)[slot] = Some(filesystem);
+        let filesystem_ref = (*&raw const MOUNTED_EXT2)[slot]
+            .as_ref()
+            .ok_or(FilesystemError::InvalidFilesystem)?;
+        if let Err(error) = get_vfs().mount(mount_path, filesystem_ref, device) {
+            (*slots)[slot] = None;
+            return Err(error);
+        }
+        debug_info!(
+            "Mounted ext2 at {} (slot {}, writable={})",
+            mount_path,
+            slot,
+            writable
+        );
+        Ok(())
     }
 }
 
@@ -334,6 +383,10 @@ pub fn mount_overlay_root(device: &'static dyn BlockDevice) -> Result<(), Filesy
 
 /// Convenience functions that operate on the global VFS
 
+#[expect(
+    dead_code,
+    reason = "legacy convenience API; File pins its mount directly"
+)]
 pub fn vfs_open(
     path: &str,
     mode: crate::fs::filesystem::FileMode,
@@ -364,6 +417,59 @@ pub fn vfs_stat(path: &str) -> Result<crate::fs::filesystem::DirectoryEntry, Fil
     } else {
         Err(FilesystemError::NotFound)
     }
+}
+
+pub fn vfs_unix_metadata(
+    path: &str,
+) -> Result<crate::fs::filesystem::UnixMetadata, FilesystemError> {
+    let (filesystem, relative) = get_vfs()
+        .find_filesystem(path)
+        .ok_or(FilesystemError::NotFound)?;
+    filesystem.unix_metadata(relative)
+}
+
+pub fn vfs_symlink_metadata(
+    path: &str,
+) -> Result<crate::fs::filesystem::UnixMetadata, FilesystemError> {
+    let (filesystem, relative) = get_vfs()
+        .find_filesystem(path)
+        .ok_or(FilesystemError::NotFound)?;
+    filesystem.symlink_metadata(relative)
+}
+
+pub fn vfs_read_link(path: &str) -> Result<alloc::vec::Vec<u8>, FilesystemError> {
+    let (filesystem, relative) = get_vfs()
+        .find_filesystem(path)
+        .ok_or(FilesystemError::NotFound)?;
+    filesystem.read_link(relative)
+}
+
+pub fn vfs_symlink(target: &str, link_path: &str) -> Result<(), FilesystemError> {
+    let (filesystem, relative) = get_vfs()
+        .find_filesystem(link_path)
+        .ok_or(FilesystemError::NotFound)?;
+    if filesystem.is_read_only() {
+        return Err(FilesystemError::ReadOnly);
+    }
+    filesystem.symlink(target, relative)
+}
+
+pub fn vfs_link(old_path: &str, new_path: &str) -> Result<(), FilesystemError> {
+    let (old_fs, old_relative) = get_vfs()
+        .find_filesystem(old_path)
+        .ok_or(FilesystemError::NotFound)?;
+    let (new_fs, new_relative) = get_vfs()
+        .find_filesystem(new_path)
+        .ok_or(FilesystemError::NotFound)?;
+    if (old_fs as *const dyn Filesystem as *const ())
+        != (new_fs as *const dyn Filesystem as *const ())
+    {
+        return Err(FilesystemError::UnsupportedOperation);
+    }
+    if old_fs.is_read_only() {
+        return Err(FilesystemError::ReadOnly);
+    }
+    old_fs.link(old_relative, new_relative)
 }
 
 pub fn vfs_mkdir(path: &str) -> Result<(), FilesystemError> {
