@@ -155,11 +155,13 @@ pub fn broadcast_theme_changed(
             match effective {
                 crate::window::theme::ThemeKind::Classic => 1,
                 crate::window::theme::ThemeKind::Aero => 2,
+                crate::window::theme::ThemeKind::Futurism => 3,
             },
             match requested {
                 crate::window::theme::ThemeRequest::Auto => 0,
                 crate::window::theme::ThemeRequest::Classic => 1,
                 crate::window::theme::ThemeRequest::Aero => 2,
+                crate::window::theme::ThemeRequest::Futurism => 3,
             },
             0,
             0,

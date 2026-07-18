@@ -16,29 +16,46 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   scene, and uses either the CPU reference engine or the qualified VirGL engine.
   CPU output presents through the boot framebuffer or VirtIO-GPU 2D; VirGL
   presents its host texture directly and uses the VirtIO hardware cursor.
-- `theme/` — boot-selected frame + control theme. `classic` renders Windows 98
-  "Windows Standard" chrome — a raised 3D bevel border, a horizontal caption
-  gradient (navy→blue active, grey inactive), an 8pt-ish bold caption font, and
-  a raised ButtonFace close button with a bitmap ✕; the bevel does not follow
-  focus, only the caption does. `aero` supplies translucent rounded glass,
-  shadows, and backdrop blur metadata for retained composition. Caption-button
-  geometry for both is data-driven via `FrameMetrics.button_*`, shared by
-  painting and `manager.rs` hit-testing through `theme::close_button_rect`.
-  `controls.rs` is the single source of truth for *control* surfaces: a
-  theme-dispatched `ControlPalette` (`controls::palette()`) plus drawing
-  helpers (`draw_button` with Normal/Hot/Pressed/Disabled states,
-  `draw_field`, `draw_raised_panel`, `draw_selection`, `draw_menu_surface`).
-  Every widget in `windows/` delegates its surface rendering there — Classic
-  gets Win98 bevels and navy selection, Aero gets rounded gradient buttons
-  (blue border + glow on the default button) and `#CBE8F6` selection. The
-  former `PALETTE_*` constants in `mod.rs` were replaced by this palette. The
-  resolved theme is also published to ring-3 as `/etc/theme` (see
-  `src/userland/etc.rs::publish_theme`), which `userland/libs/gui`'s `theme`
-  module mirrors. Runtime changes from `CONTROL.ELF` retheme every frame,
-  preserve client sizes, update compositor effects, repaint kernel controls,
-  republish `/etc/theme`, and broadcast a coalesced process-global GUI event.
-  Normative color tables live in
-  `docs/plans/2026-07-18-003-feat-theme-aware-controls-plan.md`.
+- `theme/` — the theme system. Each theme is a `ThemeSpec` (token, frame
+  metrics, frame/chrome compositor effects, painter fn) resolved through
+  `spec_for(kind)`; adding a theme means adding a spec + palette/style and a
+  painter only if it introduces a new finish. Three built-ins: `classic`
+  renders Windows 98 "Windows Standard" chrome — raised 3D bevel border,
+  horizontal caption gradient, raised ButtonFace close button; `aero`
+  supplies translucent rounded glass, shadows, and radius-6 backdrop blur;
+  `futurism` (the Auto default on retained CPU/VirGL) draws a frosted dark
+  translucent title bar over radius-6 backdrop blur (the qualified VirGL
+  pipeline's maximum) meeting the content well directly, content flush to
+  the window edge inside a 1px dark hairline
+  rim (no light borders), 12px-rounded top corners, a soft 22px drop shadow,
+  and a rounded soft-red close button. Its rounded *bottom* corners are
+  carved by `Window::paint_overlay` — a post-children pass the manager runs
+  so the frame can replace the client's corner pixels with the shadowed arc
+  (surface ARGB writes are exact replacement); `ThemeSpec.draw_frame_overlay`
+  opts a theme in. `frame_util.rs` holds the shared shadow/corner geometry
+  both translucent painters use. Caption-button geometry is data-driven via
+  `FrameMetrics.button_*`, shared by painting and `manager.rs` hit-testing
+  through `theme::close_button_rect`. `controls.rs` is the single source of
+  truth for *control* surfaces: a theme-dispatched `ControlPalette`
+  (`controls::palette()`) plus a `ControlStyle` whose `ControlFinish`
+  (`Bevel98` / `GlassKd4` / `SoftRounded`) drives the drawing helpers
+  (`draw_button`, `draw_field`, `draw_raised_panel`, `draw_selection`,
+  `draw_menu_surface`, and the chrome helpers `draw_taskbar_surface` /
+  `draw_tray_well` / `draw_task_button` / `taskbar_text`). Every widget in
+  `windows/` delegates its surface rendering there — Classic gets Win98
+  bevels and navy selection, Aero rounded gradient buttons and `#CBE8F6`
+  selection, Futurism flat white rounded buttons, `#3C8CF0` accent, rounded
+  `#DCE9FC` selection pills, and frosted translucent taskbar/start-menu
+  surfaces (`theme::chrome_effect()`). The resolved theme is published to
+  ring-3 as `/etc/theme` (see `src/userland/etc.rs::publish_theme`), which
+  `userland/libs/gui`'s `theme` module mirrors (unknown tokens degrade to
+  Classic). Runtime changes from `CONTROL.ELF` retheme every frame, preserve
+  client sizes, update compositor effects, repaint kernel controls,
+  republish `/etc/theme`, and broadcast a coalesced process-global GUI event
+  (payload codes 1=Classic, 2=Aero, 3=Futurism). Normative Classic/Aero
+  color tables live in
+  `docs/plans/2026-07-18-003-feat-theme-aware-controls-plan.md`; Futurism's
+  in `docs/plans/2026-07-18-007-feat-futurism-theme-plan.md`.
 - `screen.rs` — virtual screen abstraction (today there is one physical display).
 - `console.rs` — kernel `print!` macro output buffer.
 - `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.
@@ -64,7 +81,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
 | `StartMenuWindow` | GUIShell Start popup | Theme-aware popup panels, selection-colored rotated `AgenticOS` banner, typed disabled/separator/action rows, SVG-backed root/program icons, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
-| `TaskbarTrayWindow` | Right-side notification tray | Theme-aware recessed panel with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
+| `TaskbarTrayWindow` | Right-side notification tray | Theme-aware tray well (recessed bevel Classic, flat border Aero, translucent rounded well Futurism) with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
 | `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer or one attached VirGL client texture; close requests are delivered to the client. |
 
 All windows derive from `WindowBase` for consistent parent-child tracking.
@@ -125,11 +142,13 @@ retained CPU if qualification or runtime composition fails. Strict GPU mode
 fails initialization or panics on a runtime GPU failure instead.
 On macOS, an explicit host-side `gpu` request must first pass the pinned custom
 QEMU verifier; see `docs/macos-virgl-qualification.md`.
-`AGENTICOS_THEME=classic|aero|auto` is passed as `opt/agenticos/theme`. Explicit
-Aero is available on retained CPU and qualified VirGL; VirGL performs the
-radius-6 frame backdrop blur on the host GPU. `auto` selects Aero for retained
-CPU and qualified VirGL. Legacy selects Classic, and a non-strict runtime
-fallback to legacy activates Classic before repainting.
+`AGENTICOS_THEME=classic|aero|futurism|auto` is passed as
+`opt/agenticos/theme`. Explicit Aero or Futurism is available on retained CPU
+and qualified VirGL; VirGL performs the radius-6 frame/chrome backdrop blur
+on the host GPU (larger radii are rejected by the qualified blur pipeline —
+see `gpu_backdrop_radius_supported`). `auto` selects Futurism for
+retained CPU and qualified VirGL. Legacy selects Classic, and a non-strict
+runtime fallback to legacy activates Classic before repainting.
 
 ## Implementation status
 

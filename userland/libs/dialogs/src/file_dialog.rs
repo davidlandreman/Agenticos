@@ -309,7 +309,7 @@ impl FileDialog {
     }
 
     fn colors(&self) -> FileUiColors {
-        if theme::current() == theme::Theme::Aero {
+        if theme::current().is_modern() {
             MODERN
         } else {
             let palette = theme::palette();
@@ -694,7 +694,7 @@ impl FileDialog {
                     ROW_H as u32,
                     colors.accent,
                 );
-            } else if slot % 2 == 1 && theme::current() == theme::Theme::Aero {
+            } else if slot % 2 == 1 && theme::current().is_modern() {
                 canvas.fill_rect(left + 1, y, (content_w - 2) as u32, ROW_H as u32, 0xFAFBFD);
             }
             draw_file_icon(canvas, left + 10, y + 6, entry.kind, 16, colors);

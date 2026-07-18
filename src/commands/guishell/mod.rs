@@ -179,6 +179,7 @@ pub fn init_guishell() {
             BUTTON_HEIGHT,
         );
         let mut start_button = Button::new_with_id(start_button_id, start_bounds, "Start");
+        start_button.set_taskbar_style(true);
         start_button.set_parent(Some(taskbar_id));
 
         // Set up click callback for Start button
@@ -570,6 +571,7 @@ fn add_window_button(frame_id: WindowId, title: &str) {
         };
 
         let mut button = Button::new_with_id(button_id, bounds, display_title);
+        button.set_taskbar_style(false);
         button.set_parent(Some(taskbar_id));
 
         // Set up click callback to focus the window

@@ -61,9 +61,11 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   ownership, bounded packet parsing, mailbox publication, and teardown.
 - `etc.rs` — kernel-managed `/etc` namespace: static account/hosts files,
   the shipped zsh configuration, DHCP-published `resolv.conf` paths, and
-  `publish_theme`, which writes the boot-resolved Classic/Aero theme to
-  `/etc/theme` for ring-3 GUI apps. `userland/libs/gui` caches it and updates
-  the cache from `GUI_EVENT_THEME_CHANGED` on live Control Center changes.
+  `publish_theme`, which writes the resolved theme token (`classic`, `aero`,
+  or `futurism`) to `/etc/theme` for ring-3 GUI apps. `userland/libs/gui`
+  caches it (unknown tokens degrade to Classic) and updates the cache from
+  `GUI_EVENT_THEME_CHANGED` (payload codes 1/2/3) on live Control Center
+  changes.
   `GUI_EVENT_SETTINGS_CHANGED` lets multiple Control Center instances refresh
   after non-theme changes such as a new desktop wallpaper.
 - `abi.rs` — Linux x86-64 syscall ABI: dispatch table, compatibility

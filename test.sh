@@ -58,7 +58,7 @@ Environment:
   AGENTICOS_QEMU_BIN     Exact qemu-system-x86_64 binary to launch.
   AGENTICOS_COMPOSITOR   Boot policy: legacy (default), retained, gpu, or auto.
   AGENTICOS_GPU_STRICT   Set to 1 to make unavailable GPU mode fail loudly.
-  AGENTICOS_THEME        Frame theme: classic, aero, or auto (default auto).
+  AGENTICOS_THEME        Frame theme: classic, aero, futurism, or auto (default auto).
   AGENTICOS_RENDER_STATS Set to 1 to log retained-render stage counters.
 EOF
 }
@@ -216,7 +216,7 @@ THEME_REQUEST="${AGENTICOS_THEME:-auto}"
 RENDER_STATS="${AGENTICOS_RENDER_STATS:-0}"
 case "$COMPOSITOR_REQUEST" in legacy|retained|gpu|auto) ;; *) echo "Invalid AGENTICOS_COMPOSITOR: $COMPOSITOR_REQUEST" >&2; exit 2 ;; esac
 case "$GPU_STRICT" in 0|1) ;; *) echo "AGENTICOS_GPU_STRICT must be 0 or 1" >&2; exit 2 ;; esac
-case "$THEME_REQUEST" in classic|aero|auto) ;; *) echo "Invalid AGENTICOS_THEME: $THEME_REQUEST" >&2; exit 2 ;; esac
+case "$THEME_REQUEST" in classic|aero|futurism|auto) ;; *) echo "Invalid AGENTICOS_THEME: $THEME_REQUEST" >&2; exit 2 ;; esac
 case "$RENDER_STATS" in 0|1) ;; *) echo "AGENTICOS_RENDER_STATS must be 0 or 1" >&2; exit 2 ;; esac
 QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/compositor,string=$COMPOSITOR_REQUEST")
 QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/gpu_strict,string=$GPU_STRICT")

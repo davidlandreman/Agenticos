@@ -1,8 +1,16 @@
 //! Boot-selected window-frame themes.
+//!
+//! Each theme is described by a [`ThemeSpec`] in the [`THEMES`] registry:
+//! token, frame metrics, compositor effects, and the frame painter. Control
+//! palettes and styles live next door in [`controls`]. Adding a theme means
+//! adding a spec + palette/style and listing it here — the dispatch sites
+//! read the spec instead of matching on theme identity.
 
 mod aero;
 mod classic;
 pub mod controls;
+mod frame_util;
+mod futurism;
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -19,13 +27,20 @@ const THEME_PATH: &str = "opt/agenticos/theme";
 pub enum ThemeKind {
     Classic = 0,
     Aero = 1,
+    Futurism = 2,
 }
 
 impl ThemeKind {
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Classic => "classic",
-            Self::Aero => "aero",
+        spec_for(self).token
+    }
+
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Classic),
+            1 => Some(Self::Aero),
+            2 => Some(Self::Futurism),
+            _ => None,
         }
     }
 }
@@ -34,6 +49,7 @@ impl ThemeKind {
 pub enum ThemeRequest {
     Classic,
     Aero,
+    Futurism,
     Auto,
 }
 
@@ -42,6 +58,7 @@ impl ThemeRequest {
         match value.trim() {
             "classic" => Some(Self::Classic),
             "aero" => Some(Self::Aero),
+            "futurism" => Some(Self::Futurism),
             "auto" => Some(Self::Auto),
             _ => None,
         }
@@ -51,7 +68,18 @@ impl ThemeRequest {
         match self {
             Self::Classic => "classic",
             Self::Aero => "aero",
+            Self::Futurism => "futurism",
             Self::Auto => "auto",
+        }
+    }
+
+    /// The theme this request names, or `None` for `Auto`.
+    pub const fn explicit_kind(self) -> Option<ThemeKind> {
+        match self {
+            Self::Classic => Some(ThemeKind::Classic),
+            Self::Aero => Some(ThemeKind::Aero),
+            Self::Futurism => Some(ThemeKind::Futurism),
+            Self::Auto => None,
         }
     }
 }
@@ -100,7 +128,97 @@ pub const AERO_METRICS: FrameMetrics = FrameMetrics {
     button_right_margin: 4,
 };
 
+pub const FUTURISM_METRICS: FrameMetrics = FrameMetrics {
+    title_bar_height: 34,
+    // One hairline pixel: content runs flush to the window edge; the frame
+    // overlay pass re-carves the rounded bottom corners after content paints.
+    border_width: 1,
+    corner_radius_top: 12,
+    corner_radius_bottom: 8,
+    shadow_margin: 22,
+    button_width: 30,
+    button_height: 22,
+    button_right_margin: 10,
+};
+
 pub const AERO_BACKDROP_RADIUS: u16 = 6;
+/// Capped at the qualified VirGL blur pipeline's maximum: the three-box
+/// split (`backdrop_box_radii`) must keep every pass radius ≤ 2, and the
+/// engine rejects larger radii (`UnsupportedEffect`) rather than rendering
+/// sharp glass — which panics strict-GPU boots.
+pub const FUTURISM_BACKDROP_RADIUS: u16 = 6;
+
+/// Everything the window system needs to know about one theme. (Display
+/// names live ring-3-side in Control Center's theme table.)
+pub struct ThemeSpec {
+    /// Token used by fw_cfg, `settings.conf`, and `/etc/theme`.
+    pub token: &'static str,
+    /// Translucency/blur/shadow themes need the retained compositor.
+    pub requires_modern_renderer: bool,
+    /// Shown when the theme is requested on a renderer that cannot host it.
+    pub fallback_reason: &'static str,
+    pub metrics: FrameMetrics,
+    /// Compositor effect for frame-window layers.
+    pub frame_effect: LayerEffect,
+    /// Compositor effect for desktop chrome (taskbar, start menu).
+    pub chrome_effect: LayerEffect,
+    draw_frame: fn(&FrameChrome<'_>, &mut dyn GraphicsDevice),
+    /// Post-children pass over the frame layer, for themes whose content
+    /// runs flush to the window edge and needs its corners re-carved after
+    /// the client paints.
+    draw_frame_overlay: Option<fn(&FrameChrome<'_>, &mut dyn GraphicsDevice)>,
+}
+
+const CLASSIC_SPEC: ThemeSpec = ThemeSpec {
+    token: "classic",
+    requires_modern_renderer: false,
+    fallback_reason: "",
+    metrics: CLASSIC_METRICS,
+    frame_effect: LayerEffect::None,
+    chrome_effect: LayerEffect::None,
+    draw_frame: classic::draw,
+    draw_frame_overlay: None,
+};
+
+const AERO_SPEC: ThemeSpec = ThemeSpec {
+    token: "aero",
+    requires_modern_renderer: true,
+    fallback_reason: "Aero requires a retained compositor",
+    metrics: AERO_METRICS,
+    frame_effect: LayerEffect::BackdropSample {
+        radius: AERO_BACKDROP_RADIUS,
+    },
+    chrome_effect: LayerEffect::None,
+    draw_frame: aero::draw,
+    draw_frame_overlay: None,
+};
+
+const FUTURISM_SPEC: ThemeSpec = ThemeSpec {
+    token: "futurism",
+    requires_modern_renderer: true,
+    fallback_reason: "Futurism requires a retained compositor",
+    metrics: FUTURISM_METRICS,
+    frame_effect: LayerEffect::BackdropSample {
+        radius: FUTURISM_BACKDROP_RADIUS,
+    },
+    chrome_effect: LayerEffect::BackdropSample {
+        radius: FUTURISM_BACKDROP_RADIUS,
+    },
+    draw_frame: futurism::draw,
+    draw_frame_overlay: Some(futurism::draw_overlay),
+};
+
+pub const fn spec_for(kind: ThemeKind) -> &'static ThemeSpec {
+    match kind {
+        ThemeKind::Classic => &CLASSIC_SPEC,
+        ThemeKind::Aero => &AERO_SPEC,
+        ThemeKind::Futurism => &FUTURISM_SPEC,
+    }
+}
+
+pub fn active_spec() -> &'static ThemeSpec {
+    spec_for(active())
+}
 
 pub struct FrameChrome<'a> {
     pub bounds: Rect,
@@ -112,31 +230,33 @@ pub struct FrameChrome<'a> {
 static ACTIVE: AtomicU8 = AtomicU8::new(ThemeKind::Classic as u8);
 
 pub fn select_theme(requested: ThemeRequest, renderer: RendererKind) -> ThemeSelection {
-    match requested {
-        ThemeRequest::Classic => ThemeSelection {
+    let modern = matches!(renderer, RendererKind::RetainedCpu | RendererKind::Virgl);
+    match requested.explicit_kind() {
+        None => ThemeSelection {
             requested,
-            selected: ThemeKind::Classic,
-            fallback_reason: None,
-        },
-        ThemeRequest::Aero if renderer == RendererKind::Legacy => ThemeSelection {
-            requested,
-            selected: ThemeKind::Classic,
-            fallback_reason: Some("Aero requires a retained compositor"),
-        },
-        ThemeRequest::Aero => ThemeSelection {
-            requested,
-            selected: ThemeKind::Aero,
-            fallback_reason: None,
-        },
-        ThemeRequest::Auto => ThemeSelection {
-            requested,
-            selected: if matches!(renderer, RendererKind::RetainedCpu | RendererKind::Virgl) {
-                ThemeKind::Aero
+            selected: if modern {
+                ThemeKind::Futurism
             } else {
                 ThemeKind::Classic
             },
             fallback_reason: None,
         },
+        Some(kind) => {
+            let spec = spec_for(kind);
+            if spec.requires_modern_renderer && !modern {
+                ThemeSelection {
+                    requested,
+                    selected: ThemeKind::Classic,
+                    fallback_reason: Some(spec.fallback_reason),
+                }
+            } else {
+                ThemeSelection {
+                    requested,
+                    selected: kind,
+                    fallback_reason: None,
+                }
+            }
+        }
     }
 }
 
@@ -154,7 +274,7 @@ pub fn init_boot_policy(renderer: RendererKind) -> ThemeSelection {
         }
     }
 
-    let explicit = matches!(request, ThemeRequest::Classic | ThemeRequest::Aero);
+    let explicit = request != ThemeRequest::Auto;
     crate::system_control::record_boot_theme_override(explicit);
     if request == ThemeRequest::Auto {
         request = crate::system_control::theme_preference().request();
@@ -180,10 +300,7 @@ pub fn init_boot_policy(renderer: RendererKind) -> ThemeSelection {
 }
 
 pub fn active() -> ThemeKind {
-    match ACTIVE.load(Ordering::Acquire) {
-        1 => ThemeKind::Aero,
-        _ => ThemeKind::Classic,
-    }
+    ThemeKind::from_u8(ACTIVE.load(Ordering::Acquire)).unwrap_or(ThemeKind::Classic)
 }
 
 pub(crate) fn activate(kind: ThemeKind) {
@@ -195,23 +312,21 @@ pub fn metrics() -> FrameMetrics {
 }
 
 pub const fn frame_effect_for(kind: ThemeKind) -> LayerEffect {
-    match kind {
-        ThemeKind::Classic => LayerEffect::None,
-        ThemeKind::Aero => LayerEffect::BackdropSample {
-            radius: AERO_BACKDROP_RADIUS,
-        },
-    }
+    spec_for(kind).frame_effect
 }
 
 pub fn frame_effect() -> LayerEffect {
     frame_effect_for(active())
 }
 
+/// Compositor effect for desktop chrome (taskbar, start menu) under the
+/// active theme.
+pub fn chrome_effect() -> LayerEffect {
+    active_spec().chrome_effect
+}
+
 pub const fn metrics_for(kind: ThemeKind) -> FrameMetrics {
-    match kind {
-        ThemeKind::Classic => CLASSIC_METRICS,
-        ThemeKind::Aero => AERO_METRICS,
-    }
+    spec_for(kind).metrics
 }
 
 pub fn close_button_rect(bounds: Rect, metrics: FrameMetrics) -> Rect {
@@ -246,13 +361,22 @@ pub fn draw_frame(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
     draw_frame_for(active(), chrome, device);
 }
 
+/// Whether the active theme needs a post-children frame overlay pass.
+pub fn has_frame_overlay() -> bool {
+    active_spec().draw_frame_overlay.is_some()
+}
+
+/// Run the active theme's post-children frame overlay, if it has one.
+pub fn draw_frame_overlay(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
+    if let Some(overlay) = active_spec().draw_frame_overlay {
+        overlay(chrome, device);
+    }
+}
+
 pub(crate) fn draw_frame_for(
     kind: ThemeKind,
     chrome: &FrameChrome<'_>,
     device: &mut dyn GraphicsDevice,
 ) {
-    match kind {
-        ThemeKind::Classic => classic::draw(chrome, device),
-        ThemeKind::Aero => aero::draw(chrome, device),
-    }
+    (spec_for(kind).draw_frame)(chrome, device);
 }

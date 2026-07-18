@@ -107,9 +107,11 @@ pub const SYSTEM_CONTROL_RESET_WALLPAPER: u64 = 4;
 pub const THEME_AUTO: u32 = 0;
 pub const THEME_CLASSIC: u32 = 1;
 pub const THEME_AERO: u32 = 2;
+pub const THEME_FUTURISM: u32 = 3;
 
 pub const THEME_AVAILABLE_CLASSIC: u32 = 1 << 0;
 pub const THEME_AVAILABLE_AERO: u32 = 1 << 1;
+pub const THEME_AVAILABLE_FUTURISM: u32 = 1 << 2;
 
 pub const SYSTEM_PERSISTENCE_AVAILABLE: u32 = 1 << 0;
 pub const SYSTEM_BOOT_THEME_OVERRIDE: u32 = 1 << 0;

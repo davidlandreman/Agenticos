@@ -31,6 +31,7 @@ pub const COMMAND_RESET_WALLPAPER: u64 = 4;
 
 pub const THEME_AVAILABLE_CLASSIC: u32 = 1 << 0;
 pub const THEME_AVAILABLE_AERO: u32 = 1 << 1;
+pub const THEME_AVAILABLE_FUTURISM: u32 = 1 << 2;
 pub const PERSISTENCE_AVAILABLE: u32 = 1 << 0;
 pub const BOOT_THEME_OVERRIDE: u32 = 1 << 0;
 
@@ -40,6 +41,7 @@ pub enum ThemePreference {
     Auto = 0,
     Classic = 1,
     Aero = 2,
+    Futurism = 3,
 }
 
 impl ThemePreference {
@@ -48,6 +50,7 @@ impl ThemePreference {
             "auto" => Some(Self::Auto),
             "classic" => Some(Self::Classic),
             "aero" => Some(Self::Aero),
+            "futurism" => Some(Self::Futurism),
             _ => None,
         }
     }
@@ -57,6 +60,7 @@ impl ThemePreference {
             Self::Auto => "auto",
             Self::Classic => "classic",
             Self::Aero => "aero",
+            Self::Futurism => "futurism",
         }
     }
 
@@ -65,6 +69,7 @@ impl ThemePreference {
             Self::Auto => ThemeRequest::Auto,
             Self::Classic => ThemeRequest::Classic,
             Self::Aero => ThemeRequest::Aero,
+            Self::Futurism => ThemeRequest::Futurism,
         }
     }
 
@@ -73,7 +78,16 @@ impl ThemePreference {
             0 => Some(Self::Auto),
             1 => Some(Self::Classic),
             2 => Some(Self::Aero),
+            3 => Some(Self::Futurism),
             _ => None,
+        }
+    }
+
+    const fn for_kind(kind: ThemeKind) -> Self {
+        match kind {
+            ThemeKind::Classic => Self::Classic,
+            ThemeKind::Aero => Self::Aero,
+            ThemeKind::Futurism => Self::Futurism,
         }
     }
 }
@@ -231,22 +245,15 @@ pub fn record_boot_theme_override(explicit: bool) {
 }
 
 pub fn queue_theme_publication(kind: ThemeKind) {
-    PENDING_THEME_PUBLICATION.store(
-        match kind {
-            ThemeKind::Classic => 1,
-            ThemeKind::Aero => 2,
-        },
-        Ordering::Release,
-    );
+    PENDING_THEME_PUBLICATION.store((kind as u8) + 1, Ordering::Release);
 }
 
 /// Flush renderer-fallback notifications after the compositor releases the
 /// window-manager lock.
 pub fn drain_pending_notifications() {
-    let kind = match PENDING_THEME_PUBLICATION.swap(0, Ordering::AcqRel) {
-        1 => ThemeKind::Classic,
-        2 => ThemeKind::Aero,
-        _ => return,
+    let pending = PENDING_THEME_PUBLICATION.swap(0, Ordering::AcqRel);
+    let Some(kind) = pending.checked_sub(1).and_then(ThemeKind::from_u8) else {
+        return;
     };
     crate::userland::etc::publish_theme(kind);
     crate::userland::gui::broadcast_theme_changed(kind, theme_preference().request());
@@ -291,16 +298,13 @@ fn snapshot() -> SystemControlSnapshotV1 {
         | if renderer == RendererKind::Legacy {
             0
         } else {
-            THEME_AVAILABLE_AERO
+            THEME_AVAILABLE_AERO | THEME_AVAILABLE_FUTURISM
         };
     SystemControlSnapshotV1 {
         version: 1,
         byte_len: mem::size_of::<SystemControlSnapshotV1>() as u32,
         theme_preference: state.theme as u32,
-        active_theme: match active {
-            ThemeKind::Classic => ThemePreference::Classic as u32,
-            ThemeKind::Aero => ThemePreference::Aero as u32,
-        },
+        active_theme: ThemePreference::for_kind(active) as u32,
         theme_available_mask: available,
         renderer_kind: match renderer {
             RendererKind::Legacy => 0,
@@ -504,6 +508,23 @@ mod tests {
         assert_eq!(mem::size_of::<SystemControlSnapshotV1>(), 64);
     }
 
+    fn test_futurism_preference_round_trip() {
+        let mut state = SettingsState::defaults();
+        parse_config_into("theme=futurism\n", &mut state);
+        assert_eq!(state.theme, ThemePreference::Futurism);
+        assert_eq!(serialize(&state), "theme=futurism\nwallpaper=default\n");
+        assert_eq!(
+            ThemePreference::from_u64(3),
+            Some(ThemePreference::Futurism)
+        );
+        assert_eq!(ThemePreference::from_u64(4), None);
+        assert_eq!(ThemePreference::Futurism.request(), ThemeRequest::Futurism);
+        assert_eq!(
+            ThemePreference::for_kind(ThemeKind::Futurism),
+            ThemePreference::Futurism
+        );
+    }
+
     fn test_snapshot_syscall_writes_versioned_payload() {
         let mut snapshot = SystemControlSnapshotV1::default();
         let pointer = &mut snapshot as *mut _ as u64;
@@ -527,6 +548,7 @@ mod tests {
             &test_config_parser_is_forward_compatible,
             &test_bad_individual_values_keep_defaults,
             &test_snapshot_layout_is_stable,
+            &test_futurism_preference_round_trip,
             &test_snapshot_syscall_writes_versioned_payload,
         ]
     }

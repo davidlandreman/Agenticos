@@ -173,10 +173,12 @@ impl WindowManager {
         &mut self,
         requested: super::theme::ThemeRequest,
     ) -> Result<(super::theme::ThemeSelection, bool), i64> {
-        if requested == super::theme::ThemeRequest::Aero
-            && self.renderer_selection.selected == RendererKind::Legacy
-        {
-            return Err(crate::userland::abi::ENOTSUP);
+        if let Some(kind) = requested.explicit_kind() {
+            if super::theme::spec_for(kind).requires_modern_renderer
+                && self.renderer_selection.selected == RendererKind::Legacy
+            {
+                return Err(crate::userland::abi::ENOTSUP);
+            }
         }
         let selection = super::theme::select_theme(requested, self.renderer_selection.selected);
         let old_kind = super::theme::active();
@@ -1534,6 +1536,7 @@ impl WindowManager {
         let mut bounds = window.bounds();
         let visible = window.visible();
         let children = window.children().to_vec();
+        let wants_overlay = window.wants_paint_overlay();
         bounds.x += parent_x;
         bounds.y += parent_y;
         if !visible {
@@ -1547,7 +1550,8 @@ impl WindowManager {
         } else {
             bounds
         };
-        if let Some(clip) = paint_bounds.intersection(&region) {
+        let clip = paint_bounds.intersection(&region);
+        if let Some(clip) = clip {
             let original = window.bounds();
             window.set_bounds_no_invalidate(bounds);
             canvas.set_clip_rect(Some(clip));
@@ -1574,6 +1578,24 @@ impl WindowManager {
                 root_paint_bounds,
                 canvas,
             );
+        }
+
+        // Post-children pass: lets a themed frame re-carve translucent
+        // geometry (rounded bottom corners) over content painted flush to
+        // the window edge. Surface ARGB writes are exact replacement, so
+        // the carve makes those pixels transparent again.
+        if wants_overlay {
+            if let Some(clip) = clip {
+                if let Some(mut window) = self.window_registry.remove(&window_id) {
+                    let original = window.bounds();
+                    window.set_bounds_no_invalidate(bounds);
+                    canvas.set_clip_rect(Some(clip));
+                    window.paint_overlay(canvas);
+                    window.set_bounds_no_invalidate(original);
+                    canvas.set_clip_rect(None);
+                    self.window_registry.insert(window_id, window);
+                }
+            }
         }
         painted
     }

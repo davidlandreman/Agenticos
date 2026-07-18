@@ -11,8 +11,9 @@ use alloc::vec::Vec;
 
 /// Height of the taskbar in pixels
 pub const TASKBAR_HEIGHT: u32 = 32;
-/// Width of the Start button
-pub const START_BUTTON_WIDTH: u32 = 60;
+/// Width of the Start button (fits the Futurism "A" badge + label; Classic
+/// and Aero center their plain label in the same footprint)
+pub const START_BUTTON_WIDTH: u32 = 72;
 /// Maximum width of window buttons
 pub const MAX_WINDOW_BUTTON_WIDTH: u32 = 150;
 /// Gap between buttons
@@ -155,6 +156,20 @@ impl Window for TaskbarWindow {
         &mut self.base
     }
 
+    fn prepare_for_render(&mut self) {
+        // Track the active theme's chrome effect (Futurism frosts the bar
+        // with a backdrop blur; other themes composite it opaquely).
+        let effect = crate::window::theme::chrome_effect();
+        if self.base.compositor_properties().effect != effect {
+            self.base
+                .set_compositor_properties(crate::window::CompositorProperties {
+                    effect,
+                    ..crate::window::CompositorProperties::OPAQUE
+                });
+            self.base.invalidate();
+        }
+    }
+
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {
         if !self.base.visible() {
             return;
@@ -162,9 +177,9 @@ impl Window for TaskbarWindow {
 
         let bounds = self.base.bounds();
 
-        // Themed raised panel (Classic: ButtonFace + highlight top edge;
-        // Aero: soft vertical gradient with a 1px edge).
-        controls::draw_raised_panel(device, bounds);
+        // Themed chrome strip (Classic: ButtonFace + highlight top edge;
+        // Aero: soft vertical gradient; Futurism: frosted translucent bar).
+        controls::draw_taskbar_surface(device, bounds);
 
         // Note: Child buttons will paint themselves
 
@@ -250,7 +265,7 @@ impl Window for TaskbarTrayWindow {
             return;
         }
 
-        controls::draw_recessed_panel(device, bounds);
+        controls::draw_tray_well(device, bounds);
 
         let font = get_caption_font();
         let line_height = font.line_height();
@@ -295,5 +310,5 @@ fn draw_centered_text(
             .saturating_sub(text_width)
             .checked_div(2)
             .unwrap_or(0) as i32;
-    device.draw_text(x, y, text, font.as_font(), controls::palette().text);
+    device.draw_text(x, y, text, font.as_font(), controls::taskbar_text());
 }
