@@ -328,9 +328,10 @@ fn spawn_painting() {
 
 fn spawn_calc() {
     crate::debug_info!("GUIShell: Spawning calc...");
-    if let Err(e) = crate::commands::gui_launch_table::spawn_by_name("calc") {
-        crate::debug_warn!("GUIShell: Failed to spawn calc: errno={}", e);
-    }
+    crate::window::terminal_factory::spawn_gui_user_app(
+        "/host/CALC.ELF",
+        alloc::vec![alloc::string::String::from("calc")],
+    );
 }
 
 fn spawn_notepad() {

@@ -17,6 +17,7 @@ members = [
     "apps/guilaunch",
     "apps/guidemo",
     "apps/notepad",
+    "apps/calc",
 ]
 
 # Release profile: small, panic-abort, LTO, strip. The output ELF must fit

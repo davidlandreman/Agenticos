@@ -36,6 +36,7 @@ userland/
     ├── guilaunch/      # rust app — argv[0] → sys_gui_launch syscall
     ├── guidemo/        # minimal ring-3 GUI reference client
     ├── notepad/        # standalone editor with userland dialogs + working Save
+    ├── calc/           # standalone four-operation calculator
     ├── zsh/            # prebuilt-managed interactive shell
     ├── busybox/        # prebuilt-managed multicall utilities
     ├── compiler-compat/# tiny C static-musl boot-test fixtures
@@ -68,9 +69,10 @@ resolve into multicall or direct binaries staged under `host_share/`:
 
 - **`BB.ELF` — BusyBox** (core utilities plus IPv4 `ping`, `nc`, `nslookup`,
   and HTTP-only `wget`; IPv6 and TLS are not available).
-- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`painting`, `calc`,
-  `tasks`, `explorer`).
-- **`NOTEPAD.ELF` — direct standalone ring-3 application** (`notepad`).
+- **`GLAUNCH.ELF` — kernel-side GUI app launcher** (`painting`, `tasks`,
+  `explorer`).
+- **`CALC.ELF` / `NOTEPAD.ELF` — direct standalone ring-3 applications**
+  (`calc`, `notepad`).
 
 See `src/userland/bin_namespace.rs` for the lists and the
 `apply_bin_rewrite` helper. `execve("/bin/ls", argv, envp)` resolves
@@ -82,8 +84,9 @@ envp)` resolves to `GLAUNCH.ELF` with `argv[0]` overwritten to
 `PaintingProcess`. No symlinks, no per-applet ELF copies — the
 namespace is pure kernel synthesis.
 
-`execve("/bin/notepad", ...)` instead rewrites directly to
-`/host/NOTEPAD.ELF`; there is no `GLAUNCH` round trip or kernel notepad.
+`execve("/bin/notepad", ...)` and `execve("/bin/calc", ...)` instead rewrite
+directly to `/host/NOTEPAD.ELF` / `/host/CALC.ELF`; there is no `GLAUNCH` round
+trip or kernel-side process for either.
 
 `stat`, `access`, `open`, and `getdents64` all recognize `/bin` (the
 directory) and `/bin/<applet>` (each entry). PATH discovery from zsh
@@ -244,7 +247,8 @@ deferring the surprise to a confusing kernel-side rejection at run time.
 
 ## Adding a ring-3 GUI app
 
-Use `apps/guidemo` as the minimal reference and `apps/notepad` as the
+Use `apps/guidemo` as the minimal reference, `apps/calc` as a compact
+single-window canvas-and-hit-test reference, and `apps/notepad` as the
 multi-window/filesystem reference. `gui::Window` creates a server-decorated
 window, `Canvas` renders XRGB8888 pixels, `gui::next_event()` blocks without
 polling, and `Window::present()` performs a full-surface copy. Resize events
