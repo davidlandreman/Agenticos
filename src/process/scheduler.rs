@@ -1,22 +1,25 @@
-//! Round-robin process scheduler
+//! Privilege-neutral fair scheduler.
 //!
-//! Manages process scheduling with timer-based preemption. Each process gets
-//! a time slice, and when it expires, the scheduler picks the next ready process.
+//! Kernel threads and ring-3 processes are tagged entities in one queue. Each
+//! running entity gets one PIT tick before it is requeued at the tail; overdue
+//! one-shot latency contracts may override FIFO order.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use crate::arch::x86_64::interrupt_guard::InterruptMutex;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
 
 use super::context::CpuContext;
+use super::entity::{EntityId, LatencyContract, RunState};
 use super::pcb::{BlockReason, ProcessControlBlock, ProcessState, WakeEvents};
 use super::process::ProcessId;
+use super::run_queue::RunQueue;
 use super::stack::free_stack;
 
 /// Default time slice in timer ticks
 /// With 100 Hz timer (10ms per tick), 2 ticks = 20ms per time slice
 /// This provides smooth multitasking where processes appear to run simultaneously
-pub const DEFAULT_TIME_SLICE: u64 = 2;
+pub const DEFAULT_TIME_SLICE: u64 = 1;
 
 /// Lightweight process info for display purposes (e.g., task manager)
 #[derive(Debug, Clone)]
@@ -33,38 +36,55 @@ pub struct ProcessInfo {
     pub stack_size: usize,
 }
 
-/// What the scheduler can pick to run next. Kernel threads continue to
-/// use the existing PCB-backed flow; ring-3 user processes (U3) are a
-/// parallel kind that the U5 ring-3-aware timer ISR resumes via the U4
-/// switch primitive. The unifying surface is this enum + the decision
-/// in [`Scheduler::next_runnable`], NOT a shared queue inside the PCB
-/// table — keeping the kernel-thread side untouched lowers the risk of
-/// regression.
+/// Compatibility view of a tagged scheduling decision used by QEMU tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Runnable {
     KernelThread(ProcessId),
     RingThree(u32),
 }
 
-/// Global scheduler instance
-pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+#[derive(Debug, Clone, Copy)]
+pub struct SchedEntity {
+    pub state: RunState,
+    pub runtime_ticks: u64,
+    pub ready_since_tick: u64,
+    pub must_run_by_tick: Option<u64>,
+    pub latency_contract: Option<LatencyContract>,
+}
 
-/// Round-robin scheduler for process management
+impl SchedEntity {
+    const fn new(_id: EntityId) -> Self {
+        Self {
+            state: RunState::Blocked,
+            runtime_ticks: 0,
+            ready_since_tick: 0,
+            must_run_by_tick: None,
+            latency_contract: None,
+        }
+    }
+}
+
+/// Global scheduler instance
+pub static SCHEDULER: InterruptMutex<Scheduler> = InterruptMutex::new(Scheduler::new());
+
+/// Fair scheduler for every runnable entity on the CPU.
 pub struct Scheduler {
     /// All processes indexed by PID
     processes: BTreeMap<ProcessId, ProcessControlBlock>,
-    /// Queue of ready process IDs (round-robin order)
-    ready_queue: VecDeque<ProcessId>,
-    /// Currently running process (None if idle)
-    current: Option<ProcessId>,
+    /// Privilege-neutral scheduling state indexed by stable tagged identity.
+    entities: BTreeMap<EntityId, SchedEntity>,
+    /// The one ready queue shared by kernel threads and user processes.
+    run_queue: RunQueue,
+    /// Entity whose execution state is currently loaded on the CPU.
+    current: Option<EntityId>,
     /// The idle process PID (runs when nothing else is ready)
     pub idle_pid: Option<ProcessId>,
     /// Whether scheduler is initialized
     initialized: bool,
-    /// Processes sleeping until a specific tick, ordered by wake time
-    sleep_queue: BTreeMap<u64, Vec<ProcessId>>,
     /// Processes waiting for signal events (not time-based)
     signal_waiters: Vec<ProcessId>,
+    /// Number of contracted dispatches selected after their ceiling.
+    latency_misses: u64,
 }
 
 impl Scheduler {
@@ -72,12 +92,13 @@ impl Scheduler {
     pub const fn new() -> Self {
         Scheduler {
             processes: BTreeMap::new(),
-            ready_queue: VecDeque::new(),
+            entities: BTreeMap::new(),
+            run_queue: RunQueue::new(),
             current: None,
             idle_pid: None,
             initialized: false,
-            sleep_queue: BTreeMap::new(),
             signal_waiters: Vec::new(),
+            latency_misses: 0,
         }
     }
 
@@ -87,7 +108,11 @@ impl Scheduler {
             return;
         }
 
-        // Create idle process - it will be scheduled when nothing else is ready
+        self.run_queue
+            .reserve()
+            .expect("scheduler run-queue reservation failed");
+
+        // Create idle process - it is never inserted in the normal run queue.
         let idle_pid = super::process::allocate_pid();
         let mut idle_pcb = ProcessControlBlock::new(idle_pid, String::from("idle"));
         idle_pcb.state = ProcessState::Ready;
@@ -95,6 +120,10 @@ impl Scheduler {
 
         self.idle_pid = Some(idle_pid);
         self.processes.insert(idle_pid, idle_pcb);
+        self.entities.insert(
+            EntityId::KernelThread(idle_pid),
+            SchedEntity::new(EntityId::KernelThread(idle_pid)),
+        );
         self.initialized = true;
 
         crate::debug_info!("Scheduler initialized with idle process PID {:?}", idle_pid);
@@ -121,14 +150,249 @@ impl Scheduler {
         );
 
         self.processes.insert(pid, pcb);
-        self.ready_queue.push_back(pid);
+        let id = EntityId::KernelThread(pid);
+        self.entities.insert(id, SchedEntity::new(id));
+        self.make_ready(id, None)
+            .expect("scheduler entity capacity exceeded while spawning");
 
         pid
     }
 
     /// Get the currently running process ID
     pub fn current(&self) -> Option<ProcessId> {
+        match self.current {
+            Some(EntityId::KernelThread(pid)) => Some(pid),
+            Some(EntityId::UserProcess(_)) | None => None,
+        }
+    }
+
+    #[cfg_attr(
+        not(feature = "test"),
+        expect(dead_code, reason = "scheduler diagnostics API")
+    )]
+    pub fn current_entity(&self) -> Option<EntityId> {
         self.current
+    }
+
+    pub fn register_user(&mut self, pid: u32) -> Result<(), ()> {
+        let id = EntityId::UserProcess(pid);
+        self.entities.entry(id).or_insert(SchedEntity::new(id));
+        Ok(())
+    }
+
+    pub fn make_ready(
+        &mut self,
+        id: EntityId,
+        contract: Option<LatencyContract>,
+    ) -> Result<bool, ()> {
+        let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+        let Some(state) = self.entities.get(&id).map(|entity| entity.state) else {
+            return Err(());
+        };
+        if state == RunState::Running && self.current == Some(id) {
+            return Ok(false);
+        }
+        if state == RunState::Ready {
+            if let Some(contract) = contract {
+                let deadline = now.saturating_add(contract.max_dispatch_ticks as u64);
+                let entity = self.entities.get_mut(&id).expect("ready entity vanished");
+                entity.latency_contract = Some(contract);
+                entity.must_run_by_tick = Some(
+                    entity
+                        .must_run_by_tick
+                        .map(|existing| existing.min(deadline))
+                        .unwrap_or(deadline),
+                );
+            }
+            return self.run_queue.enqueue(id);
+        }
+        if let EntityId::KernelThread(pid) = id {
+            if let Some(pcb) = self.processes.get_mut(&pid) {
+                pcb.state = ProcessState::Ready;
+                pcb.block_reason = None;
+            }
+        }
+        let entity = self
+            .entities
+            .get_mut(&id)
+            .expect("scheduler entity vanished");
+        entity.state = RunState::Ready;
+        entity.ready_since_tick = now;
+        entity.latency_contract = contract;
+        entity.must_run_by_tick = contract.map(|c| now.saturating_add(c.max_dispatch_ticks as u64));
+        self.run_queue.enqueue(id)
+    }
+
+    pub fn block_entity(&mut self, id: EntityId) {
+        self.run_queue.remove(id);
+        if let Some(entity) = self.entities.get_mut(&id) {
+            entity.state = RunState::Blocked;
+            entity.must_run_by_tick = None;
+        }
+        if self.current == Some(id) {
+            self.current = None;
+        }
+    }
+
+    pub fn unregister_entity(&mut self, id: EntityId) {
+        self.run_queue.remove(id);
+        if self.current == Some(id) {
+            self.current = None;
+        }
+        if let Some(entity) = self.entities.get_mut(&id) {
+            entity.state = RunState::Dead;
+        }
+        self.entities.remove(&id);
+    }
+
+    pub fn entity_state(&self, id: EntityId) -> Option<RunState> {
+        self.entities.get(&id).map(|entity| entity.state)
+    }
+
+    /// Number of user entities currently eligible to execute or running.
+    pub fn runnable_user_count(&self) -> usize {
+        self.entities
+            .iter()
+            .filter(|(id, entity)| {
+                matches!(id, EntityId::UserProcess(_))
+                    && matches!(entity.state, RunState::Ready | RunState::Running)
+            })
+            .count()
+    }
+
+    fn pick_ready_index(&self, now: u64) -> Option<usize> {
+        let mut due: Option<(usize, u64)> = None;
+        for (index, id) in self.run_queue.iter().enumerate() {
+            let Some(deadline) = self
+                .entities
+                .get(id)
+                .and_then(|entity| entity.must_run_by_tick)
+            else {
+                continue;
+            };
+            if deadline <= now && due.map(|(_, earliest)| deadline < earliest).unwrap_or(true) {
+                due = Some((index, deadline));
+            }
+        }
+        due.map(|(index, _)| index)
+            .or_else(|| (!self.run_queue.is_empty()).then_some(0))
+    }
+
+    pub fn schedule_entity(&mut self) -> Option<EntityId> {
+        let now = crate::arch::x86_64::interrupts::get_timer_ticks();
+        let index = self.pick_ready_index(now)?;
+        let next = self.run_queue.remove_at(index)?;
+        let missed = self
+            .entities
+            .get(&next)
+            .and_then(|entity| entity.must_run_by_tick)
+            .is_some_and(|deadline| now > deadline);
+        if missed {
+            self.latency_misses = self.latency_misses.saturating_add(1);
+        }
+        if let Some(entity) = self.entities.get_mut(&next) {
+            entity.state = RunState::Running;
+            entity.must_run_by_tick = None;
+            entity.latency_contract = None;
+        }
+        if let EntityId::KernelThread(pid) = next {
+            if let Some(pcb) = self.processes.get_mut(&pid) {
+                pcb.state = ProcessState::Running;
+                pcb.time_slice_remaining = DEFAULT_TIME_SLICE;
+                pcb.last_activity_tick = now;
+            }
+        }
+        self.current = Some(next);
+        Some(next)
+    }
+
+    /// Requeue an interrupted running entity and select once from the shared
+    /// fair queue. Context saving is the caller's architecture responsibility.
+    pub fn preempt_and_pick(&mut self, current: EntityId) -> Option<EntityId> {
+        if let Some(entity) = self.entities.get_mut(&current) {
+            entity.runtime_ticks = entity.runtime_ticks.saturating_add(1);
+        }
+        if let EntityId::KernelThread(pid) = current {
+            if let Some(pcb) = self.processes.get_mut(&pid) {
+                pcb.state = ProcessState::Ready;
+            }
+        }
+        self.yield_entity(current);
+        let next = self.schedule_entity()?;
+        if let EntityId::KernelThread(pid) = next {
+            if let Some(pcb) = self.processes.get_mut(&pid) {
+                pcb.state = ProcessState::Running;
+                pcb.time_slice_remaining = DEFAULT_TIME_SLICE;
+                pcb.last_activity_tick = crate::arch::x86_64::interrupts::get_timer_ticks();
+            }
+        }
+        Some(next)
+    }
+
+    pub fn pop_next_user(&mut self) -> Option<u32> {
+        let index = self
+            .run_queue
+            .iter()
+            .position(|id| matches!(id, EntityId::UserProcess(_)))?;
+        let EntityId::UserProcess(pid) = self.run_queue.remove_at(index)? else {
+            return None;
+        };
+        let id = EntityId::UserProcess(pid);
+        if let Some(entity) = self.entities.get_mut(&id) {
+            entity.state = RunState::Running;
+            entity.must_run_by_tick = None;
+        }
+        self.current = Some(id);
+        Some(pid)
+    }
+
+    pub fn peek_next_user(&self) -> Option<u32> {
+        self.run_queue.iter().find_map(|id| match id {
+            EntityId::UserProcess(pid) => Some(*pid),
+            EntityId::KernelThread(_) => None,
+        })
+    }
+
+    pub fn clear_current_user(&mut self, pid: u32) {
+        if self.current == Some(EntityId::UserProcess(pid)) {
+            self.current = None;
+        }
+    }
+
+    pub fn set_running(&mut self, id: EntityId) {
+        self.entities.entry(id).or_insert(SchedEntity::new(id));
+        self.run_queue.remove(id);
+        if let Some(entity) = self.entities.get_mut(&id) {
+            entity.state = RunState::Running;
+            entity.must_run_by_tick = None;
+        }
+        self.current = Some(id);
+    }
+
+    pub fn yield_entity(&mut self, id: EntityId) {
+        if let Some(entity) = self.entities.get_mut(&id) {
+            entity.state = RunState::Ready;
+            entity.must_run_by_tick = None;
+        }
+        if self.current == Some(id) {
+            self.current = None;
+        }
+        self.run_queue
+            .enqueue(id)
+            .expect("scheduler entity capacity exceeded while yielding");
+    }
+
+    #[cfg(feature = "test")]
+    pub fn clear_user_entities_for_test(&mut self) {
+        let users: Vec<EntityId> = self
+            .entities
+            .keys()
+            .copied()
+            .filter(|id| matches!(id, EntityId::UserProcess(_)))
+            .collect();
+        for id in users {
+            self.unregister_entity(id);
+        }
     }
 
     /// Get a reference to a process by PID
@@ -141,73 +405,17 @@ impl Scheduler {
         self.processes.get_mut(&pid)
     }
 
-    /// U3: choose what runs next, considering both ring-3 user
-    /// processes and kernel threads.
-    ///
-    /// Strategy today: **strict ring-3 preference** — if any ring-3
-    /// process is in the ready queue, pop and return it. Otherwise
-    /// fall through to the existing kernel-thread `schedule()`.
-    /// Documented in the U10 follow-up (compositor as kernel thread):
-    /// if a tight-loop ring-3 process starves rendering, switch to
-    /// fair alternation here. For U5's first wiring, simple is
-    /// better.
-    ///
-    /// Called by U5's timer-ISR-driven decision path. The caller is
-    /// responsible for actually resuming the picked entity — for
-    /// `Runnable::RingThree(pid)` that's the U4 switch primitive;
-    /// for `Runnable::KernelThread(pid)` it's the existing
-    /// context_switch path.
+    /// Compatibility decision surface while call sites migrate to EntityId.
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn next_runnable(&mut self) -> Runnable {
-        if let Some(pid) = crate::userland::lifecycle::pop_next_ring3() {
-            return Runnable::RingThree(pid);
+        match self.schedule_entity() {
+            Some(EntityId::KernelThread(pid)) => Runnable::KernelThread(pid),
+            Some(EntityId::UserProcess(pid)) => Runnable::RingThree(pid),
+            None => Runnable::KernelThread(
+                self.idle_pid
+                    .expect("scheduler not initialized — no idle process"),
+            ),
         }
-        let kt_pid = self
-            .schedule()
-            .or(self.idle_pid)
-            .expect("scheduler not initialized — no idle process");
-        Runnable::KernelThread(kt_pid)
-    }
-
-    /// Select the next process to run
-    ///
-    /// # Returns
-    /// The PID of the next process to run, or None if only idle is available
-    pub fn schedule(&mut self) -> Option<ProcessId> {
-        // If there's a process in the ready queue, pick it
-        if let Some(next_pid) = self.ready_queue.pop_front() {
-            // Mark current as Ready (if not blocked/terminated)
-            if let Some(current_pid) = self.current {
-                if let Some(current_pcb) = self.processes.get_mut(&current_pid) {
-                    if current_pcb.state == ProcessState::Running {
-                        current_pcb.state = ProcessState::Ready;
-                        // Re-add to ready queue (round-robin)
-                        if Some(current_pid) != self.idle_pid {
-                            self.ready_queue.push_back(current_pid);
-                        }
-                    }
-                }
-            }
-
-            // Set new process as running
-            if let Some(next_pcb) = self.processes.get_mut(&next_pid) {
-                next_pcb.state = ProcessState::Running;
-                next_pcb.time_slice_remaining = DEFAULT_TIME_SLICE;
-                // Reset activity tick so watchdog doesn't kill processes that waited in queue
-                next_pcb.last_activity_tick = crate::arch::x86_64::interrupts::get_timer_ticks();
-            }
-
-            self.current = Some(next_pid);
-            crate::debug_trace!("Scheduler: Switching to process {:?}", next_pid);
-            return Some(next_pid);
-        }
-
-        // No processes ready - run idle or stay with current
-        if self.current.is_none() || self.current == self.idle_pid {
-            self.current = self.idle_pid;
-        }
-
-        self.current
     }
 
     /// Block the current process
@@ -215,18 +423,18 @@ impl Scheduler {
     /// # Arguments
     /// * `reason` - Why the process is blocking
     pub fn block_current(&mut self, reason: BlockReason) {
-        if let Some(current_pid) = self.current {
+        if let Some(EntityId::KernelThread(current_pid)) = self.current {
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 pcb.state = ProcessState::Blocked;
                 pcb.block_reason = Some(reason);
-                crate::debug_info!(
+                crate::debug_trace!(
                     "Scheduler: Blocked process {:?} for {:?}",
                     current_pid,
                     reason
                 );
             }
-            // Clear current - schedule will pick next
-            self.current = None;
+            // Clear current; the unified selector will pick the next entity.
+            self.block_entity(EntityId::KernelThread(current_pid));
         }
     }
 
@@ -235,12 +443,17 @@ impl Scheduler {
     /// # Arguments
     /// * `pid` - The PID of the process to wake
     pub fn wake(&mut self, pid: ProcessId) {
+        self.wake_with_contract(pid, None);
+    }
+
+    pub fn wake_with_contract(&mut self, pid: ProcessId, contract: Option<LatencyContract>) {
         if let Some(pcb) = self.processes.get_mut(&pid) {
             if pcb.state == ProcessState::Blocked {
                 pcb.state = ProcessState::Ready;
                 pcb.block_reason = None;
-                self.ready_queue.push_back(pid);
-                crate::debug_info!("Scheduler: Woke process {:?}", pid);
+                self.make_ready(EntityId::KernelThread(pid), contract)
+                    .expect("scheduler entity capacity exceeded while waking");
+                crate::debug_trace!("Scheduler: Woke process {:?}", pid);
             }
         }
     }
@@ -277,7 +490,7 @@ impl Scheduler {
 
     /// Terminate the current process
     pub fn terminate_current(&mut self) {
-        if let Some(current_pid) = self.current.take() {
+        if let Some(EntityId::KernelThread(current_pid)) = self.current.take() {
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 pcb.state = ProcessState::Terminated;
                 crate::debug_info!("Scheduler: Terminated process {:?}", current_pid);
@@ -289,13 +502,14 @@ impl Scheduler {
             }
             // Remove from processes map
             self.processes.remove(&current_pid);
+            self.unregister_entity(EntityId::KernelThread(current_pid));
         }
     }
 
     /// Terminate a specific process
     pub fn terminate(&mut self, pid: ProcessId) {
         // Remove from ready queue if present
-        self.ready_queue.retain(|&p| p != pid);
+        self.run_queue.remove(EntityId::KernelThread(pid));
 
         if let Some(pcb) = self.processes.get_mut(&pid) {
             pcb.state = ProcessState::Terminated;
@@ -309,9 +523,10 @@ impl Scheduler {
 
         // Remove from processes map
         self.processes.remove(&pid);
+        self.unregister_entity(EntityId::KernelThread(pid));
 
         // If this was the current process, clear it
-        if self.current == Some(pid) {
+        if self.current == Some(EntityId::KernelThread(pid)) {
             self.current = None;
         }
     }
@@ -321,14 +536,14 @@ impl Scheduler {
     /// # Returns
     /// `true` if the current process's time slice has expired and preemption is needed
     pub fn timer_tick(&mut self) -> bool {
-        if let Some(current_pid) = self.current {
+        if let Some(EntityId::KernelThread(current_pid)) = self.current {
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 // Increment total runtime
                 pcb.total_runtime += 1;
 
                 // Don't preempt idle process
                 if self.idle_pid == Some(current_pid) {
-                    return !self.ready_queue.is_empty();
+                    return !self.run_queue.is_empty();
                 }
 
                 // Decrement time slice
@@ -350,12 +565,16 @@ impl Scheduler {
     ///
     /// Moves the current process to the back of the ready queue.
     pub fn yield_current(&mut self) {
-        if let Some(current_pid) = self.current {
+        if let Some(EntityId::KernelThread(current_pid)) = self.current {
             if let Some(pcb) = self.processes.get_mut(&current_pid) {
                 if pcb.state == ProcessState::Running {
                     pcb.state = ProcessState::Ready;
                     if self.idle_pid != Some(current_pid) {
-                        self.ready_queue.push_back(current_pid);
+                        let id = EntityId::KernelThread(current_pid);
+                        if let Some(entity) = self.entities.get_mut(&id) {
+                            entity.state = RunState::Ready;
+                        }
+                        let _ = self.run_queue.enqueue(id);
                     }
                 }
             }
@@ -364,8 +583,21 @@ impl Scheduler {
     }
 
     /// Get the number of ready processes
+    #[expect(dead_code, reason = "legacy diagnostics API")]
     pub fn ready_count(&self) -> usize {
-        self.ready_queue.len()
+        self.run_queue
+            .iter()
+            .filter(|id| matches!(id, EntityId::KernelThread(pid) if Some(*pid) != self.idle_pid))
+            .count()
+    }
+
+    pub fn ready_entity_count(&self) -> usize {
+        self.run_queue.len()
+    }
+
+    #[cfg(feature = "test")]
+    pub fn latency_misses_for_test(&self) -> u64 {
+        self.latency_misses
     }
 
     /// Get the total number of processes (including blocked/idle)
@@ -415,73 +647,7 @@ impl Scheduler {
             .collect()
     }
 
-    // =========================================================================
-    // Sleep/Wake API
-    // =========================================================================
-
-    /// Put the current process to sleep for N timer ticks
-    ///
-    /// The process will be woken when the specified number of ticks have elapsed.
-    /// Does nothing if there is no current process.
-    ///
-    /// # Arguments
-    /// * `ticks` - Number of timer ticks to sleep (1 tick = ~10ms at 100 Hz)
-    pub fn sleep_current(&mut self, ticks: u64) {
-        let current_tick = crate::arch::x86_64::interrupts::get_timer_ticks();
-        let wake_tick = current_tick.saturating_add(ticks);
-
-        if let Some(pid) = self.current.take() {
-            if let Some(pcb) = self.processes.get_mut(&pid) {
-                pcb.state = ProcessState::Blocked;
-                pcb.block_reason = Some(BlockReason::SleepingUntilTick(wake_tick));
-                pcb.wake_at_tick = Some(wake_tick);
-                pcb.wake_events = WakeEvents::TIMER;
-
-                crate::debug_trace!(
-                    "Scheduler: Process {:?} sleeping until tick {}",
-                    pid,
-                    wake_tick
-                );
-            }
-
-            // Add to sleep queue
-            self.sleep_queue
-                .entry(wake_tick)
-                .or_insert_with(Vec::new)
-                .push(pid);
-        }
-    }
-
-    /// Check the sleep queue and wake any processes whose time has come
-    ///
-    /// This should be called from the timer interrupt handler.
-    ///
-    /// # Arguments
-    /// * `current_tick` - The current timer tick count
-    pub fn check_sleep_queue(&mut self, current_tick: u64) {
-        // Collect expired entries (wake_tick <= current_tick)
-        let expired_ticks: Vec<u64> = self
-            .sleep_queue
-            .range(..=current_tick)
-            .map(|(tick, _)| *tick)
-            .collect();
-
-        // Wake all processes in expired entries
-        for tick in expired_ticks {
-            if let Some(pids) = self.sleep_queue.remove(&tick) {
-                for pid in pids {
-                    self.wake_from_sleep(pid, WakeEvents::TIMER);
-                }
-            }
-        }
-    }
-
-    /// Wake a sleeping process with a specific event
-    ///
-    /// # Arguments
-    /// * `pid` - The process to wake
-    /// * `event` - The event that triggered the wake
-    fn wake_from_sleep(&mut self, pid: ProcessId, event: WakeEvents) {
+    fn wake_with_event(&mut self, pid: ProcessId, event: WakeEvents) {
         if let Some(pcb) = self.processes.get_mut(&pid) {
             if pcb.state == ProcessState::Blocked {
                 // Check if this event can wake the process
@@ -493,7 +659,8 @@ impl Scheduler {
                     pcb.block_reason = None;
                     pcb.wake_at_tick = None;
                     pcb.pending_signals.set(event.bits());
-                    self.ready_queue.push_back(pid);
+                    self.make_ready(EntityId::KernelThread(pid), None)
+                        .expect("scheduler entity capacity exceeded while waking sleeper");
 
                     crate::debug_trace!("Scheduler: Woke process {:?} with event {:?}", pid, event);
                 }
@@ -512,13 +679,6 @@ impl Scheduler {
         // Remove from signal_waiters if present
         self.signal_waiters.retain(|&p| p != pid);
 
-        // Also remove from sleep_queue if it's there
-        for pids in self.sleep_queue.values_mut() {
-            pids.retain(|&p| p != pid);
-        }
-        // Clean up empty entries
-        self.sleep_queue.retain(|_, pids| !pids.is_empty());
-
-        self.wake_from_sleep(pid, signal);
+        self.wake_with_event(pid, signal);
     }
 }

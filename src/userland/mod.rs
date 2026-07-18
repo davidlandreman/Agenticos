@@ -135,8 +135,8 @@ pub fn enter_user_mode_with_aspace(
 }
 
 /// U8 setup phase. Installs the Process, populates its
-/// `saved_user_state` with the binary's entry frame, marks it
-/// `ring3_ready`, and returns the new PID. Does NOT block.
+/// `saved_user_state` with the binary's entry frame, marks its scheduler entity
+/// ready, and returns the new PID. Does NOT block.
 ///
 /// **Caller responsibility (concurrency):** `address_space` must
 /// currently be active on this CPU (CR3 = its L4). The caller must

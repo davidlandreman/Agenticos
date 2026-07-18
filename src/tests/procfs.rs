@@ -436,6 +436,7 @@ fn test_kill_any_pid() {
 /// the re-fired SYSCALL, which observes it elapsed via
 /// `nanosleep_deadline` and returns 0.
 fn test_sleeper_wake_at_deadline() {
+    use crate::process::entity::{EntityId, RunState};
     use crate::userland::lifecycle::{process_expired_sleeps, Ring3BlockReason};
     const DUE: u32 = 700006;
     const NOT_DUE: u32 = 700007;
@@ -443,17 +444,21 @@ fn test_sleeper_wake_at_deadline() {
 
     insert_synthetic(DUE);
     insert_synthetic(NOT_DUE);
-    {
-        let mut g = PROCESS_TABLE.lock();
-        for (pid, deadline) in [(DUE, now.saturating_sub(1)), (NOT_DUE, now + 10_000)] {
+    for (pid, deadline) in [(DUE, now.saturating_sub(1)), (NOT_DUE, now + 10_000)] {
+        {
+            let mut g = PROCESS_TABLE.lock();
             g.by_pid.get_mut(&pid).unwrap().sleep_deadline = Some(deadline);
-            g.ring3_blocked.insert(
-                pid,
-                Ring3BlockReason::Sleeping {
-                    deadline_tick: deadline,
-                },
-            );
         }
+        crate::process::scheduler::SCHEDULER
+            .lock()
+            .register_user(pid)
+            .unwrap();
+        crate::userland::lifecycle::mark_ring3_blocked(
+            pid,
+            Ring3BlockReason::Sleeping {
+                deadline_tick: deadline,
+            },
+        );
     }
 
     process_expired_sleeps();
@@ -465,20 +470,25 @@ fn test_sleeper_wake_at_deadline() {
             "due sleeper should be unblocked"
         );
         assert!(
-            g.ring3_ready.iter().any(|&p| p == DUE),
-            "due sleeper should be ready"
-        );
-        assert!(
             g.ring3_blocked.contains_key(&NOT_DUE),
             "future sleeper must stay blocked"
         );
     }
+    assert_eq!(
+        crate::process::scheduler::SCHEDULER
+            .lock()
+            .entity_state(EntityId::UserProcess(DUE)),
+        Some(RunState::Ready),
+        "due sleeper should be ready"
+    );
 
-    // Cleanup: pull both out of the scheduler structures.
-    {
-        let mut g = PROCESS_TABLE.lock();
-        g.ring3_blocked.remove(&NOT_DUE);
-        g.ring3_ready.retain(|&p| p != DUE);
+    // Cleanup: pull both out of the scheduler and timer structures.
+    for pid in [DUE, NOT_DUE] {
+        crate::process::timer::cancel_entity(EntityId::UserProcess(pid));
+        crate::process::scheduler::SCHEDULER
+            .lock()
+            .unregister_entity(EntityId::UserProcess(pid));
+        PROCESS_TABLE.lock().ring3_blocked.remove(&pid);
     }
     remove_synthetic(DUE);
     remove_synthetic(NOT_DUE);

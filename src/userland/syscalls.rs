@@ -446,15 +446,10 @@ fn read_stdin_blocking(args: &SyscallArgs, ptr: u64, cap: u64) -> i64 {
         return n as i64;
     }
 
-    // U8: no input available. Block via the ring-3 scheduler instead
-    // of spinning on `sti;hlt;cli` (which monopolized the CPU and
-    // blocked other ring-3 processes from being scheduled). Yields
-    // to the next runnable ring-3 process, or back to the kernel
-    // main loop if none. When input arrives, the input ISR's stdin
-    // push path calls `wake_ring3_blocked_on_input`, moving us to
-    // `ring3_ready`. The kernel main loop's `save_kernel_and_resume_ring3`
-    // (or another ring-3 yielding) picks us up; our SYSCALL re-fires
-    // and this handler re-runs from the top — re-checks the queue,
+    // No input is available. Block the user entity in the shared scheduler.
+    // When input arrives, the stdin push path makes it runnable in the same
+    // queue as kernel workers; our SYSCALL re-fires when selected and
+    // this handler re-runs from the top — re-checks the queue,
     // pops the now-present bytes, returns.
     unsafe {
         crate::userland::switch::block_current_ring3_and_yield(
@@ -1084,9 +1079,9 @@ pub fn fork_handler(args: &mut SyscallArgs) -> i64 {
     // U7: fork now returns immediately to the parent without iretq'ing
     // into the child. The child is inserted into PROCESS_TABLE with a
     // populated `saved_user_state` (rax=0, parent's other GPRs +
-    // RIP/RFLAGS/RSP at fork's SYSCALL boundary) and marked
-    // `ring3_ready`. The next timer preempt (or any block-and-yield)
-    // gives the child a slice; the scheduler round-robins between
+    // RIP/RFLAGS/RSP at fork's SYSCALL boundary) and marks its tagged
+    // entity ready. The next timer preempt (or any block-and-yield)
+    // gives the child a slice; the shared scheduler round-robins between
     // parent and child thereafter.
     //
     // The parent's `fork()` syscall returns `child_pid` here; the
@@ -1964,8 +1959,8 @@ pub fn wait4_handler(args: &mut SyscallArgs) -> i64 {
     }
 
     // U6: no matching zombie, has children, no WNOHANG → block until
-    // a child exits (which calls `wake_ring3_blocked_on_child` →
-    // moves us to ring3_ready) and re-fire the SYSCALL. The helper
+    // a child exits (which calls `wake_ring3_blocked_on_child` and marks
+    // our scheduler entity ready) and re-fire the SYSCALL. The helper
     // captures the current user state with RIP rewound 2 bytes (the
     // SYSCALL instruction's length), marks us blocked, and yields to
     // the next runnable ring-3 process via `resume_ring3`. When we
@@ -4375,6 +4370,9 @@ pub fn setitimer_handler(args: &mut SyscallArgs) -> i64 {
             (value_ticks != 0).then(|| now.saturating_add(value_ticks));
         old
     });
+    if let Some(pid) = crate::userland::lifecycle::current_user_pid() {
+        crate::userland::lifecycle::sync_real_timer(pid);
+    }
 
     if old_ptr != 0 {
         return crate::userland::usercopy::write_unaligned(old_ptr, &old_value)

@@ -40,7 +40,10 @@ fn network_worker() {
     loop {
         let _changed = poll_once();
         let sleep_ticks = with_stack_mut(NetworkStack::next_poll_ticks).unwrap_or(10);
-        crate::process::sleep_ticks(sleep_ticks);
+        crate::process::sleep_ticks_with_contract(
+            sleep_ticks,
+            Some(crate::process::entity::LatencyContract::new(2)),
+        );
     }
 }
 

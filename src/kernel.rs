@@ -73,6 +73,8 @@ pub fn init(boot_info: &'static mut BootInfo) {
 
     debug_info!("[boot] scheduler");
     crate::process::init_scheduler();
+    crate::process::timer::init();
+    crate::process::timer::start_service();
 
     // Linux ABI syscall surface (write/exit_group, plus the broader set in
     // U9) is dispatched directly from `userland::abi::syscall_dispatch` —
@@ -755,12 +757,6 @@ pub fn run() -> ! {
     debug_info!("Entering idle loop...");
 
     loop {
-        // === PREEMPTION HANDLING ===
-        // Check if timer requested a context switch
-        if interrupts::check_and_clear_preemption() {
-            crate::process::handle_preemption();
-        }
-
         // === WATCHDOG HANDLING ===
         // Check if timer detected a hung process that needs to be killed
         {
@@ -807,33 +803,10 @@ pub fn run() -> ! {
             }
         }
 
-        crate::userland::lifecycle::process_due_real_timers();
-        crate::userland::lifecycle::process_expired_sleeps();
-
-        // === PROCESS SCHEDULING ===
-        // Run any ready processes (GUIShell, spawned commands, etc.)
-        // Processes that call sleep_ticks/sleep_until_event return here
+        // Dispatch one kernel-thread or user-process entity from the single
+        // fair queue. Direct cross-privilege switches keep normal execution
+        // out of this main-loop fallback after the first dispatch.
         crate::process::try_run_scheduled_processes();
-
-        // U8: dispatch any ring-3 process that's Ready. Saves the
-        // kernel main loop's context into KERNEL_CONTEXT and diverges
-        // into resume_ring3; control returns here when the ring-3
-        // process yields back via yield_to_kernel_main_loop (which
-        // switch_to_context's KERNEL_CONTEXT). Only fires when no
-        // ring-3 process is currently loaded (the loaded one is
-        // either running or running its kernel-side syscall handler).
-        if crate::userland::lifecycle::current_user_pid().is_none() {
-            if let Some(pid) = crate::userland::lifecycle::pop_next_ring3() {
-                unsafe {
-                    crate::userland::switch::save_kernel_and_resume_ring3(
-                        pid,
-                        &raw mut crate::arch::x86_64::preemption::KERNEL_CONTEXT,
-                    );
-                }
-                // Resumed via KERNEL_CONTEXT restoration. Continue
-                // the main-loop iteration below.
-            }
-        }
 
         // U10: input + terminal output + render moved to the
         // `compositor` kernel thread (spawned at boot). Main loop
@@ -841,7 +814,7 @@ pub fn run() -> ! {
 
         // === IDLE ===
         // Halt CPU until next interrupt (keyboard, mouse, timer).
-        // Timer fires at 100 Hz, waking processes from sleep_queue.
+        // Timer fires at 100 Hz and only marks bounded deferred timer work.
         x86_64::instructions::hlt();
     }
 }

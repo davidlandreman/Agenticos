@@ -18,7 +18,7 @@
 //!   format constraints.
 //!
 //! Lock discipline: each generator takes at most one subsystem lock at
-//! a time (`PROCESS_TABLE`, `SCHEDULER` via `try_lock`, `NETWORK` via
+//! a time (`PROCESS_TABLE`, `SCHEDULER`, `NETWORK` via
 //! `net::…` helpers) and returns owned data. The per-process RSS count
 //! walks page tables via `with_memory_mapper` *inside* the
 //! `PROCESS_TABLE` critical section — safe because the mapper is not a
@@ -206,8 +206,8 @@ fn root_listing() -> Vec<(String, bool)> {
 // Per-process snapshots
 // ---------------------------------------------------------------
 
-/// Owned view of one ring-3 process, collected under a single
-/// `PROCESS_TABLE` critical section.
+/// Owned view of one ring-3 process. Scheduler state is captured before the
+/// `PROCESS_TABLE` critical section so the subsystem locks never nest.
 pub struct Ring3Snapshot {
     pub pid: u32,
     pub ppid: u32,
@@ -235,13 +235,16 @@ fn comm_of(exe_path: &Option<String>, cmdline: &[String]) -> String {
 }
 
 fn snapshot_one(
-    g: &crate::userland::lifecycle::ProcessTable,
     pid: u32,
     p: &crate::userland::lifecycle::Process,
+    run_state: Option<crate::process::entity::RunState>,
 ) -> Ring3Snapshot {
     let state = if p.exit_kind != ExitKind::None {
         'Z'
-    } else if g.current_user_pid == Some(pid) || g.ring3_ready.iter().any(|&r| r == pid) {
+    } else if matches!(
+        run_state,
+        Some(crate::process::entity::RunState::Ready | crate::process::entity::RunState::Running)
+    ) {
         'R'
     } else {
         'S'
@@ -283,9 +286,12 @@ pub fn ring3_snapshot(pid: u32) -> Option<Ring3Snapshot> {
     if pid == KERNEL_PID {
         return None;
     }
+    let run_state = crate::process::scheduler::SCHEDULER
+        .lock()
+        .entity_state(crate::process::entity::EntityId::UserProcess(pid));
     let g = PROCESS_TABLE.lock();
     let p = g.by_pid.get(&pid)?;
-    Some(snapshot_one(&g, pid, p))
+    Some(snapshot_one(pid, p, run_state))
 }
 
 // ---------------------------------------------------------------
@@ -332,12 +338,14 @@ fn gen_uptime() -> Vec<u8> {
 }
 
 fn gen_loadavg() -> Vec<u8> {
-    let (running, total, last_pid) = {
+    let running = crate::process::scheduler::SCHEDULER
+        .lock()
+        .runnable_user_count();
+    let (total, last_pid) = {
         let g = PROCESS_TABLE.lock();
-        let running = g.ring3_ready.len() + usize::from(g.current_user_pid.is_some());
         let total = g.by_pid.len().saturating_sub(1); // minus sentinel
         let last_pid = g.by_pid.keys().max().copied().unwrap_or(0);
-        (running, total, last_pid)
+        (total, last_pid)
     };
     // No load-average bookkeeping — report zeros plus the honest
     // running/total counts Linux puts in fields 4 and 5.
