@@ -53,8 +53,8 @@
 use crate::arch::x86_64::preemption::InterruptStackFrame;
 use crate::arch::x86_64::syscall::SyscallArgs;
 use crate::userland::lifecycle::{
-    current_user_pid, mark_ring3_blocked, pop_next_ring3, restore_user_cpu_state,
-    save_user_cpu_state, set_current_user_pid, Process, Ring3BlockReason, PROCESS_TABLE,
+    current_user_pid, mark_ring3_blocked, restore_user_cpu_state, save_user_cpu_state,
+    set_current_user_pid, Process, Ring3BlockReason, PROCESS_TABLE,
 };
 use crate::userland::user_state::UserState;
 
@@ -65,12 +65,9 @@ use crate::userland::user_state::UserState;
 /// `kernel_save`), control resumes at the caller of this function as
 /// if it returned normally.
 ///
-/// Used by the kernel main loop / idle path to dispatch a
-/// `ring3_ready` process while keeping the kernel main loop's stack
-/// frame live for the yield-back. Without this, calling
-/// `resume_ring3` directly from the main loop would diverge and
-/// `yield_to_kernel_main_loop`'s `switch_to_context(KERNEL_CONTEXT)`
-/// would jump to a stale RIP/RSP.
+/// Used by a kernel entity or the idle/main context when the unified selector
+/// chooses a user entity. The caller's stack frame remains live until that
+/// kernel entity is scheduled again or the system returns to idle.
 ///
 /// `kernel_save` must outlive the entire ring-3 execution chain.
 /// Practical caller: pass `&raw mut KERNEL_CONTEXT` (the static
@@ -120,17 +117,12 @@ extern "C" fn dispatch_resume_ring3_diverging(pid: u32) -> ! {
     unsafe { resume_ring3(pid) }
 }
 
-/// U8: diverge from a ring-3 syscall handler back to the kernel main
-/// loop. Used when a ring-3 process must yield (block, exit) and
-/// there is no other ring-3 process runnable to switch into.
+/// Diverge from a ring-3 handler to the saved idle/main context when the
+/// unified queue has no runnable entity.
 ///
 /// Restores the kernel main loop's saved `CpuContext` (the one
-/// captured by `try_run_scheduled_processes`' invocation of
-/// `switch_context_full_restore`), so control resumes in the kernel
-/// main loop right after that call. The kernel main loop then loops
-/// back and re-invokes the scheduler, which picks up any newly-Ready
-/// kernel threads or runs `idle` (which itself checks ring3_ready
-/// and `resume_ring3`s if any).
+/// captured by the initial/idle dispatcher), so control resumes immediately
+/// after that dispatch call and can halt until an event makes work runnable.
 ///
 /// The dying syscall handler's kernel-stack frame is abandoned. The
 /// process's `Process.kernel_stack` is the storage; nothing dangles
@@ -145,16 +137,11 @@ extern "C" fn dispatch_resume_ring3_diverging(pid: u32) -> ! {
 /// `save_kernel_and_resume_ring3`). Both hold for the standard U8
 /// ring-3 block paths.
 ///
-/// Clears `current_user_pid` before diverging — the kernel main loop
-/// reads it to decide whether to dispatch the next ring3_ready
-/// process. If we leave it set to the blocked process, the main loop
-/// thinks ring 3 is still running and never wakes the queued ones.
+/// Clears `current_user_pid` before diverging because no user address space is
+/// loaded after the switch.
 pub unsafe fn yield_to_kernel_main_loop() -> ! {
     use core::sync::atomic::Ordering;
-    // U10/bugfix: no ring-3 process is loaded on this CPU anymore —
-    // we're about to switch back to the kernel main loop. The next
-    // ring-3 dispatch comes from `save_kernel_and_resume_ring3`,
-    // which gates on `current_user_pid().is_none()`.
+    // No ring-3 process is loaded on this CPU after the switch.
     crate::userland::lifecycle::set_current_user_pid(None);
     crate::process::set_in_spawned_process(false);
     crate::arch::x86_64::context_switch::switch_to_context(
@@ -164,6 +151,26 @@ pub unsafe fn yield_to_kernel_main_loop() -> ! {
     let _ = Ordering::Release;
     loop {
         x86_64::instructions::hlt();
+    }
+}
+
+/// Dispatch once from the unified run queue after the current user process
+/// blocked or exited and its state has already been saved.
+pub unsafe fn dispatch_after_user_stop() -> ! {
+    // Keep the guard out of the match scrutinee: Rust extends a scrutinee
+    // temporary through the selected arm, and both resume paths synchronize
+    // scheduler state before diverging.
+    let next = {
+        crate::process::scheduler::SCHEDULER
+            .lock()
+            .schedule_entity()
+    };
+    match next {
+        Some(crate::process::entity::EntityId::UserProcess(pid)) => resume_ring3(pid),
+        Some(crate::process::entity::EntityId::KernelThread(pid)) => {
+            crate::arch::x86_64::context_switch::resume_kernel_thread(pid)
+        }
+        None => yield_to_kernel_main_loop(),
     }
 }
 
@@ -313,13 +320,15 @@ pub fn block_current_ring3_on_io(token: u64) {
             .kernel_continuation
             .get_or_insert_with(|| Box::new(crate::process::CpuContext::default()));
         let pointer = (&mut **saved) as *mut crate::process::CpuContext;
-        table.ring3_ready.retain(|ready| *ready != pid);
         table
             .ring3_blocked
             .insert(pid, Ring3BlockReason::WaitingForBlockIo { token });
         table.current_user_pid = None;
         pointer
     };
+    crate::process::scheduler::SCHEDULER
+        .lock()
+        .block_entity(crate::process::entity::EntityId::UserProcess(pid));
 
     crate::process::set_in_spawned_process(false);
     unsafe {
@@ -413,12 +422,12 @@ pub unsafe extern "sysv64" fn resume_ring3_asm(
 ///    the `SYSCALL` instruction (`0F 05`, 2 bytes) — the kernel then
 ///    re-enters the same syscall handler, which can re-check its
 ///    condition and either return normally or block again.
-/// 2. Mark the process blocked with `reason` (removes from
-///    `ring3_ready`, inserts into `ring3_blocked`).
-/// 3. Pop the next runnable ring-3 process from `ring3_ready` and
-///    [`resume_ring3`] it. If empty, [`yield_to_kernel_main_loop`].
+/// 2. Mark the process blocked with `reason` and remove its entity from the
+///    unified run queue.
+/// 3. Select the next tagged entity and resume either privilege class. If the
+///    queue is empty, return to the saved idle/main context.
 ///
-/// The wake side moves us from `ring3_blocked` to `ring3_ready` (e.g.,
+/// The wake side makes the tagged entity ready (e.g.,
 /// [`crate::userland::lifecycle::wake_ring3_blocked_on_child`] or
 /// [`crate::userland::lifecycle::wake_ring3_blocked_on_input`]).
 /// The kernel's idle process (or another ring-3 yielding) eventually
@@ -505,14 +514,5 @@ pub unsafe fn block_current_ring3_and_yield(args: &SyscallArgs, reason: Ring3Blo
     }
     mark_ring3_blocked(me, reason);
 
-    // U8: prefer to switch into another runnable ring-3 process; if
-    // none, yield back to the kernel main loop. The idle process /
-    // kernel-thread scheduler will eventually pick up state changes
-    // (e.g., a forked sibling becoming Ready) and resume_ring3 us
-    // later via the idle-loop's ring3_ready check.
-    if let Some(next) = pop_next_ring3() {
-        resume_ring3(next)
-    } else {
-        yield_to_kernel_main_loop()
-    }
+    dispatch_after_user_stop()
 }

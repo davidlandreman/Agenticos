@@ -58,7 +58,7 @@ impl TextWindow {
     pub fn process_console_output(&mut self) {
         let (lines, pending) = crate::window::console::take_output();
         if !lines.is_empty() || !pending.is_empty() {
-            crate::debug_info!(
+            crate::debug_trace!(
                 "TextWindow: Processing {} lines and pending: '{}'",
                 lines.len(),
                 pending
@@ -69,12 +69,12 @@ impl TextWindow {
             self.suppress_invalidation = true;
 
             for (i, line) in lines.iter().enumerate() {
-                crate::debug_info!("  Line {}: '{}'", i, line);
+                crate::debug_trace!("  Line {}: '{}'", i, line);
                 self.write_str(&line);
                 self.newline();
             }
             if !pending.is_empty() {
-                crate::debug_info!("  Pending: '{}'", pending);
+                crate::debug_trace!("  Pending: '{}'", pending);
                 self.write_str(&pending);
             }
 
@@ -376,7 +376,7 @@ impl Window for TextWindow {
             self.incremental_updates && self.base.needs_repaint() && !self.dirty_cells.is_empty();
 
         if can_incremental {
-            crate::debug_info!(
+            crate::debug_trace!(
                 "TextWindow: Incremental update for {} dirty cells",
                 self.dirty_cells.len()
             );
@@ -475,7 +475,7 @@ impl Window for TextWindow {
         // Full repaint — either we have no internal dirty state to
         // optimize, or we were called for an external reason and must
         // redraw everything in clip.
-        crate::debug_info!("TextWindow: Full repaint");
+        crate::debug_trace!("TextWindow: Full repaint");
 
         // Clear dirty cells since we're doing a full repaint
         self.dirty_cells.clear();
@@ -528,7 +528,7 @@ impl Window for TextWindow {
             }
         }
 
-        crate::debug_info!("TextWindow: Drew {} non-space characters", char_count);
+        crate::debug_trace!("TextWindow: Drew {} non-space characters", char_count);
 
         // Draw cursor if focused
         if self.has_focus() && self.cursor_x < self.cols && self.cursor_y < self.rows {

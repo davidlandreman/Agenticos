@@ -1,36 +1,120 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-/// Mint a blank 64 MiB FAT32 image at `path` if it doesn't already
+/// Mint a blank 64 MiB ext2 image at `path` if it doesn't already
 /// exist. Subsequent `./build.sh` runs reuse the on-disk file so /data
 /// state survives reboots; passing `--clean` to build.sh removes the
-/// target dir (and with it data.img) for a fresh start.
+/// target dir (and with it data-ext2.img) for a fresh start.
 fn ensure_data_image(path: &Path, size: u64) {
     if path.exists() {
+        validate_ext2_image(path);
         return;
     }
     use std::fs::OpenOptions;
-    use std::io::{Seek, SeekFrom};
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(true)
         .open(path)
-        .expect("create data.img");
-    file.set_len(size).expect("set_len data.img");
-    file.seek(SeekFrom::Start(0)).expect("seek data.img");
-    let opts = fatfs::FormatVolumeOptions::new()
-        .fat_type(fatfs::FatType::Fat32)
-        .volume_label(*b"AGENTIC-DAT");
-    fatfs::format_volume(&mut file, opts).expect("format data.img as FAT32");
+        .expect("create data-ext2.img");
+    file.set_len(size).expect("set_len data-ext2.img");
+    drop(file);
+    let mke2fs = find_e2fs_tool("AGENTICOS_MKE2FS", "mke2fs");
+    let status = Command::new(&mke2fs)
+        .args([
+            "-q",
+            "-t",
+            "ext2",
+            "-F",
+            "-b",
+            "4096",
+            "-I",
+            "256",
+            "-L",
+            "AGENTIC-DATA",
+            "-O",
+            "none,filetype,sparse_super,large_file",
+            "-E",
+            "lazy_itable_init=0",
+        ])
+        .arg(path)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", mke2fs.display()));
+    if !status.success() {
+        let _ = std::fs::remove_file(path);
+        panic!(
+            "{} failed while formatting {}",
+            mke2fs.display(),
+            path.display()
+        );
+    }
+    validate_ext2_image(path);
     eprintln!(
-        "Minted blank {} MiB FAT32 at {}",
+        "Minted blank {} MiB ext2 at {}",
         size / 1024 / 1024,
         path.display()
     );
 }
 
+fn find_e2fs_tool(env_name: &str, tool: &str) -> PathBuf {
+    if let Some(path) = std::env::var_os(env_name).map(PathBuf::from) {
+        if path.is_file() {
+            return path;
+        }
+        panic!("{env_name} is not an executable file: {}", path.display());
+    }
+    let mut candidates = vec![PathBuf::from(tool)];
+    for prefix in ["/opt/homebrew/opt/e2fsprogs", "/usr/local/opt/e2fsprogs"] {
+        candidates.push(PathBuf::from(prefix).join("sbin").join(tool));
+        candidates.push(PathBuf::from(prefix).join("bin").join(tool));
+    }
+    for candidate in candidates {
+        if candidate.components().count() == 1 {
+            if Command::new(&candidate).arg("-V").output().is_ok() {
+                return candidate;
+            }
+        } else if candidate.is_file() {
+            return candidate;
+        }
+    }
+    panic!(
+        "{tool} is required to create AgenticOS's ext2 data image. Install e2fsprogs (macOS: brew install e2fsprogs) or set {env_name}."
+    );
+}
+
+fn validate_ext2_image(path: &Path) {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).expect("open ext2 data image for validation");
+    let mut superblock = [0u8; 1024];
+    file.seek(SeekFrom::Start(1024))
+        .expect("seek ext2 superblock");
+    file.read_exact(&mut superblock)
+        .expect("read ext2 superblock");
+    let le32 =
+        |offset: usize| u32::from_le_bytes(superblock[offset..offset + 4].try_into().unwrap());
+    assert_eq!(
+        &superblock[56..58],
+        &[0x53, 0xef],
+        "{} is not ext2",
+        path.display()
+    );
+    let compat = le32(92);
+    let incompat = le32(96);
+    let ro_compat = le32(100);
+    assert_eq!(compat, 0, "unsupported ext2 compat mask {compat:#x}");
+    assert_eq!(
+        incompat, 0x2,
+        "unsupported ext2 incompat mask {incompat:#x}"
+    );
+    assert_eq!(
+        ro_compat, 0x3,
+        "unsupported ext2 ro-compat mask {ro_compat:#x}"
+    );
+}
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=AGENTICOS_MKE2FS");
     // Detect build profile (debug or release)
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
 
@@ -124,11 +208,11 @@ fn main() {
 
         eprintln!("✓ Bootloader images created successfully!");
 
-        // Phase C U7: mint the /data FAT32 image on first build. Lives
+        // Mint the /data ext2 image on first build. Lives
         // alongside the boot images so `cargo clean` wipes it (clean
         // slate); otherwise persists across kernel rebuilds so /data
         // contents survive recompiles.
-        let data_path = out_dir.join("data.img");
+        let data_path = out_dir.join("data-ext2.img");
         ensure_data_image(&data_path, 64 * 1024 * 1024);
         println!("cargo:rustc-env=DATA_IMAGE={}", data_path.display());
     } else {

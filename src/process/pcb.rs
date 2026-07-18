@@ -21,6 +21,7 @@ impl WakeEvents {
     /// No events
     pub const NONE: Self = Self(0);
     /// Timer expired (for timed sleeps)
+    #[expect(dead_code, reason = "legacy event bit retained for task diagnostics")]
     pub const TIMER: Self = Self(1 << 0);
     /// Input available (keyboard/stdin)
     pub const INPUT: Self = Self(1 << 1);
@@ -98,6 +99,8 @@ pub enum BlockReason {
     WaitingForRing3Exit(u32),
     /// Waiting for an asynchronous block request completion token.
     WaitingForBlockIo(u64),
+    /// Deferred timer heap has no due work.
+    WaitingForTimerWork,
 }
 
 /// Process Control Block - complete state for a process
@@ -133,12 +136,6 @@ pub struct ProcessControlBlock {
     /// Total CPU time consumed (in timer ticks)
     pub total_runtime: u64,
 
-    /// Runtime at last CPU % sample (for delta calculation)
-    pub runtime_last_sample: u64,
-
-    /// Cached CPU percentage (0-100)
-    pub cpu_percentage: u8,
-
     /// Why the process is blocked (if state == Blocked)
     pub block_reason: Option<BlockReason>,
 
@@ -173,8 +170,6 @@ impl ProcessControlBlock {
             stdin_buffer: Arc::new(Mutex::new(VecDeque::new())),
             time_slice_remaining: 0,
             total_runtime: 0,
-            runtime_last_sample: 0,
-            cpu_percentage: 0,
             block_reason: None,
             entry_fn: None,
             wake_at_tick: None,

@@ -1,7 +1,7 @@
 //! Block device abstraction for storage devices
 
 /// Trait for block devices (storage devices that read/write in blocks)
-pub trait BlockDevice {
+pub trait BlockDevice: Sync {
     /// Read blocks from the device
     ///
     /// # Arguments
@@ -30,7 +30,6 @@ pub trait BlockDevice {
     }
 
     /// Check if the device is read-only
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn is_read_only(&self) -> bool {
         false
     }

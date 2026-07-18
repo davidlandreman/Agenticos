@@ -87,7 +87,7 @@ impl Splitter {
             second_min: 0,
             divider_position,
             pressed: false,
-            bg_color: crate::window::PALETTE_BORDER,
+            bg_color: crate::window::theme::controls::palette().border,
         }
     }
 

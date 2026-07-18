@@ -2,6 +2,7 @@
 
 mod aero;
 mod classic;
+pub mod controls;
 
 use core::sync::atomic::{AtomicU8, Ordering};
 

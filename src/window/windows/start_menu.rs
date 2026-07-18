@@ -38,6 +38,8 @@ pub enum StartMenuAction {
     Notepad,
     Painting,
     Calc,
+    GlGame,
+    TaskManager,
     Run,
     ShutDown,
 }
@@ -94,6 +96,14 @@ pub const START_MENU_PROGRAM_ITEMS: &[StartMenuItem] = &[
     StartMenuItem::Action {
         label: "Calc",
         action: StartMenuAction::Calc,
+    },
+    StartMenuItem::Action {
+        label: "GL Arena",
+        action: StartMenuAction::GlGame,
+    },
+    StartMenuItem::Action {
+        label: "Task Manager",
+        action: StartMenuAction::TaskManager,
     },
 ];
 

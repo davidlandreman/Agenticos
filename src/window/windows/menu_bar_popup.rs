@@ -2,16 +2,17 @@
 //!
 //! A popup window that displays menu items with labels, shortcuts, and separators.
 
-use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
 use crate::window::event::MouseEventType;
+use crate::window::theme::controls;
 use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
 use alloc::vec::Vec;
 
 use super::base::WindowBase;
 use super::menu_bar::MenuItemDef;
 
-/// A popup window for displaying menu bar dropdowns
+/// A popup window for displaying menu bar dropdowns. Surface colors come
+/// from the active theme via `theme::controls`.
 pub struct MenuBarPopup {
     /// Base window functionality
     base: WindowBase,
@@ -21,10 +22,6 @@ pub struct MenuBarPopup {
     hover_index: Option<usize>,
     /// ID of the menu bar that owns this popup
     menu_bar_id: WindowId,
-    /// Background color
-    bg_color: Color,
-    /// Text color
-    text_color: Color,
     /// Pending selection (item index) to be processed
     pending_selection: Option<usize>,
 }
@@ -42,8 +39,6 @@ impl MenuBarPopup {
             items,
             hover_index: None,
             menu_bar_id,
-            bg_color: crate::window::PALETTE_CONTENT_BG,
-            text_color: crate::window::PALETTE_TEXT,
             pending_selection: None,
         }
     }
@@ -102,13 +97,10 @@ impl Window for MenuBarPopup {
         let x = bounds.x;
         let y = bounds.y;
         let width = bounds.width;
-        let height = bounds.height;
 
-        // Background
-        device.fill_rect(x, y, width, height, self.bg_color);
-
-        // Border
-        device.draw_rect(x, y, width, height, crate::window::PALETTE_BORDER);
+        // Themed popup surface: background + border.
+        controls::draw_menu_surface(device, bounds);
+        let palette = controls::palette();
 
         // Draw items
         let mut item_y: i32 = y + 2;
@@ -121,20 +113,17 @@ impl Window for MenuBarPopup {
 
                     // Highlight if hovered
                     if self.hover_index == Some(i) {
-                        device.fill_rect(
-                            x + 2,
-                            item_y,
-                            width - 4,
-                            item_height,
-                            crate::window::PALETTE_HIGHLIGHT_BG,
+                        controls::draw_selection(
+                            device,
+                            Rect::new(x + 2, item_y, width.saturating_sub(4), item_height),
                         );
                     }
 
                     // Draw label
                     let text_color = if self.hover_index == Some(i) {
-                        crate::window::PALETTE_HIGHLIGHT_TEXT
+                        palette.selection_text
                     } else {
-                        self.text_color
+                        palette.text
                     };
 
                     device.draw_text(
@@ -148,9 +137,9 @@ impl Window for MenuBarPopup {
                     // Draw shortcut if present
                     if let Some(shortcut) = shortcut {
                         let shortcut_color = if self.hover_index == Some(i) {
-                            Color::new(200, 200, 200)
+                            palette.selection_text
                         } else {
-                            Color::new(128, 128, 128)
+                            palette.disabled_text
                         };
                         let shortcut_x = x + width as i32
                             - 8
@@ -168,7 +157,7 @@ impl Window for MenuBarPopup {
                 }
                 MenuItemDef::Separator => {
                     item_y += 4;
-                    device.fill_rect(x + 4, item_y, width - 8, 1, Color::new(180, 180, 180));
+                    device.fill_rect(x + 4, item_y, width - 8, 1, palette.border);
                     item_y += 4;
                 }
             }

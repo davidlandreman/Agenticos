@@ -3,7 +3,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::graphics::scene::{
-    backdrop_box_radii, backdrop_halo, inflate_rect, LayerEffect, SceneFrame,
+    backdrop_box_radii, backdrop_halo, inflate_rect, LayerEffect, LayerSource, SceneFrame,
 };
 use crate::graphics::surface::{PremulArgb, Surface, SurfaceDesc, SurfaceId};
 use crate::window::Rect;
@@ -110,9 +110,15 @@ impl CompositionEngine for CpuCompositionEngine {
                 if !layer.visible || layer.opacity == 0 {
                     continue;
                 }
+                let surface_id = match layer.source {
+                    LayerSource::Canonical(id) => id,
+                    LayerSource::VirglClient(_) => {
+                        return Err(CompositionError::UnsupportedClientSurface)
+                    }
+                };
                 let source = surfaces
-                    .get(&layer.surface_id)
-                    .ok_or(CompositionError::MissingSurface(layer.surface_id))?;
+                    .get(&surface_id)
+                    .ok_or(CompositionError::MissingSurface(surface_id))?;
                 let layer_bounds = layer.output_bounds();
                 let Some(draw) = work_rect
                     .intersection(&layer_bounds)

@@ -91,6 +91,14 @@ impl<'a> BlockDevice for PartitionBlockDevice<'a> {
     fn name(&self) -> &str {
         "Partition"
     }
+
+    fn is_read_only(&self) -> bool {
+        self.device.is_read_only()
+    }
+
+    fn flush(&self) -> Result<(), &'static str> {
+        self.device.flush()
+    }
 }
 
 /// MBR partition table entry

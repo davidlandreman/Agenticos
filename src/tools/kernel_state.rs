@@ -97,7 +97,6 @@ fn snapshot_processes() -> Value {
                 "state": process_state_name(&p.state),
                 "total_runtime_ticks": p.total_runtime,
                 "stack_size": p.stack_size,
-                "cpu_percentage": p.cpu_percentage,
             })
         })
         .collect();

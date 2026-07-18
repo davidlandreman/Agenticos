@@ -1,6 +1,6 @@
 # `src/fs/` — Filesystem Layer
 
-Read-only filesystem stack: block devices → MBR partition table → VFS → FAT12/16/32 with `Arc`-based file handles.
+Filesystem stack: checked block I/O → VFS → ext2/FAT/tmpfs/overlay with mount-pinned `Arc` file handles.
 
 ## Key files
 
@@ -9,6 +9,8 @@ Read-only filesystem stack: block devices → MBR partition table → VFS → FA
 - `vfs.rs` — virtual filesystem layer with mount management and filesystem detection.
 - `file_handle.rs` — `Arc`-based `File` and directory handle API.
 - `fs_manager.rs` — high-level filesystem operations that the rest of the kernel calls.
+- `block_io.rs` — checked byte and filesystem-block I/O over sector devices.
+- `ext2/` — writable ext2 parser and allocator, including indirect blocks, directories, hard links, symlinks, sparse files, and Unix metadata.
 - `fat/` — FAT12/16/32 implementation. `filesystem.rs` (FAT operations + long-name-aware `walk_directory`), `boot_sector.rs` (BPB parsing), `fat_table.rs` (cluster chain following), `directory.rs` (directory entry parsing — `DirectoryIterator` is the SFN-only low-level primitive), `lfn.rs` (VFAT LFN decoding + lowercase-attr-bit short-name formatting), `types.rs`.
 
 ## Architecture (bottom up)
@@ -17,7 +19,7 @@ Read-only filesystem stack: block devices → MBR partition table → VFS → FA
 Block device (src/drivers/block.rs, ide.rs)
   → MBR partition table (partition.rs)
     → VFS / mount manager (vfs.rs)
-      → Concrete filesystem (fat/)
+      → Concrete filesystem (ext2/, fat/, tmpfs/, overlay/)
         → File handles (file_handle.rs, fs_manager.rs)
 ```
 
@@ -39,10 +41,9 @@ Cleanup is automatic when the last `Arc` reference drops.
 
 ## Current limitations
 
-- **FAT mkdir / rmdir / rename on `/data` deferred.** The directory-mutation primitives (`.`/`..` entry generation, empty-dir check, cross-dir rename with proper flush ordering) are not implemented. Userland sees `UnsupportedOperation` for these on `/data`. Single-level file create/write/unlink works.
 - **No subdirectory traversal yet** in some higher-level APIs (FAT subdir reads work via `walk_directory`; some legacy paths still assume single-level).
-- **FAT only on disk.** No other on-disk filesystem implementation.
-- **No real `fsck`.** Crash recovery is best-effort per the per-op flush ordering. Dirty-bit detection refuses writable mount on detected uncleanness; the actual repair sweep is a follow-up.
+- **No in-kernel fsck.** Dirty ext2 volumes mount read-only unless the explicit developer override is set. Use `scripts/fsck-data.sh`; repairs are host-side and opt-in.
+- **Supported ext profile is deliberately narrow.** ext3 journals and ext4-only features are rejected. The generated image uses `filetype`, `sparse_super`, and `large_file` only.
 
 See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for the full plan.
 
@@ -51,7 +52,8 @@ See `docs/plans/2026-05-16-005-feat-filesystem-write-and-long-names-plan.md` for
 ```
   /          → overlay(upper = Tmpfs, lower = boot FAT partition)
   /host      → FAT (vvfat-backed, read-only)
-  /data      → FAT32 (writable, `agenticos-data` VirtIO disk, persistent)
+  /data      → ext2 (writable, `agenticos-data` VirtIO disk, persistent)
+  /legacy-data → optional old FAT image (read-only, `agenticos-legacy` VirtIO disk)
   /bin/<applet> → synthesized at syscall layer (src/userland/bin_namespace.rs)
 ```
 
@@ -61,7 +63,7 @@ Writes under `/` go through copy-up into tmpfs; persistence happens via the `syn
 
 Copy-up is size-capped at 64 KiB (`overlay::filesystem::MAX_COPY_UP_BYTES`) to bound the heap-burst risk — bigger files surface as `EFBIG`.
 
-Writes directly to `/data/<file>` skip the overlay and go straight to the FAT writer — persistent and immediate, no `sync` needed.
+Writes directly to `/data/<file>` skip the overlay and go straight to ext2. `fsync`, `fdatasync`, or `sync` checkpoints the filesystem clean bit and flushes the device.
 
 ## tmpfs and overlay
 

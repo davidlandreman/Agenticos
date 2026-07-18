@@ -180,8 +180,18 @@ if [ "$RUN_QEMU" = true ]; then
             sleep 0.2
         done
     ) &
-    DATA_IMAGE="${AGENTICOS_DATA_IMAGE:-target/bootloader/data.img}"
+    DATA_IMAGE="${AGENTICOS_DATA_IMAGE:-target/bootloader/data-ext2.img}"
     echo "💽 Persistent data disk: $DATA_IMAGE"
+    FORCE_DIRTY_MOUNT="${AGENTICOS_FORCE_DIRTY_MOUNT:-0}"
+    case "$FORCE_DIRTY_MOUNT" in 0|1) ;; *) echo "❌ AGENTICOS_FORCE_DIRTY_MOUNT must be 0 or 1" >&2; exit 2 ;; esac
+    LEGACY_DATA_ARGS=()
+    if [ -n "${AGENTICOS_LEGACY_DATA_IMAGE:-}" ]; then
+        LEGACY_DATA_ARGS=(
+            -drive "format=raw,file=$AGENTICOS_LEGACY_DATA_IMAGE,if=none,id=agenticos-legacy,readonly=on"
+            -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-legacy,serial=agenticos-legacy"
+        )
+        echo "📦 Legacy FAT data disk: $AGENTICOS_LEGACY_DATA_IMAGE -> /legacy-data (read-only)"
+    fi
     if [ "${AGENTICOS_NETWORK:-on}" = "off" ]; then
         NETWORK_ARGS=(-nic none)
         echo "🌐 Networking disabled (AGENTICOS_NETWORK=off)"
@@ -199,6 +209,7 @@ if [ "$RUN_QEMU" = true ]; then
         -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-host,serial=agenticos-host"
         -drive "format=raw,file=$DATA_IMAGE,if=none,id=agenticos-data"
         -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-data,serial=agenticos-data"
+        -fw_cfg "name=opt/agenticos/force_dirty_mount,string=$FORCE_DIRTY_MOUNT"
         -serial stdio
         -chardev "socket,id=rpc,path=$RPC_SOCK,server=on,wait=off"
         -serial chardev:rpc
@@ -209,6 +220,7 @@ if [ "$RUN_QEMU" = true ]; then
         -m "$QEMU_MEMORY"
     )
     QEMU_ARGS+=("${NETWORK_ARGS[@]}")
+    QEMU_ARGS+=("${LEGACY_DATA_ARGS[@]}")
     # On macOS the cocoa backend has no initial-scale flag, so open the window
     # then enlarge it to AGENTICOS_QEMU_SCALE (default 4x) via a backgrounded
     # AppleScript helper. zoom-to-fit=on (set by qemu-compositor.sh) scales the

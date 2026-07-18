@@ -1,10 +1,10 @@
-//! Phase C U8 + U9 tests — FAT writes against the live `/data` disk.
+//! Phase C U8 + U9 tests — FAT helpers plus writable `/data` behavior.
 //!
 //! These exercise the low-level `FatTable` write surface directly via
-//! the kernel's VirtIO block device, plus higher-level pieces from U9 as
-//! they land. Tests use QEMU `snapshot=on` for `/data` so writes are
-//! discarded at QEMU exit — each test boot starts from the same
-//! freshly-`mkfs.fat`'d image.
+//! the kernel's VirtIO block device when `/data` contains FAT, plus
+//! higher-level namespace pieces from U9. Current default images use ext2,
+//! so the raw FAT-table cases skip after detecting the non-FAT boot sector.
+//! Tests use QEMU `snapshot=on` so writes are discarded at QEMU exit.
 //!
 //! Direct FAT-entry tests restore the entries they touch. Directory
 //! mutation tests use the production VFS-mounted `/data` instance and
@@ -31,11 +31,23 @@ fn read_boot_sector(dev: &VirtioBlockDevice) -> [u8; 512] {
     buf
 }
 
+fn parse_fat_boot_sector(bytes: &[u8; 512]) -> Option<&BootSector> {
+    match BootSector::from_bytes(bytes) {
+        Ok(boot_sector) => Some(boot_sector),
+        Err(_) => {
+            debug_info!("  /data is not FAT; skipping raw FAT-table test");
+            None
+        }
+    }
+}
+
 fn test_fat_write_entry_round_trip() {
     debug_info!("U8: write_entry round-trip on /data cluster 100");
     let dev = data_block_device();
     let bs_bytes = read_boot_sector(&dev);
-    let boot_sector = BootSector::from_bytes(&bs_bytes).expect("parse BPB");
+    let Some(boot_sector) = parse_fat_boot_sector(&bs_bytes) else {
+        return;
+    };
     let fat_type = boot_sector.fat_type().expect("FAT type");
     let table = FatTable::new(&dev, boot_sector, fat_type);
 
@@ -62,7 +74,9 @@ fn test_fat_write_entry_mirrors_both_fats() {
     use crate::drivers::block::BlockDevice;
     let dev = data_block_device();
     let bs_bytes = read_boot_sector(&dev);
-    let boot_sector = BootSector::from_bytes(&bs_bytes).expect("parse BPB");
+    let Some(boot_sector) = parse_fat_boot_sector(&bs_bytes) else {
+        return;
+    };
     let fat_type = boot_sector.fat_type().expect("FAT type");
     let table = FatTable::new(&dev, boot_sector, fat_type);
 
@@ -129,7 +143,9 @@ fn test_fat_find_free_cluster() {
     debug_info!("U8: find_free_cluster on a fresh /data");
     let dev = data_block_device();
     let bs_bytes = read_boot_sector(&dev);
-    let boot_sector = BootSector::from_bytes(&bs_bytes).expect("parse BPB");
+    let Some(boot_sector) = parse_fat_boot_sector(&bs_bytes) else {
+        return;
+    };
     let fat_type = boot_sector.fat_type().expect("FAT type");
     let table = FatTable::new(&dev, boot_sector, fat_type);
 
@@ -149,7 +165,9 @@ fn test_fat_dirty_bit_read_write_cycle() {
     debug_info!("U8 / C-2: dirty bit read/write cycle on /data");
     let dev = data_block_device();
     let bs_bytes = read_boot_sector(&dev);
-    let boot_sector = BootSector::from_bytes(&bs_bytes).expect("parse BPB");
+    let Some(boot_sector) = parse_fat_boot_sector(&bs_bytes) else {
+        return;
+    };
     let fat_type = boot_sector.fat_type().expect("FAT type");
     let table = FatTable::new(&dev, boot_sector, fat_type);
 
@@ -175,7 +193,9 @@ fn test_fat_extend_chain_then_free() {
     debug_info!("U8: extend a fresh chain by 3 clusters, follow it, free it");
     let dev = data_block_device();
     let bs_bytes = read_boot_sector(&dev);
-    let boot_sector = BootSector::from_bytes(&bs_bytes).expect("parse BPB");
+    let Some(boot_sector) = parse_fat_boot_sector(&bs_bytes) else {
+        return;
+    };
     let fat_type = boot_sector.fat_type().expect("FAT type");
     let table = FatTable::new(&dev, boot_sector, fat_type);
 
@@ -235,6 +255,12 @@ fn unlink_if_present(path: &str) {
     }
 }
 
+fn data_mount_is_fat() -> bool {
+    crate::fs::vfs::get_vfs()
+        .find_filesystem("/data")
+        .is_some_and(|(filesystem, _)| filesystem.name().starts_with("FAT"))
+}
+
 fn test_u9_short_name_simple_8_3() {
     // No collision, name fits 8.3 strictly.
     let sfn = generate_short_name("FOO.TXT", 1);
@@ -268,6 +294,10 @@ fn test_u9_lfn_slot_count() {
 }
 
 fn test_u9_create_and_unlink_short_name() {
+    if !data_mount_is_fat() {
+        debug_info!("  /data is not FAT; skipping FAT namespace test");
+        return;
+    }
     const PATH: &str = "/data/FW-SHORT.TXT";
     unlink_if_present(PATH);
     let file = crate::fs::File::create(PATH).expect("create short-name fixture");
@@ -282,6 +312,10 @@ fn test_u9_create_and_unlink_short_name() {
 }
 
 fn test_u9_create_long_name_writes_lfn_run() {
+    if !data_mount_is_fat() {
+        debug_info!("  /data is not FAT; skipping FAT namespace test");
+        return;
+    }
     const PATH: &str = "/data/fat-write-notes.markdown";
     const UPPER_PATH: &str = "/data/FAT-WRITE-NOTES.MARKDOWN";
     unlink_if_present(PATH);
@@ -295,6 +329,10 @@ fn test_u9_create_long_name_writes_lfn_run() {
 }
 
 fn test_u9_write_then_read_round_trip() {
+    if !data_mount_is_fat() {
+        debug_info!("  /data is not FAT; skipping FAT namespace test");
+        return;
+    }
     const PATH: &str = "/data/fat-write-roundtrip.txt";
     unlink_if_present(PATH);
     let data = b"hello, persistent disk\n";
@@ -311,6 +349,10 @@ fn test_u9_write_then_read_round_trip() {
 }
 
 fn test_u9_short_name_cache_no_redundant_scans() {
+    if !data_mount_is_fat() {
+        debug_info!("  /data is not FAT; skipping FAT namespace test");
+        return;
+    }
     // After populating the cache once, repeated creates with the
     // same basename prefix should not require additional directory
     // scans. We can't easily measure scan count directly, but we

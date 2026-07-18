@@ -839,15 +839,126 @@ fn test_u11_pointer_flip_is_atomic() {
     }
 }
 
-fn test_data_mkdir_returns_unsupported() {
-    // U10 explicitly defers mkdir on FAT to a follow-up. Userland
-    // should see ENOSYS / UnsupportedOperation, not a misleading
-    // success.
-    let result = crate::fs::vfs::vfs_mkdir("/data/some-dir");
-    assert!(matches!(
-        result,
-        Err(crate::fs::filesystem::FilesystemError::UnsupportedOperation)
-    ));
+fn test_data_ext2_directory_mutations() {
+    let filesystem = crate::fs::vfs::get_vfs()
+        .find_filesystem("/data")
+        .expect("/data resolvable")
+        .0;
+    assert_eq!(filesystem.name(), "ext2");
+    let _ = crate::fs::vfs::vfs_unlink("/data/ext2-dir/renamed.txt");
+    let _ = crate::fs::vfs::vfs_unlink("/data/ext2-dir/nested.txt");
+    let _ = crate::fs::vfs::vfs_rmdir("/data/ext2-dir");
+    crate::fs::vfs::vfs_mkdir("/data/ext2-dir").expect("mkdir on ext2");
+    let file = crate::fs::File::create("/data/ext2-dir/nested.txt").expect("nested create");
+    file.write(b"nested ext2 data").expect("nested write");
+    drop(file);
+    crate::fs::vfs::vfs_rename("/data/ext2-dir/nested.txt", "/data/ext2-dir/renamed.txt")
+        .expect("rename on ext2");
+    crate::fs::vfs::vfs_unlink("/data/ext2-dir/renamed.txt").expect("unlink nested");
+    crate::fs::vfs::vfs_rmdir("/data/ext2-dir").expect("rmdir on ext2");
+}
+
+fn test_data_ext2_truncate_links_and_sparse_files() {
+    for path in [
+        "/data/ext2-target.txt",
+        "/data/ext2-hardlink.txt",
+        "/data/ext2-symlink.txt",
+        "/data/ext2-sparse.bin",
+    ] {
+        let _ = crate::fs::vfs::vfs_unlink(path);
+    }
+
+    let target = crate::fs::File::create("/data/ext2-target.txt").expect("create target");
+    target.write(b"abcdefgh").expect("write target");
+    target.truncate(3).expect("truncate shrink");
+    drop(target);
+    assert_eq!(
+        crate::fs::File::open_read("/data/ext2-target.txt")
+            .expect("reopen target")
+            .read_to_string()
+            .expect("read target"),
+        "abc"
+    );
+
+    crate::fs::vfs::vfs_link("/data/ext2-target.txt", "/data/ext2-hardlink.txt")
+        .expect("hard link");
+    let linked =
+        crate::fs::vfs::vfs_unix_metadata("/data/ext2-target.txt").expect("linked metadata");
+    assert_eq!(linked.links, 2);
+    crate::fs::vfs::vfs_symlink("ext2-target.txt", "/data/ext2-symlink.txt").expect("symlink");
+    assert_eq!(
+        crate::fs::vfs::vfs_read_link("/data/ext2-symlink.txt").expect("readlink"),
+        b"ext2-target.txt"
+    );
+    let symlink_metadata = crate::fs::vfs::vfs_symlink_metadata("/data/ext2-symlink.txt")
+        .expect("lstat-style metadata");
+    assert_eq!(symlink_metadata.mode & 0o170000, 0o120000);
+    assert_eq!(symlink_metadata.size, b"ext2-target.txt".len() as u64);
+    assert_eq!(symlink_metadata.blocks_512, 0);
+    assert_eq!(
+        crate::fs::File::open_read("/data/ext2-symlink.txt")
+            .expect("follow symlink")
+            .read_to_string()
+            .expect("read symlink target"),
+        "abc"
+    );
+
+    let sparse = crate::fs::File::create("/data/ext2-sparse.bin").expect("create sparse");
+    sparse.truncate(16 * 1024).expect("sparse extend");
+    let sparse_meta = sparse.metadata().expect("sparse metadata");
+    assert_eq!(sparse_meta.size, 16 * 1024);
+    assert_eq!(sparse_meta.blocks_512, 0);
+    drop(sparse);
+    let sparse_bytes = crate::fs::File::open_read("/data/ext2-sparse.bin")
+        .expect("open sparse")
+        .read_to_vec()
+        .expect("read sparse");
+    assert_eq!(sparse_bytes.len(), 16 * 1024);
+    assert!(sparse_bytes.iter().all(|byte| *byte == 0));
+
+    crate::fs::vfs::vfs_unlink("/data/ext2-target.txt").expect("unlink original");
+    assert_eq!(
+        crate::fs::File::open_read("/data/ext2-hardlink.txt")
+            .expect("hard link survives")
+            .read_to_string()
+            .expect("read hard link"),
+        "abc"
+    );
+    for path in [
+        "/data/ext2-hardlink.txt",
+        "/data/ext2-symlink.txt",
+        "/data/ext2-sparse.bin",
+    ] {
+        crate::fs::vfs::vfs_unlink(path).expect("cleanup ext2 link fixture");
+    }
+    crate::fs::vfs::vfs_sync_all().expect("sync ext2 fixtures");
+}
+
+fn test_data_ext2_indirect_block_boundaries() {
+    let file = crate::fs::File::create("/data/ext2-indirect.bin").expect("create indirect file");
+    let block_size = file.metadata().expect("indirect metadata").block_size as u64;
+    let fanout = block_size / 4;
+    let locations = [
+        (12 * block_size, 0x51u8),
+        ((12 + fanout) * block_size, 0x62),
+        ((12 + fanout + fanout * fanout) * block_size, 0x73),
+    ];
+    for (offset, marker) in locations {
+        file.seek(offset).expect("seek into indirect range");
+        file.write(&[marker]).expect("write indirect marker");
+    }
+    let metadata = file.metadata().expect("allocated-block metadata");
+    assert_eq!(metadata.blocks_512, 9 * (block_size / 512));
+    drop(file);
+
+    let reopened = crate::fs::File::open_read("/data/ext2-indirect.bin").expect("reopen indirect");
+    for (offset, marker) in locations {
+        let mut byte = [0u8; 1];
+        assert_eq!(reopened.read_at(offset, &mut byte).expect("read marker"), 1);
+        assert_eq!(byte[0], marker);
+    }
+    drop(reopened);
+    crate::fs::vfs::vfs_unlink("/data/ext2-indirect.bin").expect("unlink indirect file");
 }
 
 fn test_data_mount_root_dir_enumerable() {
@@ -960,7 +1071,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_data_create_write_read_round_trip,
         &test_data_unlink,
         &test_data_write_larger_than_one_cluster,
-        &test_data_mkdir_returns_unsupported,
+        &test_data_ext2_directory_mutations,
+        &test_data_ext2_truncate_links_and_sparse_files,
+        &test_data_ext2_indirect_block_boundaries,
         &test_u11_serialize_deserialize_round_trip,
         &test_u11_corrupted_blob_rejected,
         &test_u11_flush_then_restore_on_live_data,

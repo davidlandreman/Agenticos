@@ -1,6 +1,6 @@
 use crate::userland::lifecycle::{cleanup_user_process, frame_is_user, AbnormalExit};
 use crate::{debug_error, debug_info, debug_trace, println};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin::Mutex;
@@ -561,19 +561,9 @@ extern "x86-interrupt" fn alignment_check_handler(
 /// Timer tick counter (atomic for safe access)
 pub static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Flag indicating that a context switch should occur
-/// This is set by the timer interrupt when a process's time slice expires
-pub static PREEMPTION_PENDING: AtomicBool = AtomicBool::new(false);
-
 /// Get the current timer tick count
 pub fn get_timer_ticks() -> u64 {
     TIMER_TICKS.load(Ordering::Relaxed)
-}
-
-/// Check and clear the preemption pending flag
-/// Returns true if preemption was pending
-pub fn check_and_clear_preemption() -> bool {
-    PREEMPTION_PENDING.swap(false, Ordering::SeqCst)
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

@@ -58,6 +58,7 @@ pub type FileResult<T> = Result<T, FileError>;
 /// Internal file handle data
 struct FileHandleInner {
     path: String,
+    filesystem: &'static dyn crate::fs::filesystem::Filesystem,
     mode: FileMode,
     position: u64,
     size: u64,
@@ -77,17 +78,17 @@ pub struct File {
 impl File {
     /// Open a file at the given path with the specified mode
     pub fn open(path: &str, mode: FileMode) -> FileResult<Arc<File>> {
-        let _vfs = get_vfs();
-
-        // Use VFS to open the file
-        let fs_handle =
-            crate::fs::vfs::vfs_open(path, mode).map_err(|e| FileError::FilesystemError(e))?;
+        let (filesystem, rel_path) = get_vfs().find_filesystem(path).ok_or(FileError::NotFound)?;
+        let fs_handle = filesystem
+            .open(rel_path, mode)
+            .map_err(FileError::FilesystemError)?;
 
         // Get file metadata
         let metadata = crate::fs::vfs::vfs_stat(path).map_err(|e| FileError::FilesystemError(e))?;
 
         let inner = FileHandleInner {
             path: String::from(path),
+            filesystem,
             mode,
             position: 0,
             size: metadata.size,
@@ -122,14 +123,14 @@ impl File {
     /// Read data into the provided buffer
     /// Returns the number of bytes read
     pub fn read(&self, buffer: &mut [u8]) -> FileResult<usize> {
-        let (path, mut fs_handle) = {
+        let (filesystem, mut fs_handle) = {
             let inner = self.inner.lock();
             if !inner.is_open {
                 return Err(FileError::HandleClosed);
             }
             let handle = inner.fs_handle.as_ref().ok_or(FileError::HandleClosed)?;
             (
-                inner.path.clone(),
+                inner.filesystem,
                 crate::fs::filesystem::FileHandle {
                     inode: handle.inode,
                     position: handle.position,
@@ -139,11 +140,8 @@ impl File {
             )
         };
 
-        // Get VFS and find filesystem for this path
-        let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
-
-        // Perform the read
+        // Filesystem reads may park the current task on DMA completion. Do not
+        // carry this spin lock across that scheduler handoff.
         let bytes_read = filesystem
             .read(&mut fs_handle, buffer)
             .map_err(|e| FileError::FilesystemError(e))?;
@@ -163,7 +161,7 @@ impl File {
     /// handler, where attempting a heap allocation is both unnecessary and a
     /// potential recursive/deadlock hazard.
     pub fn read_at(&self, offset: u64, buffer: &mut [u8]) -> FileResult<usize> {
-        let (path, mut fs_handle) = {
+        let (filesystem, mut fs_handle) = {
             let inner = self.inner.lock();
             if !inner.is_open {
                 return Err(FileError::HandleClosed);
@@ -173,7 +171,7 @@ impl File {
             }
             let handle = inner.fs_handle.as_ref().ok_or(FileError::HandleClosed)?;
             (
-                inner.path.clone(),
+                inner.filesystem,
                 crate::fs::filesystem::FileHandle {
                     inode: handle.inode,
                     position: offset,
@@ -182,8 +180,6 @@ impl File {
                 },
             )
         };
-        let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
         filesystem
             .seek(&mut fs_handle, offset)
             .map_err(FileError::FilesystemError)?;
@@ -195,7 +191,7 @@ impl File {
     /// Write data from the provided buffer
     /// Returns the number of bytes written
     pub fn write(&self, buffer: &[u8]) -> FileResult<usize> {
-        let (path, mut fs_handle) = {
+        let (filesystem, mut fs_handle) = {
             let inner = self.inner.lock();
             if !inner.mode.write {
                 return Err(FileError::AccessDenied);
@@ -205,7 +201,7 @@ impl File {
             }
             let handle = inner.fs_handle.as_ref().ok_or(FileError::HandleClosed)?;
             (
-                inner.path.clone(),
+                inner.filesystem,
                 crate::fs::filesystem::FileHandle {
                     inode: handle.inode,
                     position: handle.position,
@@ -215,11 +211,8 @@ impl File {
             )
         };
 
-        // Get VFS and find filesystem for this path
-        let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
-
-        // Perform the write
+        // Writes can block on the same completion path as reads, so release
+        // the descriptor lock until the device has finished.
         let bytes_written = filesystem
             .write(&mut fs_handle, buffer)
             .map_err(|e| FileError::FilesystemError(e))?;
@@ -303,24 +296,13 @@ impl File {
     pub fn seek(&self, position: u64) -> FileResult<u64> {
         let mut inner = self.inner.lock();
 
-        // Check bounds
-        if position > inner.size {
-            return Err(FileError::SeekOutOfBounds);
-        }
-
         // Check if file is still open
         if !inner.is_open {
             return Err(FileError::HandleClosed);
         }
 
-        // Clone the path to avoid borrowing conflict
-        let path = inner.path.clone();
-
+        let filesystem = inner.filesystem;
         let fs_handle = inner.fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
-
-        // Get VFS and find filesystem for this path
-        let vfs = get_vfs();
-        let (filesystem, _) = vfs.find_filesystem(&path).ok_or(FileError::NotFound)?;
 
         // Perform the seek
         let new_position = filesystem
@@ -341,6 +323,50 @@ impl File {
         self.inner.lock().size
     }
 
+    pub fn metadata(&self) -> FileResult<crate::fs::filesystem::UnixMetadata> {
+        let inner = self.inner.lock();
+        let handle = inner.fs_handle.as_ref().ok_or(FileError::HandleClosed)?;
+        match inner.filesystem.handle_metadata(handle) {
+            Ok(metadata) => Ok(metadata),
+            Err(FilesystemError::UnsupportedOperation) => inner
+                .filesystem
+                .unix_metadata(
+                    crate::fs::vfs::get_vfs()
+                        .find_filesystem(&inner.path)
+                        .map(|(_, rel)| rel)
+                        .unwrap_or(&inner.path),
+                )
+                .map_err(FileError::FilesystemError),
+            Err(error) => Err(FileError::FilesystemError(error)),
+        }
+    }
+
+    pub fn truncate(&self, size: u64) -> FileResult<()> {
+        let mut inner = self.inner.lock();
+        if !inner.mode.write {
+            return Err(FileError::AccessDenied);
+        }
+        let filesystem = inner.filesystem;
+        let handle = inner.fs_handle.as_mut().ok_or(FileError::HandleClosed)?;
+        filesystem
+            .truncate(handle, size)
+            .map_err(FileError::FilesystemError)?;
+        inner.size = size;
+        if inner.position > size {
+            inner.position = size;
+        }
+        Ok(())
+    }
+
+    pub fn sync(&self, data_only: bool) -> FileResult<()> {
+        let inner = self.inner.lock();
+        let handle = inner.fs_handle.as_ref().ok_or(FileError::HandleClosed)?;
+        inner
+            .filesystem
+            .sync_handle(handle, data_only)
+            .map_err(FileError::FilesystemError)
+    }
+
     /// Get the file path
     pub fn path(&self) -> String {
         self.inner.lock().path.clone()
@@ -357,14 +383,11 @@ impl File {
 
         if inner.is_open {
             if let Some(fs_handle) = inner.fs_handle.take() {
-                // Get VFS and find filesystem for this path
-                let vfs = get_vfs();
-                if let Some((filesystem, _)) = vfs.find_filesystem(&inner.path) {
-                    let mut handle = fs_handle;
-                    filesystem
-                        .close(&mut handle)
-                        .map_err(|e| FileError::FilesystemError(e))?;
-                }
+                let mut handle = fs_handle;
+                inner
+                    .filesystem
+                    .close(&mut handle)
+                    .map_err(FileError::FilesystemError)?;
             }
             inner.is_open = false;
         }

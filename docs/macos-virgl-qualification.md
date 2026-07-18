@@ -81,8 +81,11 @@ pinned host passes preflight and the guest passes deterministic clear,
 premultiplied-alpha/readback, lifecycle, and production backdrop-blur gates.
 The dedicated integration runner repeats lifecycle creation and teardown 100
 times. The production fixtures compare ordered, clipped, translucent layers
-and masked/stacked/partial-damage blur with the CPU reference. A listed GL
-device or advertised feature bit alone still cannot enable GPU mode.
+and masked/stacked/partial-damage blur with the CPU reference. They also render
+an asymmetric logical GL client into a content-well layer, pin its top-left
+orientation and clipping, and verify depth ordering when a hardware depth
+format exists (or painter ordering when the capset has none). A listed GL device
+or advertised feature bit alone still cannot enable GPU mode.
 
 Run the complete hardware-backed gate with:
 
@@ -126,3 +129,8 @@ An explicit Aero request stays on qualified VirGL and renders blurred glass;
 `auto` also selects Aero after the full production blur gate succeeds.
 The custom bottle has no QEMU `user` network backend, so the workspace launch
 disables networking; this is independent of VirGL.
+
+The currently pinned ANGLE capset reports no supported depth-attachment
+format. `GLGAME.ELF` therefore uses the bounded frontend depth-order fallback
+reported by `gui_gl_get_info`; this affects only client geometry ordering and
+does not move the final game texture out of VirGL.

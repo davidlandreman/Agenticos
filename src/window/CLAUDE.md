@@ -16,14 +16,26 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   scene, and uses either the CPU reference engine or the qualified VirGL engine.
   CPU output presents through the boot framebuffer or VirtIO-GPU 2D; VirGL
   presents its host texture directly and uses the VirtIO hardware cursor.
-- `theme/` — boot-selected frame theme. `classic` renders Windows 98 "Windows
-  Standard" chrome — a raised 3D bevel border, a horizontal caption gradient
-  (navy→blue active, grey inactive), an 8pt-ish bold caption font, and a raised
-  ButtonFace close button with a bitmap ✕; the bevel does not follow focus, only
-  the caption does. `aero` supplies translucent rounded glass, shadows, and
-  backdrop blur metadata for retained composition. Caption-button geometry for
-  both is data-driven via `FrameMetrics.button_*`, shared by painting and
-  `manager.rs` hit-testing through `theme::close_button_rect`.
+- `theme/` — boot-selected frame + control theme. `classic` renders Windows 98
+  "Windows Standard" chrome — a raised 3D bevel border, a horizontal caption
+  gradient (navy→blue active, grey inactive), an 8pt-ish bold caption font, and
+  a raised ButtonFace close button with a bitmap ✕; the bevel does not follow
+  focus, only the caption does. `aero` supplies translucent rounded glass,
+  shadows, and backdrop blur metadata for retained composition. Caption-button
+  geometry for both is data-driven via `FrameMetrics.button_*`, shared by
+  painting and `manager.rs` hit-testing through `theme::close_button_rect`.
+  `controls.rs` is the single source of truth for *control* surfaces: a
+  theme-dispatched `ControlPalette` (`controls::palette()`) plus drawing
+  helpers (`draw_button` with Normal/Hot/Pressed/Disabled states,
+  `draw_field`, `draw_raised_panel`, `draw_selection`, `draw_menu_surface`).
+  Every widget in `windows/` delegates its surface rendering there — Classic
+  gets Win98 bevels and navy selection, Aero gets rounded gradient buttons
+  (blue border + glow on the default button) and `#CBE8F6` selection. The
+  former `PALETTE_*` constants in `mod.rs` were replaced by this palette. The
+  resolved theme is also published to ring-3 as `/etc/theme` (see
+  `src/userland/etc.rs::publish_theme`), which `userland/libs/gui`'s `theme`
+  module mirrors. Normative color tables live in
+  `docs/plans/2026-07-18-003-feat-theme-aware-controls-plan.md`.
 - `screen.rs` — virtual screen abstraction (today there is one physical display).
 - `console.rs` — kernel `print!` macro output buffer.
 - `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.
@@ -33,7 +45,9 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `windows/remote_surface.rs` — server-decorated client surface for ring-3
   apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
   events to the owning PID's GUI queue. Its enclosing frame title can be
-  updated through the ownership-checked ring-3 GUI ABI.
+  updated through the ownership-checked ring-3 GUI ABI. Under strict VirGL it
+  may instead own a logical GL client ID whose front texture is inserted as an
+  external retained layer clipped to the content well.
 - `adapters/` — `GraphicsDevice` implementations: `direct_framebuffer.rs` (fast, used for cursor) and `double_buffered.rs` (smooth).
 - `dialogs/` — kernel dialog-window scaffolding, including the non-blocking Run dialog. Run keeps input state outside the manager registry and launches submitted text through zsh `-c`.
 
@@ -48,7 +62,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | `ContainerWindow` | Generic parent | For grouping children. |
 | `StartMenuWindow` | GUIShell Start popup | Windows 95/98 ButtonFace panels, blue rotated `AgenticOS` banner, typed disabled/separator/action rows, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
 | `TaskbarTrayWindow` | Right-side notification tray | Recessed classic panel with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
-| `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer; close requests are delivered to the client. |
+| `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer or one attached VirGL client texture; close requests are delivered to the client. |
 
 All windows derive from `WindowBase` for consistent parent-child tracking.
 
@@ -61,7 +75,7 @@ Boot lands in GUI mode:
 - `TerminalWindow` inside the frame.
 - Bottom taskbar with a Start button, dynamically-sized frame buttons, and a
   recessed right-side UTC date/time tray. Start opens the classic menu;
-  Programs launches the five pinned apps, Run opens a modal command field, and
+  Programs launches the six pinned apps (including GL Arena), Run opens a modal command field, and
   Shut Down is an explicit safe placeholder until a clean power-off path
   exists. Task-button layout reserves the tray span and never overlaps it.
 

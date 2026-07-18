@@ -52,9 +52,13 @@ pub mod network_userland;
 #[cfg(feature = "test")]
 pub mod path_bar_tests;
 #[cfg(feature = "test")]
+pub mod procfs;
+#[cfg(feature = "test")]
 pub mod progress_bar_tests;
 #[cfg(feature = "test")]
 pub mod retained_scene;
+#[cfg(feature = "test")]
+pub mod scheduler;
 #[cfg(feature = "test")]
 pub mod scroll_view_tests;
 #[cfg(feature = "test")]
@@ -125,6 +129,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("fat_write", fat_write::get_tests),
     ("tools", tools::get_tests),
     ("userland", userland::get_tests),
+    ("procfs", procfs::get_tests),
     ("gui_userland", gui_userland::get_tests),
     ("vm", vm::get_tests),
     ("compiler_compat", compiler_compat::get_tests),
@@ -171,9 +176,14 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("desktop_backing_store", desktop_backing_store::get_tests),
     ("surface_alpha", surface_alpha::get_tests),
     ("retained_scene", retained_scene::get_tests),
+    ("scheduler", scheduler::get_tests),
     ("composition_cpu", composition_cpu::get_tests),
     ("compositor_selection", compositor_selection::get_tests),
     ("window_theme", window_theme::get_tests),
+    (
+        "theme_controls",
+        crate::window::theme::controls::tests::get_tests,
+    ),
     ("virtio_gpu_protocol", virtio_gpu_protocol::get_tests),
     ("virgl_integration", virgl_integration::get_tests),
     ("filter", filter::get_tests),
@@ -282,6 +292,14 @@ pub fn run_tests() {
             modules_with_matches,
             total_skipped
         );
+    }
+    // QEMU's debug-exit device is an abrupt power-off from the guest's point
+    // of view. Checkpoint mounted filesystems first so non-snapshot ext2
+    // interoperability runs leave a clean image for host e2fsck.
+    if let Err(error) = crate::fs::vfs::vfs_sync_all() {
+        crate::debug_error!("final filesystem sync failed: {:?}", error);
+        exit_qemu_failed();
+        return;
     }
     exit_qemu_success();
 }

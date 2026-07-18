@@ -144,7 +144,12 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
   - Root directory listing with actual filesystem entries
   - File reading capabilities
   - Integration with shell for filesystem exploration
-- **Future Filesystem Support**: Ready for ext2/3/4, NTFS implementations
+- **Ext2 Filesystem**:
+  - Linux-compatible 1/2/4 KiB block formats and 128–256 byte inodes
+  - Writable files/directories, sparse files, truncate, rename, hard links, and symlinks
+  - Direct plus single/double/triple-indirect block allocation
+  - Real Unix inode/mode/link/block metadata through stat/fstat/lstat
+- **Future Filesystem Support**: ext3/ext4 journaling and NTFS remain deferred
 
 #### Basic IPv4 Network Stack ✓
 - **Status**: Complete (bounded first release)
@@ -199,9 +204,9 @@ AgenticOS is a Rust-based operating system targeting Intel x86-64 architecture. 
   - ✓ Filesystem abstraction layer implemented
   - ✓ FAT12/16/32 read support
   - ✓ Partition table support
-  - **TODO**: Write support for filesystems
-  - **TODO**: Long filename support
-  - **TODO**: Additional filesystem implementations (ext2/3/4)
+  - ✓ Writable tmpfs, overlay, FAT file writes, and ext2 namespace mutations
+  - ✓ VFAT long filename reads
+  - ✓ ext2 implementation (ext3/ext4-only features are rejected)
 - **7.2 Process Management**
   - Process abstraction
   - Process isolation

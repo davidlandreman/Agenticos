@@ -33,7 +33,7 @@ fn copy_title(pointer: u64, length: usize) -> Result<String, i64> {
 #[cfg(feature = "test")]
 pub const TEST_GUI_CALLER_PID: u32 = u32::MAX - 1;
 
-fn caller_pid() -> Result<u32, i64> {
+pub(crate) fn caller_pid() -> Result<u32, i64> {
     match crate::userland::lifecycle::current_user_pid() {
         Some(pid) => Ok(pid),
         None => {
@@ -217,6 +217,7 @@ pub fn gui_win_destroy_handler(args: &mut SyscallArgs) -> i64 {
         Ok(pid) => pid,
         Err(error) => return error,
     };
+    crate::userland::gui_gl::destroy_for_window(pid, args.rdi as u32);
     let record = match gui::take_window(pid, args.rdi as u32) {
         Some(record) => record,
         None => return ENOENT,
