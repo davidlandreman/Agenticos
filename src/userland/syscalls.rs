@@ -2099,22 +2099,20 @@ pub fn tgkill_handler(args: &mut SyscallArgs) -> i64 {
 /// User signal handler returned. Its `ret` instruction popped the
 /// `sa_restorer` address (placed at the top of the signal frame),
 /// which executed `mov $15, eax; syscall` and landed us here. By
-/// this point the user RSP — preserved across the syscall stub
-/// stash via `r12` — points just past the popped restorer, i.e. at
-/// the saved `UserState` we wrote when delivering the signal.
+/// this point the user RSP in the syscall stub's per-CPU scratch
+/// slot points just past the popped restorer, i.e. at the saved
+/// `UserState` we wrote when delivering the signal.
 ///
 /// Read the frame, restore the user state AND the pre-delivery
 /// signal mask, then `iretq` back to the pre-signal RIP/regs.
 pub fn rt_sigreturn_handler(_args: &mut SyscallArgs) -> i64 {
     use crate::userland::user_state::UserState;
-    // The syscall stub stashed user RSP into r12 before calling the
-    // dispatcher; r12 is callee-saved through Rust calls, so it
-    // still holds user RSP here. Read it back via inline asm before
-    // the compiler can clobber it.
-    let user_rsp: u64;
-    unsafe {
-        core::arch::asm!("mov {0}, r12", out(reg) user_rsp, options(nomem, preserves_flags, nostack));
-    }
+    // The SYSCALL entry stub records the authoritative user RSP in
+    // gs:[8] before switching to the kernel stack. Do not read live
+    // r12 here: the compiler may use that callee-saved register inside
+    // this Rust call chain, while the per-CPU scratch slot remains
+    // stable until iretq.
+    let user_rsp = unsafe { crate::userland::user_state::read_user_rsp() };
 
     // The frame layout matches `deliver_signal` below: at user_rsp
     // we wrote the saved UserState, immediately following the (now
@@ -2170,10 +2168,9 @@ pub fn rt_sigreturn_handler(_args: &mut SyscallArgs) -> i64 {
 /// return.
 ///
 /// SAFETY: `user_rsp_orig` must be a writable user-mapped address;
-/// we write 168 bytes downward from there. The caller (the dispatcher)
-/// reads it from the syscall stub's stashed `r12`, which is the
-/// user's stack pointer at the point of the syscall — guaranteed
-/// writable because the user just used it.
+/// we write 168 bytes downward from there. The caller reads it from
+/// the syscall stub's per-CPU user-RSP scratch slot, which contains
+/// the user's stack pointer at the point of the syscall.
 unsafe fn deliver_signal(
     signum: i32,
     action: crate::userland::signal::SigAction,
