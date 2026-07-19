@@ -82,6 +82,28 @@ pub fn maybe_inject_crash() {
             );
             panic!("strict scheduler corruption injection did not escalate");
         }
+        b"cont-signal-wake" => {
+            let token = 0xfeed_0001;
+            let pid = 0x7fff_ff01;
+            shadow::io::submitted(token, 0, pid, 1, 7, 4096);
+            shadow::io::completed(token, 0, 4096);
+            shadow::io::queue_wake(token, pid);
+            shadow::io::reject_generic_io_wake(pid, token);
+            panic!("strict continuation wake injection did not escalate");
+        }
+        b"cont-invalid-stack" => {
+            let token = 0xfeed_0002;
+            let pid = 0x7fff_ff02;
+            let mut context = crate::process::CpuContext::default();
+            context.rip = 0xffff_8000_0000_1000;
+            context.rsp = 0x1800;
+            shadow::continuation::allocate(pid, token, 0x1000, 0x2000);
+            shadow::continuation::published(pid, &context);
+            shadow::continuation::wake(pid, token);
+            context.rsp = 0;
+            shadow::continuation::dispatch(pid, &context);
+            panic!("strict invalid continuation stack injection did not escalate");
+        }
         _ => {}
     }
 }

@@ -39,17 +39,31 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
     let page = address & !0xfff;
     let context = crate::userland::lifecycle::with_current_group(|process| {
         let space = process.address_space.as_ref()?;
-        Some((space.l4_frame(), space.vmas().find(address)?.clone()))
+        Some((
+            space.l4_frame(),
+            space.vma_generation(),
+            space.vmas().find(address)?.clone(),
+        ))
     });
     // Kernel-only syscall tests intentionally use host stack buffers plus the
     // legacy explicit bounds hook. Real processes always have an AddressSpace.
-    let Some((l4, vma)) = context else {
+    let Some((l4, vma_generation, vma)) = context else {
         let bounds = crate::userland::abi::user_va_bounds().ok_or(EFAULT)?;
         return (bounds.start <= address && address < bounds.end)
             .then_some(())
             .ok_or(EFAULT);
     };
-    let outcome = ensure_user_page_inner(page, write, l4, &vma);
+    let pager = (crate::diagnostics::personality() != crate::diagnostics::Personality::Minimal)
+        .then(|| {
+            crate::diagnostics::shadow::pager::begin(
+                crate::userland::lifecycle::current_user_pid().unwrap_or(0),
+                l4.start_address().as_u64(),
+                vma_generation,
+                page,
+            )
+        })
+        .flatten();
+    let outcome = ensure_user_page_inner(page, write, l4, vma_generation, &vma, pager);
     let (reason, requested, actual) = match outcome {
         Ok((requested, actual)) => (PageInTerminalReason::PresentCommitted, requested, actual),
         Err(failure) => (failure.reason, failure.requested, failure.actual),
@@ -61,6 +75,14 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
         actual as u64,
         0,
     );
+    if let (Some(handle), Err(failure)) = (pager, outcome) {
+        crate::diagnostics::shadow::pager::abort(
+            handle,
+            failure.reason as u16,
+            failure.requested,
+            failure.actual,
+        );
+    }
     outcome.map(|_| ()).map_err(|_| EFAULT)
 }
 
@@ -68,7 +90,9 @@ fn ensure_user_page_inner(
     page: u64,
     write: bool,
     l4: x86_64::structures::paging::PhysFrame,
+    vma_generation: u64,
     vma: &Vma,
+    pager: Option<crate::diagnostics::shadow::pager::Handle>,
 ) -> Result<(usize, usize), PageInFailure> {
     let fail = |reason| PageInFailure {
         reason,
@@ -100,8 +124,14 @@ fn ensure_user_page_inner(
     .map_err(fail)?;
 
     let Some(frame) = private_frame else {
+        if let Some(handle) = pager {
+            crate::diagnostics::shadow::pager::observe_present(handle);
+        }
         return Ok((0, 0));
     };
+    if let Some(handle) = pager {
+        crate::diagnostics::shadow::pager::reserve_frame(handle, frame.start_address().as_u64());
+    }
     let physical = frame.start_address().as_u64();
     let Some(virtual_address) = crate::mm::memory::phys_to_virt(physical) else {
         release_private(frame);
@@ -181,6 +211,14 @@ fn ensure_user_page_inner(
             return Err(error);
         }
     };
+    if let Some(handle) = pager {
+        crate::diagnostics::shadow::pager::populated(
+            handle,
+            requested,
+            actual,
+            crate::diagnostics::wire::fnv1a64(destination),
+        );
+    }
 
     // Blocking I/O dropped every VM lock. Confirm the process still owns the
     // same L4 and semantically identical VMA before publishing the leaf.
@@ -189,6 +227,7 @@ fn ensure_user_page_inner(
             return false;
         };
         space.l4_frame() == l4
+            && space.vma_generation() == vma_generation
             && space
                 .vmas()
                 .find(page)
@@ -219,7 +258,12 @@ fn ensure_user_page_inner(
             .map_err(|_| PageInTerminalReason::MapFailed)
     });
     match committed {
-        Some(Ok(())) => Ok((requested, actual)),
+        Some(Ok(())) => {
+            if let Some(handle) = pager {
+                crate::diagnostics::shadow::pager::commit(handle);
+            }
+            Ok((requested, actual))
+        }
         Some(Err(reason)) => {
             release_private(frame);
             Err(PageInFailure {

@@ -451,6 +451,30 @@ unsafe fn serialize(
             let _ = super::shadow::scheduler::write_snapshot(section);
         },
     );
+    writer.section(
+        SectionKind::ShadowPager,
+        1,
+        super::shadow::pager::snapshot_flags(),
+        |section| {
+            let _ = super::shadow::pager::write_snapshot(section);
+        },
+    );
+    writer.section(
+        SectionKind::ShadowIo,
+        1,
+        super::shadow::io::snapshot_flags(),
+        |section| {
+            let _ = super::shadow::io::write_snapshot(section);
+        },
+    );
+    writer.section(
+        SectionKind::ShadowContinuation,
+        1,
+        super::shadow::continuation::snapshot_flags(),
+        |section| {
+            let _ = super::shadow::continuation::write_snapshot(section);
+        },
+    );
     if let Some(violation) = super::shadow::first() {
         writer.section(SectionKind::Violation, 1, 0, |section| {
             section.u32(violation.invariant_id);

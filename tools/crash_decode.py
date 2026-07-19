@@ -22,6 +22,9 @@ SECTION_NAMES = {
     3: "cpu_snapshots",
     5: "trace_tail",
     6: "shadow_scheduler",
+    7: "shadow_pager",
+    8: "shadow_io",
+    9: "shadow_continuation",
     10: "violation",
     11: "backtrace",
     12: "footer",
@@ -148,6 +151,9 @@ def parse_capsule(blob: bytes, offset: int = 0) -> tuple[dict[str, Any], int]:
     required = {1, 2, 3, 5, 11, 12}
     if report["run"].get("personality") in ("record", "strict"):
         required.add(6)
+        required.add(7)
+        required.add(8)
+        required.add(9)
     present = {section.kind for section in sections}
     report["missing"] = [SECTION_NAMES[kind] for kind in sorted(required - present)]
     trigger = report["trigger"]
@@ -273,6 +279,93 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
             "pending_operation": pending_operation,
             "pending_subject": f"0x{pending_subject:016x}",
             "entities": entities,
+        }
+    elif section.kind == 7:
+        if len(payload) < 4:
+            raise DecodeError("short pager shadow section")
+        count = struct.unpack_from("<I", payload)[0]
+        if len(payload) != 4 + count * 64:
+            raise DecodeError("invalid pager shadow layout")
+        transactions = []
+        cursor = 4
+        for _ in range(count):
+            values = struct.unpack_from("<QQQQQIBBHIIQ", payload, cursor)
+            cursor += 64
+            transactions.append(
+                {
+                    "generation": values[0],
+                    "l4": f"0x{values[1]:x}",
+                    "vma_generation": values[2],
+                    "page": f"0x{values[3]:x}",
+                    "frame": f"0x{values[4]:x}",
+                    "pid": values[5],
+                    "state": values[6],
+                    "terminal_reason": values[8],
+                    "requested": values[9],
+                    "actual": values[10],
+                    "checksum": f"0x{values[11]:016x}",
+                }
+            )
+        report.setdefault("shadow", {})["pager"] = {
+            "stable": not bool(section.flags & 1),
+            "transactions": transactions,
+        }
+    elif section.kind == 8:
+        if len(payload) < 4:
+            raise DecodeError("short I/O shadow section")
+        count = struct.unpack_from("<I", payload)[0]
+        if len(payload) != 4 + count * 40:
+            raise DecodeError("invalid I/O shadow layout")
+        requests = []
+        cursor = 4
+        for _ in range(count):
+            values = struct.unpack_from("<QQIIIHHBB6x", payload, cursor)
+            cursor += 40
+            requests.append(
+                {
+                    "token": values[0],
+                    "page_generation": values[1],
+                    "pid": values[2],
+                    "requested": values[3],
+                    "actual": values[4],
+                    "device": values[5],
+                    "queue_head": values[6],
+                    "state": values[7],
+                    "status": values[8],
+                }
+            )
+        report.setdefault("shadow", {})["io"] = {
+            "stable": not bool(section.flags & 1),
+            "requests": requests,
+        }
+    elif section.kind == 9:
+        if len(payload) < 4:
+            raise DecodeError("short continuation shadow section")
+        count = struct.unpack_from("<I", payload)[0]
+        if len(payload) != 4 + count * 64:
+            raise DecodeError("invalid continuation shadow layout")
+        continuations = []
+        cursor = 4
+        for _ in range(count):
+            values = struct.unpack_from("<QQQQQQQIBB2x", payload, cursor)
+            cursor += 64
+            continuations.append(
+                {
+                    "generation": values[0],
+                    "token": values[1],
+                    "rip": f"0x{values[2]:x}",
+                    "rsp": f"0x{values[3]:x}",
+                    "rflags": f"0x{values[4]:x}",
+                    "stack_bottom": f"0x{values[5]:x}",
+                    "stack_top": f"0x{values[6]:x}",
+                    "pid": values[7],
+                    "state": values[8],
+                    "wake_pending_before_publish": bool(values[9] & 1),
+                }
+            )
+        report.setdefault("shadow", {})["continuation"] = {
+            "stable": not bool(section.flags & 1),
+            "continuations": continuations,
         }
 
 

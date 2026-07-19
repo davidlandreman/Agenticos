@@ -31,6 +31,7 @@ pub enum AddressSpaceError {
 pub struct AddressSpace {
     l4_frame: PhysFrame<Size4KiB>,
     vmas: crate::userland::vm::VmaSet,
+    vma_generation: u64,
 }
 
 impl AddressSpace {
@@ -69,6 +70,7 @@ impl AddressSpace {
             Ok(AddressSpace {
                 l4_frame: frame,
                 vmas: crate::userland::vm::VmaSet::new(),
+                vma_generation: 1,
             })
         });
 
@@ -89,7 +91,12 @@ impl AddressSpace {
     }
 
     pub fn vmas_mut(&mut self) -> &mut crate::userland::vm::VmaSet {
+        self.vma_generation = self.vma_generation.wrapping_add(1).max(1);
         &mut self.vmas
+    }
+
+    pub fn vma_generation(&self) -> u64 {
+        self.vma_generation
     }
 
     pub fn initialize_vmas_from_image(
@@ -100,6 +107,7 @@ impl AddressSpace {
         use crate::userland::vm::{VmProt, Vma, VmaBacking};
 
         self.vmas = crate::userland::vm::VmaSet::new();
+        self.vma_generation = self.vma_generation.wrapping_add(1).max(1);
         for mapping in image.mappings() {
             let prot = match mapping.perms {
                 UserPerms::ReadExecute => VmProt::READ.union(VmProt::EXEC),

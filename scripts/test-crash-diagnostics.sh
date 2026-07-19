@@ -6,7 +6,9 @@ case "$CASE_NAME" in
     panic) MISSING_CPU=""; DIAGNOSTICS=record; INJECT=panic ;;
     missing-cpu) MISSING_CPU=3; DIAGNOSTICS=record; INJECT=panic ;;
     sched-duplicate) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=sched-duplicate ;;
-    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate" >&2; exit 2 ;;
+    cont-signal-wake) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cont-signal-wake ;;
+    cont-invalid-stack) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cont-invalid-stack ;;
+    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack" >&2; exit 2 ;;
 esac
 
 RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -40,12 +42,12 @@ import sys
 
 report = json.loads(pathlib.Path(sys.argv[1]).read_text())
 case = sys.argv[2]
-expected_kind = "invariant" if case == "sched-duplicate" else "fatal"
+expected_kind = "invariant" if case in ("sched-duplicate", "cont-signal-wake", "cont-invalid-stack") else "fatal"
 assert report["trigger"]["kind"] == expected_kind, report
 assert report["run"]["manifest_trusted"] is True, report
 assert not report["missing"], report
 assert report["cpu_masks"]["online"] == 0x0f, report
-if case in ("panic", "sched-duplicate"):
+if case in ("panic", "sched-duplicate", "cont-signal-wake", "cont-invalid-stack"):
     assert report["cpu_masks"]["captured"] == 0x0f, report
     assert len(report["cpus"]) == 4, report
     assert report["flags"] & 0x04 == 0, report
@@ -56,5 +58,11 @@ else:
 if case == "sched-duplicate":
     assert report["violation"]["id"] == 0x01000001, report
     assert report["trigger"]["signature"] == "INV-01000001", report
+if case == "cont-signal-wake":
+    assert report["violation"]["id"] == 0x05000004, report
+    assert report["trigger"]["signature"] == "INV-05000004", report
+if case == "cont-invalid-stack":
+    assert report["violation"]["id"] == 0x05000002, report
+    assert report["trigger"]["signature"] == "INV-05000002", report
 print(f"validated {report['trigger']['signature']}: {sys.argv[1]}")
 PY

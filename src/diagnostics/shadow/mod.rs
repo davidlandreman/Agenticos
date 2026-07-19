@@ -1,5 +1,8 @@
 //! Independently shaped, crash-readable diagnostic state machines.
 
+pub mod continuation;
+pub mod io;
+pub mod pager;
 pub mod scheduler;
 
 use core::cell::UnsafeCell;

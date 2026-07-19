@@ -33,6 +33,8 @@ Run expected-fatal smoke cases with:
 scripts/test-crash-diagnostics.sh panic
 scripts/test-crash-diagnostics.sh missing-cpu
 scripts/test-crash-diagnostics.sh sched-duplicate
+scripts/test-crash-diagnostics.sh cont-signal-wake
+scripts/test-crash-diagnostics.sh cont-invalid-stack
 ```
 
 The harness requires a non-success QEMU exit, a complete decodable capsule,
@@ -41,6 +43,10 @@ crashes must capture all four CPUs. `missing-cpu` deliberately withholds one
 NMI acknowledgement and requires a bounded, valid partial capsule instead of
 a hang. `sched-duplicate` requires strict mode to report `SCHED-001` as the
 first invariant.
+`cont-signal-wake` proves a generic wake cannot make a block-I/O continuation
+runnable and requires `CONT-004` as the first invariant.
+`cont-invalid-stack` attempts to dispatch a saved continuation outside its
+declared live kernel stack and requires `CONT-002` as the first invariant.
 
 ## Crash-path rules
 
@@ -76,3 +82,18 @@ Current invariant ownership is `0x01xx_xxxx` (`SCHED-*`). In record mode the
 first violation remains latched for later inspection; in strict mode the same
 first violation is the crash signature. Never clear or overwrite the latch to
 make a later symptom appear first.
+
+Lazy page-in and ring-3 VirtIO are represented as separate correlated
+transactions. Pager records include L4/VMA generation, page, private frame,
+requested/actual bytes, checksum, and typed terminal reason. I/O records keep
+device/queue head, exact token, waiter PID, completion status/length, wake
+publication/acceptance, and consumption as distinct facts. The active pager
+generation links a block request submitted during population back to its page
+transaction; zero means the request was not part of a page-in.
+
+Saved ring-3 kernel continuations have their own generation and retain the
+exact request token, owner PID, saved RIP/RSP/RFLAGS, and declared stack
+bounds. The shadow distinguishes save publication, exact wake acceptance,
+dispatch, and one-time consumption. A completion that races ahead of context
+publication is retained as an explicit pending-wake fact; the scheduler and
+continuation become runnable only after the save is published.

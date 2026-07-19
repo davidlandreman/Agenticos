@@ -82,6 +82,65 @@ class CrashDecodeTests(unittest.TestCase):
         self.assertEqual([entry["cpu"] for entry in report["cpus"]], [0, 3])
         self.assertEqual(report["cpus"][1]["cr3"], "0x24")
 
+    def test_pager_and_io_shadow_sections(self):
+        pager_record = struct.pack(
+            "<QQQQQIBBHIIQ",
+            7,
+            0x1000,
+            3,
+            0x4000,
+            0x9000,
+            42,
+            4,
+            0,
+            0,
+            4096,
+            4096,
+            0x1234,
+        )
+        io_record = struct.pack(
+            "<QQIIIHHBB6x", 11, 7, 42, 4096, 4096, 1, 9, 5, 0
+        )
+        report, _ = crash_decode.parse_capsule(
+            capsule(
+                [
+                    section(7, struct.pack("<I", 1) + pager_record),
+                    section(8, struct.pack("<I", 1) + io_record),
+                ]
+            )
+        )
+        self.assertEqual(report["shadow"]["pager"]["transactions"][0]["page"], "0x4000")
+        self.assertEqual(report["shadow"]["io"]["requests"][0]["token"], 11)
+
+    def test_pager_shadow_rejects_bad_count(self):
+        with self.assertRaisesRegex(crash_decode.DecodeError, "pager shadow layout"):
+            crash_decode.parse_capsule(capsule([section(7, struct.pack("<I", 2))]))
+
+    def test_continuation_shadow_section(self):
+        continuation = struct.pack(
+            "<QQQQQQQIBB2x",
+            5,
+            17,
+            0xFFFF800000001234,
+            0xFFFF900000002000,
+            0x202,
+            0xFFFF900000001000,
+            0xFFFF900000003000,
+            42,
+            3,
+            1,
+        )
+        report, _ = crash_decode.parse_capsule(
+            capsule([section(9, struct.pack("<I", 1) + continuation)])
+        )
+        saved = report["shadow"]["continuation"]["continuations"][0]
+        self.assertEqual(saved["pid"], 42)
+        self.assertTrue(saved["wake_pending_before_publish"])
+
+    def test_continuation_shadow_rejects_bad_count(self):
+        with self.assertRaisesRegex(crash_decode.DecodeError, "continuation shadow layout"):
+            crash_decode.parse_capsule(capsule([section(9, struct.pack("<I", 1))]))
+
 
 if __name__ == "__main__":
     unittest.main()

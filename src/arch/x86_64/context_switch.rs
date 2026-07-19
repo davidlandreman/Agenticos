@@ -129,6 +129,10 @@ pub(crate) extern "C" fn publish_handoff_context(old_context: *mut CpuContext) -
     // pointer lookup is a no-op for user continuations, so publish both forms
     // when applicable and require at least one to identify the saved context.
     let kernel_published = scheduler.publish_kernel_context_ptr(old_context);
+    drop(scheduler);
+    if let Some(crate::process::entity::EntityId::UserProcess(pid)) = pending {
+        crate::diagnostics::shadow::continuation::published(pid, unsafe { &*old_context });
+    }
     pending.is_some() || kernel_published
 }
 

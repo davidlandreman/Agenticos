@@ -329,6 +329,7 @@ unsafe fn resume_ring3_inner(pid: u32) -> ! {
     crate::process::set_in_spawned_process(true);
 
     if let Some(context) = kernel_continuation {
+        crate::diagnostics::shadow::continuation::dispatch(pid, &context);
         crate::arch::x86_64::context_switch::switch_to_context(&context);
     }
 
@@ -349,7 +350,7 @@ pub fn block_current_ring3_on_io(token: u64) {
     let Some(pid) = current_user_pid() else {
         return;
     };
-    let old_context = {
+    let (old_context, stack_bottom, stack_top) = {
         let mut table = PROCESS_TABLE.lock();
         let process = table
             .by_pid
@@ -365,11 +366,19 @@ pub fn block_current_ring3_on_io(token: u64) {
             .kernel_continuation
             .get_or_insert_with(|| Box::new(crate::process::CpuContext::default()));
         let pointer = (&mut **saved) as *mut crate::process::CpuContext;
+        let stack_top = process
+            .kernel_stack
+            .as_ref()
+            .expect("ring-3 I/O block without a kernel stack")
+            .top()
+            .as_u64();
+        let stack_bottom = stack_top - crate::userland::kernel_stack::KERNEL_STACK_BYTES as u64;
         table
             .ring3_blocked
             .insert(pid, Ring3BlockReason::WaitingForBlockIo { token });
-        pointer
+        (pointer, stack_bottom, stack_top)
     };
+    crate::diagnostics::shadow::continuation::allocate(pid, token, stack_bottom, stack_top);
     crate::process::scheduler::SCHEDULER
         .lock()
         .mark_context_saving(crate::process::entity::EntityId::UserProcess(pid));
@@ -387,6 +396,7 @@ pub fn block_current_ring3_on_io(token: u64) {
             crate::arch::x86_64::percpu::kernel_context_ptr(),
         );
     }
+    crate::diagnostics::shadow::continuation::consumed(pid, token);
 }
 
 /// Naked asm that builds an iretq frame from `state` and transfers to

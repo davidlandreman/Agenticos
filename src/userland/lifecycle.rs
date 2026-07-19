@@ -806,6 +806,17 @@ pub fn mark_ring3_ready(pid: u32) {
         debug_assert!(false, "attempted to mark sentinel ring-3 ready");
         return;
     }
+    let blocked_io = {
+        let table = PROCESS_TABLE.lock();
+        match table.ring3_blocked.get(&pid) {
+            Some(Ring3BlockReason::WaitingForBlockIo { token }) => Some(*token),
+            _ => None,
+        }
+    };
+    if let Some(token) = blocked_io {
+        crate::diagnostics::shadow::io::reject_generic_io_wake(pid, token);
+        return;
+    }
     PROCESS_TABLE.lock().ring3_blocked.remove(&pid);
     let entity = crate::process::entity::EntityId::UserProcess(pid);
     let _ = crate::process::timer::cancel(crate::process::timer::TimerKey {
@@ -936,9 +947,11 @@ pub fn queue_ring3_io_wake(pid: u32, token: u64) {
             .is_ok()
         {
             slot.token.store(token, Ordering::Release);
+            crate::diagnostics::shadow::io::queue_wake(token, pid);
             return;
         }
     }
+    crate::diagnostics::shadow::io::wake_lost(token, pid);
     crate::debug_error!("ring-3 I/O wake queue full for PID {} token {}", pid, token);
 }
 
@@ -969,11 +982,13 @@ fn try_wake_ring3_blocked_on_io(pid: u32, token: u64) -> bool {
         if !matches!(process.exit_kind, ExitKind::None) {
             return true;
         }
-        if !matches!(
-            table.ring3_blocked.get(&pid),
-            Some(Ring3BlockReason::WaitingForBlockIo { token: awaited }) if *awaited == token
-        ) {
-            return false;
+        match table.ring3_blocked.get(&pid) {
+            Some(Ring3BlockReason::WaitingForBlockIo { token: awaited }) if *awaited == token => {}
+            Some(Ring3BlockReason::WaitingForBlockIo { token: awaited }) => {
+                crate::diagnostics::shadow::io::wrong_wake(token, pid, *awaited);
+                return true;
+            }
+            _ => return false,
         }
     }
 
@@ -995,6 +1010,8 @@ fn try_wake_ring3_blocked_on_io(pid: u32, token: u64) -> bool {
     ) {
         return false;
     }
+    crate::diagnostics::shadow::io::accept_wake(token, pid);
+    crate::diagnostics::shadow::continuation::wake(pid, token);
     mark_ring3_ready(pid);
     true
 }

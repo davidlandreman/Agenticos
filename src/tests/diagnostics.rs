@@ -96,6 +96,57 @@ fn test_scheduler_shadow_rejects_illegal_edges() {
     );
 }
 
+fn test_pager_shadow_transition_table() {
+    use crate::diagnostics::shadow::pager::{transition_state, Operation, State, PAGER_001};
+
+    let state = transition_state(State::Classified, Operation::ReserveFrame).unwrap();
+    let state = transition_state(state, Operation::Populate).unwrap();
+    let state = transition_state(state, Operation::Commit).unwrap();
+    assert_eq!(state, State::PresentCommitted);
+    assert_eq!(
+        transition_state(State::Classified, Operation::Commit).unwrap_err(),
+        PAGER_001
+    );
+    assert_eq!(
+        transition_state(State::FrameReserved, Operation::Abort).unwrap(),
+        State::Aborted
+    );
+}
+
+fn test_io_shadow_transition_table() {
+    use crate::diagnostics::shadow::io::{transition_state, Operation, State, IO_002};
+
+    let state = transition_state(State::Submitted, Operation::Complete).unwrap();
+    let state = transition_state(state, Operation::QueueWake).unwrap();
+    let state = transition_state(state, Operation::AcceptWake).unwrap();
+    let state = transition_state(state, Operation::Consume).unwrap();
+    assert_eq!(state, State::Consumed);
+    assert_eq!(
+        transition_state(State::Submitted, Operation::Consume).unwrap_err(),
+        IO_002
+    );
+}
+
+fn test_continuation_shadow_transition_table() {
+    use crate::diagnostics::shadow::continuation::{
+        transition_state, Operation, State, CONT_001, CONT_003,
+    };
+
+    let state = transition_state(State::Saving, Operation::Publish).unwrap();
+    let state = transition_state(state, Operation::Wake).unwrap();
+    let state = transition_state(state, Operation::Dispatch).unwrap();
+    let state = transition_state(state, Operation::Consume).unwrap();
+    assert_eq!(state, State::Consumed);
+    assert_eq!(
+        transition_state(State::Saving, Operation::Dispatch).unwrap_err(),
+        CONT_001
+    );
+    assert_eq!(
+        transition_state(State::Runnable, Operation::Consume).unwrap_err(),
+        CONT_003
+    );
+}
+
 fn test_no_production_shadow_violation_latched() {
     if let Some(violation) = crate::diagnostics::shadow::first() {
         crate::debug_error!(
@@ -126,6 +177,9 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_trace_commit_and_wrap,
         &test_scheduler_shadow_legal_save_publish_cycle,
         &test_scheduler_shadow_rejects_illegal_edges,
+        &test_pager_shadow_transition_table,
+        &test_io_shadow_transition_table,
+        &test_continuation_shadow_transition_table,
         &test_no_production_shadow_violation_latched,
     ]
 }
