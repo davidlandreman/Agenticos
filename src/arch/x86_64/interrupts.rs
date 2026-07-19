@@ -396,6 +396,23 @@ extern "x86-interrupt" fn page_fault_handler(
     use x86_64::registers::control::Cr2;
 
     let accessed_addr = Cr2::read();
+    let previous_cpl = (stack_frame.code_segment as u64 & 3) as u8;
+    crate::diagnostics::trace::record_interrupt_boundary(
+        crate::diagnostics::trace::EventKind::InterruptEntry,
+        14,
+        previous_cpl,
+        false,
+        crate::diagnostics::trace::InterruptOutcome::Return,
+    );
+    let trace_exit = |outcome| {
+        crate::diagnostics::trace::record_interrupt_boundary(
+            crate::diagnostics::trace::EventKind::InterruptExit,
+            14,
+            previous_cpl,
+            false,
+            outcome,
+        );
+    };
     crate::diagnostics::trace::record(
         crate::diagnostics::trace::EventKind::PageFault,
         accessed_addr.as_u64() & !0xfff,
@@ -453,7 +470,10 @@ extern "x86-interrupt" fn page_fault_handler(
                 }) {
                     match outcome {
                         crate::mm::paging::CowOutcome::Copied
-                        | crate::mm::paging::CowOutcome::Upgraded => return,
+                        | crate::mm::paging::CowOutcome::Upgraded => {
+                            trace_exit(crate::diagnostics::trace::InterruptOutcome::RecoveredCow);
+                            return;
+                        }
                         crate::mm::paging::CowOutcome::NotCow
                         | crate::mm::paging::CowOutcome::OutOfFrames => {}
                     }
@@ -472,11 +492,15 @@ extern "x86-interrupt" fn page_fault_handler(
             )
             .is_ok()
         {
+            trace_exit(crate::diagnostics::trace::InterruptOutcome::RecoveredPageIn);
             return;
         }
         use crate::userland::lifecycle::{try_grow_user_stack, GrowOutcome};
         match try_grow_user_stack(accessed_addr) {
-            GrowOutcome::Grew => return,
+            GrowOutcome::Grew => {
+                trace_exit(crate::diagnostics::trace::InterruptOutcome::RecoveredStackGrowth);
+                return;
+            }
             GrowOutcome::NotStackGrow
             | GrowOutcome::Overflow
             | GrowOutcome::BudgetExhausted
@@ -523,6 +547,7 @@ extern "x86-interrupt" fn page_fault_handler(
                 );
             }
             // Successfully mapped - return and retry the instruction
+            trace_exit(crate::diagnostics::trace::InterruptOutcome::RecoveredKernelDemand);
             return;
         }
     }

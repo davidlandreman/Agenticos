@@ -47,7 +47,13 @@ pub enum EventKind {
     InvariantLatched = 0x900,
 }
 
-// Stable operand schemas for the first scheduler events:
+// Stable operand schemas for interrupt and scheduler events:
+//
+// InterruptEntry / InterruptExit:
+//   subject = x86 interrupt vector
+//   arg0    = interrupted CPL
+//   arg1    = EOI-sent flag in bit 0, InterruptOutcome in bits 8..15
+//   epoch   = 0 (per-CPU ordering only)
 //
 // SchedulerDispatch:
 //   subject = scheduler::entity_key(EntityId)
@@ -68,6 +74,19 @@ pub enum DispatchSource {
     UserQueue = 2,
     ForceRunning = 3,
     ResumeSameCpu = 4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InterruptOutcome {
+    Return = 0,
+    SwitchUser = 1,
+    SwitchKernel = 2,
+    Terminate = 3,
+    RecoveredCow = 4,
+    RecoveredPageIn = 5,
+    RecoveredStackGrowth = 6,
+    RecoveredKernelDemand = 7,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -163,6 +182,26 @@ pub fn record(kind: EventKind, subject: u64, arg0: u64, arg1: u64, causal_epoch:
         0
     };
     record_on(cpu, kind, subject, arg0, arg1, causal_epoch);
+}
+
+pub fn record_interrupt_boundary(
+    kind: EventKind,
+    vector: u8,
+    previous_cpl: u8,
+    eoi_sent: bool,
+    outcome: InterruptOutcome,
+) {
+    debug_assert!(matches!(
+        kind,
+        EventKind::InterruptEntry | EventKind::InterruptExit
+    ));
+    record(
+        kind,
+        u64::from(vector),
+        u64::from(previous_cpl),
+        u64::from(eoi_sent) | (u64::from(outcome as u8) << 8),
+        0,
+    );
 }
 
 pub fn record_on(

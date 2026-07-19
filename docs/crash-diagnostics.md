@@ -121,6 +121,12 @@ enqueued. Both carry the committed scheduler-shadow epoch, which is the
 causal ordering key across CPUs; TSC values alone are not used to infer that
 ordering.
 
+`interrupt_entry` and `interrupt_exit` identify the x86 vector and interrupted
+CPL. Exit records additionally say whether EOI was sent and whether the frame
+returned, switched to a user or kernel entity, terminated, or recovered a
+page fault through COW, page-in, stack growth, or kernel demand mapping. A
+fatal path intentionally has no successful exit record.
+
 Lazy file page-in now follows a private-frame commit protocol: allocate and
 zero privately, perform an exact-length read, revalidate the L4/VMA, and then
 install the present leaf. Signals stay pending while a kernel block-I/O

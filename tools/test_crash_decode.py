@@ -121,6 +121,21 @@ class CrashDecodeTests(unittest.TestCase):
         self.assertEqual(records[1]["operands"]["state"], "ready")
         self.assertTrue(records[1]["operands"]["newly_enqueued"])
 
+    def test_interrupt_trace_operands_are_decoded(self):
+        interrupt_exit = struct.pack(
+            "<8Q", 1, 2, 3, 0, 14, 3, (5 << 8), 0x0100_0101
+        )
+        trace = (
+            struct.pack("<HHHHBBHQQQI", 1, 1024, 128, 0, 0, 0, 0, 2, 0, 0, 1)
+            + interrupt_exit
+        )
+        report, _ = crash_decode.parse_capsule(capsule([section(5, trace)]))
+        event = report["trace"]["cpus"][0]["records"][0]
+        self.assertEqual(event["operands"]["vector"], "page_fault")
+        self.assertEqual(event["operands"]["previous_cpl"], 3)
+        self.assertEqual(event["operands"]["outcome"], "recovered_page_in")
+        self.assertFalse(event["operands"]["eoi_sent"])
+
     def test_missing_rich_sections_are_absent_evidence(self):
         metadata = struct.pack("<BBHI", 2, 0, 0, 3)
         for value in ("abc", "0", "rustc", "strict"):

@@ -143,6 +143,20 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     // The BSP PIT is the sole wall-clock/timer-heap driver. AP LAPIC timers
     // provide local preemption only.
     let cpu = crate::arch::x86_64::percpu::cpu_id();
+    let frame = unsafe { &*stack_frame };
+    let previous_cpl = (frame.cs & 3) as u8;
+    let vector = if cpu == 0 {
+        InterruptIndex::Timer.as_u8()
+    } else {
+        crate::arch::x86_64::lapic::LAPIC_TIMER_VECTOR
+    };
+    crate::diagnostics::trace::record_interrupt_boundary(
+        crate::diagnostics::trace::EventKind::InterruptEntry,
+        vector,
+        previous_cpl,
+        false,
+        crate::diagnostics::trace::InterruptOutcome::Return,
+    );
     let ticks = if cpu == 0 {
         let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = crate::process::drain_kernel_io_wakes();
@@ -153,7 +167,6 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
         TIMER_TICKS.load(Ordering::Relaxed)
     };
 
-    let frame = unsafe { &*stack_frame };
     let time_kind = if (frame.cs & 3) == 3 {
         crate::arch::x86_64::percpu::CpuTimeKind::User
     } else if crate::arch::x86_64::percpu::in_spawned_process() {
@@ -201,6 +214,13 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
         // tick. Interrupts are disabled in this handler, so EOI'ing
         // early can't cause re-entry.
         let Some(current_pid) = crate::userland::lifecycle::current_user_pid() else {
+            crate::diagnostics::trace::record_interrupt_boundary(
+                crate::diagnostics::trace::EventKind::InterruptExit,
+                vector,
+                previous_cpl,
+                true,
+                crate::diagnostics::trace::InterruptOutcome::Return,
+            );
             return;
         };
         let saved = crate::userland::lifecycle::with_process(current_pid, |process| {
@@ -208,6 +228,13 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
         })
         .is_some();
         if !saved {
+            crate::diagnostics::trace::record_interrupt_boundary(
+                crate::diagnostics::trace::EventKind::InterruptExit,
+                vector,
+                previous_cpl,
+                true,
+                crate::diagnostics::trace::InterruptOutcome::Return,
+            );
             return;
         }
         let current = crate::process::entity::EntityId::UserProcess(current_pid);
@@ -215,16 +242,41 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
             .lock()
             .preempt_and_pick(current);
         match next {
-            Some(crate::process::entity::EntityId::UserProcess(pid)) if pid != current_pid => unsafe {
-                crate::arch::x86_64::percpu::set_pending_user_context_publish(current_pid);
-                crate::userland::switch::resume_ring3(pid)
-            },
-            Some(crate::process::entity::EntityId::KernelThread(pid)) => unsafe {
-                crate::arch::x86_64::percpu::set_pending_user_context_publish(current_pid);
-                crate::arch::x86_64::context_switch::resume_kernel_thread(pid)
-            },
+            Some(crate::process::entity::EntityId::UserProcess(pid)) if pid != current_pid => {
+                crate::diagnostics::trace::record_interrupt_boundary(
+                    crate::diagnostics::trace::EventKind::InterruptExit,
+                    vector,
+                    previous_cpl,
+                    true,
+                    crate::diagnostics::trace::InterruptOutcome::SwitchUser,
+                );
+                unsafe {
+                    crate::arch::x86_64::percpu::set_pending_user_context_publish(current_pid);
+                    crate::userland::switch::resume_ring3(pid)
+                }
+            }
+            Some(crate::process::entity::EntityId::KernelThread(pid)) => {
+                crate::diagnostics::trace::record_interrupt_boundary(
+                    crate::diagnostics::trace::EventKind::InterruptExit,
+                    vector,
+                    previous_cpl,
+                    true,
+                    crate::diagnostics::trace::InterruptOutcome::SwitchKernel,
+                );
+                unsafe {
+                    crate::arch::x86_64::percpu::set_pending_user_context_publish(current_pid);
+                    crate::arch::x86_64::context_switch::resume_kernel_thread(pid)
+                }
+            }
             Some(crate::process::entity::EntityId::UserProcess(_)) | None => {}
         }
+        crate::diagnostics::trace::record_interrupt_boundary(
+            crate::diagnostics::trace::EventKind::InterruptExit,
+            vector,
+            previous_cpl,
+            true,
+            crate::diagnostics::trace::InterruptOutcome::Return,
+        );
         return;
     }
 
@@ -233,6 +285,13 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
     // bounded timer-service worker.
     if !crate::arch::x86_64::preemption_guard::kernel_preemption_allowed() {
         eoi(InterruptIndex::Timer.as_u8());
+        crate::diagnostics::trace::record_interrupt_boundary(
+            crate::diagnostics::trace::EventKind::InterruptExit,
+            vector,
+            previous_cpl,
+            true,
+            crate::diagnostics::trace::InterruptOutcome::Return,
+        );
         return;
     }
 
@@ -250,6 +309,13 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
             .is_some_and(|scheduler| scheduler.current_termination_requested())
     {
         eoi(InterruptIndex::Timer.as_u8());
+        crate::diagnostics::trace::record_interrupt_boundary(
+            crate::diagnostics::trace::EventKind::InterruptExit,
+            vector,
+            previous_cpl,
+            true,
+            crate::diagnostics::trace::InterruptOutcome::Terminate,
+        );
         crate::process::terminate_current();
     }
 
@@ -359,6 +425,21 @@ extern "C" fn timer_handler_inner(stack_frame: *mut InterruptStackFrame) {
 
     // Send EOI
     eoi(InterruptIndex::Timer.as_u8());
+
+    let outcome = if user_target.is_some() {
+        crate::diagnostics::trace::InterruptOutcome::SwitchUser
+    } else if kernel_target.is_some() {
+        crate::diagnostics::trace::InterruptOutcome::SwitchKernel
+    } else {
+        crate::diagnostics::trace::InterruptOutcome::Return
+    };
+    crate::diagnostics::trace::record_interrupt_boundary(
+        crate::diagnostics::trace::EventKind::InterruptExit,
+        vector,
+        previous_cpl,
+        true,
+        outcome,
+    );
 
     if let Some(pid) = user_target {
         unsafe { crate::userland::switch::resume_ring3(pid) }

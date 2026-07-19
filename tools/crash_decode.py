@@ -75,6 +75,23 @@ RUN_STATE_NAMES = {
     3: "blocked",
     4: "dead",
 }
+INTERRUPT_OUTCOME_NAMES = {
+    0: "return",
+    1: "switch_user",
+    2: "switch_kernel",
+    3: "terminate",
+    4: "recovered_cow",
+    5: "recovered_page_in",
+    6: "recovered_stack_growth",
+    7: "recovered_kernel_demand",
+}
+INTERRUPT_VECTOR_NAMES = {
+    2: "nmi",
+    14: "page_fault",
+    32: "pit_timer",
+    0xEF: "lapic_timer",
+    0xF0: "reschedule",
+}
 LOCK_CLASS_NAMES = {
     1: "scheduler",
     2: "process_table",
@@ -333,7 +350,17 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
                     "cpu": (meta >> 16) & 0xFF,
                     "schema": (meta >> 24) & 0xFF,
                 }
-                if kind == 0x200:
+                if kind in (0x100, 0x101):
+                    outcome = (arg1 >> 8) & 0xFF
+                    record["operands"] = {
+                        "vector": INTERRUPT_VECTOR_NAMES.get(subject, f"vector_{subject}"),
+                        "previous_cpl": arg0,
+                        "eoi_sent": bool(arg1 & 1),
+                        "outcome": INTERRUPT_OUTCOME_NAMES.get(
+                            outcome, f"unknown({outcome})"
+                        ),
+                    }
+                elif kind == 0x200:
                     source = arg1 & 0xFF
                     record["operands"] = {
                         "entity_key": f"0x{subject:016x}",
