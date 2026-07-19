@@ -178,7 +178,7 @@ prompt_git_relative() {
 
 # Git: branch/detached head, dirty status
 prompt_git() {
-  # AgenticOS: git is not shipped; keep this segment silent until it is.
+  # AgenticOS: stay silent unless the git builtin is on PATH (GIT.ELF).
   (( $+commands[git] )) || return
   if [[ "$(command git config --get oh-my-zsh.hide-status 2>/dev/null)" = 1 ]]; then
     return
@@ -189,10 +189,30 @@ prompt_git() {
     PL_BRANCH_CHAR=$'\ue0a0'         # 
   }
   local ref dirty mode repo_path
+  # AgenticOS: staged/unstaged flags and marker, computed inline below.
+  local git_status staged unstaged git_marker
 
    if [[ "$(command git rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ]]; then
     repo_path=$(command git rev-parse --git-dir 2>/dev/null)
-    dirty=$(parse_git_dirty)
+    # AgenticOS: derive dirty state and the staged/unstaged markers from a
+    # single `git status --porcelain` pass. Upstream agnoster relies on
+    # oh-my-zsh's parse_git_dirty (not shipped here) for the dirty color and on
+    # zsh's vcs_info for the ' %u%c' markers; neither works in the guest —
+    # parse_git_dirty is undefined and vcs_info's git backend hits a
+    # guest-specific parse error. One git fork now replaces both, and the
+    # segment still renders the green/yellow background plus ± / ✚ markers.
+    # Dirty (color) counts untracked files; the markers count tracked staged
+    # (✚) and unstaged (±) changes only, matching the original semantics.
+    git_status=$(command git status --porcelain 2>/dev/null)
+    dirty=''; staged=''; unstaged=''
+    if [[ -n $git_status ]]; then
+      dirty=1
+      local line
+      for line in "${(@f)git_status}"; do
+        [[ ${line[1]} != ' ' && ${line[1]} != '?' ]] && staged=1
+        [[ ${line[2]} != ' ' && ${line[2]} != '?' ]] && unstaged=1
+      done
+    fi
     ref=$(command git symbolic-ref HEAD 2> /dev/null) || \
     ref="◈ $(command git describe --exact-match --tags HEAD 2> /dev/null)" || \
     ref="➦ $(command git rev-parse --short HEAD 2> /dev/null)"
@@ -223,18 +243,12 @@ prompt_git() {
       mode=" >R>"
     fi
 
-    setopt promptsubst
-    autoload -Uz vcs_info
-
-    zstyle ':vcs_info:*' enable git
-    zstyle ':vcs_info:*' get-revision true
-    zstyle ':vcs_info:*' check-for-changes true
-    zstyle ':vcs_info:*' stagedstr '✚'
-    zstyle ':vcs_info:*' unstagedstr '±'
-    zstyle ':vcs_info:*' formats ' %u%c'
-    zstyle ':vcs_info:*' actionformats ' %u%c'
-    vcs_info
-    AGNOSTER_PROMPT+="${${ref:gs/%/%%}/refs\/heads\//$PL_BRANCH_CHAR }${vcs_info_msg_0_%% }${mode}"
+    # AgenticOS: assemble vcs_info's ' %u%c' equivalent (unstaged ±, staged ✚).
+    git_marker=''
+    [[ -n $unstaged ]] && git_marker+='±'
+    [[ -n $staged ]] && git_marker+='✚'
+    [[ -n $git_marker ]] && git_marker=" $git_marker"
+    AGNOSTER_PROMPT+="${${ref:gs/%/%%}/refs\/heads\//$PL_BRANCH_CHAR }${git_marker}${mode}"
     [[ $AGNOSTER_GIT_INLINE == 'true' ]] && prompt_git_relative
   fi
 }
