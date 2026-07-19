@@ -112,6 +112,15 @@ IF/preemption context, and a dependency cycle.
 - Decoder inferences remain separate from capsule facts. Missing evidence is
   not evidence that a subsystem was healthy.
 
+Scheduler trace entities use bit 63 to distinguish user processes from
+kernel threads. `scheduler_dispatch` records the receiving CPU, selection
+source (`fair_queue`, `user_queue`, `force_running`, or `resume_same_cpu`),
+and whether a latency deadline was missed. `context_publish` records the
+resulting production run state plus whether the entity existed and was newly
+enqueued. Both carry the committed scheduler-shadow epoch, which is the
+causal ordering key across CPUs; TSC values alone are not used to infer that
+ordering.
+
 Lazy file page-in now follows a private-frame commit protocol: allocate and
 zero privately, perform an exact-length read, revalidate the L4/VMA, and then
 install the present leaf. Signals stay pending while a kernel block-I/O

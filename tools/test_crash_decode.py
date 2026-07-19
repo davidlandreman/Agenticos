@@ -102,6 +102,25 @@ class CrashDecodeTests(unittest.TestCase):
         with self.assertRaisesRegex(crash_decode.DecodeError, "trace record count"):
             crash_decode.parse_capsule(capsule([section(5, trace)]))
 
+    def test_scheduler_trace_operands_are_decoded(self):
+        dispatch = struct.pack(
+            "<8Q", 1, 2, 3, 18, 0x8000_0000_0000_002A, 3, 0x101, 0x0100_0200
+        )
+        publish = struct.pack(
+            "<8Q", 2, 4, 5, 20, 0x8000_0000_0000_002A, 1, 3, 0x0100_0201
+        )
+        trace = (
+            struct.pack("<HHHHBBHQQQI", 1, 1024, 128, 0, 0, 0, 0, 3, 0, 0, 2)
+            + dispatch
+            + publish
+        )
+        report, _ = crash_decode.parse_capsule(capsule([section(5, trace)]))
+        records = report["trace"]["cpus"][0]["records"]
+        self.assertEqual(records[0]["operands"]["source"], "fair_queue")
+        self.assertTrue(records[0]["operands"]["deadline_missed"])
+        self.assertEqual(records[1]["operands"]["state"], "ready")
+        self.assertTrue(records[1]["operands"]["newly_enqueued"])
+
     def test_missing_rich_sections_are_absent_evidence(self):
         metadata = struct.pack("<BBHI", 2, 0, 0, 3)
         for value in ("abc", "0", "rustc", "strict"):

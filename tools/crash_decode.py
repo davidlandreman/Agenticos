@@ -62,6 +62,19 @@ EVENT_NAMES = {
     0x804: "lock_order_edge",
     0x900: "invariant_latched",
 }
+DISPATCH_SOURCE_NAMES = {
+    1: "fair_queue",
+    2: "user_queue",
+    3: "force_running",
+    4: "resume_same_cpu",
+}
+RUN_STATE_NAMES = {
+    0: "missing",
+    1: "ready",
+    2: "running",
+    3: "blocked",
+    4: "dead",
+}
 LOCK_CLASS_NAMES = {
     1: "scheduler",
     2: "process_table",
@@ -307,21 +320,35 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
                 )
                 cursor += 64
                 kind = meta & 0xFFFF
-                records.append(
-                    {
-                        "sequence": sequence,
-                        "tsc": tsc,
-                        "tick": tick,
-                        "causal_epoch": epoch,
-                        "subject": subject,
-                        "arg0": arg0,
-                        "arg1": arg1,
-                        "kind": EVENT_NAMES.get(kind, f"unknown({kind})"),
-                        "kind_id": kind,
-                        "cpu": (meta >> 16) & 0xFF,
-                        "schema": (meta >> 24) & 0xFF,
+                record = {
+                    "sequence": sequence,
+                    "tsc": tsc,
+                    "tick": tick,
+                    "causal_epoch": epoch,
+                    "subject": subject,
+                    "arg0": arg0,
+                    "arg1": arg1,
+                    "kind": EVENT_NAMES.get(kind, f"unknown({kind})"),
+                    "kind_id": kind,
+                    "cpu": (meta >> 16) & 0xFF,
+                    "schema": (meta >> 24) & 0xFF,
+                }
+                if kind == 0x200:
+                    source = arg1 & 0xFF
+                    record["operands"] = {
+                        "entity_key": f"0x{subject:016x}",
+                        "target_cpu": arg0,
+                        "source": DISPATCH_SOURCE_NAMES.get(source, f"unknown({source})"),
+                        "deadline_missed": bool(arg1 & (1 << 8)),
                     }
-                )
+                elif kind == 0x201:
+                    record["operands"] = {
+                        "entity_key": f"0x{subject:016x}",
+                        "state": RUN_STATE_NAMES.get(arg0, f"unknown({arg0})"),
+                        "entity_existed": bool(arg1 & 1),
+                        "newly_enqueued": bool(arg1 & 2),
+                    }
+                records.append(record)
             cpus.append(
                 {
                     "cpu": cpu,

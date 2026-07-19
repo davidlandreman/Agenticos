@@ -101,6 +101,47 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    fn trace_dispatch(
+        &self,
+        id: EntityId,
+        source: crate::diagnostics::trace::DispatchSource,
+        missed_deadline: bool,
+    ) {
+        if !self.shadow_observed {
+            return;
+        }
+        let arg1 = u64::from(source as u8) | (u64::from(missed_deadline) << 8);
+        crate::diagnostics::trace::record(
+            crate::diagnostics::trace::EventKind::SchedulerDispatch,
+            crate::diagnostics::shadow::scheduler::entity_key(id),
+            crate::arch::x86_64::percpu::cpu_id() as u64,
+            arg1,
+            crate::diagnostics::shadow::scheduler::committed_epoch(),
+        );
+    }
+
+    fn trace_context_publish(&self, id: EntityId, existed: bool, enqueued: bool) {
+        if !self.shadow_observed {
+            return;
+        }
+        let state = self
+            .entities
+            .get(&id)
+            .map_or(0, |entity| match entity.state {
+                RunState::Ready => 1,
+                RunState::Running => 2,
+                RunState::Blocked => 3,
+                RunState::Dead => 4,
+            });
+        crate::diagnostics::trace::record(
+            crate::diagnostics::trace::EventKind::ContextPublish,
+            crate::diagnostics::shadow::scheduler::entity_key(id),
+            state,
+            u64::from(existed) | (u64::from(enqueued) << 1),
+            crate::diagnostics::shadow::scheduler::committed_epoch(),
+        );
+    }
+
     /// Create a new scheduler (const for static initialization)
     pub const fn new() -> Self {
         Scheduler {
@@ -381,13 +422,13 @@ impl Scheduler {
     }
 
     pub fn publish_context(&mut self, id: EntityId) {
-        let ready = if let Some(entity) = self.entities.get_mut(&id) {
+        let (existed, ready) = if let Some(entity) = self.entities.get_mut(&id) {
             entity.context_published = true;
-            entity.state == RunState::Ready
+            (true, entity.state == RunState::Ready)
         } else {
-            false
+            (false, false)
         };
-        if ready {
+        let enqueued = if ready {
             let enqueued = self
                 .run_queue
                 .enqueue(id)
@@ -395,10 +436,14 @@ impl Scheduler {
             if enqueued {
                 crate::arch::x86_64::smp::notify_work();
             }
-        }
+            enqueued
+        } else {
+            false
+        };
         if self.shadow_observed {
             crate::diagnostics::shadow::scheduler::publish(id);
         }
+        self.trace_context_publish(id, existed, enqueued);
     }
 
     pub fn publish_kernel_context_ptr(&mut self, context: *mut CpuContext) -> bool {
@@ -483,6 +528,11 @@ impl Scheduler {
         if self.shadow_observed {
             crate::diagnostics::shadow::scheduler::dispatch(next);
         }
+        self.trace_dispatch(
+            next,
+            crate::diagnostics::trace::DispatchSource::FairQueue,
+            missed,
+        );
         crate::arch::x86_64::percpu::record_dispatch();
         Some(next)
     }
@@ -528,6 +578,11 @@ impl Scheduler {
             if self.shadow_observed {
                 crate::diagnostics::shadow::scheduler::resume_same_cpu(current);
             }
+            self.trace_dispatch(
+                current,
+                crate::diagnostics::trace::DispatchSource::ResumeSameCpu,
+                false,
+            );
             return Some(current);
         };
         if let EntityId::KernelThread(pid) = next {
@@ -557,6 +612,11 @@ impl Scheduler {
         if self.shadow_observed {
             crate::diagnostics::shadow::scheduler::dispatch(id);
         }
+        self.trace_dispatch(
+            id,
+            crate::diagnostics::trace::DispatchSource::UserQueue,
+            false,
+        );
         Some(pid)
     }
 
@@ -616,6 +676,11 @@ impl Scheduler {
         if self.shadow_observed {
             crate::diagnostics::shadow::scheduler::force_running(id);
         }
+        self.trace_dispatch(
+            id,
+            crate::diagnostics::trace::DispatchSource::ForceRunning,
+            false,
+        );
     }
 
     pub fn yield_entity(&mut self, id: EntityId) {

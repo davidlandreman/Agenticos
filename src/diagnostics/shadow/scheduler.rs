@@ -97,6 +97,15 @@ pub fn entity_key(id: EntityId) -> u64 {
     }
 }
 
+/// Return the most recently committed scheduler-shadow epoch.
+///
+/// Commit-adjacent flight-recorder hooks call this after applying their
+/// shadow transition. A normal result is even; an odd value means a crash
+/// interrupted a transition and is preserved as evidence rather than retried.
+pub fn committed_epoch() -> u64 {
+    EPOCH.load(Ordering::Acquire)
+}
+
 pub fn running_entity_on_cpu(cpu: usize) -> Option<u64> {
     let before = EPOCH.load(Ordering::Acquire);
     if before & 1 != 0 {

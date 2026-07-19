@@ -47,6 +47,29 @@ pub enum EventKind {
     InvariantLatched = 0x900,
 }
 
+// Stable operand schemas for the first scheduler events:
+//
+// SchedulerDispatch:
+//   subject = scheduler::entity_key(EntityId)
+//   arg0    = logical CPU receiving the entity
+//   arg1    = DispatchSource in bits 0..7, deadline-missed flag in bit 8
+//   epoch   = committed scheduler-shadow epoch
+// ContextPublish:
+//   subject = scheduler::entity_key(EntityId)
+//   arg0    = resulting production RunState (1 ready, 2 running, 3 blocked,
+//             4 dead, 0 missing)
+//   arg1    = entity-existed flag in bit 0, newly-enqueued flag in bit 1
+//   epoch   = committed scheduler-shadow epoch
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DispatchSource {
+    FairQueue = 1,
+    UserQueue = 2,
+    ForceRunning = 3,
+    ResumeSameCpu = 4,
+}
+
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct TraceRecord {
