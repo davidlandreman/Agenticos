@@ -1954,7 +1954,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     //     anchors and exit info. Retain PID, parent_pid, FD table,
     //     cwd, continuation.
     new_aspace.publish_owner(tgid);
-    crate::userland::lifecycle::with_current_group(|p| {
+    let closed_on_exec = crate::userland::lifecycle::with_current_group(|p| {
         p.image = Some(image);
         p.address_space = Some(new_aspace);
         p.brk_current = brk_base;
@@ -1968,8 +1968,9 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         p.cmdline = crate::userland::lifecycle::capped_cmdline(&argv_refs);
         // POSIX: exec closes every descriptor with FD_CLOEXEC set. musl
         // posix_spawn's success signal is the CLOEXEC status pipe
-        // closing here.
-        p.fd_table.close_on_exec();
+        // closing here. Detach under PROCESS_TABLE, but defer Drop until the
+        // closure releases that lock so pipe EOF wakes can reacquire it.
+        let closed_on_exec = p.fd_table.take_cloexec();
         // Phase 5 PR-B: POSIX semantics — exec resets signal
         // dispositions but preserves the blocked mask. Pending
         // signals are also preserved across exec.
@@ -1989,7 +1990,9 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
             stack_max_growth_floor,
             crate::mm::paging::USER_STACK_MAX_GROWTH_PAGES,
         );
+        closed_on_exec
     });
+    drop(closed_on_exec);
     // set_tid_address(2) and set_robust_list(2) register pointers into the
     // pre-exec address space. This path rejects multithreaded exec above, so
     // the sole group member is the leader named by `tgid`.

@@ -288,21 +288,17 @@ exercise them hard:
    paths (`wake_ring3_blocked_by_locking`) since those handlers hold no
    process lock and a dropped wake strands a pipe peer.
 
-### Known limitation: pack-protocol transports
+### Pack-protocol transport status
 
-`git clone`/`fetch`/`push` over the pack protocol (a local
-`git-upload-pack` spawned via `sh -c`, or the HTTP helper) still do not
-complete on this kernel. They spawn a helper and hold a *bidirectional*
-pipe conversation across two or three processes; that multi-process
-pipe/poll IPC hits a deeper scheduler lost-wake interaction beyond the
-single-child EOF case fixed above — the same "its own kernel project"
-concurrency area as the links2-HTTPS hang. The transport is wired and
-reachable (`git-upload-pack`/`git-receive-pack`/`git-upload-archive`
-resolve to `GIT.ELF` via `argv[0]` dispatch; `git-remote-http{,s}` →
-`GITRHTTP.ELF`; `tools/git-fixture` is a committed dumb-HTTP repo), so
-the clone tests can be switched on once that lands. Everything
-in-process — init, add, commit, branch, checkout, merge, log, diff,
-status, cat-file, rev-parse, config, fsck's non-forking checks — works.
+The HTTP clone hang was a missed EOF wake on musl's nested `posix_spawn`
+status pipe. `execve` dropped CLOEXEC pipe endpoints while holding
+`PROCESS_TABLE`; the endpoint's try-lock wake could not reacquire the table,
+leaving the parent blocked on an empty pipe with zero writers. CLOEXEC slots
+are now detached under the lock and dropped after it is released, matching the
+existing process-exit fd-table teardown discipline. The committed dumb-HTTP
+fixture is covered by `git_userland::test_git_http_clone`. Local helper,
+fetch, and push paths remain wired but do not yet have dedicated end-to-end
+regressions.
 
 ## Out of scope
 

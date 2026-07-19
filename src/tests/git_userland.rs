@@ -3,9 +3,8 @@
 //! The committed static-musl `GIT.ELF` is launched directly through the
 //! production ELF loader (like the binutils suite), not through zsh: a
 //! full local init→add→commit→branch→merge round trip on `/work`, plus a
-//! pure object-database readback. Pack-protocol transports (`clone`,
-//! `fetch`, `push`) are deliberately excluded — see the note above
-//! `get_tests`.
+//! pure object-database readback, and a dumb-HTTP clone that exercises the
+//! nested helper/close-on-exec pipe handshake.
 //!
 //! Launching directly keeps the coverage focused on git and the kernel
 //! ABI rather than on zsh's job-control signal path. Progress meters are
@@ -123,19 +122,28 @@ fn test_git_object_store_readback() {
     git_ok(&["git", "-C", repo, "rev-parse", "HEAD"]);
 }
 
-// NOTE: `git clone`/`fetch`/`push` over the pack protocol (local
-// `git-upload-pack` or the HTTP transport helper) are intentionally not
-// covered here. They spawn a helper and converse over a bidirectional
-// pipe pair; that multi-process pipe/poll IPC hits a pre-existing kernel
-// scheduler lost-wake interaction (the same family as the links2-HTTPS
-// hang) that is its own kernel project — see the git port plan doc. The
-// `tools/git-fixture` dumb-HTTP repo and the `GITRHTTP.ELF` helper are in
-// place so those tests can be enabled once that lands.
+/// Dumb HTTP crosses both nested spawn handshakes (`git remote-http` then
+/// `git-remote-http`). Each child closes a CLOEXEC status-pipe writer during
+/// exec; the parent must wake, observe EOF, and continue the conversation.
+fn test_git_http_clone() {
+    let clone = "/work/gthttp";
+    let prior_deadline = crate::process::swap_inline_ring3_test_deadline_ticks(6_000);
+    git_ok(&[
+        "git",
+        "clone",
+        "-q",
+        "http://10.0.2.101:8081/repo.git",
+        clone,
+    ]);
+    crate::process::swap_inline_ring3_test_deadline_ticks(prior_deadline);
+    git_ok(&["git", "-C", clone, "rev-parse", "HEAD"]);
+}
 
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_git_version_and_system_identity,
         &test_git_local_round_trip,
         &test_git_object_store_readback,
+        &test_git_http_clone,
     ]
 }

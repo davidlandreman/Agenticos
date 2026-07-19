@@ -55,15 +55,16 @@ works — init, add, commit, branch, checkout, merge, log, diff, status,
 cat-file, rev-parse, config. The kernel seeds `/etc/gitconfig` (root identity,
 `init.defaultBranch=main`, `safe.directory=*`, `core.fileMode=false`,
 `core.pager=cat`, `gc.auto=0`, `maintenance.auto=false`); repos belong on
-`/work` or `/data`. **Pack-protocol transports (`clone`/`fetch`/`push`) do not
-yet complete** — they hold a bidirectional pipe conversation across a spawned
-helper and hit a pre-existing multi-process pipe/poll scheduler lost-wake (the
-same family as the links2-HTTPS hang), a separate kernel project; ssh and
-`git://` are also out of scope. Bringing git up fixed three real kernel bugs:
+`/work` or `/data`. Dumb-HTTP `clone` completes through the spawned
+`git-remote-http` helper and has booted end-to-end coverage. Local helper,
+`fetch`, and `push` paths remain wired but do not yet have dedicated
+end-to-end regressions; ssh and `git://` are out of scope. Bringing git up
+fixed four real kernel bugs:
 the missing `/dev/null`, a signal-frame red-zone clobber in `deliver_signal`
 (async-signal handlers now return without corrupting the interrupted context),
 and a fork→pipe→wait deadlock where a child's fds stayed open until reap (fds
-now close at exit).
+now close at exit), plus an exec-time CLOEXEC lost wake (descriptors now drop
+after releasing `PROCESS_TABLE`).
 Kernel-requested programs use one persistent `process-service`: Start, Run, and Terminal enqueue requests and return immediately, and the service later reaps detached exits from its own stack.
 
 The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.

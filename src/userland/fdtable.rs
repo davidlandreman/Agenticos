@@ -278,16 +278,21 @@ impl FdTable {
         self.slots[fd as usize].as_mut()
     }
 
-    /// Drop every slot whose FD_CLOEXEC bit is set. Runs at the execve
-    /// commit point — closing the write end of musl posix_spawn's
-    /// CLOEXEC status pipe is what signals a successful exec to the
-    /// spawning parent.
-    pub fn close_on_exec(&mut self) {
+    /// Detach every slot whose `FD_CLOEXEC` bit is set.
+    ///
+    /// The returned collection owns the detached descriptors so the caller can
+    /// drop them after releasing `PROCESS_TABLE`. Pipe endpoint `Drop` wakes
+    /// blocked peers through that same lock; dropping here while `execve`
+    /// holds it would skip the wake and strand a parent waiting for EOF on
+    /// musl's `posix_spawn` status pipe.
+    pub fn take_cloexec(&mut self) -> alloc::vec::Vec<FdSlot> {
+        let mut detached = alloc::vec::Vec::new();
         for slot in self.slots.iter_mut() {
             if slot.as_ref().is_some_and(FdSlot::is_cloexec) {
-                *slot = None;
+                detached.push(slot.take().expect("CLOEXEC slot disappeared"));
             }
         }
+        detached
     }
 
     /// Insert `slot` at the lowest available index ≥ 3 and return the

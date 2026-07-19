@@ -2187,6 +2187,47 @@ fn test_fdtable_dup_and_dup2() {
     assert_eq!(t.dup2(20, 5), None);
 }
 
+fn test_fdtable_take_cloexec_defers_pipe_endpoint_drop() {
+    use crate::userland::pipe::{Pipe, PipeReadHandle, PipeWriteHandle};
+
+    let pipe = Pipe::new();
+    let _reader = PipeReadHandle::new(pipe.clone(), false);
+    let mut table = FdTable::new();
+    table.install_default_streams();
+    let cloexec_fd = table
+        .alloc(FdSlot::PipeWrite(
+            PipeWriteHandle::new(pipe.clone(), false),
+            true,
+        ))
+        .expect("CLOEXEC pipe fd");
+    let retained_fd = table
+        .alloc(FdSlot::PipeWrite(
+            PipeWriteHandle::new(pipe.clone(), false),
+            false,
+        ))
+        .expect("retained pipe fd");
+    assert_eq!(pipe.writers(), 2);
+
+    let detached = table.take_cloexec();
+    assert!(table.get(cloexec_fd).is_none());
+    assert!(matches!(
+        table.get(retained_fd),
+        Some(FdSlot::PipeWrite(_, false))
+    ));
+    assert_eq!(
+        pipe.writers(),
+        2,
+        "detaching CLOEXEC slots must not run endpoint Drop under the caller's lock"
+    );
+
+    drop(detached);
+    assert_eq!(
+        pipe.writers(),
+        1,
+        "dropping the detached descriptors must release the CLOEXEC endpoint"
+    );
+}
+
 // ---------- Phase 2: path utilities ----------
 
 fn test_normalize_path_absolute_keeps_path() {
@@ -6172,6 +6213,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_fdtable_alloc_and_close,
         &test_fdtable_capacity_64,
         &test_fdtable_dup_and_dup2,
+        &test_fdtable_take_cloexec_defers_pipe_endpoint_drop,
         // Phase 2: path utilities
         &test_normalize_path_absolute_keeps_path,
         &test_normalize_path_relative_anchors_at_cwd,
