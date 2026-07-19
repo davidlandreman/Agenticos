@@ -777,6 +777,25 @@ pub fn snapshot_flags() -> u32 {
     )
 }
 
+/// Bounds of the active ring-3 task's kernel stack when the current CPU phase
+/// still owns that stack. The caller must also verify its live RSP lies inside
+/// the returned interval before dereferencing a frame pointer.
+pub fn current_user_stack_bounds() -> Option<(u64, u64)> {
+    if !enabled() {
+        return None;
+    }
+    let cpu = local();
+    if !matches!(
+        phase(cpu.phase.load(Ordering::Acquire)),
+        Phase::LoadingUser | Phase::UserStable | Phase::LoadingKernel
+    ) {
+        return None;
+    }
+    let top = cpu.expected_stack_top.load(Ordering::Acquire);
+    let bottom = top.checked_sub(crate::userland::kernel_stack::KERNEL_STACK_BYTES as u64)?;
+    (top != 0).then_some((bottom, top))
+}
+
 #[cfg(feature = "test")]
 pub fn inject_wrong_cr3() {
     let pid = 0x7fff_ff10;

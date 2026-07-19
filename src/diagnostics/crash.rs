@@ -19,6 +19,7 @@ const FLAG_PARTIAL_CPU_SET: u64 = 1 << 2;
 const FLAG_RENDEZVOUS_SEND_FAILED: u64 = 1 << 3;
 const RENDEZVOUS_TSC_BUDGET: u64 = 50_000_000;
 const RENDEZVOUS_SPIN_BUDGET: usize = 5_000_000;
+const MAX_BACKTRACE_FRAMES: usize = 32;
 
 const STATE_IDLE: u8 = 0;
 const STATE_CAPTURING: u8 = 1;
@@ -99,6 +100,14 @@ struct RendezvousResult {
     online_mask: u8,
     captured_mask: u8,
     send_failed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct BacktraceSnapshot {
+    frames: [u64; MAX_BACKTRACE_FRAMES],
+    count: u16,
+    unavailable_reason: u8,
+    incomplete: bool,
 }
 
 const BUILD_HASH_A: u64 = fnv1a64(env!("AGENTICOS_BUILD_GIT_SHA").as_bytes())
@@ -339,6 +348,8 @@ unsafe fn serialize(
     trigger: Trigger,
     rendezvous: RendezvousResult,
 ) -> usize {
+    let owner_registers = read_snapshot(owner_cpu as usize).unwrap_or_default();
+    let backtrace = capture_backtrace(owner_registers);
     let mut writer = Writer::new(arena);
     let _ = writer.zeros(HEADER_LEN);
 
@@ -535,11 +546,19 @@ unsafe fn serialize(
             }
         });
     }
-    writer.section(SectionKind::Backtrace, 1, 1, |section| {
-        section.u16(0);
-        section.u8(5); // Unavailable until stack bounds are crash-readable.
-        section.u8(0);
-    });
+    writer.section(
+        SectionKind::Backtrace,
+        1,
+        u32::from(backtrace.incomplete),
+        |section| {
+            section.u16(backtrace.count);
+            section.u8(backtrace.unavailable_reason);
+            section.u8(0);
+            for frame in backtrace.frames.iter().take(usize::from(backtrace.count)) {
+                section.u64(*frame);
+            }
+        },
+    );
     writer.section(SectionKind::Footer, 1, 0, |section| {
         section.u64(NESTED_COUNT.load(Ordering::Relaxed));
         section.u32(0x434f_4d50); // "COMP"
@@ -581,6 +600,91 @@ unsafe fn serialize(
     let header_crc = crc32(&arena[..HEADER_LEN]);
     arena[76..80].copy_from_slice(&header_crc.to_le_bytes());
     total_len
+}
+
+fn capture_backtrace(registers: RegisterSnapshot) -> BacktraceSnapshot {
+    let mut result = BacktraceSnapshot {
+        frames: [0; MAX_BACKTRACE_FRAMES],
+        count: 0,
+        unavailable_reason: 0,
+        incomplete: false,
+    };
+    let bounds = super::shadow::cpu::current_user_stack_bounds()
+        .filter(|(bottom, top)| registers.rsp >= *bottom && registers.rsp < *top)
+        .or_else(|| crate::process::stack::bounds_containing(registers.rsp));
+    let Some((bottom, top)) = bounds else {
+        result.unavailable_reason = 5; // no crash-readable bounds for this stack
+        result.incomplete = true;
+        return result;
+    };
+
+    walk_bounded_backtrace(registers.rbp, bottom, top)
+}
+
+fn walk_bounded_backtrace(mut rbp: u64, bottom: u64, top: u64) -> BacktraceSnapshot {
+    let mut result = BacktraceSnapshot {
+        frames: [0; MAX_BACKTRACE_FRAMES],
+        count: 0,
+        unavailable_reason: 0,
+        incomplete: false,
+    };
+    while usize::from(result.count) < MAX_BACKTRACE_FRAMES {
+        if !frame_pointer_in_bounds(rbp, bottom, top) {
+            result.incomplete = true;
+            if result.count == 0 {
+                result.unavailable_reason = 6; // frame pointer absent or outside live stack
+            }
+            break;
+        }
+        let next = unsafe { (rbp as *const u64).read() };
+        let return_address = unsafe { ((rbp + 8) as *const u64).read() };
+        if return_address == 0 {
+            break;
+        }
+        if return_address < 0xffff_8000_0000_0000 {
+            result.incomplete = true;
+            if result.count == 0 {
+                result.unavailable_reason = 7; // non-kernel return address
+            }
+            break;
+        }
+        result.frames[usize::from(result.count)] = return_address;
+        result.count += 1;
+        if next == 0 {
+            break;
+        }
+        if next <= rbp {
+            result.incomplete = true;
+            break;
+        }
+        rbp = next;
+    }
+    if usize::from(result.count) == MAX_BACKTRACE_FRAMES {
+        result.incomplete = true;
+    }
+    result
+}
+
+#[cfg(feature = "test")]
+pub fn bounded_backtrace_for_test(
+    frame_pointer: u64,
+    bottom: u64,
+    top: u64,
+) -> (u16, u64, u64, u8, bool) {
+    let result = walk_bounded_backtrace(frame_pointer, bottom, top);
+    (
+        result.count,
+        result.frames[0],
+        result.frames[1],
+        result.unavailable_reason,
+        result.incomplete,
+    )
+}
+
+pub fn frame_pointer_in_bounds(frame_pointer: u64, bottom: u64, top: u64) -> bool {
+    frame_pointer & 7 == 0
+        && frame_pointer >= bottom
+        && frame_pointer.checked_add(16).is_some_and(|end| end <= top)
 }
 
 fn write_bounded_string(writer: &mut Writer<'_>, value: &str) {

@@ -11,6 +11,40 @@ fn test_wire_layout_contract() {
     assert_eq!(wire::MAGIC, *b"AGCRASH\0");
 }
 
+fn test_bounded_backtrace_frame_validation() {
+    use crate::diagnostics::crash::frame_pointer_in_bounds;
+
+    assert!(frame_pointer_in_bounds(0x1800, 0x1000, 0x2000));
+    assert!(frame_pointer_in_bounds(0x1ff0, 0x1000, 0x2000));
+    assert!(!frame_pointer_in_bounds(0x0ff8, 0x1000, 0x2000));
+    assert!(!frame_pointer_in_bounds(0x1ff8, 0x1000, 0x2000));
+    assert!(!frame_pointer_in_bounds(0x1801, 0x1000, 0x2000));
+    assert!(!frame_pointer_in_bounds(u64::MAX - 7, 0, u64::MAX));
+}
+
+fn test_bounded_backtrace_walks_only_declared_stack() {
+    #[repr(align(16))]
+    struct Frames([u64; 6]);
+
+    let mut frames = Frames([0; 6]);
+    let bottom = frames.0.as_ptr() as u64;
+    frames.0[0] = bottom + 16;
+    frames.0[1] = 0xffff_8000_0000_1111;
+    frames.0[2] = 0;
+    frames.0[3] = 0xffff_8000_0000_2222;
+    let (count, first, second, reason, incomplete) =
+        crate::diagnostics::crash::bounded_backtrace_for_test(
+            bottom,
+            bottom,
+            bottom + core::mem::size_of::<Frames>() as u64,
+        );
+    assert_eq!(count, 2);
+    assert_eq!(first, 0xffff_8000_0000_1111);
+    assert_eq!(second, 0xffff_8000_0000_2222);
+    assert_eq!(reason, 0);
+    assert!(!incomplete);
+}
+
 fn test_memory_shadow_budget_contract() {
     let frames = 65_536usize;
     let expected = if cfg!(any(feature = "diagnostics", feature = "diagnostics-strict")) {
@@ -305,6 +339,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_crc32_golden_vector,
         &test_wire_layout_contract,
+        &test_bounded_backtrace_frame_validation,
+        &test_bounded_backtrace_walks_only_declared_stack,
         &test_memory_shadow_budget_contract,
         &test_trace_commit_and_wrap,
         &test_scheduler_shadow_legal_save_publish_cycle,

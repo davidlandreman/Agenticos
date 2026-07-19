@@ -23,6 +23,21 @@ const GUARD_PAGE_SIZE: usize = 4096;
 /// Total size for each stack slot (stack + guard page)
 const STACK_SLOT_SIZE: usize = STACK_SIZE + GUARD_PAGE_SIZE;
 
+/// Return the mapped stack bounds for an address in the fixed kernel-thread
+/// stack arena. This is arithmetic-only so fatal diagnostics can use it
+/// without acquiring the allocator lock.
+pub fn bounds_containing(address: u64) -> Option<(u64, u64)> {
+    let relative = address.checked_sub(STACK_REGION_START)?;
+    let index = relative / STACK_SLOT_SIZE as u64;
+    if index >= MAX_PROCESSES as u64 {
+        return None;
+    }
+    let slot_start = STACK_REGION_START + index * STACK_SLOT_SIZE as u64;
+    let bottom = slot_start + GUARD_PAGE_SIZE as u64;
+    let top = slot_start + STACK_SLOT_SIZE as u64;
+    (address >= bottom && address < top).then_some((bottom, top))
+}
+
 /// Global stack allocator instance
 pub static STACK_ALLOCATOR: PreemptionMutex<StackAllocator> = PreemptionMutex::new_tracked(
     StackAllocator::new(),

@@ -211,6 +211,15 @@ ELF preparation uses a separate `address_space_setup` phase while the loader
 temporarily installs a not-yet-runnable L4; its generation and restore-to-
 kernel-CR3 boundary remain visible if paging fails during image construction.
 
+Release and development kernels retain frame pointers. Fatal serialization
+walks at most 32 frames and dereferences only inside either the active user
+task's generated kernel-stack bounds or the fixed kernel-thread stack arena.
+Backtrace reason 5 means no crash-readable bounds were available, 6 means the
+initial frame pointer was outside those bounds, and 7 means it led outside
+kernel text. Partial or capped walks keep their frames but set the section's
+incomplete flag. The boot/main and panic-IST stack layouts remain explicitly
+unavailable until they have equally strict bounds.
+
 CPU handoff invariant IDs are stable artifact signatures:
 
 | ID | Meaning |
