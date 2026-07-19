@@ -136,6 +136,20 @@ class CrashDecodeTests(unittest.TestCase):
         self.assertEqual(event["operands"]["outcome"], "recovered_page_in")
         self.assertFalse(event["operands"]["eoi_sent"])
 
+    def test_syscall_trace_operands_are_decoded(self):
+        syscall_exit = struct.pack(
+            "<8Q", 1, 2, 3, 0, 0x100, 257, (1 << 64) - 9, 0x0100_0101
+        )
+        trace = (
+            struct.pack("<HHHHBBHQQQI", 1, 1024, 128, 0, 0, 0, 0, 2, 0, 0, 1)
+            + syscall_exit
+        )
+        report, _ = crash_decode.parse_capsule(capsule([section(5, trace)]))
+        event = report["trace"]["cpus"][0]["records"][0]
+        self.assertEqual(event["operands"]["boundary"], "syscall")
+        self.assertEqual(event["operands"]["number"], 257)
+        self.assertEqual(event["operands"]["return_value"], -9)
+
     def test_missing_rich_sections_are_absent_evidence(self):
         metadata = struct.pack("<BBHI", 2, 0, 0, 3)
         for value in ("abc", "0", "rustc", "strict"):

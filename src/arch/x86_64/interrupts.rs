@@ -374,7 +374,22 @@ pub fn eoi(vector: u8) {
 // Exception Handlers
 
 extern "x86-interrupt" fn crash_nmi_handler(stack_frame: InterruptStackFrame) {
+    let previous_cpl = (stack_frame.code_segment as u64 & 3) as u8;
+    crate::diagnostics::trace::record_interrupt_boundary(
+        crate::diagnostics::trace::EventKind::InterruptEntry,
+        2,
+        previous_cpl,
+        false,
+        crate::diagnostics::trace::InterruptOutcome::Return,
+    );
     crate::diagnostics::crash::handle_nmi(stack_frame.instruction_pointer.as_u64());
+    crate::diagnostics::trace::record_interrupt_boundary(
+        crate::diagnostics::trace::EventKind::InterruptExit,
+        2,
+        previous_cpl,
+        false,
+        crate::diagnostics::trace::InterruptOutcome::Return,
+    );
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
@@ -720,9 +735,24 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
 static LAPIC_TIMER_TICKS: [AtomicU64; crate::arch::x86_64::acpi::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::acpi::MAX_CPUS];
 
-extern "x86-interrupt" fn reschedule_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn reschedule_interrupt_handler(stack_frame: InterruptStackFrame) {
+    let previous_cpl = (stack_frame.code_segment as u64 & 3) as u8;
+    crate::diagnostics::trace::record_interrupt_boundary(
+        crate::diagnostics::trace::EventKind::InterruptEntry,
+        crate::arch::x86_64::lapic::RESCHEDULE_VECTOR,
+        previous_cpl,
+        false,
+        crate::diagnostics::trace::InterruptOutcome::Return,
+    );
     crate::arch::x86_64::lapic::eoi();
     crate::userland::syscalls::maybe_terminate_pending_fatal_signal();
+    crate::diagnostics::trace::record_interrupt_boundary(
+        crate::diagnostics::trace::EventKind::InterruptExit,
+        crate::arch::x86_64::lapic::RESCHEDULE_VECTOR,
+        previous_cpl,
+        true,
+        crate::diagnostics::trace::InterruptOutcome::Return,
+    );
 }
 
 extern "x86-interrupt" fn halt_interrupt_handler(_stack_frame: InterruptStackFrame) {

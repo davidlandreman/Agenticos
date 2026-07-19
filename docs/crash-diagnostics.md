@@ -126,6 +126,10 @@ CPL. Exit records additionally say whether EOI was sent and whether the frame
 returned, switched to a user or kernel entity, terminated, or recovered a
 page fault through COW, page-in, stack growth, or kernel demand mapping. A
 fatal path intentionally has no successful exit record.
+SYSCALL uses a synthetic boundary ID rather than pretending to be an IDT
+vector: entry records carry the Linux syscall number and current PID; paired
+exits carry the same number and signed return value. A blocking handoff may
+legitimately have no paired exit on that CPU.
 
 Lazy file page-in now follows a private-frame commit protocol: allocate and
 zero privately, perform an exact-length read, revalidate the L4/VMA, and then

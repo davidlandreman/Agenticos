@@ -13,6 +13,9 @@ pub const RING_LEN: usize = 128;
 const COMMITTED: u64 = 2;
 const IN_PROGRESS: u64 = 1;
 
+/// Synthetic boundary ID for the SYSCALL instruction (not an IDT vector).
+pub const SYSCALL_BOUNDARY: u64 = 0x100;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(
     dead_code,
@@ -54,6 +57,8 @@ pub enum EventKind {
 //   arg0    = interrupted CPL
 //   arg1    = EOI-sent flag in bit 0, InterruptOutcome in bits 8..15
 //   epoch   = 0 (per-CPU ordering only)
+// For subject=SYSCALL_BOUNDARY, arg0 is the Linux syscall number. Entry arg1
+// is the current user PID; exit arg1 is the signed return value's raw bits.
 //
 // SchedulerDispatch:
 //   subject = scheduler::entity_key(EntityId)

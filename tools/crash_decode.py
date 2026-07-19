@@ -351,15 +351,26 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
                     "schema": (meta >> 24) & 0xFF,
                 }
                 if kind in (0x100, 0x101):
-                    outcome = (arg1 >> 8) & 0xFF
-                    record["operands"] = {
-                        "vector": INTERRUPT_VECTOR_NAMES.get(subject, f"vector_{subject}"),
-                        "previous_cpl": arg0,
-                        "eoi_sent": bool(arg1 & 1),
-                        "outcome": INTERRUPT_OUTCOME_NAMES.get(
-                            outcome, f"unknown({outcome})"
-                        ),
-                    }
+                    if subject == 0x100:
+                        record["operands"] = {"boundary": "syscall", "number": arg0}
+                        if kind == 0x100:
+                            record["operands"]["current_pid"] = arg1
+                        else:
+                            record["operands"]["return_value"] = (
+                                arg1 if arg1 < (1 << 63) else arg1 - (1 << 64)
+                            )
+                    else:
+                        outcome = (arg1 >> 8) & 0xFF
+                        record["operands"] = {
+                            "vector": INTERRUPT_VECTOR_NAMES.get(
+                                subject, f"vector_{subject}"
+                            ),
+                            "previous_cpl": arg0,
+                            "eoi_sent": bool(arg1 & 1),
+                            "outcome": INTERRUPT_OUTCOME_NAMES.get(
+                                outcome, f"unknown({outcome})"
+                            ),
+                        }
                 elif kind == 0x200:
                     source = arg1 & 0xFF
                     record["operands"] = {
