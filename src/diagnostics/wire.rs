@@ -53,6 +53,7 @@ pub enum SectionKind {
     Footer = 12,
     ShadowAddressSpace = 13,
     ShadowStack = 14,
+    ShadowMemory = 15,
 }
 
 pub struct Writer<'a> {

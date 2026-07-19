@@ -260,6 +260,9 @@ pub fn record_reschedule_ipi(cpu: usize) {
 
 pub fn mapper_enter() {
     let was_in_mapper = local().in_mapper.swap(true, Ordering::AcqRel);
+    if was_in_mapper {
+        crate::diagnostics::shadow::memory::report_mapper_recursion(cpu_id() as u64);
+    }
     debug_assert!(!was_in_mapper, "recursive memory-mapper acquisition");
 }
 

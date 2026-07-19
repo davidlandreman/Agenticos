@@ -11,6 +11,7 @@ use core::sync::atomic::{AtomicIsize, Ordering};
 use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
 
+use crate::diagnostics::shadow::memory::FrameRefReason;
 use crate::{debug_error, debug_info, debug_trace};
 
 const PAGE_SIZE: u64 = 0x1000;
@@ -112,8 +113,27 @@ impl BootInfoFrameAllocator {
         let bitmap_words = total_frames.div_ceil(64) as usize;
         let bitmap_bytes = bitmap_words * core::mem::size_of::<u64>();
         let refcount_offset = align_up(bitmap_bytes as u64, 8) as usize;
-        let metadata_bytes = refcount_offset
-            .checked_add(total_frames as usize * core::mem::size_of::<u32>())
+        let refcount_bytes = total_frames as usize * core::mem::size_of::<u32>();
+        let shadow_offset = align_up((refcount_offset + refcount_bytes) as u64, 8) as usize;
+        let shadow_bytes = crate::diagnostics::shadow::memory::storage_bytes(total_frames as usize);
+        if crate::diagnostics::personality() == crate::diagnostics::Personality::Strict
+            && shadow_bytes == 0
+        {
+            panic!(
+                "strict diagnostics cannot provision a full frame ledger for {} usable frames",
+                total_frames
+            );
+        }
+        if crate::diagnostics::personality() == crate::diagnostics::Personality::Record
+            && shadow_bytes == 0
+        {
+            debug_error!(
+                "diagnostic MM shadow disabled: {} usable frames exceed the 32 MiB budget",
+                total_frames
+            );
+        }
+        let metadata_bytes = shadow_offset
+            .checked_add(shadow_bytes)
             .expect("frame allocator metadata size overflow");
         let metadata_pages = (metadata_bytes as u64).div_ceil(PAGE_SIZE);
         let metadata_start = find_metadata_extent(memory_map, metadata_pages).unwrap_or_else(|| {
@@ -135,6 +155,10 @@ impl BootInfoFrameAllocator {
         let bitmap = core::slice::from_raw_parts_mut(metadata_va as *mut u64, bitmap_words);
         let refcounts = core::slice::from_raw_parts_mut(
             (metadata_va as usize + refcount_offset) as *mut u32,
+            total_frames as usize,
+        );
+        crate::diagnostics::shadow::memory::init(
+            (metadata_va as usize + shadow_offset) as *mut u8,
             total_frames as usize,
         );
 
@@ -189,7 +213,17 @@ impl BootInfoFrameAllocator {
         (count != PINNED_REFCOUNT).then_some(count)
     }
 
+    #[cfg(feature = "test")]
     pub fn retain_frame(&mut self, frame: PhysFrame<Size4KiB>) -> Result<u32, FrameReleaseError> {
+        self.retain_frame_reason(frame, FrameRefReason::Other, 0)
+    }
+
+    pub fn retain_frame_reason(
+        &mut self,
+        frame: PhysFrame<Size4KiB>,
+        reason: FrameRefReason,
+        site: u16,
+    ) -> Result<u32, FrameReleaseError> {
         let index = self
             .frame_index(frame)
             .ok_or(FrameReleaseError::Unmanaged)?;
@@ -204,12 +238,22 @@ impl BootInfoFrameAllocator {
                 if count == 1 {
                     self.stats.shared += 1;
                 }
+                crate::diagnostics::shadow::memory::retain(index, reason, site);
                 Ok(new_count)
             }
         }
     }
 
     pub fn release_frame(&mut self, frame: PhysFrame<Size4KiB>) -> Result<u32, FrameReleaseError> {
+        self.release_frame_reason(frame, FrameRefReason::Other, 0)
+    }
+
+    pub fn release_frame_reason(
+        &mut self,
+        frame: PhysFrame<Size4KiB>,
+        reason: FrameRefReason,
+        site: u16,
+    ) -> Result<u32, FrameReleaseError> {
         let index = self
             .frame_index(frame)
             .ok_or(FrameReleaseError::Unmanaged)?;
@@ -229,6 +273,7 @@ impl BootInfoFrameAllocator {
                     self.stats.free += 1;
                     self.next_word = self.next_word.min(index / 64);
                 }
+                crate::diagnostics::shadow::memory::release(index, reason, new_count, site);
                 Ok(new_count)
             }
         }
@@ -253,6 +298,7 @@ impl BootInfoFrameAllocator {
         self.refcounts[index] = PINNED_REFCOUNT;
         self.stats.pinned += 1;
         self.stats.free -= 1;
+        crate::diagnostics::shadow::memory::pinned(index, 1);
     }
 
     fn set_allocated(&mut self, index: usize, allocated: bool) {
@@ -268,13 +314,25 @@ impl BootInfoFrameAllocator {
         compact_frame_index(self.memory_map, frame.start_address().as_u64())
     }
 
-    fn frame_for_index(&self, index: usize) -> Option<PhysFrame<Size4KiB>> {
-        compact_index_frame(self.memory_map, index)
+    pub fn shadow_identity(&self, frame: PhysFrame<Size4KiB>) -> Option<(usize, u32)> {
+        let index = self.frame_index(frame)?;
+        let generation = crate::diagnostics::shadow::memory::frame_generation(index).unwrap_or(0);
+        Some((index, generation))
     }
-}
 
-unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
-    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+    pub fn allocate_frame_reason(
+        &mut self,
+        reason: FrameRefReason,
+        site: u16,
+    ) -> Option<PhysFrame<Size4KiB>> {
+        self.allocate_with_reason(reason, site)
+    }
+
+    fn allocate_with_reason(
+        &mut self,
+        reason: FrameRefReason,
+        site: u16,
+    ) -> Option<PhysFrame<Size4KiB>> {
         if injected_failure() || self.stats.free == 0 {
             return None;
         }
@@ -296,6 +354,7 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             self.stats.free -= 1;
             self.next_word = word_index;
             self.allocations += 1;
+            crate::diagnostics::shadow::memory::allocated(index, reason, site);
             let frame = self
                 .frame_for_index(index)
                 .expect("bitmap index must map to a frame");
@@ -311,6 +370,16 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             return Some(frame);
         }
         None
+    }
+
+    fn frame_for_index(&self, index: usize) -> Option<PhysFrame<Size4KiB>> {
+        compact_index_frame(self.memory_map, index)
+    }
+}
+
+unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
+    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        self.allocate_with_reason(FrameRefReason::Other, 0)
     }
 }
 

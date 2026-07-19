@@ -1,4 +1,5 @@
 use super::frame_allocator::BootInfoFrameAllocator;
+use crate::diagnostics::shadow::memory::FrameRefReason;
 use crate::{debug_error, debug_info, debug_trace};
 use alloc::vec::Vec;
 use bootloader_api::info::MemoryRegions;
@@ -231,6 +232,18 @@ pub struct MemoryMapper {
     physical_memory_offset: VirtAddr,
 }
 
+struct TypedFrameAllocator<'a> {
+    allocator: &'a mut BootInfoFrameAllocator,
+    reason: FrameRefReason,
+    site: u16,
+}
+
+unsafe impl FrameAllocator<Size4KiB> for TypedFrameAllocator<'_> {
+    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        self.allocator.allocate_frame_reason(self.reason, self.site)
+    }
+}
+
 // All access is serialized by `mm::memory::MAPPER`. The boot memory map and
 // page-table alias are immutable after initialization; mutable allocator and
 // mapper state never escapes the lock-backed closure API.
@@ -335,12 +348,39 @@ impl MemoryMapper {
         self.frame_allocator.allocate_frame()
     }
 
+    pub fn allocate_root_frame(&mut self) -> Option<PhysFrame> {
+        self.frame_allocator
+            .allocate_frame_reason(FrameRefReason::RootL4, 0x1001)
+    }
+
+    pub fn allocate_page_table_frame(&mut self) -> Option<PhysFrame> {
+        self.frame_allocator
+            .allocate_frame_reason(FrameRefReason::PageTable, 0x1002)
+    }
+
     pub fn release_frame(&mut self, frame: PhysFrame<Size4KiB>) -> bool {
         self.frame_allocator.release_frame(frame).is_ok()
     }
 
+    #[cfg(feature = "test")]
     pub fn retain_frame(&mut self, frame: PhysFrame<Size4KiB>) -> bool {
         self.frame_allocator.retain_frame(frame).is_ok()
+    }
+
+    pub fn retain_leaf_frame(&mut self, frame: PhysFrame<Size4KiB>) -> bool {
+        self.frame_allocator
+            .retain_frame_reason(frame, FrameRefReason::CowShare, 0x1003)
+            .is_ok()
+    }
+
+    pub fn shadow_frame_identity(&self, frame: PhysFrame<Size4KiB>) -> Option<(usize, u32)> {
+        self.frame_allocator.shadow_identity(frame)
+    }
+
+    fn address_space_generation(&self, l4_frame: PhysFrame<Size4KiB>) -> u64 {
+        crate::diagnostics::shadow::address_space::generation_for_l4(
+            l4_frame.start_address().as_u64(),
+        )
     }
 
     pub fn frame_refcount(&self, frame: PhysFrame<Size4KiB>) -> Option<u32> {
@@ -410,6 +450,11 @@ impl MemoryMapper {
                 .ok_or(UserMapError::PageNotMapped)?
         };
         entry.set_flags(flags);
+        crate::diagnostics::shadow::memory::update_leaf_flags(
+            self.address_space_generation(l4_frame),
+            addr.as_u64() & !0xfff,
+            flags.bits(),
+        );
         if self.active_l4_frame() == l4_frame {
             x86_64::instructions::tlb::flush(addr);
         }
@@ -429,7 +474,10 @@ impl MemoryMapper {
             let _ = self.set_leaf_flags(l4_frame, addr, flags);
             return CowOutcome::Upgraded;
         }
-        let Some(new_frame) = self.frame_allocator.allocate_frame() else {
+        let Some(new_frame) = self
+            .frame_allocator
+            .allocate_frame_reason(FrameRefReason::LeafMapping, 0x1101)
+        else {
             return CowOutcome::OutOfFrames;
         };
         unsafe {
@@ -441,7 +489,21 @@ impl MemoryMapper {
             let entry = &mut *self.leaf_entry_ptr(l4_frame, addr).unwrap();
             entry.set_addr(new_frame.start_address(), flags);
         }
-        let _ = self.frame_allocator.release_frame(old_frame);
+        if let Some((new_index, _)) = self.frame_allocator.shadow_identity(new_frame) {
+            crate::diagnostics::shadow::memory::replace_leaf(
+                self.address_space_generation(l4_frame),
+                addr.as_u64() & !0xfff,
+                old_frame.start_address().as_u64(),
+                new_frame.start_address().as_u64(),
+                new_index,
+                flags.bits(),
+            );
+        }
+        let _ = self.frame_allocator.release_frame_reason(
+            old_frame,
+            FrameRefReason::LeafMapping,
+            0x1102,
+        );
         if self.active_l4_frame() == l4_frame {
             x86_64::instructions::tlb::flush(addr);
         }
@@ -452,7 +514,9 @@ impl MemoryMapper {
     /// table. Lazy file paging populates this private frame while block I/O
     /// may sleep, then commits the leaf only after the bytes are complete.
     pub fn allocate_private_zeroed_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        let frame = self.frame_allocator.allocate_frame()?;
+        let frame = self
+            .frame_allocator
+            .allocate_frame_reason(FrameRefReason::Transient, 0x1103)?;
         self.zero_frame(frame);
         Some(frame)
     }
@@ -472,14 +536,13 @@ impl MemoryMapper {
         let mut target = unsafe { OffsetPageTable::new(l4, self.physical_memory_offset) };
         let parent_flags =
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let mut table_allocator = TypedFrameAllocator {
+            allocator: &mut self.frame_allocator,
+            reason: FrameRefReason::PageTable,
+            site: 0x1104,
+        };
         let result = unsafe {
-            target.map_to_with_table_flags(
-                page,
-                frame,
-                flags,
-                parent_flags,
-                &mut self.frame_allocator,
-            )
+            target.map_to_with_table_flags(page, frame, flags, parent_flags, &mut table_allocator)
         };
         match result {
             Ok(flush) => {
@@ -487,6 +550,21 @@ impl MemoryMapper {
                     flush.flush();
                 } else {
                     flush.ignore();
+                }
+                if let Some((frame_index, _)) = self.frame_allocator.shadow_identity(frame) {
+                    crate::diagnostics::shadow::memory::transfer(
+                        frame_index,
+                        FrameRefReason::Transient,
+                        FrameRefReason::LeafMapping,
+                        0x1105,
+                    );
+                    crate::diagnostics::shadow::memory::map_leaf(
+                        self.address_space_generation(l4_frame),
+                        page_addr.as_u64(),
+                        frame.start_address().as_u64(),
+                        frame_index,
+                        flags.bits(),
+                    );
                 }
                 Ok(())
             }
@@ -499,7 +577,9 @@ impl MemoryMapper {
 
     /// Release a private frame that was never committed into a leaf.
     pub fn release_private_frame(&mut self, frame: PhysFrame<Size4KiB>) {
-        let released = self.frame_allocator.release_frame(frame);
+        let released =
+            self.frame_allocator
+                .release_frame_reason(frame, FrameRefReason::Transient, 0x1106);
         debug_assert!(released.is_ok(), "private frame must have one live owner");
     }
 
@@ -533,8 +613,22 @@ impl MemoryMapper {
             return Err(UserMapError::PageAlreadyMapped);
         }
         let leaf_frame = PhysFrame::containing_address(leaf.addr());
+        let as_generation = self.address_space_generation(l4_frame);
+        let identity = self.frame_allocator.shadow_identity(leaf_frame);
         leaf.set_unused();
-        let released = self.frame_allocator.release_frame(leaf_frame);
+        if let Some((_, frame_generation)) = identity {
+            crate::diagnostics::shadow::memory::unmap_leaf(
+                as_generation,
+                addr.as_u64() & !0xfff,
+                leaf_frame.start_address().as_u64(),
+                frame_generation,
+            );
+        }
+        let released = self.frame_allocator.release_frame_reason(
+            leaf_frame,
+            FrameRefReason::LeafMapping,
+            0x1107,
+        );
         debug_assert!(released.is_ok(), "user leaf must be allocator-owned");
         self.prune_empty_path(l4_frame, addr);
         if self.active_l4_frame() == l4_frame {
@@ -569,13 +663,18 @@ impl MemoryMapper {
         let destination_page = Page::<Size4KiB>::containing_address(destination);
         let parent_flags =
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let mut table_allocator = TypedFrameAllocator {
+            allocator: &mut self.frame_allocator,
+            reason: FrameRefReason::PageTable,
+            site: 0x1108,
+        };
         let mapping = unsafe {
             target.map_to_with_table_flags(
                 destination_page,
                 frame,
                 flags,
                 parent_flags,
-                &mut self.frame_allocator,
+                &mut table_allocator,
             )
         };
         let flush = match mapping {
@@ -599,6 +698,11 @@ impl MemoryMapper {
                 .expect("source leaf disappeared during move")
         };
         source_leaf.set_unused();
+        crate::diagnostics::shadow::memory::move_leaf(
+            self.address_space_generation(l4_frame),
+            source.as_u64(),
+            destination.as_u64(),
+        );
         self.prune_empty_path(l4_frame, source);
         if self.active_l4_frame() == l4_frame {
             x86_64::instructions::tlb::flush(source);
@@ -631,7 +735,11 @@ impl MemoryMapper {
             }
             let parent = unsafe { &mut *self.table_ptr(tables[child_depth - 1]) };
             parent[indices[child_depth - 1]].set_unused();
-            let released = self.frame_allocator.release_frame(tables[child_depth]);
+            let released = self.frame_allocator.release_frame_reason(
+                tables[child_depth],
+                FrameRefReason::PageTable,
+                0x1109,
+            );
             debug_assert!(released.is_ok(), "user page table must be allocator-owned");
             depth -= 1;
         }
@@ -639,6 +747,8 @@ impl MemoryMapper {
 
     /// Destroy all user-owned lower-half subtrees and finally release the L4.
     pub fn destroy_user_address_space(&mut self, l4_frame: PhysFrame<Size4KiB>) {
+        let as_generation = self.address_space_generation(l4_frame);
+        crate::diagnostics::shadow::memory::remove_address_space(as_generation);
         let l4 = unsafe { &mut *self.table_ptr(l4_frame) };
         for slot in 0..256 {
             if is_kernel_reserved_slot(slot) || l4[slot].is_unused() {
@@ -653,7 +763,9 @@ impl MemoryMapper {
             l4[slot].set_unused();
             unsafe { self.destroy_user_table(child, 3) };
         }
-        let released = self.frame_allocator.release_frame(l4_frame);
+        let released =
+            self.frame_allocator
+                .release_frame_reason(l4_frame, FrameRefReason::RootL4, 0x110a);
         debug_assert!(released.is_ok(), "user L4 must be allocator-owned");
     }
 
@@ -672,14 +784,180 @@ impl MemoryMapper {
             let owned = PhysFrame::containing_address(entry.addr());
             entry.set_unused();
             if level == 1 {
-                let released = self.frame_allocator.release_frame(owned);
+                let released = self.frame_allocator.release_frame_reason(
+                    owned,
+                    FrameRefReason::LeafMapping,
+                    0x110b,
+                );
                 debug_assert!(released.is_ok(), "user leaf must be allocator-owned");
             } else {
                 self.destroy_user_table(owned, level - 1);
             }
         }
-        let released = self.frame_allocator.release_frame(frame);
+        let released =
+            self.frame_allocator
+                .release_frame_reason(frame, FrameRefReason::PageTable, 0x110c);
         debug_assert!(released.is_ok(), "user page table must be allocator-owned");
+    }
+
+    /// Independently reconcile one user page-table tree with the allocator
+    /// and shadow ledgers. The caller already holds the mapper serialization
+    /// domain; this walk uses only the direct physical alias and never yields.
+    pub fn audit_user_address_space(&self, l4_frame: PhysFrame<Size4KiB>) -> bool {
+        if crate::diagnostics::personality() == crate::diagnostics::Personality::Minimal {
+            return true;
+        }
+        let as_generation = self.address_space_generation(l4_frame);
+        let Some((root_index, _)) = self.frame_allocator.shadow_identity(l4_frame) else {
+            crate::diagnostics::shadow::memory::report_topology(
+                crate::diagnostics::shadow::memory::MM_006,
+                l4_frame.start_address().as_u64(),
+                as_generation,
+                0,
+            );
+            return false;
+        };
+        let mut valid = crate::diagnostics::shadow::memory::validate_frame(
+            root_index,
+            crate::diagnostics::shadow::memory::FrameKind::RootL4,
+            self.frame_allocator.refcount(l4_frame),
+            l4_frame.start_address().as_u64(),
+        );
+        let l4 = unsafe { &*self.table_ptr(l4_frame) };
+        for slot in 0..256 {
+            if is_kernel_reserved_slot(slot) || l4[slot].is_unused() {
+                continue;
+            }
+            let entry = &l4[slot];
+            let flags = entry.flags();
+            if flags.contains(PageTableFlags::HUGE_PAGE) {
+                crate::diagnostics::shadow::memory::report_topology(
+                    crate::diagnostics::shadow::memory::MM_005,
+                    (slot as u64) << 39,
+                    as_generation,
+                    flags.bits(),
+                );
+                valid = false;
+                continue;
+            }
+            if !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+                crate::diagnostics::shadow::memory::report_topology(
+                    crate::diagnostics::shadow::memory::MM_004,
+                    (slot as u64) << 39,
+                    as_generation,
+                    flags.bits(),
+                );
+                valid = false;
+            }
+            let child = PhysFrame::containing_address(entry.addr());
+            valid &= unsafe {
+                self.audit_user_table(
+                    child,
+                    3,
+                    (slot as u64) << 39,
+                    flags.contains(PageTableFlags::USER_ACCESSIBLE),
+                    as_generation,
+                )
+            };
+        }
+        valid
+    }
+
+    unsafe fn audit_user_table(
+        &self,
+        frame: PhysFrame<Size4KiB>,
+        level: u8,
+        virtual_base: u64,
+        ancestors_user: bool,
+        as_generation: u64,
+    ) -> bool {
+        let mut valid = true;
+        let Some((frame_index, _)) = self.frame_allocator.shadow_identity(frame) else {
+            crate::diagnostics::shadow::memory::report_topology(
+                crate::diagnostics::shadow::memory::MM_006,
+                frame.start_address().as_u64(),
+                as_generation,
+                level.into(),
+            );
+            return false;
+        };
+        valid &= crate::diagnostics::shadow::memory::validate_frame(
+            frame_index,
+            crate::diagnostics::shadow::memory::FrameKind::PageTable,
+            self.frame_allocator.refcount(frame),
+            frame.start_address().as_u64(),
+        );
+        let table = unsafe { &*self.table_ptr(frame) };
+        let shift = match level {
+            3 => 30,
+            2 => 21,
+            _ => 12,
+        };
+        for (index, entry) in table.iter().enumerate() {
+            if entry.is_unused() || !entry.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            let address = virtual_base | ((index as u64) << shift);
+            let flags = entry.flags();
+            let path_user = ancestors_user && flags.contains(PageTableFlags::USER_ACCESSIBLE);
+            if !path_user {
+                crate::diagnostics::shadow::memory::report_topology(
+                    crate::diagnostics::shadow::memory::MM_004,
+                    address,
+                    as_generation,
+                    flags.bits(),
+                );
+                valid = false;
+            }
+            if flags.contains(PageTableFlags::HUGE_PAGE) {
+                crate::diagnostics::shadow::memory::report_topology(
+                    crate::diagnostics::shadow::memory::MM_005,
+                    address,
+                    as_generation,
+                    flags.bits(),
+                );
+                valid = false;
+                continue;
+            }
+            let owned = PhysFrame::containing_address(entry.addr());
+            if level == 1 {
+                if flags.contains(PageTableFlags::WRITABLE)
+                    && !flags.contains(PageTableFlags::NO_EXECUTE)
+                {
+                    crate::diagnostics::shadow::memory::report_topology(
+                        crate::diagnostics::shadow::memory::MM_004,
+                        address,
+                        as_generation,
+                        flags.bits(),
+                    );
+                    valid = false;
+                }
+                let Some((leaf_index, leaf_generation)) =
+                    self.frame_allocator.shadow_identity(owned)
+                else {
+                    valid = false;
+                    continue;
+                };
+                valid &= crate::diagnostics::shadow::memory::validate_frame(
+                    leaf_index,
+                    crate::diagnostics::shadow::memory::FrameKind::UserLeaf,
+                    self.frame_allocator.refcount(owned),
+                    owned.start_address().as_u64(),
+                );
+                valid &= crate::diagnostics::shadow::memory::validate_leaf(
+                    as_generation,
+                    address,
+                    owned.start_address().as_u64(),
+                    leaf_generation,
+                    flags.bits(),
+                );
+            } else {
+                valid &= unsafe {
+                    self.audit_user_table(owned, level - 1, address, path_user, as_generation)
+                };
+            }
+        }
+        valid
     }
 
     /// Count resident user leaf pages in the address space rooted at
@@ -783,13 +1061,17 @@ impl MemoryMapper {
         // the boot-time kernel L4 the global mapper was constructed
         // with.
         let mut active_mapper = unsafe { active_offset_page_table(phys_offset) };
+        let l4 = self.active_l4_frame();
+        let as_generation = self.address_space_generation(l4);
 
         for i in 0..num_pages {
             let page_addr = VirtAddr::new(virt_start.as_u64() + i * 0x1000);
             let page = Page::<Size4KiB>::containing_address(page_addr);
 
-            let Some(frame) = self.frame_allocator.allocate_frame() else {
-                let l4 = self.active_l4_frame();
+            let Some(frame) = self
+                .frame_allocator
+                .allocate_frame_reason(FrameRefReason::LeafMapping, 0x1201)
+            else {
                 for installed in (0..frames.len()).rev() {
                     let va = VirtAddr::new(virt_start.as_u64() + installed as u64 * 0x1000);
                     let _ = self.unmap_page_from(l4, va);
@@ -805,20 +1087,39 @@ impl MemoryMapper {
                 core::ptr::write_bytes(virt as *mut u8, 0u8, 0x1000);
             }
 
+            let mut table_allocator = TypedFrameAllocator {
+                allocator: &mut self.frame_allocator,
+                reason: FrameRefReason::PageTable,
+                site: 0x1202,
+            };
             let result = unsafe {
                 active_mapper.map_to_with_table_flags(
                     page,
                     frame,
                     leaf_flags,
                     parent_flags,
-                    &mut self.frame_allocator,
+                    &mut table_allocator,
                 )
             };
             match result {
-                Ok(flush) => flush.flush(),
+                Ok(flush) => {
+                    flush.flush();
+                    if let Some((frame_index, _)) = self.frame_allocator.shadow_identity(frame) {
+                        crate::diagnostics::shadow::memory::map_leaf(
+                            as_generation,
+                            page_addr.as_u64(),
+                            frame.start_address().as_u64(),
+                            frame_index,
+                            leaf_flags.bits(),
+                        );
+                    }
+                }
                 Err(error) => {
-                    let _ = self.frame_allocator.release_frame(frame);
-                    let l4 = self.active_l4_frame();
+                    let _ = self.frame_allocator.release_frame_reason(
+                        frame,
+                        FrameRefReason::LeafMapping,
+                        0x1203,
+                    );
                     self.prune_empty_path(l4, page_addr);
                     for installed in (0..frames.len()).rev() {
                         let va = VirtAddr::new(virt_start.as_u64() + installed as u64 * 0x1000);
@@ -929,7 +1230,7 @@ impl MemoryMapper {
         } else {
             // For other regions (like heap), allocate a new frame
             self.frame_allocator
-                .allocate_frame()
+                .allocate_frame_reason(FrameRefReason::KernelHeap, 0x1204)
                 .ok_or(MapToError::FrameAllocationFailed)?
         };
 
@@ -948,13 +1249,21 @@ impl MemoryMapper {
                     // Page is already mapped, that's fine
                     debug_trace!("Page {:?} was already mapped", page);
                     if allocator_owned {
-                        let _ = self.frame_allocator.release_frame(frame);
+                        let _ = self.frame_allocator.release_frame_reason(
+                            frame,
+                            FrameRefReason::KernelHeap,
+                            0x1205,
+                        );
                     }
                     return Ok(());
                 }
                 Err(e) => {
                     if allocator_owned {
-                        let _ = self.frame_allocator.release_frame(frame);
+                        let _ = self.frame_allocator.release_frame_reason(
+                            frame,
+                            FrameRefReason::KernelHeap,
+                            0x1206,
+                        );
                     }
                     debug_error!(
                         "Failed to map page {:?} to frame {:?}: {:?}",

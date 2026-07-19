@@ -37,6 +37,9 @@ scripts/test-crash-diagnostics.sh cont-signal-wake
 scripts/test-crash-diagnostics.sh cont-invalid-stack
 scripts/test-crash-diagnostics.sh as-destroy-active
 scripts/test-crash-diagnostics.sh stack-retire-active
+scripts/test-crash-diagnostics.sh mm-double-release
+scripts/test-crash-diagnostics.sh mm-wrong-unmap
+scripts/test-crash-diagnostics.sh mm-wx
 ```
 
 The harness requires a non-success QEMU exit, a complete decodable capsule,
@@ -51,7 +54,9 @@ runnable and requires `CONT-004` as the first invariant.
 declared live kernel stack and requires `CONT-002` as the first invariant.
 `as-destroy-active` requires `AS-003` before an active user L4 can be freed;
 `stack-retire-active` requires `STACK-001` before an active rsp0 stack can be
-retired or reused.
+retired or reused. The three `mm-*` cases require exact `MM-002`, `MM-001`,
+and `MM-004` signatures for typed-reference underflow, a mismatched mapping
+key, and an executable writable user leaf.
 
 ## Crash-path rules
 
@@ -109,3 +114,22 @@ VMA generation, active CPU mask, and build/live/destroy state. Stack records
 retain the owner PID, exact bounds, active CPU, last installed RSP, and
 allocation/live/retirement state. Exit handoffs publish stack inactivity only
 after assembly has moved to a different stack.
+
+Rich modes also reserve a full physical-frame ownership ledger and a bounded
+user-leaf mapping table beside the allocator metadata before heap startup.
+Every usable frame receives a 24-byte generation/state/reference record and,
+through 2 GiB, the mapping table receives one 40-byte slot per usable frame:
+64 bytes per frame, or 1.5625% of managed RAM. Above that point total shadow
+storage stays capped at 32 MiB and the remaining budget determines mapping
+capacity; strict mode refuses boot if the complete frame ledger itself cannot
+fit. Root, page-table, leaf,
+COW, heap, and transient ownership updates are typed at their production
+commit points. Address-space publication and destruction independently walk
+the raw page tables to reconcile USER ancestry, W^X, frame types, allocator
+counts, and exact mapping generations.
+
+The `shadow_memory` capsule section reports provisioned capacity, live mapping
+load, maximum probe distance, rejected insertions, transition stability, and
+the 256 most recently mutated frame and mapping records. A full mapping table
+never evicts live facts; it latches `DIAG-CAPACITY-MAPPING` and preserves
+existing entries.

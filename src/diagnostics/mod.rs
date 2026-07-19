@@ -119,6 +119,18 @@ pub fn maybe_inject_crash() {
             shadow::stack::begin_retire(generation);
             panic!("strict active stack retirement injection did not escalate");
         }
+        b"mm-double-release" => {
+            shadow::memory::inject_double_release(0);
+            panic!("strict frame double-release injection did not escalate");
+        }
+        b"mm-wrong-unmap" => {
+            shadow::memory::unmap_leaf(0x7fff_0001, 0x4000, 0x9000, 1);
+            panic!("strict wrong-unmap injection did not escalate");
+        }
+        b"mm-wx" => {
+            shadow::memory::report_topology(shadow::memory::MM_004, 0x4000, 0x7fff_0002, 0x3);
+            panic!("strict W+X injection did not escalate");
+        }
         _ => {}
     }
 }

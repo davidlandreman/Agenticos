@@ -161,6 +161,25 @@ class CrashDecodeTests(unittest.TestCase):
         self.assertEqual(report["shadow"]["address_space"]["roots"][0]["owner_tgid"], 42)
         self.assertEqual(report["shadow"]["stack"]["stacks"][0]["owner_pid"], 43)
 
+    def test_memory_shadow_section(self):
+        frame = struct.pack(
+            "<IIIHHHBBHHI", 17, 3, 2, 2, 0, 0, 2, 3, 0x1201, 0x1107, 99
+        )
+        mapping = struct.pack(
+            "<QQQIIIBBH", 7, 0x4000, 0x9000, 3, 0x80000007, 12, 1, 2, 0
+        )
+        payload = (
+            struct.pack("<IIIIIIQI", 65536, 65536, 21, 4, 0, 24, 18, 1)
+            + frame
+            + struct.pack("<I", 1)
+            + mapping
+        )
+        report, _ = crash_decode.parse_capsule(capsule([section(15, payload)]))
+        memory = report["shadow"]["memory"]
+        self.assertEqual(memory["mapping_count"], 21)
+        self.assertEqual(memory["recent_frames"][0]["allocation_generation"], 3)
+        self.assertEqual(memory["recent_mappings"][0]["virtual_page"], "0x4000")
+
 
 if __name__ == "__main__":
     unittest.main()

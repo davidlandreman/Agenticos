@@ -145,6 +145,18 @@ fn slot_for(generation: u64) -> Option<&'static Slot> {
         .find(|slot| slot.key.load(Ordering::Acquire) == generation)
 }
 
+pub fn generation_for_l4(l4: u64) -> u64 {
+    if !enabled() {
+        return 0;
+    }
+    SLOTS
+        .iter()
+        .find(|slot| slot.l4_key.load(Ordering::Acquire) == l4)
+        .map(|slot| slot.key.load(Ordering::Acquire))
+        .filter(|generation| *generation != 0 && *generation != CLAIMED)
+        .unwrap_or(0)
+}
+
 pub fn allocate(l4: u64) -> u64 {
     if !enabled() {
         return 0;

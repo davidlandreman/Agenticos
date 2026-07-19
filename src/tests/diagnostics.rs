@@ -11,6 +11,20 @@ fn test_wire_layout_contract() {
     assert_eq!(wire::MAGIC, *b"AGCRASH\0");
 }
 
+fn test_memory_shadow_budget_contract() {
+    let frames = 65_536usize;
+    let expected = if cfg!(any(feature = "diagnostics", feature = "diagnostics-strict")) {
+        frames * 64
+    } else {
+        0
+    };
+    assert_eq!(
+        crate::diagnostics::shadow::memory::storage_bytes(frames),
+        expected
+    );
+    assert!(expected == 0 || expected <= 32 * 1024 * 1024);
+}
+
 fn test_trace_commit_and_wrap() {
     // CPU 7 is a valid possible-CPU recorder even when the test VM boots
     // fewer CPUs, which keeps this synthetic writer isolated from live CPUs.
@@ -216,6 +230,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_crc32_golden_vector,
         &test_wire_layout_contract,
+        &test_memory_shadow_budget_contract,
         &test_trace_commit_and_wrap,
         &test_scheduler_shadow_legal_save_publish_cycle,
         &test_scheduler_shadow_rejects_illegal_edges,

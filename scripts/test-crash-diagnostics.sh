@@ -10,7 +10,10 @@ case "$CASE_NAME" in
     cont-invalid-stack) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cont-invalid-stack ;;
     as-destroy-active) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=as-destroy-active ;;
     stack-retire-active) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=stack-retire-active ;;
-    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active" >&2; exit 2 ;;
+    mm-double-release) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=mm-double-release ;;
+    mm-wrong-unmap) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=mm-wrong-unmap ;;
+    mm-wx) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=mm-wx ;;
+    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active, mm-double-release, mm-wrong-unmap, mm-wx" >&2; exit 2 ;;
 esac
 
 RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -50,6 +53,9 @@ invariant_cases = (
     "cont-invalid-stack",
     "as-destroy-active",
     "stack-retire-active",
+    "mm-double-release",
+    "mm-wrong-unmap",
+    "mm-wx",
 )
 expected_kind = "invariant" if case in invariant_cases else "fatal"
 assert report["trigger"]["kind"] == expected_kind, report
@@ -79,5 +85,14 @@ if case == "as-destroy-active":
 if case == "stack-retire-active":
     assert report["violation"]["id"] == 0x07000001, report
     assert report["trigger"]["signature"] == "INV-07000001", report
+if case == "mm-double-release":
+    assert report["violation"]["id"] == 0x08000002, report
+    assert report["trigger"]["signature"] == "INV-08000002", report
+if case == "mm-wrong-unmap":
+    assert report["violation"]["id"] == 0x08000001, report
+    assert report["trigger"]["signature"] == "INV-08000001", report
+if case == "mm-wx":
+    assert report["violation"]["id"] == 0x08000004, report
+    assert report["trigger"]["signature"] == "INV-08000004", report
 print(f"validated {report['trigger']['signature']}: {sys.argv[1]}")
 PY

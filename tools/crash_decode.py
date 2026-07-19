@@ -30,6 +30,7 @@ SECTION_NAMES = {
     12: "footer",
     13: "shadow_address_space",
     14: "shadow_stack",
+    15: "shadow_memory",
 }
 MAX_CAPSULE = 16 * 1024 * 1024
 MAX_SECTIONS = 256
@@ -158,6 +159,7 @@ def parse_capsule(blob: bytes, offset: int = 0) -> tuple[dict[str, Any], int]:
         required.add(9)
         required.add(13)
         required.add(14)
+        required.add(15)
     present = {section.kind for section in sections}
     report["missing"] = [SECTION_NAMES[kind] for kind in sorted(required - present)]
     trigger = report["trigger"]
@@ -426,6 +428,67 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
         report.setdefault("shadow", {})["stack"] = {
             "stable": not bool(section.flags & 1),
             "stacks": stacks,
+        }
+    elif section.kind == 15:
+        if len(payload) < 36:
+            raise DecodeError("short memory shadow section")
+        frame_count, mapping_capacity, mapping_count, max_probe, rejected, frame_size, sequence = struct.unpack_from(
+            "<IIIIIIQ", payload
+        )
+        recent_count = struct.unpack_from("<I", payload, 32)[0]
+        mapping_count_offset = 36 + recent_count * 28
+        if frame_size != 24 or len(payload) < mapping_count_offset + 4:
+            raise DecodeError("invalid memory shadow layout")
+        frames = []
+        cursor = 36
+        for _ in range(recent_count):
+            values = struct.unpack_from("<IIIHHHBBHHI", payload, cursor)
+            cursor += 28
+            frames.append(
+                {
+                    "index": values[0],
+                    "allocation_generation": values[1],
+                    "expected_refs": values[2],
+                    "leaf_refs": values[3],
+                    "page_table_refs": values[4],
+                    "transient_refs": values[5],
+                    "state": values[6],
+                    "kind": values[7],
+                    "last_alloc_site": values[8],
+                    "last_release_site": values[9],
+                    "last_epoch": values[10],
+                }
+            )
+        recent_mapping_count = struct.unpack_from("<I", payload, mapping_count_offset)[0]
+        cursor = mapping_count_offset + 4
+        if len(payload) != cursor + recent_mapping_count * 40:
+            raise DecodeError("invalid memory shadow layout")
+        mappings = []
+        for _ in range(recent_mapping_count):
+            values = struct.unpack_from("<QQQIIIBBH", payload, cursor)
+            cursor += 40
+            mappings.append(
+                {
+                    "address_space_generation": values[0],
+                    "virtual_page": f"0x{values[1]:x}",
+                    "frame_address": f"0x{values[2]:x}",
+                    "frame_generation": values[3],
+                    "flags": f"0x{values[4]:x}",
+                    "mapping_generation": values[5],
+                    "state": values[6],
+                    "probe_distance": values[7],
+                }
+            )
+        report.setdefault("shadow", {})["memory"] = {
+            "stable": not bool(section.flags & 1),
+            "frame_count": frame_count,
+            "mapping_capacity": mapping_capacity,
+            "mapping_count": mapping_count,
+            "max_probe_distance": max_probe,
+            "rejected_insertions": rejected,
+            "sequence": sequence,
+            "recent_frames": frames,
+            "recent_mappings": mappings,
         }
 
 
