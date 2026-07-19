@@ -121,6 +121,43 @@ pub fn maybe_inject_crash() {
             shadow::continuation::dispatch(pid, &context);
             panic!("strict invalid continuation stack injection did not escalate");
         }
+        b"pager-short-read" => {
+            let handle = shadow::pager::begin(0x7fff_ff10, 0x1234_5000, 7, 0x4000)
+                .expect("pager injection slot");
+            shadow::pager::reserve_frame(handle, 0x9000);
+            shadow::pager::populated(handle, 4096, 2048, 0);
+            panic!("strict pager short-read injection did not escalate");
+        }
+        b"io-wrong-wake" => {
+            let token = 0xfeed_0010;
+            let pid = 0x7fff_ff10;
+            shadow::io::submitted(token, 0x1010, pid, 1, 8, 4096);
+            shadow::io::completed(token, 0, 4096);
+            shadow::io::queue_wake(token, pid);
+            shadow::io::wrong_wake(token, pid, token + 1);
+            panic!("strict wrong-token wake injection did not escalate");
+        }
+        b"io-lost-wake" => {
+            let token = 0xfeed_0011;
+            let pid = 0x7fff_ff11;
+            shadow::io::submitted(token, 0x1011, pid, 1, 9, 4096);
+            shadow::io::completed(token, 0, 4096);
+            shadow::io::wake_lost(token, pid);
+            panic!("strict lost-wake injection did not escalate");
+        }
+        b"io-double-complete" => {
+            let token = 0xfeed_0012;
+            shadow::io::submitted(token, 0x1012, 0x7fff_ff12, 1, 10, 4096);
+            shadow::io::completed(token, 0, 4096);
+            shadow::io::completed(token, 0, 4096);
+            panic!("strict duplicate-completion injection did not escalate");
+        }
+        b"io-early-consume" => {
+            let token = 0xfeed_0013;
+            shadow::io::submitted(token, 0x1013, 0x7fff_ff13, 1, 11, 4096);
+            shadow::io::consumed(token);
+            panic!("strict premature-consume injection did not escalate");
+        }
         b"as-destroy-active" => {
             let generation = shadow::address_space::allocate(0x1234_5000);
             shadow::address_space::publish_owner(generation, 0x7fff_ff03, 1);

@@ -62,6 +62,11 @@ scripts/test-crash-diagnostics.sh missing-cpu
 scripts/test-crash-diagnostics.sh sched-duplicate
 scripts/test-crash-diagnostics.sh cont-signal-wake
 scripts/test-crash-diagnostics.sh cont-invalid-stack
+scripts/test-crash-diagnostics.sh pager-short-read
+scripts/test-crash-diagnostics.sh io-wrong-wake
+scripts/test-crash-diagnostics.sh io-lost-wake
+scripts/test-crash-diagnostics.sh io-double-complete
+scripts/test-crash-diagnostics.sh io-early-consume
 scripts/test-crash-diagnostics.sh as-destroy-active
 scripts/test-crash-diagnostics.sh stack-retire-active
 scripts/test-crash-diagnostics.sh mm-double-release
@@ -91,6 +96,10 @@ this qualifies the logger-free fatal exception route itself.
 runnable and requires `CONT-004` as the first invariant.
 `cont-invalid-stack` attempts to dispatch a saved continuation outside its
 declared live kernel stack and requires `CONT-002` as the first invariant.
+`pager-short-read` preserves requested and actual byte counts and requires
+`PAGER-004`. The four `io-*` cases distinguish a wrong token (`IO-003`), lost
+wake publication (`IO-004`), duplicate completion (`IO-001`), and result
+consumption before completion (`IO-002`).
 `as-destroy-active` requires `AS-003` before an active user L4 can be freed;
 `stack-retire-active` requires `STACK-001` before an active rsp0 stack can be
 retired or reused. The three `mm-*` cases require exact `MM-002`, `MM-001`,

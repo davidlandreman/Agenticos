@@ -9,6 +9,11 @@ case "$CASE_NAME" in
     sched-duplicate) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=sched-duplicate ;;
     cont-signal-wake) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cont-signal-wake ;;
     cont-invalid-stack) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cont-invalid-stack ;;
+    pager-short-read) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=pager-short-read ;;
+    io-wrong-wake) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=io-wrong-wake ;;
+    io-lost-wake) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=io-lost-wake ;;
+    io-double-complete) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=io-double-complete ;;
+    io-early-consume) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=io-early-consume ;;
     as-destroy-active) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=as-destroy-active ;;
     stack-retire-active) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=stack-retire-active ;;
     mm-double-release) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=mm-double-release ;;
@@ -23,7 +28,7 @@ case "$CASE_NAME" in
     cpu-wrong-pid) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-wrong-pid ;;
     cpu-kernel-cr3) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-kernel-cr3 ;;
     cpu-wrong-publication) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-wrong-publication ;;
-    *) echo "supported crash cases: panic, fatal-page-fault, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active, mm-double-release, mm-wrong-unmap, mm-wx, lock-recursion, lock-wrong-owner, lock-wrong-context, lock-cycle, cpu-wrong-cr3, cpu-wrong-order, cpu-wrong-pid, cpu-kernel-cr3, cpu-wrong-publication" >&2; exit 2 ;;
+    *) echo "supported crash cases: panic, fatal-page-fault, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, pager-short-read, io-wrong-wake, io-lost-wake, io-double-complete, io-early-consume, as-destroy-active, stack-retire-active, mm-double-release, mm-wrong-unmap, mm-wx, lock-recursion, lock-wrong-owner, lock-wrong-context, lock-cycle, cpu-wrong-cr3, cpu-wrong-order, cpu-wrong-pid, cpu-kernel-cr3, cpu-wrong-publication" >&2; exit 2 ;;
 esac
 
 RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -73,6 +78,11 @@ invariant_cases = (
     "sched-duplicate",
     "cont-signal-wake",
     "cont-invalid-stack",
+    "pager-short-read",
+    "io-wrong-wake",
+    "io-lost-wake",
+    "io-double-complete",
+    "io-early-consume",
     "as-destroy-active",
     "stack-retire-active",
     "mm-double-release",
@@ -118,6 +128,27 @@ if case == "cont-signal-wake":
 if case == "cont-invalid-stack":
     assert report["violation"]["id"] == 0x05000002, report
     assert report["trigger"]["signature"] == "INV-05000002", report
+if case == "pager-short-read":
+    assert report["violation"]["id"] == 0x03000004, report
+    assert report["violation"]["expected"][0] == 4096, report
+    assert report["violation"]["observed"][0] == 2048, report
+    assert report["trigger"]["signature"] == "INV-03000004", report
+if case == "io-wrong-wake":
+    assert report["violation"]["id"] == 0x04000003, report
+    assert report["trigger"]["signature"] == "INV-04000003", report
+if case == "io-lost-wake":
+    assert report["violation"]["id"] == 0x04000004, report
+    assert report["trigger"]["signature"] == "INV-04000004", report
+if case == "io-double-complete":
+    assert report["violation"]["id"] == 0x04000001, report
+    assert report["violation"]["expected"][0] == 1, report
+    assert report["violation"]["observed"][0] == 2, report
+    assert report["trigger"]["signature"] == "INV-04000001", report
+if case == "io-early-consume":
+    assert report["violation"]["id"] == 0x04000002, report
+    assert report["violation"]["expected"][0] == 4, report
+    assert report["violation"]["observed"][0] == 1, report
+    assert report["trigger"]["signature"] == "INV-04000002", report
 if case == "as-destroy-active":
     assert report["violation"]["id"] == 0x06000003, report
     assert report["trigger"]["signature"] == "INV-06000003", report
@@ -160,5 +191,27 @@ if case == "cpu-kernel-cr3":
 if case == "cpu-wrong-publication":
     assert report["violation"]["id"] == 0x02000004, report
     assert report["trigger"]["signature"] == "INV-02000004", report
+
+io_expectations = {
+    "cont-signal-wake": (0xFEED0001, ["submitted", "completed", "wake_queued", "generic_wake_rejected"]),
+    "io-wrong-wake": (0xFEED0010, ["submitted", "completed", "wake_queued", "wrong_wake"]),
+    "io-lost-wake": (0xFEED0011, ["submitted", "completed", "wake_lost"]),
+    "io-double-complete": (0xFEED0012, ["submitted", "completed"]),
+    "io-early-consume": (0xFEED0013, ["submitted"]),
+}
+if case in io_expectations:
+    token, expected_phases = io_expectations[case]
+    events = [
+        record["operands"]
+        for cpu in report["trace"]["cpus"]
+        for record in cpu["records"]
+        if record.get("operands", {}).get("token") == token
+    ]
+    assert [event["phase"] for event in events] == expected_phases, events
+    assert all(event["page_generation"] != 0 for event in events), events
+    if case == "cont-signal-wake":
+        assert events[1]["status"] == 0 and events[1]["actual_bytes"] == 4096, events
+    if case == "io-wrong-wake":
+        assert events[-1]["awaited_token"] == token + 1, events
 print(f"validated {report['trigger']['signature']}: {sys.argv[1]}")
 PY
