@@ -8,6 +8,7 @@ import binascii
 import hashlib
 import json
 import pathlib
+import shutil
 import struct
 import subprocess
 from dataclasses import dataclass
@@ -32,6 +33,40 @@ SECTION_NAMES = {
     14: "shadow_stack",
     15: "shadow_memory",
     16: "shadow_locks",
+}
+EVENT_NAMES = {
+    1: "diagnostics_enabled",
+    2: "boot_phase",
+    3: "cpu_online",
+    4: "fatal_elected",
+    5: "nested_fatal",
+    6: "cpu_rendezvous",
+    7: "unexpected_nmi",
+    0x100: "interrupt_entry",
+    0x101: "interrupt_exit",
+    0x200: "scheduler_dispatch",
+    0x201: "context_publish",
+    0x300: "cr3_write",
+    0x301: "current_pid",
+    0x400: "page_fault",
+    0x401: "page_in_terminal",
+    0x500: "io_token",
+    0x600: "signal_wake_attempt",
+    0x601: "signal_wake_deferred_io",
+    0x800: "lock_attempt",
+    0x801: "lock_acquired",
+    0x802: "lock_try_failed",
+    0x803: "lock_released",
+    0x804: "lock_order_edge",
+    0x900: "invariant_latched",
+}
+LOCK_CLASS_NAMES = {
+    1: "scheduler",
+    2: "process_table",
+    3: "memory_mapper",
+    4: "stack_allocator",
+    5: "heap_allocator",
+    6: "serial_logger",
 }
 MAX_CAPSULE = 16 * 1024 * 1024
 MAX_SECTIONS = 256
@@ -241,6 +276,65 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
             report["cpus"] = cpus
         else:
             raise DecodeError(f"unsupported CPU snapshot version {section.version}")
+    elif section.kind == 5:
+        if len(payload) < 8:
+            raise DecodeError("short trace section")
+        cpu_count, ring_length, exported_per_cpu, reserved = struct.unpack_from("<HHHH", payload)
+        if reserved != 0 or cpu_count > 8:
+            raise DecodeError("invalid trace header")
+        cursor = 8
+        cpus = []
+        seen = set()
+        for _ in range(cpu_count):
+            if cursor + 32 > len(payload):
+                raise DecodeError("truncated trace CPU header")
+            cpu, cpu_reserved, reserved2, next_sequence, overwrites, drops, count = struct.unpack_from(
+                "<BBHQQQI", payload, cursor
+            )
+            cursor += 32
+            if cpu >= 8 or cpu in seen or cpu_reserved != 0 or reserved2 != 0:
+                raise DecodeError("invalid trace CPU header")
+            if count > exported_per_cpu or count > (len(payload) - cursor) // 64:
+                raise DecodeError("invalid trace record count")
+            seen.add(cpu)
+            records = []
+            for _ in range(count):
+                sequence, tsc, tick, epoch, subject, arg0, arg1, meta = struct.unpack_from(
+                    "<8Q", payload, cursor
+                )
+                cursor += 64
+                kind = meta & 0xFFFF
+                records.append(
+                    {
+                        "sequence": sequence,
+                        "tsc": tsc,
+                        "tick": tick,
+                        "causal_epoch": epoch,
+                        "subject": subject,
+                        "arg0": arg0,
+                        "arg1": arg1,
+                        "kind": EVENT_NAMES.get(kind, f"unknown({kind})"),
+                        "kind_id": kind,
+                        "cpu": (meta >> 16) & 0xFF,
+                        "schema": (meta >> 24) & 0xFF,
+                    }
+                )
+            cpus.append(
+                {
+                    "cpu": cpu,
+                    "next_sequence": next_sequence,
+                    "overwrites": overwrites,
+                    "drops": drops,
+                    "records": records,
+                }
+            )
+        if cursor != len(payload):
+            raise DecodeError("trailing trace data")
+        report["trace"] = {
+            "ring_length": ring_length,
+            "exported_per_cpu": exported_per_cpu,
+            "cpus": cpus,
+        }
     elif section.kind == 10:
         if len(payload) != 64:
             raise DecodeError("invalid violation size")
@@ -506,6 +600,7 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
             classes.append(
                 {
                     "class": values[0],
+                    "class_name": LOCK_CLASS_NAMES.get(values[0], f"unknown({values[0]})"),
                     "owner_cpu": values[1],
                     "recursion_depth": values[2],
                     "waiters": values[4],
@@ -515,11 +610,37 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
                     "acquisitions": values[9],
                     "failed_try_locks": values[10],
                     "order_edges": values[11],
+                    "order_edge_classes": [
+                        name for class_id, name in LOCK_CLASS_NAMES.items() if values[11] & (1 << class_id)
+                    ],
                 }
             )
         report.setdefault("shadow", {})["locks"] = {
             "stable": not bool(section.flags & 1),
             "classes": classes,
+        }
+    elif section.kind == 11:
+        if len(payload) < 4:
+            raise DecodeError("short backtrace section")
+        count, unavailable_reason, reserved = struct.unpack_from("<HBB", payload)
+        if reserved != 0 or len(payload) != 4 + count * 8:
+            raise DecodeError("invalid backtrace layout")
+        frames = [f"0x{value:x}" for value in struct.unpack_from(f"<{count}Q", payload, 4)]
+        report["backtrace"] = {
+            "complete": not bool(section.flags & 1),
+            "unavailable_reason": unavailable_reason,
+            "frames": frames,
+        }
+    elif section.kind == 12:
+        if len(payload) != 16:
+            raise DecodeError("invalid footer size")
+        nested_count, marker, reserved = struct.unpack("<QII", payload)
+        if reserved != 0:
+            raise DecodeError("invalid footer reserved field")
+        report["footer"] = {
+            "complete": marker == 0x434F4D50,
+            "marker": f"0x{marker:08x}",
+            "nested_count": nested_count,
         }
 
 
@@ -549,13 +670,60 @@ def parse_stream(blob: bytes) -> list[dict[str, Any]]:
 
 def trust_manifest(report: dict[str, Any], manifest_path: pathlib.Path, elf: pathlib.Path | None) -> None:
     manifest = json.loads(manifest_path.read_text())
-    trusted = manifest.get("build_id") == report["run"]["build_id"]
+    identity_mismatches = []
+    for field, observed in (
+        ("run_id", report["run"]["id"]),
+        ("build_id", report["run"]["build_id"]),
+        ("diagnostics", report["run"].get("personality")),
+    ):
+        if manifest.get(field) != observed:
+            identity_mismatches.append(field)
+    mismatches = list(identity_mismatches)
+    symbols_trusted = not identity_mismatches
     if elf is not None:
         digest = hashlib.sha256(elf.read_bytes()).hexdigest()
-        trusted = trusted and manifest.get("kernel_elf_sha256") == digest
-    report["run"]["manifest_trusted"] = bool(trusted)
-    if not trusted:
-        report["inferences"].append("symbols_untrusted")
+        if manifest.get("kernel_elf_sha256") != digest:
+            mismatches.append("kernel_elf_sha256")
+            symbols_trusted = False
+    else:
+        symbols_trusted = False
+    report["run"]["manifest_trusted"] = not identity_mismatches
+    report["run"]["symbols_trusted"] = symbols_trusted
+    if mismatches:
+        report["inferences"].append({"manifest_mismatches": mismatches})
+
+
+def symbolize_backtrace(report: dict[str, Any], elf: pathlib.Path | None) -> None:
+    backtrace = report.get("backtrace")
+    if not backtrace or not backtrace["frames"]:
+        return
+    if elf is None or not report["run"].get("symbols_trusted", False):
+        report["inferences"].append("backtrace_symbols_unavailable_or_untrusted")
+        return
+    symbolizer = shutil.which("llvm-addr2line") or shutil.which("addr2line")
+    if symbolizer is None:
+        report["inferences"].append("addr2line_unavailable")
+        return
+    try:
+        process = subprocess.run(
+            [symbolizer, "-f", "-C", "-e", str(elf), *backtrace["frames"]],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        report["inferences"].append("addr2line_failed")
+        return
+    lines = process.stdout.splitlines()
+    if process.returncode != 0 or len(lines) != len(backtrace["frames"]) * 2:
+        report["inferences"].append("addr2line_failed")
+        return
+    backtrace["symbols"] = [
+        {"address": address, "function": lines[index * 2], "location": lines[index * 2 + 1]}
+        for index, address in enumerate(backtrace["frames"])
+    ]
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -567,9 +735,36 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Trigger: {trigger['kind']} on CPU {trigger['owner_cpu']}",
         f"- Build ID: `{report['run']['build_id']}`",
         f"- Captured CPUs: `0x{report['cpu_masks']['captured']:02x}` / online `0x{report['cpu_masks']['online']:02x}`",
+        f"- Manifest trusted: `{report['run'].get('manifest_trusted', False)}`",
+        f"- Symbols trusted: `{report['run'].get('symbols_trusted', False)}`",
     ]
+    if "violation" in report:
+        lines.append(f"- First invariant: `0x{report['violation']['id']:08x}`")
+    if "footer" in report:
+        lines.append(f"- Completion footer: `{report['footer']['complete']}`")
+    if report.get("backtrace", {}).get("frames"):
+        lines.extend(["", "## Backtrace facts", ""])
+        symbols = report["backtrace"].get("symbols")
+        if symbols:
+            for frame in symbols:
+                lines.append(f"- `{frame['address']}` {frame['function']} — {frame['location']}")
+        else:
+            lines.extend(f"- `{address}`" for address in report["backtrace"]["frames"])
+    elif "backtrace" in report:
+        lines.extend(
+            [
+                "",
+                "## Backtrace facts",
+                "",
+                f"Unavailable reason: `{report['backtrace']['unavailable_reason']}`",
+            ]
+        )
     if report["missing"]:
-        lines.extend(["", "Missing evidence: " + ", ".join(report["missing"])])
+        lines.extend(["", "## Missing evidence", "", ", ".join(report["missing"])])
+    if report["inferences"]:
+        lines.extend(
+            ["", "## Decoder inferences", "", f"```json\n{json.dumps(report['inferences'], indent=2)}\n```"]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -586,6 +781,7 @@ def main() -> int:
     for report in reports:
         if args.manifest:
             trust_manifest(report, args.manifest, args.elf)
+        symbolize_backtrace(report, args.elf)
     primary = reports[0]
     (output / "report.json").write_text(json.dumps(primary, indent=2, sort_keys=True) + "\n")
     (output / "report.md").write_text(render_markdown(primary))

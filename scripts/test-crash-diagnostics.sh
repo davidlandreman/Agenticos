@@ -22,6 +22,7 @@ esac
 
 RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 ARTIFACT_DIR="${AGENTICOS_CRASH_DIR:-$(pwd)/.context/crashes/$RUN_ID}"
+TIMEOUT_SECONDS="${AGENTICOS_CRASH_TIMEOUT_SECONDS:-180}"
 mkdir -p "$ARTIFACT_DIR"
 
 set +e
@@ -31,19 +32,30 @@ AGENTICOS_CRASH_DIR="$ARTIFACT_DIR" \
 AGENTICOS_CRASH_INJECT="$INJECT" \
 AGENTICOS_CRASH_MISSING_CPU="$MISSING_CPU" \
 AGENTICOS_QEMU_SMP=4 \
-./test.sh --skip-userland diagnostics
+python3 tools/run_with_timeout.py --seconds "$TIMEOUT_SECONDS" -- \
+    ./test.sh --skip-userland diagnostics
 STATUS=$?
 set -e
 
+if [ "$STATUS" -eq 124 ]; then
+    echo "crash case $CASE_NAME exceeded ${TIMEOUT_SECONDS}s hard timeout" >&2
+    exit 1
+fi
 if [ "$STATUS" -eq 0 ]; then
     echo "expected injected crash, but tests passed" >&2
     exit 1
 fi
+if [ ! -s "$ARTIFACT_DIR/capsule.bin" ] || [ ! -s "$ARTIFACT_DIR/manifest.json" ]; then
+    echo "crash case $CASE_NAME exited without a complete artifact set" >&2
+    exit 1
+fi
+cp target/x86_64-unknown-none/release/agenticos "$ARTIFACT_DIR/kernel.elf"
+printf '%s\n' "$ARTIFACT_DIR/kernel.elf" > "$ARTIFACT_DIR/kernel.elf.ref"
 python3 tools/crash_decode.py \
     "$ARTIFACT_DIR/capsule.bin" \
     --output-dir "$ARTIFACT_DIR" \
     --manifest "$ARTIFACT_DIR/manifest.json" \
-    --elf target/x86_64-unknown-none/release/agenticos
+    --elf "$ARTIFACT_DIR/kernel.elf"
 python3 - "$ARTIFACT_DIR/report.json" "$CASE_NAME" <<'PY'
 import json
 import pathlib
@@ -68,7 +80,10 @@ invariant_cases = (
 expected_kind = "invariant" if case in invariant_cases else "fatal"
 assert report["trigger"]["kind"] == expected_kind, report
 assert report["run"]["manifest_trusted"] is True, report
+assert report["run"]["symbols_trusted"] is True, report
 assert not report["missing"], report
+assert report["footer"]["complete"] is True, report
+assert report["backtrace"]["frames"] or report["backtrace"]["unavailable_reason"] != 0, report
 assert report["cpu_masks"]["online"] == 0x0f, report
 if case == "panic" or case in invariant_cases:
     assert report["cpu_masks"]["captured"] == 0x0f, report
@@ -78,6 +93,8 @@ else:
     assert report["cpu_masks"]["captured"] == 0x07, report
     assert len(report["cpus"]) == 3, report
     assert report["flags"] & 0x04, report
+if case in ("panic", "missing-cpu"):
+    assert report["trigger"]["signature"] == "VEC-ff:0xf3243b8bc636f3bd", report
 if case == "sched-duplicate":
     assert report["violation"]["id"] == 0x01000001, report
     assert report["trigger"]["signature"] == "INV-01000001", report

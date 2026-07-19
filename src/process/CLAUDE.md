@@ -44,6 +44,13 @@ production state/queue commit. A handoff must save/yield the old entity before
 dispatching the next one; temporarily publishing two `Running` entities on one
 CPU is `SCHED-002`, even if the next instruction would repair it.
 
+The singleton `SCHEDULER` and `STACK_ALLOCATOR` also carry tracked lock
+classes in record/strict diagnostics. Their crash-readable owner and observed
+edges are evidence only; they never choose a runnable entity or repair a
+stack. Scheduler transitions own `0x01xx_xxxx`, stack lifetime transitions own
+`0x07xx_xxxx`, and undeclared lock edges own `0x0900_0004`. New hooks must be
+integer-only and adjacent to the production commit they describe.
+
 **Pthread affinity rule:** several ring-3 task entities may share one TGID and
 address space. Until user TLB shootdown exists, the group is assigned a home
 CPU on its first pthread clone and all members receive scheduler affinity to

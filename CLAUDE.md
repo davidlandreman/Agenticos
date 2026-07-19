@@ -114,6 +114,10 @@ Tests run automatically on kernel boot when built with the test feature. QEMU ex
 Crash capsules and flight-recorder modes are documented in
 [`docs/crash-diagnostics.md`](docs/crash-diagnostics.md). Crash-path code must
 remain allocation-free and lock-free after first-failure election.
+New shadow domains require a stable invariant range, bounded crash-readable
+state, commit-adjacent integer hooks, hostile-length decoder tests, exact-ID
+negative injections, and a clean strict workload. Missing capsule evidence
+must never be described as a healthy subsystem.
 
 Set `AGENTICOS_RENDER_STATS=1` with a retained compositor launch to emit
 per-frame raster/upload/composition/blur/fence/presentation counters. The

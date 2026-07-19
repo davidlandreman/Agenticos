@@ -1,7 +1,10 @@
 import binascii
+import hashlib
+import json
 import pathlib
 import struct
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -81,6 +84,74 @@ class CrashDecodeTests(unittest.TestCase):
         report, _ = crash_decode.parse_capsule(capsule([section(3, payload, version=2)]))
         self.assertEqual([entry["cpu"] for entry in report["cpus"]], [0, 3])
         self.assertEqual(report["cpus"][1]["cr3"], "0x24")
+
+    def test_trace_footer_and_explicitly_unavailable_backtrace(self):
+        record = struct.pack("<8Q", 7, 11, 13, 17, 19, 23, 29, 0x0100_0800)
+        trace = struct.pack("<HHHHBBHQQQI", 1, 1024, 128, 0, 0, 0, 0, 8, 2, 1, 1) + record
+        backtrace = struct.pack("<HBB", 0, 5, 0)
+        footer = struct.pack("<QII", 0, 0x434F4D50, 0)
+        report, _ = crash_decode.parse_capsule(
+            capsule([section(5, trace), section(11, backtrace, flags=1), section(12, footer)])
+        )
+        self.assertEqual(report["trace"]["cpus"][0]["records"][0]["kind"], "lock_attempt")
+        self.assertEqual(report["backtrace"]["unavailable_reason"], 5)
+        self.assertTrue(report["footer"]["complete"])
+
+    def test_trace_rejects_hostile_record_count(self):
+        trace = struct.pack("<HHHHBBHQQQI", 1, 1024, 128, 0, 0, 0, 0, 8, 0, 0, 129)
+        with self.assertRaisesRegex(crash_decode.DecodeError, "trace record count"):
+            crash_decode.parse_capsule(capsule([section(5, trace)]))
+
+    def test_missing_rich_sections_are_absent_evidence(self):
+        metadata = struct.pack("<BBHI", 2, 0, 0, 3)
+        for value in ("abc", "0", "rustc", "strict"):
+            encoded = value.encode()
+            metadata += struct.pack("<H", len(encoded)) + encoded
+        report, _ = crash_decode.parse_capsule(capsule([section(1, metadata)]))
+        self.assertIn("shadow_locks", report["missing"])
+        self.assertIn("footer", report["missing"])
+
+    def test_manifest_requires_run_build_mode_and_elf_identity(self):
+        metadata = struct.pack("<BBHI", 2, 0, 0, 3)
+        for value in ("abc", "0", "rustc", "strict"):
+            encoded = value.encode()
+            metadata += struct.pack("<H", len(encoded)) + encoded
+        report, _ = crash_decode.parse_capsule(capsule([section(1, metadata)]))
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            elf = root / "kernel"
+            elf.write_bytes(b"elf")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "run_id": "00" * 16,
+                        "build_id": bytes(range(20)).hex(),
+                        "diagnostics": "strict",
+                        "kernel_elf_sha256": hashlib.sha256(b"elf").hexdigest(),
+                    }
+                )
+            )
+            crash_decode.trust_manifest(report, manifest, elf)
+            self.assertTrue(report["run"]["manifest_trusted"])
+            self.assertTrue(report["run"]["symbols_trusted"])
+
+            document = json.loads(manifest.read_text())
+            document["run_id"] = "11" * 16
+            manifest.write_text(json.dumps(document))
+            crash_decode.trust_manifest(report, manifest, elf)
+            self.assertFalse(report["run"]["manifest_trusted"])
+            self.assertIn("run_id", report["inferences"][-1]["manifest_mismatches"])
+
+            document["run_id"] = "00" * 16
+            manifest.write_text(json.dumps(document))
+            elf.write_bytes(b"different elf")
+            crash_decode.trust_manifest(report, manifest, elf)
+            self.assertTrue(report["run"]["manifest_trusted"])
+            self.assertFalse(report["run"]["symbols_trusted"])
+            self.assertIn(
+                "kernel_elf_sha256", report["inferences"][-1]["manifest_mismatches"]
+            )
 
     def test_pager_and_io_shadow_sections(self):
         pager_record = struct.pack(
@@ -202,8 +273,10 @@ class CrashDecodeTests(unittest.TestCase):
         )
         locks = report["shadow"]["locks"]
         self.assertEqual(locks["classes"][0]["class"], 3)
+        self.assertEqual(locks["classes"][0]["class_name"], "memory_mapper")
         self.assertEqual(locks["classes"][0]["owner_cpu"], 2)
         self.assertEqual(locks["classes"][0]["order_edges"], 1 << 4)
+        self.assertEqual(locks["classes"][0]["order_edge_classes"], ["stack_allocator"])
 
     def test_lock_shadow_rejects_bad_count(self):
         with self.assertRaisesRegex(crash_decode.DecodeError, "lock shadow layout"):

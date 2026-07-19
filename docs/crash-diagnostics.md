@@ -8,10 +8,12 @@ AGENTICOS_DIAGNOSTICS=record ./build.sh
 AGENTICOS_DIAGNOSTICS=strict ./test.sh diagnostics
 ```
 
-`record` expands each CPU ring to 1,024 records and records scheduler-shadow
-violations without stopping the guest. `strict` escalates the first scheduler
-invariant violation into an invariant crash capsule. Ordinary launches remain
-`minimal` and do not attach a host debugcon file.
+`record` expands each CPU ring to 1,024 records and latches the first shadow
+violation without stopping the guest. `strict` escalates that same first
+violation into an invariant crash capsule. Ordinary launches remain `minimal`
+and do not attach a host debugcon file. The selected and configured modes are
+embedded independently in the capsule; a mismatch makes the manifest
+untrusted.
 
 Rich launches write `.context/crashes/<run-id>/manifest.json`, `capsule.bin`,
 and `kernel.elf.ref`. Decode a completed stream with:
@@ -26,6 +28,30 @@ The decoder validates header, payload, and per-section CRCs before producing
 `report.json` and `report.md`. It treats unknown sections as forward-compatible,
 labels duplicate or missing evidence explicitly, and will not trust symbols
 unless the build ID and ELF hash match the manifest.
+Expected-fatal harness runs also copy the matching ELF into the run directory
+as `kernel.elf`, so later builds or workspace cleanup cannot silently change
+the symbols used for that artifact. When frames are available, the decoder
+uses `llvm-addr2line` or `addr2line` only after the identity checks pass.
+
+## Evidence interpretation
+
+`report.json` separates three categories:
+
+- Capsule facts are under `trigger`, `cpus`, `trace`, `shadow`, `violation`,
+  `backtrace`, and `footer`. They passed the capsule and section CRC checks.
+- Decoder inferences are only under `inferences`; they are never silently
+  promoted into shadow or CPU facts.
+- `missing` names required sections absent from this complete capsule. An
+  absent section is unavailable evidence, not evidence that its subsystem was
+  healthy. Section `stable: false` likewise means a transition was observed,
+  not that either the old or new state can be assumed.
+
+`run.manifest_trusted` requires matching run ID, build ID, and diagnostic
+personality. `run.symbols_trusted` additionally requires the supplied ELF's
+SHA-256 to match the manifest. Never symbolize against a convenient current
+build after either flag becomes false. Backtrace reason `5` explicitly means
+stack bounds were unavailable to the crash walker in schema v1; the absence
+of frames is recorded rather than inferred.
 
 Run expected-fatal smoke cases with:
 
@@ -45,6 +71,11 @@ scripts/test-crash-diagnostics.sh lock-wrong-owner
 scripts/test-crash-diagnostics.sh lock-wrong-context
 scripts/test-crash-diagnostics.sh lock-cycle
 ```
+
+Each case has a 180-second process-group timeout covering build and QEMU; set
+`AGENTICOS_CRASH_TIMEOUT_SECONDS` to change the bound. A timeout kills the
+entire spawned group and fails without attempting to decode a stale or empty
+capsule.
 
 The harness requires a non-success QEMU exit, a complete decodable capsule,
 matching run/build identity, and no missing required section. Normal SMP=4
@@ -167,3 +198,56 @@ stack may enter heap, mapper, or serial. Any edge outside this declared DAG,
 or any observed path that closes a cycle, is `LOCK-004`. In particular,
 mapper → heap is forbidden because heap demand paging already requires
 heap → mapper. User mapping buffers are allocated before `MAPPER` is taken.
+
+## Invariant namespace
+
+The high byte owns the diagnostic domain; IDs are stable artifact signatures,
+not source line numbers.
+
+| Range | Owner | Current meaning |
+|---|---|---|
+| `0x01xx_xxxx` | scheduler | duplicate identity/CPU, publication, affinity, and lifecycle transitions |
+| `0x02xx_xxxx` | CPU handoff | reserved for CR3/current-entity/rsp0 composite checks |
+| `0x03xx_xxxx` | pager | transaction order, identity, exact population length |
+| `0x04xx_xxxx` | block I/O | token/request state, owner, completion and wake causality |
+| `0x05xx_xxxx` | continuation | publication, stack/RIP validity, consume, generic-wake rejection |
+| `0x06xx_xxxx` | address space | generated L4 identity, activation, ownership, destruction |
+| `0x07xx_xxxx` | kernel stack | generated ownership, active bounds, retirement/reuse |
+| `0x08xx_xxxx` | memory | mapping identity, typed refs, topology/W^X, frame type, mapper recursion |
+| `0x09xx_xxxx` | locks | owner/release, recursion, context, declared dependency DAG |
+| `0x0fxx_xxxx` | diagnostics | bounded shadow capacity exhaustion |
+
+The first violation latch is immutable. Do not clear it or renumber an ID to
+make a later symptom appear causal. A new invariant gets a deliberate-negative
+test that asserts the exact ID and a clean strict workload that reaches the
+same subsystem without latching it.
+
+## Resource and perturbation budget
+
+| Component | Minimal | Record/strict |
+|---|---:|---:|
+| flight recorder at 8 CPUs | 64 KiB (128 × 64-byte slots/CPU) | 512 KiB (1,024 × 64-byte slots/CPU) |
+| crash arena | 256 KiB static | 256 KiB static |
+| memory ledger | disabled | 24 bytes/usable frame plus 40-byte mapping slots |
+| rich memory cap | disabled | min(2% of managed RAM, 32 MiB) |
+
+At the standard 256 MiB test topology, a representative strict boot reports
+about 60.6k usable frames and reserves about 3.70 MiB (3.88 MB) for the full
+frame ledger plus one mapping slot per frame (roughly 1.56% of managed RAM). Other bounded
+shadow tables are static. Routine heap/serial lock traffic is excluded from
+the recorder; successful paging hooks perform integer/atomic updates only.
+
+## Adding or changing a shadow domain
+
+1. Assign the domain's stable ID range and fixed-capacity crash-readable
+   representation. Shadow state must not drive or repair production behavior.
+2. Put integer-only hooks beside production commit points. Do not allocate,
+   format, perform port I/O, or acquire a diagnostic/production lock from a
+   recorder hook.
+3. Serialize a versioned section using bounded reads. Extend the hostile-length
+   Python decoder tests and mark the section required only for personalities
+   that always emit it.
+4. Add legal transition tests, exact-ID negative injections, a clean strict
+   workload, and an artifact assertion. Preserve the immutable first latch.
+5. Document what is a capsule fact, what the decoder infers, and which missing
+   or unstable states remain unavailable evidence.

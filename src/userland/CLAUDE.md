@@ -447,6 +447,13 @@ memory mapper from inside this primitive. The brief re-acquire inside
 `restore_user_cpu_state` (via `with_process`) is safe — `PROCESS_TABLE`
 never blocks the holder.
 
+Across the subsystem, the reviewed tracked order is
+`SCHEDULER → PROCESS_TABLE → stack/heap → MAPPER → serial`. In particular,
+drop `PROCESS_TABLE` before inspecting the scheduler (signal wake does this in
+two revalidated process-table phases), and allocate user-mapping result
+buffers before entering `MAPPER`. Rich modes make undeclared edges and cycles
+`LOCK-004`.
+
 **ABI contract:** `resume_ring3_asm` reads `UserState` by hard-coded
 offset. The contract is locked by `_SIZE_CHECK` in `user_state.rs` and
 the assertion test `test_user_state_offsets_match_asm_contract` in
