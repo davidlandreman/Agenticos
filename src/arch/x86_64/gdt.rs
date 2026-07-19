@@ -74,6 +74,11 @@ pub unsafe fn set_kernel_rsp0(rsp0: VirtAddr) {
     TSS[cpu].privilege_stack_table[0] = rsp0;
 }
 
+pub fn current_kernel_rsp0() -> VirtAddr {
+    let cpu = super::percpu::cpu_id();
+    unsafe { TSS[cpu].privilege_stack_table[0] }
+}
+
 /// Construct and load the calling CPU's private GDT/TSS.
 ///
 /// # Safety

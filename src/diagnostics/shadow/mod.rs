@@ -2,6 +2,7 @@
 
 pub mod address_space;
 pub mod continuation;
+pub mod cpu;
 pub mod io;
 pub mod locks;
 pub mod memory;

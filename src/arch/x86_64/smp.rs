@@ -280,6 +280,7 @@ extern "C" fn ap_main(logical_id: usize) -> ! {
             cpu.lapic_id,
             super::gdt::kernel_rsp0_top_for(logical_id).as_u64(),
         );
+        crate::diagnostics::percpu_init();
         super::lapic::enable_this_cpu();
     }
     debug_assert_eq!(super::percpu::lapic_id(), cpu.lapic_id);

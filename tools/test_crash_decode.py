@@ -284,6 +284,42 @@ class CrashDecodeTests(unittest.TestCase):
                 capsule([section(16, struct.pack("<HH", 2, 0) + bytes(36))])
             )
 
+    def test_cpu_handoff_shadow_section(self):
+        cpu = struct.pack(
+            "<BBBBIQ8QIIQ",
+            2,
+            3,
+            0x1F,
+            8,
+            0,
+            44,
+            0x800000000000002A,
+            0x12345000,
+            9,
+            0xFFFF800000008000,
+            12,
+            0x12345000,
+            0xFFFF800000008000,
+            0xFFFF800000008000,
+            42,
+            0,
+            0,
+        )
+        report, _ = crash_decode.parse_capsule(
+            capsule([section(17, struct.pack("<HH", 1, 96) + cpu)])
+        )
+        shadow = report["shadow"]["cpu"]
+        self.assertTrue(shadow["stable"])
+        self.assertEqual(shadow["cpus"][0]["phase_name"], "user_stable")
+        self.assertEqual(shadow["cpus"][0]["observed_pid"], 42)
+        self.assertEqual(shadow["cpus"][0]["last_operation_name"], "commit_user")
+
+    def test_cpu_handoff_shadow_rejects_bad_record_size(self):
+        with self.assertRaisesRegex(crash_decode.DecodeError, "CPU handoff shadow layout"):
+            crash_decode.parse_capsule(
+                capsule([section(17, struct.pack("<HH", 1, 95) + bytes(95))])
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

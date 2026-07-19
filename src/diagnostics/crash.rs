@@ -507,6 +507,14 @@ unsafe fn serialize(
             let _ = super::shadow::locks::write_snapshot(section);
         },
     );
+    writer.section(
+        SectionKind::ShadowCpu,
+        1,
+        super::shadow::cpu::snapshot_flags(),
+        |section| {
+            let _ = super::shadow::cpu::write_snapshot(section);
+        },
+    );
     if let Some(violation) = super::shadow::first() {
         writer.section(SectionKind::Violation, 1, 0, |section| {
             section.u32(violation.invariant_id);

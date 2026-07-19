@@ -33,6 +33,7 @@ SECTION_NAMES = {
     14: "shadow_stack",
     15: "shadow_memory",
     16: "shadow_locks",
+    17: "shadow_cpu",
 }
 EVENT_NAMES = {
     1: "diagnostics_enabled",
@@ -48,6 +49,7 @@ EVENT_NAMES = {
     0x201: "context_publish",
     0x300: "cr3_write",
     0x301: "current_pid",
+    0x302: "cpu_handoff",
     0x400: "page_fault",
     0x401: "page_in_terminal",
     0x500: "io_token",
@@ -197,6 +199,7 @@ def parse_capsule(blob: bytes, offset: int = 0) -> tuple[dict[str, Any], int]:
         required.add(14)
         required.add(15)
         required.add(16)
+        required.add(17)
     present = {section.kind for section in sections}
     report["missing"] = [SECTION_NAMES[kind] for kind in sorted(required - present)]
     trigger = report["trigger"]
@@ -618,6 +621,76 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
         report.setdefault("shadow", {})["locks"] = {
             "stable": not bool(section.flags & 1),
             "classes": classes,
+        }
+    elif section.kind == 17:
+        if len(payload) < 4:
+            raise DecodeError("short CPU handoff shadow section")
+        count, record_size = struct.unpack_from("<HH", payload)
+        if record_size != 96 or len(payload) != 4 + count * record_size:
+            raise DecodeError("invalid CPU handoff shadow layout")
+        phase_names = {
+            0: "boot",
+            1: "kernel_stable",
+            2: "loading_user",
+            3: "user_stable",
+            4: "loading_kernel",
+            5: "address_space_setup",
+            6: "crashed",
+        }
+        operation_names = {
+            0: "none",
+            1: "initialize_kernel",
+            2: "begin_user",
+            3: "install_user_cr3",
+            4: "install_rsp0",
+            5: "install_gs_stack",
+            6: "restore_extended",
+            7: "set_current_pid",
+            8: "commit_user",
+            9: "begin_kernel",
+            10: "clear_current_pid",
+            11: "install_kernel_cr3",
+            12: "commit_kernel",
+            13: "set_pending_publish",
+            14: "take_pending_publish",
+            15: "begin_address_space_setup",
+            16: "install_setup_cr3",
+            17: "restore_setup_kernel_cr3",
+            18: "commit_address_space_setup",
+        }
+        cpus = []
+        cursor = 4
+        for _ in range(count):
+            values = struct.unpack_from("<BBBBIQ8QIIQ", payload, cursor)
+            cursor += record_size
+            cpus.append(
+                {
+                    "cpu": values[0],
+                    "phase": values[1],
+                    "phase_name": phase_names.get(values[1], f"unknown({values[1]})"),
+                    "completed_steps": f"0x{values[2]:02x}",
+                    "last_operation": values[3],
+                    "last_operation_name": operation_names.get(
+                        values[3], f"unknown({values[3]})"
+                    ),
+                    "flags": f"0x{values[4]:08x}",
+                    "epoch": values[5],
+                    "target_entity": f"0x{values[6]:016x}",
+                    "expected_l4": f"0x{values[7]:x}",
+                    "address_space_generation": values[8],
+                    "expected_stack_top": f"0x{values[9]:x}",
+                    "stack_generation": values[10],
+                    "observed_cr3": f"0x{values[11]:x}",
+                    "observed_rsp0": f"0x{values[12]:x}",
+                    "observed_gs_top": f"0x{values[13]:x}",
+                    "observed_pid": values[14],
+                    "pending_entity": f"0x{values[16]:016x}",
+                }
+            )
+        report.setdefault("shadow", {})["cpu"] = {
+            "stable": not bool(section.flags & 1)
+            and all(cpu["epoch"] % 2 == 0 for cpu in cpus),
+            "cpus": cpus,
         }
     elif section.kind == 11:
         if len(payload) < 4:

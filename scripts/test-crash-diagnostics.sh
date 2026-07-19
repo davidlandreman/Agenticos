@@ -17,7 +17,12 @@ case "$CASE_NAME" in
     lock-wrong-owner) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=lock-wrong-owner ;;
     lock-wrong-context) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=lock-wrong-context ;;
     lock-cycle) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=lock-cycle ;;
-    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active, mm-double-release, mm-wrong-unmap, mm-wx, lock-recursion, lock-wrong-owner, lock-wrong-context, lock-cycle" >&2; exit 2 ;;
+    cpu-wrong-cr3) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-wrong-cr3 ;;
+    cpu-wrong-order) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-wrong-order ;;
+    cpu-wrong-pid) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-wrong-pid ;;
+    cpu-kernel-cr3) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-kernel-cr3 ;;
+    cpu-wrong-publication) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-wrong-publication ;;
+    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active, mm-double-release, mm-wrong-unmap, mm-wx, lock-recursion, lock-wrong-owner, lock-wrong-context, lock-cycle, cpu-wrong-cr3, cpu-wrong-order, cpu-wrong-pid, cpu-kernel-cr3, cpu-wrong-publication" >&2; exit 2 ;;
 esac
 
 RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -76,6 +81,11 @@ invariant_cases = (
     "lock-wrong-owner",
     "lock-wrong-context",
     "lock-cycle",
+    "cpu-wrong-cr3",
+    "cpu-wrong-order",
+    "cpu-wrong-pid",
+    "cpu-kernel-cr3",
+    "cpu-wrong-publication",
 )
 expected_kind = "invariant" if case in invariant_cases else "fatal"
 assert report["trigger"]["kind"] == expected_kind, report
@@ -131,5 +141,20 @@ if case == "lock-wrong-context":
 if case == "lock-cycle":
     assert report["violation"]["id"] == 0x09000004, report
     assert report["trigger"]["signature"] == "INV-09000004", report
+if case == "cpu-wrong-cr3":
+    assert report["violation"]["id"] == 0x02000002, report
+    assert report["trigger"]["signature"] == "INV-02000002", report
+if case == "cpu-wrong-order":
+    assert report["violation"]["id"] == 0x02000005, report
+    assert report["trigger"]["signature"] == "INV-02000005", report
+if case == "cpu-wrong-pid":
+    assert report["violation"]["id"] == 0x02000001, report
+    assert report["trigger"]["signature"] == "INV-02000001", report
+if case == "cpu-kernel-cr3":
+    assert report["violation"]["id"] == 0x02000003, report
+    assert report["trigger"]["signature"] == "INV-02000003", report
+if case == "cpu-wrong-publication":
+    assert report["violation"]["id"] == 0x02000004, report
+    assert report["trigger"]["signature"] == "INV-02000004", report
 print(f"validated {report['trigger']['signature']}: {sys.argv[1]}")
 PY

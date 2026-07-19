@@ -42,6 +42,11 @@ pub fn early_init() {
 pub fn percpu_init() {
     PERCPU_READY.store(true, Ordering::Release);
     trace::record(trace::EventKind::CpuOnline, 0, 0, 0, 0);
+    let (l4, _) = x86_64::registers::control::Cr3::read();
+    shadow::cpu::initialize_kernel(
+        l4.start_address().as_u64(),
+        crate::arch::x86_64::percpu::kernel_rsp_top(),
+    );
 }
 
 /// Rich shadow tables are introduced domain-by-domain. The first-violation
@@ -146,6 +151,26 @@ pub fn maybe_inject_crash() {
         b"lock-cycle" => {
             shadow::locks::inject_cycle();
             panic!("strict lock cycle injection did not escalate");
+        }
+        b"cpu-wrong-cr3" => {
+            shadow::cpu::inject_wrong_cr3();
+            panic!("strict CPU CR3 mismatch injection did not escalate");
+        }
+        b"cpu-wrong-order" => {
+            shadow::cpu::inject_wrong_order();
+            panic!("strict CPU handoff ordering injection did not escalate");
+        }
+        b"cpu-wrong-pid" => {
+            shadow::cpu::inject_wrong_pid();
+            panic!("strict CPU PID mismatch injection did not escalate");
+        }
+        b"cpu-kernel-cr3" => {
+            shadow::cpu::inject_wrong_kernel_cr3();
+            panic!("strict CPU kernel CR3 mismatch injection did not escalate");
+        }
+        b"cpu-wrong-publication" => {
+            shadow::cpu::inject_wrong_publication();
+            panic!("strict CPU publication mismatch injection did not escalate");
         }
         _ => {}
     }

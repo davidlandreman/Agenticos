@@ -33,6 +33,7 @@ pub enum EventKind {
     ContextPublish = 0x201,
     Cr3Write = 0x300,
     CurrentPid = 0x301,
+    CpuHandoff = 0x302,
     PageFault = 0x400,
     PageInTerminal = 0x401,
     IoToken = 0x500,

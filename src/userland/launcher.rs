@@ -133,9 +133,17 @@ pub(crate) fn prepare_user_binary_unstarted(
     // has the not-yet-runnable process's CR3 installed, no scheduler handoff
     // may replace it before the ELF mappings and initial stack are complete.
     let _preemption_guard = crate::arch::x86_64::preemption_guard::PreemptionGuard::disable();
+    crate::diagnostics::shadow::cpu::begin_address_space_setup(
+        aspace.l4_frame().start_address().as_u64(),
+        aspace.shadow_generation(),
+    );
     unsafe {
         aspace.activate();
     }
+    crate::diagnostics::shadow::cpu::install_setup_cr3(
+        aspace.l4_frame().start_address().as_u64(),
+        aspace.shadow_generation(),
+    );
     #[cfg(feature = "test")]
     TEST_SETUP_ACTIVATIONS.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
 
@@ -171,6 +179,12 @@ pub(crate) fn prepare_user_binary_unstarted(
     unsafe {
         crate::mm::paging::activate_kernel_l4();
     }
+    let kernel_l4 = crate::mm::paging::kernel_l4_frame()
+        .expect("kernel L4 vanished during address-space setup")
+        .start_address()
+        .as_u64();
+    crate::diagnostics::shadow::cpu::restore_setup_kernel_cr3(kernel_l4);
+    crate::diagnostics::shadow::cpu::commit_address_space_setup();
     #[cfg(feature = "test")]
     TEST_SETUP_RESTORES.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
     result

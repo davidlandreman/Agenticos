@@ -55,6 +55,7 @@ pub enum SectionKind {
     ShadowStack = 14,
     ShadowMemory = 15,
     ShadowLocks = 16,
+    ShadowCpu = 17,
 }
 
 pub struct Writer<'a> {

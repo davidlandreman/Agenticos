@@ -127,6 +127,59 @@ fn test_pager_shadow_transition_table() {
     );
 }
 
+fn test_cpu_shadow_handoff_transition_table() {
+    use crate::diagnostics::shadow::cpu::{
+        transition_state, Operation, Phase, TransitionState, CPU_005,
+    };
+
+    let mut state = TransitionState {
+        phase: Phase::Boot,
+        completed: 0,
+    };
+    for operation in [
+        Operation::InitializeKernel,
+        Operation::BeginUser,
+        Operation::InstallUserCr3,
+        Operation::InstallRsp0,
+        Operation::InstallGsStack,
+        Operation::RestoreExtended,
+        Operation::SetCurrentPid,
+        Operation::CommitUser,
+    ] {
+        state = transition_state(state, operation).unwrap();
+    }
+    assert_eq!(state.phase, Phase::UserStable);
+    assert_eq!(
+        transition_state(
+            TransitionState {
+                phase: Phase::KernelStable,
+                completed: 0,
+            },
+            Operation::InstallUserCr3,
+        )
+        .unwrap_err(),
+        CPU_005
+    );
+    for operation in [
+        Operation::BeginKernel,
+        Operation::ClearCurrentPid,
+        Operation::InstallKernelCr3,
+        Operation::CommitKernel,
+    ] {
+        state = transition_state(state, operation).unwrap();
+    }
+    assert_eq!(state.phase, Phase::KernelStable);
+    for operation in [
+        Operation::BeginAddressSpaceSetup,
+        Operation::InstallSetupCr3,
+        Operation::RestoreSetupKernelCr3,
+        Operation::CommitAddressSpaceSetup,
+    ] {
+        state = transition_state(state, operation).unwrap();
+    }
+    assert_eq!(state.phase, Phase::KernelStable);
+}
+
 fn test_io_shadow_transition_table() {
     use crate::diagnostics::shadow::io::{transition_state, Operation, State, IO_002};
 
@@ -256,6 +309,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_trace_commit_and_wrap,
         &test_scheduler_shadow_legal_save_publish_cycle,
         &test_scheduler_shadow_rejects_illegal_edges,
+        &test_cpu_shadow_handoff_transition_table,
         &test_pager_shadow_transition_table,
         &test_io_shadow_transition_table,
         &test_continuation_shadow_transition_table,

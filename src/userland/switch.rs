@@ -157,9 +157,16 @@ pub unsafe fn yield_to_kernel_main_loop() -> ! {
     if let Some(pid) = crate::userland::lifecycle::current_user_pid() {
         crate::diagnostics::shadow::stack::begin_abandon(pid);
     }
+    crate::diagnostics::shadow::cpu::begin_kernel(None);
     crate::userland::lifecycle::set_current_user_pid(None);
+    crate::diagnostics::shadow::cpu::clear_current_pid();
     crate::process::set_in_spawned_process(false);
     crate::mm::paging::activate_kernel_l4();
+    let kernel_l4 = crate::mm::paging::kernel_l4_frame()
+        .expect("kernel L4 vanished during handoff")
+        .start_address()
+        .as_u64();
+    crate::diagnostics::shadow::cpu::install_kernel_cr3(kernel_l4);
     crate::arch::x86_64::context_switch::switch_to_context(
         crate::arch::x86_64::percpu::kernel_context_ptr(),
     );
@@ -317,6 +324,23 @@ unsafe fn resume_ring3_inner(pid: u32) -> ! {
         (state, continuation, l4, stack)
     };
 
+    let (live_l4, _) = x86_64::registers::control::Cr3::read();
+    let expected_l4 = l4
+        .map(|(frame, _)| frame.start_address().as_u64())
+        .unwrap_or_else(|| live_l4.start_address().as_u64());
+    let address_space_generation = l4.map(|(_, generation)| generation).unwrap_or(0);
+    let expected_stack_top = kstack
+        .map(|(top, _)| top.as_u64())
+        .unwrap_or_else(crate::arch::x86_64::percpu::kernel_rsp_top);
+    let stack_generation = kstack.map(|(_, generation)| generation).unwrap_or(0);
+    crate::diagnostics::shadow::cpu::begin_user(
+        pid,
+        expected_l4,
+        address_space_generation,
+        expected_stack_top,
+        stack_generation,
+    );
+
     // CR3 swap — only if the process has its own address space.
     if let Some((frame, generation)) = l4 {
         use x86_64::registers::control::{Cr3, Cr3Flags};
@@ -325,23 +349,37 @@ unsafe fn resume_ring3_inner(pid: u32) -> ! {
             generation,
             frame.start_address().as_u64(),
         );
+        crate::diagnostics::shadow::cpu::install_user_cr3(
+            frame.start_address().as_u64(),
+            generation,
+        );
+    } else {
+        crate::diagnostics::shadow::cpu::install_user_cr3(expected_l4, 0);
     }
 
     // TSS.rsp0 + per-CPU SYSCALL rsp top — per-process kernel stack
     // when present, otherwise leave at the global default.
     if let Some((top, generation)) = kstack {
         set_kernel_rsp0(top);
+        crate::diagnostics::shadow::cpu::install_rsp0(top.as_u64());
         set_percpu_kernel_rsp_top(top.as_u64());
+        crate::diagnostics::shadow::cpu::install_gs_stack(top.as_u64());
         crate::diagnostics::shadow::stack::activate(generation, pid, top.as_u64());
+    } else {
+        crate::diagnostics::shadow::cpu::install_rsp0(expected_stack_top);
+        crate::diagnostics::shadow::cpu::install_gs_stack(expected_stack_top);
     }
 
     // FS_BASE + FPU. Re-borrow under the lock briefly to get a
     // `&Process` for `restore_user_cpu_state`; both reads are cheap.
     crate::userland::lifecycle::with_process(pid, |p| restore_user_cpu_state(p))
         .expect("resume_ring3: process disappeared between snapshot and restore");
+    crate::diagnostics::shadow::cpu::restore_extended(pid);
 
     set_current_user_pid(Some(pid));
+    crate::diagnostics::shadow::cpu::set_current_pid(pid);
     crate::process::set_in_spawned_process(true);
+    crate::diagnostics::shadow::cpu::commit_user(pid);
 
     if let Some(context) = kernel_continuation {
         crate::diagnostics::shadow::continuation::dispatch(pid, &context);
@@ -409,7 +447,9 @@ pub fn block_current_ring3_on_io(token: u64) {
         .lock()
         .mark_context_saving(crate::process::entity::EntityId::UserProcess(pid));
     crate::arch::x86_64::percpu::set_pending_user_context_publish(pid);
+    crate::diagnostics::shadow::cpu::begin_kernel(None);
     crate::arch::x86_64::percpu::set_current_user_pid(None);
+    crate::diagnostics::shadow::cpu::clear_current_pid();
     crate::process::scheduler::SCHEDULER
         .lock()
         .block_entity(crate::process::entity::EntityId::UserProcess(pid));
@@ -417,6 +457,11 @@ pub fn block_current_ring3_on_io(token: u64) {
     crate::process::set_in_spawned_process(false);
     unsafe {
         crate::mm::paging::activate_kernel_l4();
+        let kernel_l4 = crate::mm::paging::kernel_l4_frame()
+            .expect("kernel L4 vanished during block handoff")
+            .start_address()
+            .as_u64();
+        crate::diagnostics::shadow::cpu::install_kernel_cr3(kernel_l4);
         switch_context(
             old_context,
             crate::arch::x86_64::percpu::kernel_context_ptr(),

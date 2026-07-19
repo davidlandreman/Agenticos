@@ -2820,7 +2820,9 @@ pub fn cooperative_thread_exit(code: i64) -> ! {
         crate::userland::process_service::notify_process_exit(tid);
     }
     crate::diagnostics::shadow::stack::begin_abandon(tid);
+    crate::diagnostics::shadow::cpu::begin_kernel(None);
     set_current_user_pid(None);
+    crate::diagnostics::shadow::cpu::clear_current_pid();
     unsafe { crate::userland::switch::dispatch_after_user_stop() }
 }
 
@@ -2837,7 +2839,9 @@ pub fn cooperative_group_exit(code: i64) -> ! {
     with_group(tgid, unmap_user_stack);
     finish_group(tgid, code);
     crate::diagnostics::shadow::stack::begin_abandon(tid);
+    crate::diagnostics::shadow::cpu::begin_kernel(None);
     set_current_user_pid(None);
+    crate::diagnostics::shadow::cpu::clear_current_pid();
     unsafe { crate::userland::switch::dispatch_after_user_stop() }
 }
 
@@ -2884,7 +2888,9 @@ fn long_jump_to_run_or_halt() -> ! {
         // process. The next ring-3 dispatch (via resume_ring3) will
         // set it to the next pid.
         crate::diagnostics::shadow::stack::begin_abandon(pid);
+        crate::diagnostics::shadow::cpu::begin_kernel(None);
         set_current_user_pid(None);
+        crate::diagnostics::shadow::cpu::clear_current_pid();
     }
 
     unsafe { crate::userland::switch::dispatch_after_user_stop() }

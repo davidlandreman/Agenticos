@@ -134,6 +134,7 @@ pub(crate) extern "C" fn publish_handoff_context(old_context: *mut CpuContext) -
         crate::diagnostics::shadow::continuation::published(pid, unsafe { &*old_context });
         crate::diagnostics::shadow::stack::deactivate_owner(pid);
     }
+    crate::diagnostics::shadow::cpu::commit_kernel();
     pending.is_some() || kernel_published
 }
 
@@ -149,6 +150,7 @@ pub(crate) extern "C" fn publish_pending_context() {
         }
     }
     crate::diagnostics::shadow::stack::complete_abandon();
+    crate::diagnostics::shadow::cpu::commit_kernel();
 }
 
 /// Switch to a new process context without saving the old one.
@@ -197,6 +199,7 @@ pub unsafe extern "C" fn switch_to_context(new_ctx: *const CpuContext) {
 
 extern "C" fn complete_stack_abandon() {
     crate::diagnostics::shadow::stack::complete_abandon();
+    crate::diagnostics::shadow::cpu::commit_kernel();
 }
 
 /// Abandon a terminated kernel thread, retire its stack from a different
@@ -314,12 +317,21 @@ pub unsafe fn resume_kernel_thread(pid: crate::process::ProcessId) -> ! {
         .copied()
         .expect("resume_kernel_thread: unknown pid");
     validate_kernel_context(pid, &context);
+    crate::diagnostics::shadow::cpu::begin_kernel(Some(
+        crate::process::entity::EntityId::KernelThread(pid),
+    ));
     crate::userland::lifecycle::set_current_user_pid(None);
+    crate::diagnostics::shadow::cpu::clear_current_pid();
     crate::process::set_in_spawned_process(true);
     // Kernel entities never own a user address space. A ring-3 timer/exit may
     // select this thread directly, so restore the permanent kernel CR3 before
     // the old process can be reaped on another CPU.
     crate::mm::paging::activate_kernel_l4();
+    let kernel_l4 = crate::mm::paging::kernel_l4_frame()
+        .expect("kernel L4 vanished during kernel-thread handoff")
+        .start_address()
+        .as_u64();
+    crate::diagnostics::shadow::cpu::install_kernel_cr3(kernel_l4);
     restore_kernel_context(&context)
 }
 

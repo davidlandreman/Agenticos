@@ -97,6 +97,20 @@ pub fn entity_key(id: EntityId) -> u64 {
     }
 }
 
+pub fn running_entity_on_cpu(cpu: usize) -> Option<u64> {
+    let before = EPOCH.load(Ordering::Acquire);
+    if before & 1 != 0 {
+        return None;
+    }
+    let found = SLOTS.iter().find_map(|slot| {
+        let entity = unsafe { *slot.0.get() };
+        (entity.key != 0 && entity.state == ShadowState::Running && usize::from(entity.cpu) == cpu)
+            .then_some(entity.key)
+    });
+    let after = EPOCH.load(Ordering::Acquire);
+    (before == after).then_some(found).flatten()
+}
+
 fn begin(operation: OperationKind, key: u64) -> u64 {
     PENDING_SUBJECT.store(key, Ordering::Relaxed);
     PENDING_OPERATION.store(operation as u64, Ordering::Relaxed);

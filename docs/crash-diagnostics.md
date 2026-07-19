@@ -199,6 +199,28 @@ or any observed path that closes a cycle, is `LOCK-004`. In particular,
 mapper → heap is forbidden because heap demand paging already requires
 heap → mapper. User mapping buffers are allocated before `MAPPER` is taken.
 
+The `shadow_cpu` section records one fixed 96-byte composite per initialized
+CPU. Stable user checkpoints correlate the scheduler's running entity,
+`current_user_pid`, live CR3, TSS `rsp0`, the GS SYSCALL stack top, address-
+space generation, and kernel-stack generation. Transient `loading_user` and
+`loading_kernel` phases retain a completed-step mask and pending outgoing
+context entity, so a crash in the middle of a handoff is evidence of where the
+handoff stopped rather than an automatic mismatch. An odd epoch or section
+flag means the crash interrupted a shadow update and the record is unstable.
+ELF preparation uses a separate `address_space_setup` phase while the loader
+temporarily installs a not-yet-runnable L4; its generation and restore-to-
+kernel-CR3 boundary remain visible if paging fails during image construction.
+
+CPU handoff invariant IDs are stable artifact signatures:
+
+| ID | Meaning |
+|---|---|
+| `CPU-001` (`0x02000001`) | stable scheduler entity and current user PID disagree |
+| `CPU-002` (`0x02000002`) | stable or declared target CR3 disagrees with its live L4 generation |
+| `CPU-003` (`0x02000003`) | kernel-stable state lacks the permanent kernel CR3 or retains a user PID |
+| `CPU-004` (`0x02000004`) | pending context publication is missing, duplicated, or names the wrong outgoing entity |
+| `CPU-005` (`0x02000005`) | CR3, rsp0, GS stack, extended-state, and PID operations violate declared order |
+
 ## Invariant namespace
 
 The high byte owns the diagnostic domain; IDs are stable artifact signatures,
@@ -207,7 +229,7 @@ not source line numbers.
 | Range | Owner | Current meaning |
 |---|---|---|
 | `0x01xx_xxxx` | scheduler | duplicate identity/CPU, publication, affinity, and lifecycle transitions |
-| `0x02xx_xxxx` | CPU handoff | reserved for CR3/current-entity/rsp0 composite checks |
+| `0x02xx_xxxx` | CPU handoff | stable entity/PID, CR3, kernel phase, context publication, and operation order |
 | `0x03xx_xxxx` | pager | transaction order, identity, exact population length |
 | `0x04xx_xxxx` | block I/O | token/request state, owner, completion and wake causality |
 | `0x05xx_xxxx` | continuation | publication, stack/RIP validity, consume, generic-wake rejection |
