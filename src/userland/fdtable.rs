@@ -181,6 +181,29 @@ impl FdSlot {
         }
     }
 
+    /// Change the per-descriptor close-on-exec bit without affecting the
+    /// shared open-file description. The three legacy standard-stream
+    /// sentinels cannot carry descriptor flags and therefore remain clear.
+    fn set_cloexec(&mut self, value: bool) {
+        match self {
+            Self::Stdin | Self::Stdout | Self::Stderr => {}
+            Self::File { cloexec, .. }
+            | Self::Directory { cloexec, .. }
+            | Self::VirtualBinDir { cloexec, .. }
+            | Self::Socket { cloexec, .. }
+            | Self::VirtualFile { cloexec, .. }
+            | Self::VirtualDir { cloexec, .. }
+            | Self::VirtualDevDir { cloexec, .. }
+            | Self::Urandom { cloexec }
+            | Self::DevNull { cloexec }
+            | Self::GuiEvents { cloexec, .. }
+            | Self::EventFd { cloexec, .. }
+            | Self::Epoll { cloexec, .. }
+            | Self::LocalStream { cloexec, .. } => *cloexec = value,
+            Self::PipeRead(_, cloexec) | Self::PipeWrite(_, cloexec) => *cloexec = value,
+        }
+    }
+
     /// Whether two descriptor slots refer to the same Linux open-file
     /// description. Per-descriptor close-on-exec bits are intentionally
     /// ignored.
@@ -278,21 +301,19 @@ impl FdTable {
         self.slots[fd as usize].as_mut()
     }
 
-    /// Detach every slot whose `FD_CLOEXEC` bit is set.
-    ///
-    /// The returned collection owns the detached descriptors so the caller can
-    /// drop them after releasing `PROCESS_TABLE`. Pipe endpoint `Drop` wakes
-    /// blocked peers through that same lock; dropping here while `execve`
-    /// holds it would skip the wake and strand a parent waiting for EOF on
-    /// musl's `posix_spawn` status pipe.
+    /// Remove every slot whose FD_CLOEXEC bit is set and return ownership to
+    /// the caller. The caller must drop the returned slots only after it has
+    /// released `PROCESS_TABLE`: pipe-endpoint `Drop` wakes readers by taking
+    /// that lock, and musl posix_spawn relies on the resulting EOF wake as its
+    /// successful-exec notification.
     pub fn take_cloexec(&mut self) -> alloc::vec::Vec<FdSlot> {
-        let mut detached = alloc::vec::Vec::new();
+        let mut removed = alloc::vec::Vec::new();
         for slot in self.slots.iter_mut() {
             if slot.as_ref().is_some_and(FdSlot::is_cloexec) {
-                detached.push(slot.take().expect("CLOEXEC slot disappeared"));
+                removed.push(slot.take().expect("CLOEXEC slot disappeared"));
             }
         }
-        detached
+        removed
     }
 
     /// Insert `slot` at the lowest available index ≥ 3 and return the
@@ -357,7 +378,9 @@ impl FdTable {
 
     /// `dup(fd)` — clone the slot into the lowest free index ≥ 3.
     pub fn dup(&mut self, fd: i32) -> Option<i32> {
-        let slot = self.get(fd)?.clone();
+        let mut slot = self.get(fd)?.clone();
+        // POSIX: descriptor duplication clears FD_CLOEXEC on the new fd.
+        slot.set_cloexec(false);
         self.alloc(slot)
     }
 
@@ -371,9 +394,28 @@ impl FdTable {
             // POSIX: dup2(fd, fd) is a no-op iff fd is valid.
             return self.get(oldfd).map(|_| newfd);
         }
-        let slot = self.get(oldfd)?.clone();
+        let mut slot = self.get(oldfd)?.clone();
+        // POSIX: dup2 clears FD_CLOEXEC when it creates a distinct fd.
+        slot.set_cloexec(false);
         self.slots[newfd as usize] = Some(slot);
         Some(newfd)
+    }
+
+    /// `fcntl(F_DUPFD*)`: duplicate `fd` into the lowest free descriptor at
+    /// or above `minimum`, choosing the new descriptor's FD_CLOEXEC value.
+    pub fn dup_from(&mut self, fd: i32, minimum: i32, cloexec: bool) -> Option<i32> {
+        if minimum < 0 || minimum as usize >= FD_TABLE_SIZE {
+            return None;
+        }
+        let mut slot = self.get(fd)?.clone();
+        slot.set_cloexec(cloexec);
+        for index in minimum as usize..FD_TABLE_SIZE {
+            if self.slots[index].is_none() {
+                self.slots[index] = Some(slot);
+                return Some(index as i32);
+            }
+        }
+        None
     }
 
     /// Set/clear the FD_CLOEXEC flag for a file or directory slot.
@@ -385,24 +427,7 @@ impl FdTable {
             .get_mut(fd as usize)
             .and_then(|s| s.as_mut())
             .ok_or(EBADF)?;
-        match slot {
-            FdSlot::File { cloexec: ce, .. } => *ce = cloexec,
-            FdSlot::Directory { cloexec: ce, .. } => *ce = cloexec,
-            FdSlot::PipeRead(_, ce) | FdSlot::PipeWrite(_, ce) => *ce = cloexec,
-            FdSlot::VirtualBinDir { cloexec: ce, .. } => *ce = cloexec,
-            FdSlot::Socket { cloexec: ce, .. } => *ce = cloexec,
-            FdSlot::VirtualFile { cloexec: ce, .. } => *ce = cloexec,
-            FdSlot::VirtualDir { cloexec: ce, .. } => *ce = cloexec,
-            FdSlot::VirtualDevDir { cloexec: ce, .. } => *ce = cloexec,
-            FdSlot::Urandom { cloexec: ce } => *ce = cloexec,
-            FdSlot::DevNull { cloexec: ce } => *ce = cloexec,
-            FdSlot::GuiEvents { cloexec: ce, .. } => *ce = cloexec,
-            FdSlot::EventFd { cloexec: ce, .. } | FdSlot::Epoll { cloexec: ce, .. } => {
-                *ce = cloexec
-            }
-            FdSlot::LocalStream { cloexec: ce, .. } => *ce = cloexec,
-            _ => {}
-        }
+        slot.set_cloexec(cloexec);
         Ok(())
     }
 

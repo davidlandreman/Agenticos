@@ -20,18 +20,6 @@ const IO_WAKE_SLOTS: usize = 64;
 static PENDING_IO_WAKES: [core::sync::atomic::AtomicU32; IO_WAKE_SLOTS] =
     [const { core::sync::atomic::AtomicU32::new(0) }; IO_WAKE_SLOTS];
 
-#[cfg(feature = "test")]
-static INLINE_RING3_TEST_DEADLINE_TICKS: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(3_000);
-
-/// Replace the inline ring-3 launch deadline used by the booted test harness.
-/// Returns the previous value so a slow end-to-end test can restore it.
-#[cfg(feature = "test")]
-pub fn swap_inline_ring3_test_deadline_ticks(ticks: u64) -> u64 {
-    assert!(ticks > 0, "ring-3 test deadline must be nonzero");
-    INLINE_RING3_TEST_DEADLINE_TICKS.swap(ticks, core::sync::atomic::Ordering::AcqRel)
-}
-
 /// Check if we're currently running a spawned process
 pub fn is_in_spawned_process() -> bool {
     crate::arch::x86_64::percpu::in_spawned_process()
@@ -467,12 +455,27 @@ pub fn park_current_if(reason: BlockReason, should_park: impl FnOnce() -> bool) 
 /// U8: inline ring-3 dispatch loop for non-kernel-thread contexts
 /// (kernel main loop, test runner). Polls until `awaited_pid`'s
 /// `exit_kind` becomes non-None.
+#[cfg(feature = "test")]
+static INLINE_RING3_TEST_TIMEOUT_TICKS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(3_000);
+
+/// Override the synchronous QEMU launcher's bounded timeout for a test suite
+/// and return the previous value. Large static toolchains can opt into a
+/// realistic budget without weakening the default hang detector globally.
+#[cfg(feature = "test")]
+pub fn set_inline_ring3_test_timeout_ticks(ticks: u64) -> u64 {
+    assert!(ticks > 0, "ring-3 test timeout must be nonzero");
+    INLINE_RING3_TEST_TIMEOUT_TICKS.swap(ticks, core::sync::atomic::Ordering::AcqRel)
+}
+
 fn drive_inline_ring3_until_exit(awaited_pid: u32) {
     use crate::userland::lifecycle::{pop_next_ring3, with_process, ExitKind};
     #[cfg(feature = "test")]
-    let test_deadline = crate::arch::x86_64::interrupts::get_timer_ticks().saturating_add(
-        INLINE_RING3_TEST_DEADLINE_TICKS.load(core::sync::atomic::Ordering::Acquire),
-    );
+    let test_timeout_ticks =
+        INLINE_RING3_TEST_TIMEOUT_TICKS.load(core::sync::atomic::Ordering::Acquire);
+    #[cfg(feature = "test")]
+    let test_deadline =
+        crate::arch::x86_64::interrupts::get_timer_ticks().saturating_add(test_timeout_ticks);
     loop {
         let exited =
             with_process(awaited_pid, |p| !matches!(p.exit_kind, ExitKind::None)).unwrap_or(true); // process gone (already reaped) → treat as exited
@@ -483,8 +486,9 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
         #[cfg(feature = "test")]
         assert!(
             crate::arch::x86_64::interrupts::get_timer_ticks() < test_deadline,
-            "ring-3 process {} exceeded the 30-second test deadline",
+            "ring-3 process {} exceeded the {}-tick test deadline",
             awaited_pid,
+            test_timeout_ticks,
         );
 
         if crate::process::timer::take_work_pending() {

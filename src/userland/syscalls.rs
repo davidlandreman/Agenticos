@@ -1968,8 +1968,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         p.cmdline = crate::userland::lifecycle::capped_cmdline(&argv_refs);
         // POSIX: exec closes every descriptor with FD_CLOEXEC set. musl
         // posix_spawn's success signal is the CLOEXEC status pipe
-        // closing here. Detach under PROCESS_TABLE, but defer Drop until the
-        // closure releases that lock so pipe EOF wakes can reacquire it.
+        // closing here.
         let closed_on_exec = p.fd_table.take_cloexec();
         // Phase 5 PR-B: POSIX semantics — exec resets signal
         // dispositions but preserves the blocked mask. Pending
@@ -1992,6 +1991,9 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
         );
         closed_on_exec
     });
+    // Pipe endpoint destruction can wake a parent blocked in the musl/Git
+    // successful-exec handshake. Drop only after with_current_group releases
+    // PROCESS_TABLE, matching exit-time fd teardown's lock discipline.
     drop(closed_on_exec);
     // set_tid_address(2) and set_robust_list(2) register pointers into the
     // pre-exec address space. This path rejects multithreaded exec above, so
@@ -3766,11 +3768,20 @@ pub fn dup_handler(args: &mut SyscallArgs) -> i64 {
 pub fn dup2_handler(args: &mut SyscallArgs) -> i64 {
     let oldfd = args.rdi as i32;
     let newfd = args.rsi as i32;
+    // Keep a temporary reference to a replaced endpoint so its final Drop
+    // (and any pipe EOF/EPIPE wake) happens after PROCESS_TABLE is unlocked.
+    let replaced = if oldfd != newfd {
+        with_fd_slot(newfd)
+    } else {
+        None
+    };
     let result = with_fd_table_mut(|t| t.dup2(oldfd, newfd))
         .map(|n| n as i64)
         .unwrap_or(EBADF);
+    drop(replaced);
     crate::net::drain_deferred_closes();
     crate::userland::lifecycle::wake_ring3_blocked_on_network(true);
+    crate::userland::readiness::notify_changed();
     result
 }
 
@@ -3785,22 +3796,15 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
 
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
-            let slot = match with_fd_slot(fd) {
-                Some(s) => s,
-                None => return EBADF,
-            };
-            // F_DUPFD wants the lowest-fd-≥-arg variant; we approximate by
-            // using the standard alloc (≥ 3) and ignoring `arg` — libc
-            // just expects "some fresh fd," which any free slot satisfies.
-            let _ = arg;
-            let new = with_fd_table_mut(|t| t.alloc(slot)).unwrap_or(-1);
-            if new < 0 {
-                return EMFILE;
+            if with_fd_slot(fd).is_none() {
+                return EBADF;
             }
-            if cmd == F_DUPFD_CLOEXEC {
-                let _ = with_fd_table_mut(|t| t.set_cloexec(new, true));
+            if arg > i32::MAX as u64 || arg >= FD_TABLE_SIZE as u64 {
+                return EINVAL;
             }
-            new as i64
+            with_fd_table_mut(|t| t.dup_from(fd, arg as i32, cmd == F_DUPFD_CLOEXEC))
+                .map(|new| new as i64)
+                .unwrap_or(EMFILE)
         }
         F_GETFD => match with_fd_table_mut(|t| t.cloexec(fd)) {
             Ok(true) => FD_CLOEXEC as i64,

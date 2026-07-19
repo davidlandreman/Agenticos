@@ -2187,45 +2187,59 @@ fn test_fdtable_dup_and_dup2() {
     assert_eq!(t.dup2(20, 5), None);
 }
 
-fn test_fdtable_take_cloexec_defers_pipe_endpoint_drop() {
-    use crate::userland::pipe::{Pipe, PipeReadHandle, PipeWriteHandle};
+fn test_fdtable_duplication_cloexec_semantics() {
+    let mut t = FdTable::new();
+    t.install_default_streams();
+    let source = t
+        .alloc(FdSlot::DevNull { cloexec: true })
+        .expect("allocate CLOEXEC source");
+
+    let duplicated = t.dup(source).expect("dup CLOEXEC source");
+    assert!(!t.cloexec(duplicated).expect("query dup flags"));
+
+    assert_eq!(t.dup2(source, 12), Some(12));
+    assert!(!t.cloexec(12).expect("query dup2 flags"));
+
+    // dup2(fd, fd) is a no-op and therefore preserves the original flag.
+    assert_eq!(t.dup2(source, source), Some(source));
+    assert!(t.cloexec(source).expect("query no-op dup2 flags"));
+
+    let ordinary = t
+        .dup_from(source, 20, false)
+        .expect("F_DUPFD-style duplicate");
+    assert_eq!(ordinary, 20);
+    assert!(!t.cloexec(ordinary).expect("query F_DUPFD flags"));
+
+    let cloexec = t
+        .dup_from(source, 24, true)
+        .expect("F_DUPFD_CLOEXEC-style duplicate");
+    assert_eq!(cloexec, 24);
+    assert!(t.cloexec(cloexec).expect("query F_DUPFD_CLOEXEC flags"));
+}
+
+fn test_fdtable_take_cloexec_defers_endpoint_drop() {
+    use crate::userland::pipe::{Pipe, PipeWriteHandle};
 
     let pipe = Pipe::new();
-    let _reader = PipeReadHandle::new(pipe.clone(), false);
-    let mut table = FdTable::new();
-    table.install_default_streams();
-    let cloexec_fd = table
+    let mut t = FdTable::new();
+    t.install_default_streams();
+    let fd = t
         .alloc(FdSlot::PipeWrite(
             PipeWriteHandle::new(pipe.clone(), false),
             true,
         ))
-        .expect("CLOEXEC pipe fd");
-    let retained_fd = table
-        .alloc(FdSlot::PipeWrite(
-            PipeWriteHandle::new(pipe.clone(), false),
-            false,
-        ))
-        .expect("retained pipe fd");
-    assert_eq!(pipe.writers(), 2);
+        .expect("allocate CLOEXEC pipe writer");
+    assert_eq!(pipe.writers(), 1);
 
-    let detached = table.take_cloexec();
-    assert!(table.get(cloexec_fd).is_none());
-    assert!(matches!(
-        table.get(retained_fd),
-        Some(FdSlot::PipeWrite(_, false))
-    ));
-    assert_eq!(
-        pipe.writers(),
-        2,
-        "detaching CLOEXEC slots must not run endpoint Drop under the caller's lock"
-    );
-
-    drop(detached);
+    let removed = t.take_cloexec();
+    assert!(t.get(fd).is_none());
     assert_eq!(
         pipe.writers(),
         1,
-        "dropping the detached descriptors must release the CLOEXEC endpoint"
+        "endpoint must remain alive until caller drops it outside PROCESS_TABLE"
     );
+    drop(removed);
+    assert_eq!(pipe.writers(), 0);
 }
 
 // ---------- Phase 2: path utilities ----------
@@ -6213,7 +6227,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_fdtable_alloc_and_close,
         &test_fdtable_capacity_64,
         &test_fdtable_dup_and_dup2,
-        &test_fdtable_take_cloexec_defers_pipe_endpoint_drop,
+        &test_fdtable_duplication_cloexec_semantics,
+        &test_fdtable_take_cloexec_defers_endpoint_drop,
         // Phase 2: path utilities
         &test_normalize_path_absolute_keeps_path,
         &test_normalize_path_relative_anchors_at_cwd,

@@ -51,6 +51,14 @@ stack. Scheduler transitions own `0x01xx_xxxx`, stack lifetime transitions own
 `0x07xx_xxxx`, and undeclared lock edges own `0x0900_0004`. New hooks must be
 integer-only and adjacent to the production commit they describe.
 
+Ring-3 blocking is published in two structures guarded by different locks:
+`PROCESS_TABLE.ring3_blocked` records the targeted wake reason and the unified
+scheduler records the entity as Blocked. `mark_ring3_blocked` must reconcile
+the scheduler state after both writes: a producer may remove the reason and
+mark Ready between them, and without the final reason-presence check the later
+Blocked write would consume that wake. Git's multi-process transport exposed
+this ordering race.
+
 **Pthread affinity rule:** several ring-3 task entities may share one TGID and
 address space. Until user TLB shootdown exists, the group is assigned a home
 CPU on its first pthread clone and all members receive scheduler affinity to

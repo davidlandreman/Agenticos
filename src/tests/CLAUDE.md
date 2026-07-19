@@ -87,6 +87,13 @@ The runner consults `filter.rs`, populated at boot from QEMU `fw_cfg`. Run a sub
 
 When the filter matches zero tests the kernel exits with code 35 (failure) so a typo never silently "passes." Full syntax: `.claude/rules/testing-flow.md`.
 
+Synchronous ring-3 fixtures have a 30-second default watchdog. Suites that
+launch unusually large static programs may temporarily override it with
+`process::set_inline_ring3_test_timeout_ticks` and must restore the returned
+previous value after the launch. Git uses 120 seconds; GCC uses 300 seconds.
+The GCC module is deliberately opt-in because its native compile pipeline is
+too slow for the default suite; run it explicitly with `./test.sh gcc`.
+
 ## Output
 
 Each test prints its name to serial and `[ok]` on success. Failure triggers the panic handler, which prints the failure and exits QEMU with the failure code (35).

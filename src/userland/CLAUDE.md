@@ -220,6 +220,14 @@ FD-table mutation or hold process/network locks or user pointers across a
 yield. Final handle drop uses the deferred-close queue documented in
 `src/net/CLAUDE.md`.
 
+Descriptor endpoint destruction is two-phase whenever an FD-table mutation
+holds `PROCESS_TABLE`: remove/take the slot under the lock, then drop it after
+unlocking. This is load-bearing for pipe EOF/EPIPE wakes. `execve` uses
+`FdTable::take_cloexec`, and `dup2` retains a temporary copy of a replaced
+endpoint, so their final `Drop` can acquire the process table. Ordinary
+`dup`/`dup2`/`F_DUPFD` clear the new descriptor's `FD_CLOEXEC` bit;
+`F_DUPFD_CLOEXEC` sets it.
+
 `CLOCK_MONOTONIC`, scheduler sleeps, polling deadlines, interval timers, and
 watchdogs remain based on the 100 Hz PIT. `CLOCK_REALTIME` and `gettimeofday`
 use the boot CMOS RTC snapshot advanced by PIT ticks through `crate::time`;

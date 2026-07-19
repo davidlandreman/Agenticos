@@ -33,9 +33,7 @@ pub mod fat_write;
 pub mod filesystem;
 #[cfg(feature = "test")]
 pub mod fonts;
-// Kept but not yet registered in MODULES (cc1 runtime hang — see below).
 #[cfg(feature = "test")]
-#[allow(dead_code)]
 pub mod gcc;
 #[cfg(feature = "test")]
 pub mod git_userland;
@@ -168,11 +166,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("vm", vm::get_tests),
     ("compiler_compat", compiler_compat::get_tests),
     ("tcc", tcc::get_tests),
-    // GCC end-to-end compile is not yet registered: the driver → cc1 → as →
-    // ld pipeline is wired and cc1 loads, but cc1 hangs early in userspace
-    // when run as a fork+execve child (see the GCC port plan's "Known gap").
-    // The test module and staged fixtures are kept for when that is solved.
-    // ("gcc", gcc::get_tests),
+    ("gcc", gcc::get_tests),
     ("userland_switch", userland_switch::get_tests),
     ("path", crate::userland::path::path_tests),
     ("etc", crate::userland::etc::etc_tests),
@@ -244,6 +238,13 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     // production transition in a full or multi-module filtered run.
     ("diagnostics", diagnostics::get_tests),
 ];
+
+/// Modules that are available through an explicit filter but are too slow for
+/// the default no-filter suite. Keep this list deliberately small: opt-in
+/// tests should represent unusually expensive end-to-end coverage, not a way
+/// to hide ordinary test cost.
+#[cfg(feature = "test")]
+const OPT_IN_MODULES: &[&str] = &["gcc"];
 
 /// Strip the `agenticos::tests::<topic>::` prefix from a test's `type_name`,
 /// yielding `<module>::<fn>` (matching the registry's module name).
@@ -360,7 +361,7 @@ pub fn run_tests() {
 #[cfg(feature = "test")]
 fn filter_matches(module: &str, fn_name: &str) -> bool {
     if filter::is_empty() {
-        return true;
+        return !OPT_IN_MODULES.contains(&module);
     }
     let mut buf = [0u8; 128];
     let m = module.as_bytes();

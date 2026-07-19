@@ -288,17 +288,17 @@ exercise them hard:
    paths (`wake_ring3_blocked_by_locking`) since those handlers hold no
    process lock and a dropped wake strands a pipe peer.
 
-### Pack-protocol transport status
+### Resolved follow-up: pack-protocol transports
 
-The HTTP clone hang was a missed EOF wake on musl's nested `posix_spawn`
-status pipe. `execve` dropped CLOEXEC pipe endpoints while holding
-`PROCESS_TABLE`; the endpoint's try-lock wake could not reacquire the table,
-leaving the parent blocked on an empty pipe with zero writers. CLOEXEC slots
-are now detached under the lock and dropped after it is released, matching the
-existing process-exit fd-table teardown discipline. The committed dumb-HTTP
-fixture is covered by `git_userland::test_git_http_clone`. Local helper,
-fetch, and push paths remain wired but do not yet have dedicated end-to-end
-regressions.
+The remaining local and HTTP clone stalls had two kernel causes. First,
+`execve` destroyed CLOEXEC pipe endpoints while holding `PROCESS_TABLE`, so
+the helper-success EOF wake was dropped. Second, a waiter published its
+blocked reason and scheduler state under separate locks; a producer could
+consume the reason and mark it Ready before the waiter overwrote the final
+scheduler state with Blocked. CLOEXEC teardown is now two-phase and
+`mark_ring3_blocked` reconciles that ordering after publication. The booted
+suite covers both a local `git-upload-pack` clone and a dumb-HTTP clone through
+`GITRHTTP.ELF`, including the helper's nested `rev-list` child.
 
 ## Out of scope
 

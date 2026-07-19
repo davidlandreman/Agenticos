@@ -2,9 +2,9 @@
 //!
 //! The committed static-musl `GIT.ELF` is launched directly through the
 //! production ELF loader (like the binutils suite), not through zsh: a
-//! full local init→add→commit→branch→merge round trip on `/work`, plus a
-//! pure object-database readback, and a dumb-HTTP clone that exercises the
-//! nested helper/close-on-exec pipe handshake.
+//! full local init→add→commit→branch→merge round trip on `/work`, pure
+//! object-database readback, a local pack-protocol clone, and a dumb-HTTP
+//! clone through the separately exec'd transport helper.
 //!
 //! Launching directly keeps the coverage focused on git and the kernel
 //! ABI rather than on zsh's job-control signal path. Progress meters are
@@ -36,6 +36,9 @@ fn assert_git_staged() {
 fn git(argv: &[&str]) -> i64 {
     assert_git_staged();
     let path = crate::userland::bin_namespace::GIT_HOST_PATH;
+    // HTTP clone starts multiple large static helpers and can legitimately
+    // exceed the default 30-second inline-launch budget under QEMU.
+    let prior_timeout = crate::process::set_inline_ring3_test_timeout_ticks(12_000);
     let prior_trace = crate::userland::abi::is_trace_mode();
     crate::userland::abi::set_trace_mode(true);
     crate::userland::abi::reset_unknown_syscall_trace();
@@ -44,6 +47,7 @@ fn git(argv: &[&str]) -> i64 {
         argv,
         &crate::userland::process_service::DEFAULT_USER_ENV,
     );
+    crate::process::set_inline_ring3_test_timeout_ticks(prior_timeout);
     crate::userland::abi::set_trace_mode(prior_trace);
     crate::userland::abi::clear_user_va_bounds();
     let (kind, code) =
@@ -122,21 +126,38 @@ fn test_git_object_store_readback() {
     git_ok(&["git", "-C", repo, "rev-parse", "HEAD"]);
 }
 
-/// Dumb HTTP crosses both nested spawn handshakes (`git remote-http` then
-/// `git-remote-http`). Each child closes a CLOEXEC status-pipe writer during
-/// exec; the parent must wake, observe EOF, and continue the conversation.
+/// Local pack-protocol clone through the forked `git-upload-pack` builtin.
+fn test_git_local_clone() {
+    let source = "/work/gtclone-src";
+    let destination = "/work/gtclone-dst";
+    git_ok(&["git", "init", "-q", source]);
+    write_file("/work/gtclone-src/payload.txt", b"local clone payload\n");
+    git_ok(&["git", "-C", source, "add", "payload.txt"]);
+    git_ok(&["git", "-C", source, "commit", "-qm", "seed"]);
+    git_ok(&["git", "clone", "-q", source, destination]);
+    git_ok(&[
+        "git",
+        "-C",
+        destination,
+        "cat-file",
+        "-p",
+        "HEAD:payload.txt",
+    ]);
+}
+
+/// Dumb-HTTP clone through the separately exec'd `GITRHTTP.ELF` helper.
 fn test_git_http_clone() {
-    let clone = "/work/gthttp";
-    let prior_deadline = crate::process::swap_inline_ring3_test_deadline_ticks(6_000);
+    crate::net::wait_for_config_ticks(500)
+        .expect("QEMU-local DHCP lease was not acquired within five seconds");
+    let destination = "/work/gitclone";
     git_ok(&[
         "git",
         "clone",
         "-q",
-        "http://10.0.2.101:8081/repo.git",
-        clone,
+        "http://agenticos-http.test:8081/repo.git",
+        destination,
     ]);
-    crate::process::swap_inline_ring3_test_deadline_ticks(prior_deadline);
-    git_ok(&["git", "-C", clone, "rev-parse", "HEAD"]);
+    git_ok(&["git", "-C", destination, "cat-file", "-p", "HEAD:hello.txt"]);
 }
 
 pub fn get_tests() -> &'static [&'static dyn Testable] {
@@ -144,6 +165,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_git_version_and_system_identity,
         &test_git_local_round_trip,
         &test_git_object_store_readback,
+        &test_git_local_clone,
         &test_git_http_clone,
     ]
 }
