@@ -183,6 +183,24 @@ class CrashDecodeTests(unittest.TestCase):
         self.assertEqual(operands["actual_bytes"], 2048)
         self.assertEqual(operands["page_generation"], 77)
 
+    def test_page_fault_operands_are_decoded(self):
+        fault = struct.pack(
+            "<8Q", 1, 2, 3, 0, 0x7FFF_F000, 0b1_0110, 0x401234, 0x0100_0400
+        )
+        trace = (
+            struct.pack("<HHHHBBHQQQI", 1, 1024, 128, 0, 0, 0, 0, 2, 0, 0, 1)
+            + fault
+        )
+        report, _ = crash_decode.parse_capsule(capsule([section(5, trace)]))
+        operands = report["trace"]["cpus"][0]["records"][0]["operands"]
+        self.assertEqual(operands["page"], "0x000000007ffff000")
+        self.assertEqual(operands["faulting_rip"], "0x0000000000401234")
+        self.assertFalse(operands["protection_violation"])
+        self.assertTrue(operands["write"])
+        self.assertTrue(operands["user"])
+        self.assertTrue(operands["instruction_fetch"])
+        self.assertFalse(operands["reserved_bit"])
+
     def test_missing_rich_sections_are_absent_evidence(self):
         metadata = struct.pack("<BBHI", 2, 0, 0, 3)
         for value in ("abc", "0", "rustc", "strict"):

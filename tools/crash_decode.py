@@ -423,6 +423,20 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
                         "entity_existed": bool(arg1 & 1),
                         "newly_enqueued": bool(arg1 & 2),
                     }
+                elif kind == 0x400:
+                    record["operands"] = {
+                        "page": f"0x{subject:016x}",
+                        "faulting_rip": f"0x{arg1:016x}",
+                        "error_code": arg0,
+                        "protection_violation": bool(arg0 & (1 << 0)),
+                        "write": bool(arg0 & (1 << 1)),
+                        "user": bool(arg0 & (1 << 2)),
+                        "reserved_bit": bool(arg0 & (1 << 3)),
+                        "instruction_fetch": bool(arg0 & (1 << 4)),
+                        "protection_key": bool(arg0 & (1 << 5)),
+                        "shadow_stack": bool(arg0 & (1 << 6)),
+                        "sgx": bool(arg0 & (1 << 15)),
+                    }
                 elif kind == 0x401:
                     reason = arg0 & 0xFFFF
                     record["operands"] = {

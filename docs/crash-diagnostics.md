@@ -158,6 +158,9 @@ inferred from a missing success record.
 requested byte count, actual byte count, and pager generation. In rich modes
 that generation joins the terminal result to the matching pager-shadow record;
 zero means the minimal recorder observed the result without a shadow handle.
+The preceding `page_fault` record decodes the x86 access-error flags and keeps
+the faulting RIP, so not-present recovery is distinct from protection, write,
+user, instruction-fetch, reserved-bit, protection-key, and shadow-stack faults.
 
 Lazy file page-in now follows a private-frame commit protocol: allocate and
 zero privately, perform an exact-length read, revalidate the L4/VMA, and then
