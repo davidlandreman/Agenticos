@@ -11,6 +11,8 @@ panic = "abort"
 
 [features]
 test = []
+diagnostics = []
+diagnostics-strict = ["diagnostics"]
 
 [build-dependencies]
 bootloader = "=0.11.10"

@@ -20,6 +20,7 @@ impl Color {
         green: 255,
         blue: 255,
     };
+    #[allow(dead_code, reason = "reserved for future panic-screen fallback")]
     pub const RED: Color = Color {
         red: 255,
         green: 0,

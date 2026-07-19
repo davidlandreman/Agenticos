@@ -38,6 +38,7 @@ pub fn write_line(prefix: &str, args: fmt::Arguments<'_>) {
 
 /// Panic-safe serial output. If another CPU died while owning the lock, emit
 /// anyway instead of deadlocking the panic path.
+#[allow(dead_code, reason = "post-capsule serial fallback API")]
 pub fn write_panic_line(prefix: &str, args: fmt::Arguments<'_>) {
     if let Some(_guard) = SERIAL_OUTPUT.try_lock() {
         qemu_print::qemu_print!("{}", prefix);

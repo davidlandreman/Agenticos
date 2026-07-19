@@ -22,6 +22,8 @@ pub mod desktop_backing_store;
 #[cfg(feature = "test")]
 pub mod desktop_window;
 #[cfg(feature = "test")]
+pub mod diagnostics;
+#[cfg(feature = "test")]
 pub mod display;
 #[cfg(feature = "test")]
 pub mod entropy;
@@ -136,6 +138,7 @@ type GetTestsFn = fn() -> &'static [&'static dyn crate::lib::test_utils::Testabl
 #[cfg(feature = "test")]
 static MODULES: &[(&str, GetTestsFn)] = &[
     ("basic", basic::get_tests),
+    ("diagnostics", diagnostics::get_tests),
     ("binutils", binutils::get_tests),
     ("memory", memory::get_tests),
     ("network", network::get_tests),

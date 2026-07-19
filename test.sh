@@ -89,6 +89,24 @@ fi
 REBUILD_USERLAND="${REBUILD_USERLAND:-0}"
 export REBUILD_USERLAND
 
+AGENTICOS_GIT_SHA="${AGENTICOS_GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
+if [ -z "${AGENTICOS_GIT_DIRTY:-}" ]; then
+    if git diff-index --quiet HEAD -- 2>/dev/null && [ -z "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
+        AGENTICOS_GIT_DIRTY=0
+    else
+        AGENTICOS_GIT_DIRTY=1
+    fi
+fi
+AGENTICOS_RUSTC_VERSION="${AGENTICOS_RUSTC_VERSION:-$(rustc --version 2>/dev/null || echo unknown)}"
+AGENTICOS_DIAGNOSTICS="${AGENTICOS_DIAGNOSTICS:-minimal}"
+case "$AGENTICOS_DIAGNOSTICS" in
+    minimal) TEST_FEATURES=test ;;
+    record) TEST_FEATURES=test,diagnostics ;;
+    strict) TEST_FEATURES=test,diagnostics-strict ;;
+    *) echo "AGENTICOS_DIAGNOSTICS must be minimal, record, or strict" >&2; exit 2 ;;
+esac
+export AGENTICOS_GIT_SHA AGENTICOS_GIT_DIRTY AGENTICOS_RUSTC_VERSION AGENTICOS_DIAGNOSTICS
+
 if [ "$LIST_ONLY" -eq 1 ]; then
     echo "Available test modules (from src/tests/mod.rs MODULES registry):"
     awk '/^static MODULES:/,/^\];$/' src/tests/mod.rs \
@@ -131,8 +149,8 @@ stage_userland test "$SKIP_USERLAND" || {
 # `--release` matches build.sh: the dev profile produces a much larger kernel
 # binary, which the BIOS-stage bootloader can fail to load silently in some
 # configurations. Tests run faster against an optimized kernel anyway.
-cargo build --release --features test
-cargo build --release --features test
+cargo build --release --features "$TEST_FEATURES"
+cargo build --release --features "$TEST_FEATURES"
 
 # Run with QEMU configured for testing
 BIOS_IMAGE="${AGENTICOS_BIOS_IMAGE:-target/bootloader/bios.img}"
@@ -155,6 +173,7 @@ if [ ! -r /dev/urandom ]; then
     echo "Host entropy source /dev/urandom is missing or unreadable" >&2
     exit 1
 fi
+RUN_ID="${AGENTICOS_RUN_ID:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}"
 QEMU_ARGS=(
     -drive "format=raw,file=$BIOS_IMAGE,if=none,id=agenticos-root,readonly=on"
     -device "virtio-blk-pci,disable-legacy=on,drive=agenticos-root,serial=agenticos-root,bootindex=1"
@@ -165,6 +184,7 @@ QEMU_ARGS=(
     -object "rng-random,id=agenticos-rng,filename=/dev/urandom"
     -device "virtio-rng-pci,disable-legacy=on,rng=agenticos-rng"
     -fw_cfg "name=opt/agenticos/force_dirty_mount,string=$FORCE_DIRTY_MOUNT"
+    -fw_cfg "name=opt/agenticos/run_id,string=$RUN_ID"
     -serial stdio
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
     -no-reboot
@@ -215,6 +235,9 @@ if [ -n "$FILTER" ]; then
     ESCAPED_FILTER=${FILTER//,/,,}
     QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/test_filter,string=$ESCAPED_FILTER")
 fi
+if [ -n "${AGENTICOS_CRASH_INJECT:-}" ]; then
+    QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/crash_inject,string=$AGENTICOS_CRASH_INJECT")
+fi
 
 COMPOSITOR_REQUEST="${AGENTICOS_COMPOSITOR:-legacy}"
 GPU_STRICT="${AGENTICOS_GPU_STRICT:-0}"
@@ -259,6 +282,28 @@ elif "$QEMU_BIN" -device help 2>/dev/null | grep -q virtio-9p-pci; then
     echo "Host share: $TEST_SHARED_DIR -> /shared"
 else
     echo "Host share unsupported by $QEMU_BIN; p9 tests will self-skip"
+fi
+if [ "$AGENTICOS_DIAGNOSTICS" != minimal ]; then
+    CRASH_DIR="${AGENTICOS_CRASH_DIR:-$(pwd)/.context/crashes/$RUN_ID}"
+    mkdir -p "$CRASH_DIR"
+    CRASH_STREAM="$CRASH_DIR/capsule.bin"
+    : > "$CRASH_STREAM"
+    QEMU_ARGS+=(
+        -chardev "file,id=agenticos-crash,path=$CRASH_STREAM"
+        -device "isa-debugcon,iobase=0xe9,chardev=agenticos-crash"
+    )
+    python3 tools/crash_manifest.py \
+        --output "$CRASH_DIR/manifest.json" \
+        --kernel target/x86_64-unknown-none/release/agenticos \
+        --bios "$BIOS_IMAGE" \
+        --qemu "$QEMU_BIN" \
+        --run-id "$RUN_ID" \
+        --mode "$AGENTICOS_DIAGNOSTICS" \
+        --memory "${AGENTICOS_TEST_MEMORY:-256M}" \
+        --smp "$QEMU_SMP" \
+        -- "${QEMU_ARGS[@]}"
+    printf '%s\n' "$(pwd)/target/x86_64-unknown-none/release/agenticos" > "$CRASH_DIR/kernel.elf.ref"
+    echo "Crash artifacts: $CRASH_DIR"
 fi
 "$QEMU_BIN" "${QEMU_ARGS[@]}"
 

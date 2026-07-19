@@ -111,6 +111,10 @@ Tests run automatically on kernel boot when built with the test feature. QEMU ex
 - `cargo clippy` — Lint
 - `cargo check` — Quick compilation check (preferred for validating code changes — avoids producing binaries)
 
+Crash capsules and flight-recorder modes are documented in
+[`docs/crash-diagnostics.md`](docs/crash-diagnostics.md). Crash-path code must
+remain allocation-free and lock-free after first-failure election.
+
 Set `AGENTICOS_RENDER_STATS=1` with a retained compositor launch to emit
 per-frame raster/upload/composition/blur/fence/presentation counters. The
 optional pinned macOS VirGL host verifier and its side-by-side QEMU rules are

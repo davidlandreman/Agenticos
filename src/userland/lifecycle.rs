@@ -1600,6 +1600,31 @@ pub fn wake_ring3_for_signal(pid: u32) {
     if !actionable {
         return;
     }
+    crate::diagnostics::trace::record(
+        crate::diagnostics::trace::EventKind::SignalWakeAttempt,
+        u64::from(pid),
+        0,
+        0,
+        0,
+    );
+    // A kernel-managed block-I/O continuation is not an interruptible
+    // userspace syscall. Its saved kernel stack may resume only after the
+    // exact request token completes and `try_wake_ring3_blocked_on_io`
+    // accepts that token. Keep the signal pending for delivery after the
+    // continuation returns to the dispatcher; making it runnable here can
+    // consume the request's initial status, roll back a valid lazy ELF page,
+    // and later masquerade as an MM or scheduler fault.
+    if let Some(Ring3BlockReason::WaitingForBlockIo { token }) = g.ring3_blocked.get(&pid).copied()
+    {
+        crate::diagnostics::trace::record(
+            crate::diagnostics::trace::EventKind::SignalWakeDeferredIo,
+            u64::from(pid),
+            token,
+            0,
+            0,
+        );
+        return;
+    }
     let running_cpu = {
         let scheduler = crate::process::scheduler::SCHEDULER.lock();
         (0..crate::arch::x86_64::smp::online_cpu_count()).find(|cpu| {

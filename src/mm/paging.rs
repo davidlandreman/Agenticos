@@ -447,20 +447,26 @@ impl MemoryMapper {
         CowOutcome::Copied
     }
 
-    /// Install one fresh zeroed user leaf in the specified address space.
-    pub fn map_zeroed_page_into(
+    /// Allocate and zero a user-leaf frame without exposing it in any page
+    /// table. Lazy file paging populates this private frame while block I/O
+    /// may sleep, then commits the leaf only after the bytes are complete.
+    pub fn allocate_private_zeroed_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        let frame = self.frame_allocator.allocate_frame()?;
+        self.zero_frame(frame);
+        Some(frame)
+    }
+
+    /// Install a previously allocated private frame as one user leaf. On
+    /// error ownership remains with the caller, which must release it.
+    pub fn map_private_frame_into(
         &mut self,
         l4_frame: PhysFrame<Size4KiB>,
         addr: VirtAddr,
+        frame: PhysFrame<Size4KiB>,
         flags: PageTableFlags,
-    ) -> Result<PhysFrame<Size4KiB>, UserMapError> {
+    ) -> Result<(), UserMapError> {
         let page_addr = VirtAddr::new(addr.as_u64() & !0xfff);
         let page = Page::<Size4KiB>::containing_address(page_addr);
-        let frame = self
-            .frame_allocator
-            .allocate_frame()
-            .ok_or(UserMapError::OutOfFrames)?;
-        self.zero_frame(frame);
         let l4 = unsafe { &mut *self.table_ptr(l4_frame) };
         let mut target = unsafe { OffsetPageTable::new(l4, self.physical_memory_offset) };
         let parent_flags =
@@ -481,14 +487,19 @@ impl MemoryMapper {
                 } else {
                     flush.ignore();
                 }
-                Ok(frame)
+                Ok(())
             }
             Err(error) => {
-                let _ = self.frame_allocator.release_frame(frame);
                 self.prune_empty_path(l4_frame, page_addr);
                 Err(UserMapError::from(error))
             }
         }
+    }
+
+    /// Release a private frame that was never committed into a leaf.
+    pub fn release_private_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        let released = self.frame_allocator.release_frame(frame);
+        debug_assert!(released.is_ok(), "private frame must have one live owner");
     }
 
     /// Unmap one present 4 KiB leaf from an arbitrary address space, release

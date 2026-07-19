@@ -15,7 +15,7 @@ fn route_user_fault_or_panic(
     error_code: Option<u64>,
     fault_addr: Option<x86_64::VirtAddr>,
     panic_msg: &'static str,
-) {
+) -> ! {
     if frame_is_user(stack_frame.code_segment as u64) {
         cleanup_user_process(AbnormalExit {
             vector,
@@ -24,7 +24,13 @@ fn route_user_fault_or_panic(
             fault_rip: stack_frame.instruction_pointer,
         });
     }
-    panic!("{}", panic_msg);
+    crate::diagnostics::crash::begin_trap(
+        panic_msg,
+        vector,
+        error_code,
+        fault_addr.map(|address| address.as_u64()),
+        stack_frame.instruction_pointer.as_u64(),
+    );
 }
 
 /// PIT (Programmable Interval Timer) base frequency in Hz
@@ -381,6 +387,13 @@ extern "x86-interrupt" fn page_fault_handler(
     use x86_64::registers::control::Cr2;
 
     let accessed_addr = Cr2::read();
+    crate::diagnostics::trace::record(
+        crate::diagnostics::trace::EventKind::PageFault,
+        accessed_addr.as_u64() & !0xfff,
+        error_code.bits(),
+        stack_frame.instruction_pointer.as_u64(),
+        0,
+    );
 
     // Routine demand faults are expected and can occur thousands of times
     // during process startup. Keep per-fault detail available for an
@@ -492,7 +505,13 @@ extern "x86-interrupt" fn page_fault_handler(
         {
             if let Err(e) = result {
                 debug_error!("Failed to handle page fault: {:?}", e);
-                panic!("Failed to allocate memory for {}", region);
+                crate::diagnostics::crash::begin_trap(
+                    "kernel-demand-map-failed",
+                    14,
+                    Some(error_code.bits()),
+                    Some(accessed_addr.as_u64()),
+                    stack_frame.instruction_pointer.as_u64(),
+                );
             }
             // Successfully mapped - return and retry the instruction
             return;
@@ -506,19 +525,23 @@ extern "x86-interrupt" fn page_fault_handler(
     debug_error!("Instruction Pointer: {:?}", stack_frame.instruction_pointer);
     debug_error!("{:#?}", stack_frame);
 
-    panic!("Unhandled page fault");
+    crate::diagnostics::crash::begin_trap(
+        "unhandled-page-fault",
+        14,
+        Some(error_code.bits()),
+        Some(accessed_addr.as_u64()),
+        stack_frame.instruction_pointer.as_u64(),
+    );
 }
 
 extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame, _error_code: u64) {
-    debug_error!("EXCEPTION: DOUBLE FAULT");
-    debug_error!("{:#?}", stack_frame);
-
-    // Diverging handlers in `extern "x86-interrupt"` are not expressible as
-    // `-> !` on this nightly, so we register the address directly and keep
-    // the function from returning by halting forever.
-    loop {
-        x86_64::instructions::hlt();
-    }
+    crate::diagnostics::crash::begin_trap(
+        "double-fault",
+        8,
+        Some(0),
+        None,
+        stack_frame.instruction_pointer.as_u64(),
+    );
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
@@ -567,16 +590,7 @@ extern "x86-interrupt" fn bound_range_exceeded_handler(stack_frame: InterruptSta
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    debug_error!("EXCEPTION: INVALID TSS");
-    debug_error!("Error Code: {}", error_code);
-    debug_error!("{:#?}", stack_frame);
-
-    println!();
-    println!("EXCEPTION: INVALID TSS");
-    println!("Error Code: {}", error_code);
-    println!("{:#?}", stack_frame);
-
-    panic!("Invalid TSS");
+    route_user_fault_or_panic(&stack_frame, 10, Some(error_code), None, "Invalid TSS");
 }
 
 extern "x86-interrupt" fn segment_not_present_handler(
@@ -587,12 +601,13 @@ extern "x86-interrupt" fn segment_not_present_handler(
     debug_error!("Error Code: {}", error_code);
     debug_error!("{:#?}", stack_frame);
 
-    println!();
-    println!("EXCEPTION: SEGMENT NOT PRESENT");
-    println!("Error Code: {}", error_code);
-    println!("{:#?}", stack_frame);
-
-    panic!("Segment not present");
+    route_user_fault_or_panic(
+        &stack_frame,
+        11,
+        Some(error_code),
+        None,
+        "Segment not present",
+    );
 }
 
 extern "x86-interrupt" fn stack_segment_fault_handler(

@@ -5,7 +5,35 @@ use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
 use crate::userland::abi::EFAULT;
-use crate::userland::vm::{VmProt, VmaBacking};
+use crate::userland::vm::{VmProt, Vma, VmaBacking};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "stable diagnostic terminal-reason schema")]
+#[repr(u16)]
+pub enum PageInTerminalReason {
+    PresentCommitted = 0,
+    NoAddressSpace = 1,
+    NoVma = 2,
+    PermissionDenied = 3,
+    MapperUnavailable = 4,
+    FrameAllocationFailed = 5,
+    PhysicalAliasFailed = 6,
+    FileExtentOverflow = 7,
+    FileOffsetInvalid = 8,
+    IoCompletionError = 9,
+    ShortRead = 10,
+    VmaChangedDuringIo = 11,
+    LeafCollision = 12,
+    MapFailed = 13,
+    RollbackReleaseFailed = 14,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PageInFailure {
+    reason: PageInTerminalReason,
+    requested: usize,
+    actual: usize,
+}
 
 pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
     let page = address & !0xfff;
@@ -21,92 +49,262 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
             .then_some(())
             .ok_or(EFAULT);
     };
+    let outcome = ensure_user_page_inner(page, write, l4, &vma);
+    let (reason, requested, actual) = match outcome {
+        Ok((requested, actual)) => (PageInTerminalReason::PresentCommitted, requested, actual),
+        Err(failure) => (failure.reason, failure.requested, failure.actual),
+    };
+    crate::diagnostics::trace::record(
+        crate::diagnostics::trace::EventKind::PageInTerminal,
+        page,
+        u64::from(reason as u16) | ((requested as u64) << 16),
+        actual as u64,
+        0,
+    );
+    outcome.map(|_| ()).map_err(|_| EFAULT)
+}
+
+fn ensure_user_page_inner(
+    page: u64,
+    write: bool,
+    l4: x86_64::structures::paging::PhysFrame,
+    vma: &Vma,
+) -> Result<(usize, usize), PageInFailure> {
+    let fail = |reason| PageInFailure {
+        reason,
+        requested: 0,
+        actual: 0,
+    };
     let required = if write { VmProt::WRITE } else { VmProt::READ };
     if !vma.prot.contains(required) {
-        return Err(EFAULT);
+        return Err(fail(PageInTerminalReason::PermissionDenied));
     }
 
-    let mapped = crate::mm::memory::with_memory_mapper(|mapper| {
+    let private_frame = crate::mm::memory::with_memory_mapper(|mapper| {
         if let Some((_frame, flags)) = mapper.leaf_info(l4, VirtAddr::new(page)) {
             if write && !flags.contains(PageTableFlags::WRITABLE) {
                 return match mapper.resolve_cow(l4, VirtAddr::new(page)) {
                     crate::mm::paging::CowOutcome::Copied
                     | crate::mm::paging::CowOutcome::Upgraded => Ok(None),
-                    _ => Err(EFAULT),
+                    _ => Err(PageInTerminalReason::PermissionDenied),
                 };
             }
             return Ok(None);
         }
-
-        let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-        if vma.prot.contains(VmProt::WRITE) {
-            flags.insert(PageTableFlags::WRITABLE);
-        }
-        if !vma.prot.contains(VmProt::EXEC) {
-            flags.insert(PageTableFlags::NO_EXECUTE);
-        }
         let frame = mapper
-            .map_zeroed_page_into(l4, VirtAddr::new(page), flags)
-            .map_err(|_| EFAULT)?;
+            .allocate_private_zeroed_frame()
+            .ok_or(PageInTerminalReason::FrameAllocationFailed)?;
         Ok(Some(frame))
     })
-    .unwrap_or(Err(EFAULT))?;
+    .ok_or_else(|| fail(PageInTerminalReason::MapperUnavailable))?
+    .map_err(fail)?;
 
-    // Never retain the global mapper lock while file-backed paging sleeps on
-    // DMA. The frame remains owned by the address space mapping, and the
-    // direct physical map gives us a stable destination while blocked.
-    let Some(frame) = mapped else { return Ok(()) };
+    let Some(frame) = private_frame else {
+        return Ok((0, 0));
+    };
     let physical = frame.start_address().as_u64();
-    let virtual_address = crate::mm::memory::phys_to_virt(physical).ok_or(EFAULT)?;
+    let Some(virtual_address) = crate::mm::memory::phys_to_virt(physical) else {
+        release_private(frame);
+        return Err(fail(PageInTerminalReason::PhysicalAliasFailed));
+    };
     let destination =
         unsafe { core::slice::from_raw_parts_mut(virtual_address as *mut u8, 0x1000) };
-    let populate = (|| {
-        match &vma.backing {
-            VmaBacking::FilePrivate {
-                file,
-                file_offset,
-                file_size,
-            } => {
-                let offset = file_offset + (page - vma.start);
-                if offset >= *file_size {
-                    return Err(EFAULT);
-                }
-                let available = (*file_size - offset).min(0x1000) as usize;
-                if file.read_at(offset, &mut destination[..available]).is_err() {
-                    return Err(EFAULT);
-                }
+    let populate: Result<(usize, usize), PageInFailure> = (|| match &vma.backing {
+        VmaBacking::FilePrivate {
+            file,
+            file_offset,
+            file_size,
+        } => {
+            let offset = file_offset
+                .checked_add(page - vma.start)
+                .ok_or_else(|| fail(PageInTerminalReason::FileExtentOverflow))?;
+            if offset >= *file_size {
+                return Err(fail(PageInTerminalReason::FileOffsetInvalid));
             }
-            VmaBacking::Elf {
-                file,
-                file_offset,
-                file_len,
-                ..
-            } => {
-                let relative = page - vma.start;
-                if relative < *file_len {
-                    let available = (*file_len - relative).min(0x1000) as usize;
-                    if file
-                        .read_at(file_offset + relative, &mut destination[..available])
-                        .is_err()
-                    {
-                        return Err(EFAULT);
-                    }
-                }
+            let available = (*file_size - offset).min(0x1000) as usize;
+            let actual = file
+                .read_at(offset, &mut destination[..available])
+                .map_err(|_| PageInFailure {
+                    reason: PageInTerminalReason::IoCompletionError,
+                    requested: available,
+                    actual: 0,
+                })?;
+            if actual != available {
+                return Err(PageInFailure {
+                    reason: PageInTerminalReason::ShortRead,
+                    requested: available,
+                    actual,
+                });
             }
-            VmaBacking::ElfResident
-            | VmaBacking::Tls
-            | VmaBacking::Stack { .. }
-            | VmaBacking::Heap
-            | VmaBacking::Anonymous => {}
+            Ok((available, actual))
         }
-        Ok(())
+        VmaBacking::Elf {
+            file,
+            file_offset,
+            file_len,
+            ..
+        } => {
+            let relative = page - vma.start;
+            if relative < *file_len {
+                let available = (*file_len - relative).min(0x1000) as usize;
+                let offset = file_offset
+                    .checked_add(relative)
+                    .ok_or_else(|| fail(PageInTerminalReason::FileExtentOverflow))?;
+                let actual = file
+                    .read_at(offset, &mut destination[..available])
+                    .map_err(|_| PageInFailure {
+                        reason: PageInTerminalReason::IoCompletionError,
+                        requested: available,
+                        actual: 0,
+                    })?;
+                if actual != available {
+                    return Err(PageInFailure {
+                        reason: PageInTerminalReason::ShortRead,
+                        requested: available,
+                        actual,
+                    });
+                }
+                return Ok((available, actual));
+            }
+            Ok((0, 0))
+        }
+        VmaBacking::ElfResident
+        | VmaBacking::Tls
+        | VmaBacking::Stack { .. }
+        | VmaBacking::Heap
+        | VmaBacking::Anonymous => Ok((0, 0)),
     })();
-    if populate.is_err() {
-        let _ = crate::mm::memory::with_memory_mapper(|mapper| {
-            mapper.unmap_page_from(l4, VirtAddr::new(page))
+    let (requested, actual) = match populate {
+        Ok(counts) => counts,
+        Err(error) => {
+            release_private(frame);
+            return Err(error);
+        }
+    };
+
+    // Blocking I/O dropped every VM lock. Confirm the process still owns the
+    // same L4 and semantically identical VMA before publishing the leaf.
+    let unchanged = crate::userland::lifecycle::with_current_group(|process| {
+        let Some(space) = process.address_space.as_ref() else {
+            return false;
+        };
+        space.l4_frame() == l4
+            && space
+                .vmas()
+                .find(page)
+                .is_some_and(|current| same_vma(current, vma))
+    });
+    if !unchanged {
+        release_private(frame);
+        return Err(PageInFailure {
+            reason: PageInTerminalReason::VmaChangedDuringIo,
+            requested,
+            actual,
         });
     }
-    populate
+
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if vma.prot.contains(VmProt::WRITE) {
+        flags.insert(PageTableFlags::WRITABLE);
+    }
+    if !vma.prot.contains(VmProt::EXEC) {
+        flags.insert(PageTableFlags::NO_EXECUTE);
+    }
+    let committed = crate::mm::memory::with_memory_mapper(|mapper| {
+        if mapper.leaf_info(l4, VirtAddr::new(page)).is_some() {
+            return Err(PageInTerminalReason::LeafCollision);
+        }
+        mapper
+            .map_private_frame_into(l4, VirtAddr::new(page), frame, flags)
+            .map_err(|_| PageInTerminalReason::MapFailed)
+    });
+    match committed {
+        Some(Ok(())) => Ok((requested, actual)),
+        Some(Err(reason)) => {
+            release_private(frame);
+            Err(PageInFailure {
+                reason,
+                requested,
+                actual,
+            })
+        }
+        None => {
+            release_private(frame);
+            Err(PageInFailure {
+                reason: PageInTerminalReason::MapperUnavailable,
+                requested,
+                actual,
+            })
+        }
+    }
+}
+
+fn release_private(frame: x86_64::structures::paging::PhysFrame) {
+    let _ = crate::mm::memory::with_memory_mapper(|mapper| mapper.release_private_frame(frame));
+}
+
+fn same_vma(current: &Vma, original: &Vma) -> bool {
+    if current.start != original.start
+        || current.end != original.end
+        || current.prot != original.prot
+        || current.private != original.private
+        || current.grow_down != original.grow_down
+        || current.mapping_id != original.mapping_id
+    {
+        return false;
+    }
+    match (&current.backing, &original.backing) {
+        (VmaBacking::ElfResident, VmaBacking::ElfResident)
+        | (VmaBacking::Tls, VmaBacking::Tls)
+        | (VmaBacking::Heap, VmaBacking::Heap)
+        | (VmaBacking::Anonymous, VmaBacking::Anonymous) => true,
+        (
+            VmaBacking::Stack {
+                floor: left_floor,
+                guard_bytes: left_guard,
+            },
+            VmaBacking::Stack {
+                floor: right_floor,
+                guard_bytes: right_guard,
+            },
+        ) => left_floor == right_floor && left_guard == right_guard,
+        (
+            VmaBacking::Elf {
+                file: left_file,
+                file_offset: left_offset,
+                file_len: left_len,
+                zero_tail: left_tail,
+            },
+            VmaBacking::Elf {
+                file: right_file,
+                file_offset: right_offset,
+                file_len: right_len,
+                zero_tail: right_tail,
+            },
+        ) => {
+            crate::lib::arc::Arc::ptr_eq(left_file, right_file)
+                && left_offset == right_offset
+                && left_len == right_len
+                && left_tail == right_tail
+        }
+        (
+            VmaBacking::FilePrivate {
+                file: left_file,
+                file_offset: left_offset,
+                file_size: left_size,
+            },
+            VmaBacking::FilePrivate {
+                file: right_file,
+                file_offset: right_offset,
+                file_size: right_size,
+            },
+        ) => {
+            crate::lib::arc::Arc::ptr_eq(left_file, right_file)
+                && left_offset == right_offset
+                && left_size == right_size
+        }
+        _ => false,
+    }
 }
 
 pub fn ensure_user_range(ptr: u64, len: u64, write: bool) -> Result<(), i64> {
