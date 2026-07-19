@@ -264,9 +264,7 @@ impl UserImage {
         // teardown discipline for transactional handles.
         let mut errs: u32 = 0;
         for range in self.mappings.iter().rev() {
-            let res = crate::mm::memory::with_memory_mapper(|m| {
-                m.unmap_user_region(range.virt_start, range.page_count)
-            });
+            let res = crate::mm::memory::unmap_user_region(range.virt_start, range.page_count);
             match res {
                 Some(Ok(_)) => {}
                 Some(Err(UserMapError::PageNotMapped)) => {
@@ -293,9 +291,10 @@ impl UserImage {
         // double-unmap).
         if self.stack_initial_bottom != 0 && self.stack_top.as_u64() > self.stack_initial_bottom {
             let page_count = (self.stack_top.as_u64() - self.stack_initial_bottom) / 0x1000;
-            let res = crate::mm::memory::with_memory_mapper(|m| {
-                m.unmap_user_region(x86_64::VirtAddr::new(self.stack_initial_bottom), page_count)
-            });
+            let res = crate::mm::memory::unmap_user_region(
+                x86_64::VirtAddr::new(self.stack_initial_bottom),
+                page_count,
+            );
             if let Some(Err(e)) = res {
                 if !matches!(e, UserMapError::PageNotMapped) {
                     crate::debug_warn!("UserImage::drop: stack unmap failed: {:?}", e);

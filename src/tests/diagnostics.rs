@@ -226,6 +226,28 @@ fn test_no_production_shadow_violation_latched() {
     }
 }
 
+fn test_observed_lock_graph_matches_reviewed_order() {
+    use crate::diagnostics::shadow::locks::{self, LockClassId};
+
+    if !locks::observed_graph_is_allowed() {
+        for class in [
+            LockClassId::Scheduler,
+            LockClassId::ProcessTable,
+            LockClassId::MemoryMapper,
+            LockClassId::StackAllocator,
+            LockClassId::HeapAllocator,
+            LockClassId::SerialLogger,
+        ] {
+            crate::debug_error!(
+                "lock class {:?} observed dependency mask={:#06x}",
+                class,
+                locks::observed_edges(class),
+            );
+        }
+        panic!("observed lock graph departed from the reviewed partial order");
+    }
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_crc32_golden_vector,
@@ -239,6 +261,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_continuation_shadow_transition_table,
         &test_address_space_shadow_transition_table,
         &test_stack_shadow_transition_table,
+        &test_observed_lock_graph_matches_reviewed_order,
         &test_no_production_shadow_violation_latched,
     ]
 }

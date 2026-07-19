@@ -24,8 +24,10 @@ const GUARD_PAGE_SIZE: usize = 4096;
 const STACK_SLOT_SIZE: usize = STACK_SIZE + GUARD_PAGE_SIZE;
 
 /// Global stack allocator instance
-pub static STACK_ALLOCATOR: PreemptionMutex<StackAllocator> =
-    PreemptionMutex::new(StackAllocator::new());
+pub static STACK_ALLOCATOR: PreemptionMutex<StackAllocator> = PreemptionMutex::new_tracked(
+    StackAllocator::new(),
+    crate::diagnostics::shadow::locks::LockClassId::StackAllocator,
+);
 
 /// Allocator for process stacks
 ///

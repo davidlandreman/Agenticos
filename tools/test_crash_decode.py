@@ -180,6 +180,37 @@ class CrashDecodeTests(unittest.TestCase):
         self.assertEqual(memory["recent_frames"][0]["allocation_generation"], 3)
         self.assertEqual(memory["recent_mappings"][0]["virtual_page"], "0x4000")
 
+    def test_lock_shadow_section(self):
+        lock = struct.pack(
+            "<BBBBHHIQQQQHH",
+            3,
+            2,
+            1,
+            0,
+            4,
+            0,
+            42,
+            0x5678,
+            0x1234,
+            19,
+            5,
+            1 << 4,
+            0,
+        )
+        report, _ = crash_decode.parse_capsule(
+            capsule([section(16, struct.pack("<HH", 1, 0) + lock)])
+        )
+        locks = report["shadow"]["locks"]
+        self.assertEqual(locks["classes"][0]["class"], 3)
+        self.assertEqual(locks["classes"][0]["owner_cpu"], 2)
+        self.assertEqual(locks["classes"][0]["order_edges"], 1 << 4)
+
+    def test_lock_shadow_rejects_bad_count(self):
+        with self.assertRaisesRegex(crash_decode.DecodeError, "lock shadow layout"):
+            crash_decode.parse_capsule(
+                capsule([section(16, struct.pack("<HH", 2, 0) + bytes(36))])
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

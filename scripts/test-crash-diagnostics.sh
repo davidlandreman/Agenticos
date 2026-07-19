@@ -13,7 +13,11 @@ case "$CASE_NAME" in
     mm-double-release) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=mm-double-release ;;
     mm-wrong-unmap) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=mm-wrong-unmap ;;
     mm-wx) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=mm-wx ;;
-    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active, mm-double-release, mm-wrong-unmap, mm-wx" >&2; exit 2 ;;
+    lock-recursion) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=lock-recursion ;;
+    lock-wrong-owner) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=lock-wrong-owner ;;
+    lock-wrong-context) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=lock-wrong-context ;;
+    lock-cycle) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=lock-cycle ;;
+    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active, mm-double-release, mm-wrong-unmap, mm-wx, lock-recursion, lock-wrong-owner, lock-wrong-context, lock-cycle" >&2; exit 2 ;;
 esac
 
 RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -56,6 +60,10 @@ invariant_cases = (
     "mm-double-release",
     "mm-wrong-unmap",
     "mm-wx",
+    "lock-recursion",
+    "lock-wrong-owner",
+    "lock-wrong-context",
+    "lock-cycle",
 )
 expected_kind = "invariant" if case in invariant_cases else "fatal"
 assert report["trigger"]["kind"] == expected_kind, report
@@ -94,5 +102,17 @@ if case == "mm-wrong-unmap":
 if case == "mm-wx":
     assert report["violation"]["id"] == 0x08000004, report
     assert report["trigger"]["signature"] == "INV-08000004", report
+if case == "lock-recursion":
+    assert report["violation"]["id"] == 0x09000002, report
+    assert report["trigger"]["signature"] == "INV-09000002", report
+if case == "lock-wrong-owner":
+    assert report["violation"]["id"] == 0x09000001, report
+    assert report["trigger"]["signature"] == "INV-09000001", report
+if case == "lock-wrong-context":
+    assert report["violation"]["id"] == 0x09000003, report
+    assert report["trigger"]["signature"] == "INV-09000003", report
+if case == "lock-cycle":
+    assert report["violation"]["id"] == 0x09000004, report
+    assert report["trigger"]["signature"] == "INV-09000004", report
 print(f"validated {report['trigger']['signature']}: {sys.argv[1]}")
 PY

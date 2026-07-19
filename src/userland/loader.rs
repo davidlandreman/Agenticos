@@ -433,11 +433,9 @@ fn load_elf_impl(bytes: &[u8], backing_file: Option<Arc<File>>) -> Result<UserIm
         }
 
         // Map the segment's pages.
-        crate::mm::memory::with_memory_mapper(|m| {
-            m.map_user_region(VirtAddr::new(seg.page_va), seg.page_count, perms)
-        })
-        .ok_or(LoaderError::OutOfFrames)?
-        .map_err(LoaderError::from)?;
+        crate::mm::memory::map_user_region(VirtAddr::new(seg.page_va), seg.page_count, perms)
+            .ok_or(LoaderError::OutOfFrames)?
+            .map_err(LoaderError::from)?;
 
         // Record before copy so a failure between map and copy still frees.
         image.record_mapping_with_perms(VirtAddr::new(seg.page_va), seg.page_count, perms);
@@ -463,13 +461,11 @@ fn load_elf_impl(bytes: &[u8], backing_file: Option<Arc<File>>) -> Result<UserIm
     // stack: Process owns stack teardown via `unmap_user_stack` so
     // the per-fault growth path doesn't need to push to a
     // heap-allocated `Vec` from interrupt context.
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(
-            VirtAddr::new(initial_stack_bottom),
-            USER_STACK_INITIAL_PAGES,
-            UserPerms::ReadWrite,
-        )
-    })
+    crate::mm::memory::map_user_region(
+        VirtAddr::new(initial_stack_bottom),
+        USER_STACK_INITIAL_PAGES,
+        UserPerms::ReadWrite,
+    )
     .ok_or(LoaderError::OutOfFrames)?
     .map_err(LoaderError::from)?;
 
@@ -551,19 +547,15 @@ fn install_tls(
 
     // Map TLS image page (R+W; tdata bytes get copied in via the kernel
     // alias of the freshly mapped frame).
-    memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(tls_image_va), 1, UserPerms::ReadWrite)
-    })
-    .ok_or(LoaderError::OutOfFrames)?
-    .map_err(LoaderError::from)?;
+    memory::map_user_region(VirtAddr::new(tls_image_va), 1, UserPerms::ReadWrite)
+        .ok_or(LoaderError::OutOfFrames)?
+        .map_err(LoaderError::from)?;
     image.record_mapping(VirtAddr::new(tls_image_va), 1);
 
     // Map TCB page.
-    memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(tcb_va), 1, UserPerms::ReadWrite)
-    })
-    .ok_or(LoaderError::OutOfFrames)?
-    .map_err(LoaderError::from)?;
+    memory::map_user_region(VirtAddr::new(tcb_va), 1, UserPerms::ReadWrite)
+        .ok_or(LoaderError::OutOfFrames)?
+        .map_err(LoaderError::from)?;
     image.record_mapping(VirtAddr::new(tcb_va), 1);
 
     // Copy tdata bytes into the TLS image. tbss is already zero (fresh

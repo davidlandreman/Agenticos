@@ -31,6 +31,7 @@ SECTION_NAMES = {
     13: "shadow_address_space",
     14: "shadow_stack",
     15: "shadow_memory",
+    16: "shadow_locks",
 }
 MAX_CAPSULE = 16 * 1024 * 1024
 MAX_SECTIONS = 256
@@ -160,6 +161,7 @@ def parse_capsule(blob: bytes, offset: int = 0) -> tuple[dict[str, Any], int]:
         required.add(13)
         required.add(14)
         required.add(15)
+        required.add(16)
     present = {section.kind for section in sections}
     report["missing"] = [SECTION_NAMES[kind] for kind in sorted(required - present)]
     trigger = report["trigger"]
@@ -489,6 +491,35 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
             "sequence": sequence,
             "recent_frames": frames,
             "recent_mappings": mappings,
+        }
+    elif section.kind == 16:
+        if len(payload) < 4:
+            raise DecodeError("short lock shadow section")
+        count, reserved = struct.unpack_from("<HH", payload)
+        if reserved != 0 or len(payload) != 4 + count * 48:
+            raise DecodeError("invalid lock shadow layout")
+        classes = []
+        cursor = 4
+        for _ in range(count):
+            values = struct.unpack_from("<BBBBHHIQQQQHH", payload, cursor)
+            cursor += 48
+            classes.append(
+                {
+                    "class": values[0],
+                    "owner_cpu": values[1],
+                    "recursion_depth": values[2],
+                    "waiters": values[4],
+                    "owner_entity": values[6],
+                    "acquire_site": f"0x{values[7]:016x}",
+                    "acquire_tsc": values[8],
+                    "acquisitions": values[9],
+                    "failed_try_locks": values[10],
+                    "order_edges": values[11],
+                }
+            )
+        report.setdefault("shadow", {})["locks"] = {
+            "stable": not bool(section.flags & 1),
+            "classes": classes,
         }
 
 

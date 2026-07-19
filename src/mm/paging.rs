@@ -1038,13 +1038,16 @@ impl MemoryMapper {
     /// This path does **not** go through `handle_page_fault`. The fault
     /// handler in U2 already short-circuits on CPL=3 before reaching its
     /// auto-map branch; user faults are lifecycle events, not lazy mappings.
-    pub fn map_user_region(
+    pub fn map_user_region_into(
         &mut self,
         virt_start: VirtAddr,
         num_pages: u64,
         perms: UserPerms,
-    ) -> Result<Vec<PhysFrame>, UserMapError> {
+        frames: &mut Vec<PhysFrame>,
+    ) -> Result<(), UserMapError> {
         validate_user_range(virt_start, num_pages)?;
+        debug_assert!(frames.is_empty());
+        debug_assert!(frames.capacity() >= num_pages as usize);
 
         let leaf_flags = perms.leaf_flags();
         // Parent flags are uniform across all permission profiles: a parent
@@ -1053,8 +1056,6 @@ impl MemoryMapper {
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
 
         let phys_offset = self.physical_memory_offset;
-        let mut frames: Vec<PhysFrame> = Vec::with_capacity(num_pages as usize);
-
         // Phase 4 PR-B: build the OffsetPageTable from the *current* CR3
         // for each call so that after a process activates its
         // AddressSpace, mappings land in that process's L4 rather than
@@ -1138,29 +1139,28 @@ impl MemoryMapper {
             virt_start,
             perms
         );
-        Ok(frames)
+        Ok(())
     }
 
-    /// Unmap a previously mapped user region. Returns the physical frames
-    /// that backed the leaf pages so the caller can verify (in tests) or hand
-    /// them off to a future per-process frame reclaimer. The bump frame
-    /// allocator does not actually return frames to a pool; the returned list
-    /// is the loader's transactional-teardown handle (U6).
-    pub fn unmap_user_region(
+    /// Unmap a previously mapped user region. Appends the physical frames
+    /// formerly backing its leaves to the caller-provided result buffer while
+    /// releasing their allocator references and pruning empty page tables.
+    pub fn unmap_user_region_into(
         &mut self,
         virt_start: VirtAddr,
         num_pages: u64,
-    ) -> Result<Vec<PhysFrame>, UserMapError> {
+        frames: &mut Vec<PhysFrame>,
+    ) -> Result<(), UserMapError> {
         validate_user_range(virt_start, num_pages)?;
-
-        let mut frames: Vec<PhysFrame> = Vec::with_capacity(num_pages as usize);
+        debug_assert!(frames.is_empty());
+        debug_assert!(frames.capacity() >= num_pages as usize);
         let l4 = self.active_l4_frame();
 
         for i in 0..num_pages {
             let page_addr = VirtAddr::new(virt_start.as_u64() + i * 0x1000);
             frames.push(self.unmap_page_from(l4, page_addr)?);
         }
-        Ok(frames)
+        Ok(())
     }
 
     /// Walk the page-table hierarchy for `addr` and confirm every parent
@@ -1285,7 +1285,10 @@ impl MemoryMapper {
 /// touch the kernel heap at `0x_4444_4444_0000` or process stacks at
 /// `0x_5555_0000_0000`. The check is purely on virtual addresses; physical
 /// frames are allocated only after this has returned `Ok`.
-fn validate_user_range(virt_start: VirtAddr, num_pages: u64) -> Result<(), UserMapError> {
+pub(crate) fn validate_user_range(
+    virt_start: VirtAddr,
+    num_pages: u64,
+) -> Result<(), UserMapError> {
     if num_pages == 0 {
         return Err(UserMapError::VaOutOfRange);
     }

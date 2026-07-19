@@ -40,6 +40,10 @@ scripts/test-crash-diagnostics.sh stack-retire-active
 scripts/test-crash-diagnostics.sh mm-double-release
 scripts/test-crash-diagnostics.sh mm-wrong-unmap
 scripts/test-crash-diagnostics.sh mm-wx
+scripts/test-crash-diagnostics.sh lock-recursion
+scripts/test-crash-diagnostics.sh lock-wrong-owner
+scripts/test-crash-diagnostics.sh lock-wrong-context
+scripts/test-crash-diagnostics.sh lock-cycle
 ```
 
 The harness requires a non-success QEMU exit, a complete decodable capsule,
@@ -57,6 +61,9 @@ declared live kernel stack and requires `CONT-002` as the first invariant.
 retired or reused. The three `mm-*` cases require exact `MM-002`, `MM-001`,
 and `MM-004` signatures for typed-reference underflow, a mismatched mapping
 key, and an executable writable user leaf.
+The four `lock-*` cases require exact `LOCK-002`, `LOCK-001`, `LOCK-003`, and
+`LOCK-004` signatures for recursive acquisition, owner mismatch, invalid
+IF/preemption context, and a dependency cycle.
 
 ## Crash-path rules
 
@@ -133,3 +140,30 @@ load, maximum probe distance, rejected insertions, transition stability, and
 the 256 most recently mutated frame and mapping records. A full mapping table
 never evicts live facts; it latches `DIAG-CAPACITY-MAPPING` and preserves
 existing entries.
+
+The scheduler, process table, memory mapper, stack allocator, heap allocator,
+and serial logger mutexes carry static lock classes in rich modes. Their
+wrappers publish owner CPU/entity, acquisition TSC, waiter and failed-try
+counts, and observed dependency edges without acquiring a diagnostic lock.
+The wrappers verify owner-matched release, reject recursion, check that IF or
+preemption is disabled for the mutex kind, and reject an edge that would make
+the dependency graph cyclic. Shadow release is published while production
+exclusion still holds, followed by production unlock and then restoration of
+IF or preemption.
+Routine heap and serial acquisitions update the shadow counters but are not
+copied into the flight recorder, preventing allocator and logging traffic from
+displacing the paging and handoff events being diagnosed.
+
+The `shadow_locks` capsule section always includes one fixed-size record for
+each critical class. An owner CPU of `255` means unowned; `order_edges` is a
+bitset indexed by static lock class. Counts and edges are historical evidence,
+while owner, entity, TSC, and waiters describe the crash-time observation.
+
+The reviewed outer-to-inner partial order is scheduler → process table →
+stack/heap → memory mapper → serial logger, with stack and heap intentionally
+unordered peers. Scheduler may also enter stack, heap, mapper, or serial
+directly; process table may enter stack, heap, mapper, or serial directly;
+stack may enter heap, mapper, or serial. Any edge outside this declared DAG,
+or any observed path that closes a cycle, is `LOCK-004`. In particular,
+mapper → heap is forbidden because heap demand paging already requires
+heap → mapper. User mapping buffers are allocated before `MAPPER` is taken.

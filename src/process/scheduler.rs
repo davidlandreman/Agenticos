@@ -72,7 +72,10 @@ impl SchedEntity {
 }
 
 /// Global scheduler instance
-pub static SCHEDULER: InterruptMutex<Scheduler> = InterruptMutex::new(Scheduler::new());
+pub static SCHEDULER: InterruptMutex<Scheduler> = InterruptMutex::new_tracked(
+    Scheduler::new(),
+    crate::diagnostics::shadow::locks::LockClassId::Scheduler,
+);
 
 /// Fair scheduler for every runnable entity on the CPU.
 pub struct Scheduler {

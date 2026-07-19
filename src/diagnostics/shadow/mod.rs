@@ -3,6 +3,7 @@
 pub mod address_space;
 pub mod continuation;
 pub mod io;
+pub mod locks;
 pub mod memory;
 pub mod pager;
 pub mod scheduler;

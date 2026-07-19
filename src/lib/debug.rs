@@ -14,7 +14,10 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use crate::arch::x86_64::interrupt_guard::InterruptMutex;
 
 static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(DebugLevel::Info as u8);
-static SERIAL_OUTPUT: InterruptMutex<()> = InterruptMutex::new(());
+static SERIAL_OUTPUT: InterruptMutex<()> = InterruptMutex::new_tracked(
+    (),
+    crate::diagnostics::shadow::locks::LockClassId::SerialLogger,
+);
 
 pub fn set_debug_level(level: DebugLevel) {
     DEBUG_LEVEL.store(level as u8, Ordering::Release);

@@ -386,8 +386,10 @@ impl RealTimerState {
 // mutex allows a kernel thread to be preempted while holding the table and the
 // ring-3 handler to spin forever on the same single CPU. Make the invariant
 // structural so new call sites cannot accidentally reintroduce that deadlock.
-pub(crate) static PROCESS_TABLE: InterruptMutex<ProcessTable> =
-    InterruptMutex::new(ProcessTable::empty());
+pub(crate) static PROCESS_TABLE: InterruptMutex<ProcessTable> = InterruptMutex::new_tracked(
+    ProcessTable::empty(),
+    crate::diagnostics::shadow::locks::LockClassId::ProcessTable,
+);
 
 /// Lazy initializer: ensures the sentinel entry at PID 0 exists. Called
 /// from every `with_current_process`/`with_process` path before lookup
@@ -1637,15 +1639,33 @@ pub fn clear_stale_network_wait(syscall_nr: u64) {
 /// set `pending_syscall_interrupt` so the re-fired syscall enters the
 /// dispatcher as `-EINTR`, and requeue as ready.
 pub fn wake_ring3_for_signal(pid: u32) {
-    let Some(mut g) = PROCESS_TABLE.try_lock() else {
-        return;
-    };
-    let actionable = g
-        .by_pid
-        .get(&pid)
-        .is_some_and(|p| p.signal_state.has_actionable_pending());
-    if !actionable {
-        return;
+    {
+        let Some(g) = PROCESS_TABLE.try_lock() else {
+            return;
+        };
+        let actionable = g
+            .by_pid
+            .get(&pid)
+            .is_some_and(|p| p.signal_state.has_actionable_pending());
+        if !actionable {
+            return;
+        }
+        // A kernel-managed block-I/O continuation is not an interruptible
+        // userspace syscall. Its saved kernel stack may resume only after the
+        // exact request token completes and `try_wake_ring3_blocked_on_io`
+        // accepts that token.
+        if let Some(Ring3BlockReason::WaitingForBlockIo { token }) =
+            g.ring3_blocked.get(&pid).copied()
+        {
+            crate::diagnostics::trace::record(
+                crate::diagnostics::trace::EventKind::SignalWakeDeferredIo,
+                u64::from(pid),
+                token,
+                0,
+                0,
+            );
+            return;
+        }
     }
     crate::diagnostics::trace::record(
         crate::diagnostics::trace::EventKind::SignalWakeAttempt,
@@ -1654,24 +1674,9 @@ pub fn wake_ring3_for_signal(pid: u32) {
         0,
         0,
     );
-    // A kernel-managed block-I/O continuation is not an interruptible
-    // userspace syscall. Its saved kernel stack may resume only after the
-    // exact request token completes and `try_wake_ring3_blocked_on_io`
-    // accepts that token. Keep the signal pending for delivery after the
-    // continuation returns to the dispatcher; making it runnable here can
-    // consume the request's initial status, roll back a valid lazy ELF page,
-    // and later masquerade as an MM or scheduler fault.
-    if let Some(Ring3BlockReason::WaitingForBlockIo { token }) = g.ring3_blocked.get(&pid).copied()
-    {
-        crate::diagnostics::trace::record(
-            crate::diagnostics::trace::EventKind::SignalWakeDeferredIo,
-            u64::from(pid),
-            token,
-            0,
-            0,
-        );
-        return;
-    }
+    // Do not hold PROCESS_TABLE while taking SCHEDULER. Procfs snapshots use
+    // the reviewed Scheduler -> ProcessTable order, so the reverse nesting
+    // would make a real cross-CPU deadlock cycle.
     let running_cpu = {
         let scheduler = crate::process::scheduler::SCHEDULER.lock();
         (0..crate::arch::x86_64::smp::online_cpu_count()).find(|cpu| {
@@ -1688,6 +1693,27 @@ pub fn wake_ring3_for_signal(pid: u32) {
             );
             crate::arch::x86_64::percpu::record_reschedule_ipi(cpu);
         }
+    }
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let actionable = g
+        .by_pid
+        .get(&pid)
+        .is_some_and(|p| p.signal_state.has_actionable_pending());
+    if !actionable {
+        return;
+    }
+    if let Some(Ring3BlockReason::WaitingForBlockIo { token }) = g.ring3_blocked.get(&pid).copied()
+    {
+        crate::diagnostics::trace::record(
+            crate::diagnostics::trace::EventKind::SignalWakeDeferredIo,
+            u64::from(pid),
+            token,
+            0,
+            0,
+        );
+        return;
     }
     let Some(reason) = g.ring3_blocked.remove(&pid) else {
         return;
@@ -2187,9 +2213,11 @@ pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
     };
 
     // Map one page R+W under the active address space.
-    let map_result = crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(x86_64::VirtAddr::new(new_page), 1, UserPerms::ReadWrite)
-    });
+    let map_result = crate::mm::memory::map_user_region(
+        x86_64::VirtAddr::new(new_page),
+        1,
+        UserPerms::ReadWrite,
+    );
     match map_result {
         Some(Ok(_)) => {}
         // The page was already mapped — the fault must have been a
@@ -2281,9 +2309,10 @@ pub fn unmap_user_stack(p: &mut Process) {
         return;
     }
     let page_count = (p.stack_top - p.stack_mapped_bottom) / 0x1000;
-    let _ = crate::mm::memory::with_memory_mapper(|m| {
-        m.unmap_user_region(x86_64::VirtAddr::new(p.stack_mapped_bottom), page_count)
-    });
+    let _ = crate::mm::memory::unmap_user_region(
+        x86_64::VirtAddr::new(p.stack_mapped_bottom),
+        page_count,
+    );
     // Tell `UserImage::Drop` we already handled the stack so it doesn't
     // try to unmap the (now unmapped) initial commit again.
     if let Some(img) = p.image.as_mut() {

@@ -38,6 +38,11 @@ pub enum EventKind {
     IoToken = 0x500,
     SignalWakeAttempt = 0x600,
     SignalWakeDeferredIo = 0x601,
+    LockAttempt = 0x800,
+    LockAcquired = 0x801,
+    LockTryFailed = 0x802,
+    LockReleased = 0x803,
+    LockOrderEdge = 0x804,
     InvariantLatched = 0x900,
 }
 

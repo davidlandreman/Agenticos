@@ -131,6 +131,22 @@ pub fn maybe_inject_crash() {
             shadow::memory::report_topology(shadow::memory::MM_004, 0x4000, 0x7fff_0002, 0x3);
             panic!("strict W+X injection did not escalate");
         }
+        b"lock-recursion" => {
+            shadow::locks::inject_recursion();
+            panic!("strict lock recursion injection did not escalate");
+        }
+        b"lock-wrong-owner" => {
+            shadow::locks::inject_wrong_owner();
+            panic!("strict lock wrong-owner injection did not escalate");
+        }
+        b"lock-wrong-context" => {
+            shadow::locks::inject_wrong_context();
+            panic!("strict lock context injection did not escalate");
+        }
+        b"lock-cycle" => {
+            shadow::locks::inject_cycle();
+            panic!("strict lock cycle injection did not escalate");
+        }
         _ => {}
     }
 }

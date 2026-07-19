@@ -13,7 +13,10 @@ pub struct LockedHeap(InterruptMutex<Option<linked_list_allocator::Heap>>);
 
 impl LockedHeap {
     pub const fn empty() -> Self {
-        LockedHeap(InterruptMutex::new(None))
+        LockedHeap(InterruptMutex::new_tracked(
+            None,
+            crate::diagnostics::shadow::locks::LockClassId::HeapAllocator,
+        ))
     }
 
     pub unsafe fn init(&self, heap_start: usize, heap_size: usize) {

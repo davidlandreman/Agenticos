@@ -72,10 +72,9 @@ fn test_tss_loaded() {
 
 fn test_map_user_region_kernel_can_read() {
     let va = VirtAddr::new(USER_LOAD_BASE);
-    let frames =
-        crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 1, UserPerms::ReadWrite))
-            .expect("mapper")
-            .expect("map");
+    let frames = crate::mm::memory::map_user_region(va, 1, UserPerms::ReadWrite)
+        .expect("mapper")
+        .expect("map");
     assert_eq!(frames.len(), 1);
 
     let mut sum: u64 = 0;
@@ -87,34 +86,33 @@ fn test_map_user_region_kernel_can_read() {
     }
     assert_eq!(sum, 0, "freshly mapped user page should be zero-filled");
 
-    crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(va, 1))
+    crate::mm::memory::unmap_user_region(va, 1)
         .unwrap()
         .unwrap();
 }
 
 fn test_map_user_region_propagates_user_bit() {
     let va = VirtAddr::new(USER_LOAD_BASE + 0x1000);
-    crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 1, UserPerms::ReadExecute))
+    crate::mm::memory::map_user_region(va, 1, UserPerms::ReadExecute)
         .unwrap()
         .unwrap();
 
     let ok = crate::mm::memory::with_memory_mapper(|m| m.user_bit_set_on_all_parents(va)).unwrap();
     assert!(ok, "USER bit must be set on every parent table entry");
 
-    crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(va, 1))
+    crate::mm::memory::unmap_user_region(va, 1)
         .unwrap()
         .unwrap();
 }
 
 fn test_unmap_user_region_returns_frames() {
     let va = VirtAddr::new(USER_LOAD_BASE + 0x2000);
-    let mapped =
-        crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 2, UserPerms::ReadWrite))
-            .unwrap()
-            .unwrap();
+    let mapped = crate::mm::memory::map_user_region(va, 2, UserPerms::ReadWrite)
+        .unwrap()
+        .unwrap();
     assert_eq!(mapped.len(), 2);
 
-    let unmapped = crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(va, 2))
+    let unmapped = crate::mm::memory::unmap_user_region(va, 2)
         .unwrap()
         .unwrap();
     assert_eq!(unmapped.len(), 2);
@@ -124,54 +122,59 @@ fn test_unmap_user_region_returns_frames() {
 
 fn test_map_user_region_rejects_double_map() {
     let va = VirtAddr::new(USER_LOAD_BASE + 0x4000);
-    crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 1, UserPerms::ReadWrite))
+    crate::mm::memory::map_user_region(va, 1, UserPerms::ReadWrite)
         .unwrap()
         .unwrap();
 
-    let err =
-        crate::mm::memory::with_memory_mapper(|m| m.map_user_region(va, 1, UserPerms::ReadWrite))
-            .unwrap()
-            .unwrap_err();
+    let err = crate::mm::memory::map_user_region(va, 1, UserPerms::ReadWrite)
+        .unwrap()
+        .unwrap_err();
     assert_eq!(err, UserMapError::PageAlreadyMapped);
 
-    crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(va, 1))
+    crate::mm::memory::unmap_user_region(va, 1)
         .unwrap()
         .unwrap();
 }
 
 fn test_map_user_region_rejects_out_of_range() {
-    crate::mm::memory::with_memory_mapper(|m| {
-        // Kernel heap address.
-        let r = m.map_user_region(VirtAddr::new(0x_4444_4444_0000), 1, UserPerms::ReadWrite);
-        assert_eq!(r.unwrap_err(), UserMapError::VaOutOfRange);
+    // Kernel heap address.
+    let r = crate::mm::memory::map_user_region(
+        VirtAddr::new(0x_4444_4444_0000),
+        1,
+        UserPerms::ReadWrite,
+    );
+    assert_eq!(r.unwrap().unwrap_err(), UserMapError::VaOutOfRange);
 
-        // Above the user range.
-        let r = m.map_user_region(VirtAddr::new(USER_VA_RANGE_END), 1, UserPerms::ReadWrite);
-        assert_eq!(r.unwrap_err(), UserMapError::VaOutOfRange);
+    // Above the user range.
+    let r = crate::mm::memory::map_user_region(
+        VirtAddr::new(USER_VA_RANGE_END),
+        1,
+        UserPerms::ReadWrite,
+    );
+    assert_eq!(r.unwrap().unwrap_err(), UserMapError::VaOutOfRange);
 
-        // Misaligned start.
-        let r = m.map_user_region(
-            VirtAddr::new(USER_VA_RANGE_START + 1),
-            1,
-            UserPerms::ReadWrite,
-        );
-        assert_eq!(r.unwrap_err(), UserMapError::VaOutOfRange);
+    // Misaligned start.
+    let r = crate::mm::memory::map_user_region(
+        VirtAddr::new(USER_VA_RANGE_START + 1),
+        1,
+        UserPerms::ReadWrite,
+    );
+    assert_eq!(r.unwrap().unwrap_err(), UserMapError::VaOutOfRange);
 
-        // Zero pages.
-        let r = m.map_user_region(VirtAddr::new(USER_LOAD_BASE), 0, UserPerms::ReadWrite);
-        assert_eq!(r.unwrap_err(), UserMapError::VaOutOfRange);
+    // Zero pages.
+    let r =
+        crate::mm::memory::map_user_region(VirtAddr::new(USER_LOAD_BASE), 0, UserPerms::ReadWrite);
+    assert_eq!(r.unwrap().unwrap_err(), UserMapError::VaOutOfRange);
 
-        // In-range start whose end exceeds USER_VA_RANGE_END.
-        let last_page = VirtAddr::new(USER_VA_RANGE_END - 0x1000);
-        let r = m.map_user_region(last_page, 2, UserPerms::ReadWrite);
-        assert_eq!(r.unwrap_err(), UserMapError::VaOutOfRange);
-    })
-    .unwrap();
+    // In-range start whose end exceeds USER_VA_RANGE_END.
+    let last_page = VirtAddr::new(USER_VA_RANGE_END - 0x1000);
+    let r = crate::mm::memory::map_user_region(last_page, 2, UserPerms::ReadWrite);
+    assert_eq!(r.unwrap().unwrap_err(), UserMapError::VaOutOfRange);
 }
 
 fn test_unmap_user_region_rejects_unmapped() {
     let va = VirtAddr::new(USER_LOAD_BASE + 0x6000);
-    let err = crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(va, 1))
+    let err = crate::mm::memory::unmap_user_region(va, 1)
         .unwrap()
         .unwrap_err();
     assert_eq!(err, UserMapError::PageNotMapped);
@@ -1610,20 +1613,17 @@ fn test_loader_rollback_unmaps_on_reloc_failure() {
     let bytes = fix::elf_with_one_reloc("anything", fix::R_X86_64_TPOFF64, 0x40_1000);
     assert!(load_elf(&bytes).is_err());
 
-    let r1 = crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(0x40_0000), 1, UserPerms::ReadExecute)
-    })
-    .unwrap();
+    let r1 =
+        crate::mm::memory::map_user_region(VirtAddr::new(0x40_0000), 1, UserPerms::ReadExecute)
+            .unwrap();
     assert!(
         r1.is_ok(),
         "PT_LOAD #1 was not unmapped on rollback: {:?}",
         r1.err()
     );
 
-    let r2 = crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(0x40_1000), 1, UserPerms::ReadWrite)
-    })
-    .unwrap();
+    let r2 = crate::mm::memory::map_user_region(VirtAddr::new(0x40_1000), 1, UserPerms::ReadWrite)
+        .unwrap();
     assert!(
         r2.is_ok(),
         "PT_LOAD #2 was not unmapped on rollback: {:?}",
@@ -1631,21 +1631,24 @@ fn test_loader_rollback_unmaps_on_reloc_failure() {
     );
 
     let stack_bottom = crate::mm::paging::USER_STACK_TOP - 8 * 0x1000;
-    let r3 = crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(stack_bottom), 8, UserPerms::ReadWrite)
-    })
-    .unwrap();
+    let r3 =
+        crate::mm::memory::map_user_region(VirtAddr::new(stack_bottom), 8, UserPerms::ReadWrite)
+            .unwrap();
     assert!(
         r3.is_ok(),
         "user stack was not unmapped on rollback: {:?}",
         r3.err()
     );
 
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.unmap_user_region(VirtAddr::new(0x40_0000), 1).unwrap();
-        m.unmap_user_region(VirtAddr::new(0x40_1000), 1).unwrap();
-        m.unmap_user_region(VirtAddr::new(stack_bottom), 8).unwrap();
-    });
+    crate::mm::memory::unmap_user_region(VirtAddr::new(0x40_0000), 1)
+        .unwrap()
+        .unwrap();
+    crate::mm::memory::unmap_user_region(VirtAddr::new(0x40_1000), 1)
+        .unwrap()
+        .unwrap();
+    crate::mm::memory::unmap_user_region(VirtAddr::new(stack_bottom), 8)
+        .unwrap()
+        .unwrap();
 }
 
 // ---------- enter_user_mode + lifecycle ----------
@@ -3191,11 +3194,9 @@ fn test_address_space_drop_reclaims_leaf_and_all_table_levels() {
         // Separate PTs and PDPTs force teardown to visit/release L1, L2,
         // L3, leaf, and finally L4 ownership.
         for address in [0x400000, 0x600000, 0x4000_0000] {
-            crate::mm::memory::with_memory_mapper(|m| {
-                m.map_user_region(VirtAddr::new(address), 1, UserPerms::ReadWrite)
-                    .expect("cross-level user map")
-            })
-            .expect("memory mapper");
+            crate::mm::memory::map_user_region(VirtAddr::new(address), 1, UserPerms::ReadWrite)
+                .expect("memory mapper")
+                .expect("cross-level user map");
         }
     }
     let after = crate::mm::memory::with_memory_mapper(|m| m.frame_stats()).unwrap();
@@ -4379,10 +4380,9 @@ fn test_address_space_clone_for_child_uses_cow() {
     }
 
     // Map one user page in the parent and write a magic value.
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(USER_LOAD_BASE), 1, UserPerms::ReadWrite)
-            .expect("parent map");
-    });
+    crate::mm::memory::map_user_region(VirtAddr::new(USER_LOAD_BASE), 1, UserPerms::ReadWrite)
+        .expect("memory mapper")
+        .expect("parent map");
     let parent_va = USER_LOAD_BASE as *mut u32;
     unsafe {
         core::ptr::write_volatile(parent_va, 0xAABB_CCDD);
@@ -5139,13 +5139,11 @@ fn test_try_grow_user_stack_grew() {
     // Map the initial commit so the fault handler's lookup of an existing
     // mapping (when it'd grow into it) doesn't surprise us. Then test the
     // grow path on the page below it.
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(
-            VirtAddr::new(bottom),
-            8,
-            crate::mm::paging::UserPerms::ReadWrite,
-        )
-    })
+    crate::mm::memory::map_user_region(
+        VirtAddr::new(bottom),
+        8,
+        crate::mm::paging::UserPerms::ReadWrite,
+    )
     .unwrap()
     .unwrap();
 
@@ -5230,13 +5228,11 @@ fn test_try_grow_user_stack_fills_gap_above_bottom() {
     let top = USER_STACK_TOP;
     let bottom = top - 8 * 0x1000;
     let floor = top - 64 * 0x1000;
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(bottom), 8, UserPerms::ReadWrite)
-    })
-    .unwrap()
-    .unwrap();
+    crate::mm::memory::map_user_region(VirtAddr::new(bottom), 8, UserPerms::ReadWrite)
+        .unwrap()
+        .unwrap();
     let gap_page = bottom + 0x2000;
-    crate::mm::memory::with_memory_mapper(|m| m.unmap_user_region(VirtAddr::new(gap_page), 1))
+    crate::mm::memory::unmap_user_region(VirtAddr::new(gap_page), 1)
         .unwrap()
         .unwrap();
     let snap = stage_stack_window(top, bottom, floor, 100);
@@ -5265,11 +5261,9 @@ fn test_try_grow_user_stack_rejects_mapped_and_out_of_range_pages() {
     let top = USER_STACK_TOP;
     let bottom = top - 8 * 0x1000;
     let floor = top - 64 * 0x1000;
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(VirtAddr::new(bottom), 8, UserPerms::ReadWrite)
-    })
-    .unwrap()
-    .unwrap();
+    crate::mm::memory::map_user_region(VirtAddr::new(bottom), 8, UserPerms::ReadWrite)
+        .unwrap()
+        .unwrap();
     let snap = stage_stack_window(top, bottom, floor, 100);
 
     assert_eq!(
@@ -5316,13 +5310,11 @@ fn test_try_grow_user_stack_widens_validated_bounds() {
     let bottom = top - 8 * 0x1000;
     let floor = top - 64 * 0x1000;
     // Map the initial commit so growth can lower below it cleanly.
-    crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(
-            VirtAddr::new(bottom),
-            8,
-            crate::mm::paging::UserPerms::ReadWrite,
-        )
-    })
+    crate::mm::memory::map_user_region(
+        VirtAddr::new(bottom),
+        8,
+        crate::mm::paging::UserPerms::ReadWrite,
+    )
     .unwrap()
     .unwrap();
     let stack_snap = stage_stack_window(top, bottom, floor, 100);
@@ -5575,7 +5567,7 @@ fn test_unmap_user_stack_sentinel_is_noop() {
 }
 
 fn test_unmap_user_stack_releases_range() {
-    use crate::mm::memory::with_memory_mapper;
+    use crate::mm::memory::{map_user_region, unmap_user_region};
     use crate::mm::paging::{UserPerms, USER_STACK_TOP};
     use crate::userland::lifecycle::{unmap_user_stack, with_current_process};
     use x86_64::VirtAddr;
@@ -5583,7 +5575,7 @@ fn test_unmap_user_stack_releases_range() {
     // Map a small fake stack so we can assert unmap_user_stack frees it.
     const N: u64 = 4;
     let bottom = USER_STACK_TOP - N * 0x1000;
-    with_memory_mapper(|m| m.map_user_region(VirtAddr::new(bottom), N, UserPerms::ReadWrite))
+    map_user_region(VirtAddr::new(bottom), N, UserPerms::ReadWrite)
         .unwrap()
         .unwrap();
 
@@ -5607,10 +5599,10 @@ fn test_unmap_user_stack_releases_range() {
         assert_eq!(p.stack_mapped_bottom, 0);
 
         // Re-mapping must succeed — the range is empty again.
-        with_memory_mapper(|m| m.map_user_region(VirtAddr::new(bottom), N, UserPerms::ReadWrite))
+        map_user_region(VirtAddr::new(bottom), N, UserPerms::ReadWrite)
             .unwrap()
             .unwrap();
-        with_memory_mapper(|m| m.unmap_user_region(VirtAddr::new(bottom), N))
+        unmap_user_region(VirtAddr::new(bottom), N)
             .unwrap()
             .unwrap();
 
