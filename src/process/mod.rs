@@ -35,7 +35,9 @@ pub fn set_in_spawned_process(value: bool) {
 
 /// Initialize the scheduler
 pub fn init_scheduler() {
-    scheduler::SCHEDULER.lock().init();
+    let mut scheduler = scheduler::SCHEDULER.lock();
+    scheduler.observe_with_shadow();
+    scheduler.init();
 }
 
 /// Return the current kernel thread when storage is called from a spawned

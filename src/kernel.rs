@@ -9,6 +9,10 @@ use alloc::boxed::Box;
 use bootloader_api::BootInfo;
 
 pub fn init(boot_info: &'static mut BootInfo) {
+    // The minimal crash core and CPU0 recorder are static and usable before
+    // the heap, GS, mapper, or any production lock exists.
+    crate::diagnostics::early_init();
+
     // Initialize debug subsystem
     debug::init();
     debug::set_debug_level(DebugLevel::Debug);
@@ -47,6 +51,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     // Both GS bases point at PERCPU so the first swapgs on SYSCALL entry is
     // a no-op regardless of MSR ordering.
     crate::arch::x86_64::syscall::init_percpu();
+    crate::diagnostics::percpu_init();
     // Program EFER.SCE + STAR/LSTAR/FMASK so user-mode `syscall` lands at
     // `syscall_fastpath_entry`. Must run after gdt::init() (so STAR sees
     // the right selectors) and after init_percpu() (so the first swapgs
@@ -78,9 +83,12 @@ pub fn init(boot_info: &'static mut BootInfo) {
 
     debug_info!("[boot] scheduler");
     crate::process::init_scheduler();
+    crate::diagnostics::shadow_init();
     crate::process::timer::init();
     crate::process::timer::start_service();
     crate::arch::x86_64::smp::init();
+    #[cfg(feature = "test")]
+    crate::diagnostics::maybe_inject_crash();
 
     debug_info!("[boot] entropy");
     crate::random::init();

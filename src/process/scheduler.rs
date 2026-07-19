@@ -72,7 +72,10 @@ impl SchedEntity {
 }
 
 /// Global scheduler instance
-pub static SCHEDULER: InterruptMutex<Scheduler> = InterruptMutex::new(Scheduler::new());
+pub static SCHEDULER: InterruptMutex<Scheduler> = InterruptMutex::new_tracked(
+    Scheduler::new(),
+    crate::diagnostics::shadow::locks::LockClassId::Scheduler,
+);
 
 /// Fair scheduler for every runnable entity on the CPU.
 pub struct Scheduler {
@@ -92,9 +95,53 @@ pub struct Scheduler {
     signal_waiters: Vec<ProcessId>,
     /// Number of contracted dispatches selected after their ceiling.
     latency_misses: u64,
+    /// Whether mutations belong to the singleton production scheduler and
+    /// therefore participate in the global crash-readable shadow.
+    shadow_observed: bool,
 }
 
 impl Scheduler {
+    fn trace_dispatch(
+        &self,
+        id: EntityId,
+        source: crate::diagnostics::trace::DispatchSource,
+        missed_deadline: bool,
+    ) {
+        if !self.shadow_observed {
+            return;
+        }
+        let arg1 = u64::from(source as u8) | (u64::from(missed_deadline) << 8);
+        crate::diagnostics::trace::record(
+            crate::diagnostics::trace::EventKind::SchedulerDispatch,
+            crate::diagnostics::shadow::scheduler::entity_key(id),
+            crate::arch::x86_64::percpu::cpu_id() as u64,
+            arg1,
+            crate::diagnostics::shadow::scheduler::committed_epoch(),
+        );
+    }
+
+    fn trace_context_publish(&self, id: EntityId, existed: bool, enqueued: bool) {
+        if !self.shadow_observed {
+            return;
+        }
+        let state = self
+            .entities
+            .get(&id)
+            .map_or(0, |entity| match entity.state {
+                RunState::Ready => 1,
+                RunState::Running => 2,
+                RunState::Blocked => 3,
+                RunState::Dead => 4,
+            });
+        crate::diagnostics::trace::record(
+            crate::diagnostics::trace::EventKind::ContextPublish,
+            crate::diagnostics::shadow::scheduler::entity_key(id),
+            state,
+            u64::from(existed) | (u64::from(enqueued) << 1),
+            crate::diagnostics::shadow::scheduler::committed_epoch(),
+        );
+    }
+
     /// Create a new scheduler (const for static initialization)
     pub const fn new() -> Self {
         Scheduler {
@@ -106,7 +153,16 @@ impl Scheduler {
             initialized: false,
             signal_waiters: Vec::new(),
             latency_misses: 0,
+            shadow_observed: false,
         }
+    }
+
+    /// Mark this scheduler as the production instance before initialization.
+    /// Isolated scheduler values used by unit tests intentionally remain out
+    /// of the singleton shadow namespace.
+    pub fn observe_with_shadow(&mut self) {
+        assert!(!self.initialized, "scheduler shadow enabled after init");
+        self.shadow_observed = true;
     }
 
     /// Initialize the scheduler with an idle process
@@ -131,6 +187,9 @@ impl Scheduler {
             EntityId::KernelThread(idle_pid),
             SchedEntity::new(EntityId::KernelThread(idle_pid)),
         );
+        if self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::register(EntityId::KernelThread(idle_pid));
+        }
         self.initialized = true;
 
         crate::debug_info!("Scheduler initialized with idle process PID {:?}", idle_pid);
@@ -159,6 +218,9 @@ impl Scheduler {
         self.processes.insert(pid, pcb);
         let id = EntityId::KernelThread(pid);
         self.entities.insert(id, SchedEntity::new(id));
+        if self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::register(id);
+        }
         self.make_ready(id, None)
             .expect("scheduler entity capacity exceeded while spawning");
 
@@ -209,7 +271,12 @@ impl Scheduler {
 
     pub fn register_user(&mut self, pid: u32) -> Result<(), ()> {
         let id = EntityId::UserProcess(pid);
-        self.entities.entry(id).or_insert(SchedEntity::new(id));
+        if let alloc::collections::btree_map::Entry::Vacant(entry) = self.entities.entry(id) {
+            entry.insert(SchedEntity::new(id));
+            if self.shadow_observed {
+                crate::diagnostics::shadow::scheduler::register(id);
+            }
+        }
         Ok(())
     }
 
@@ -242,9 +309,15 @@ impl Scheduler {
                 .get(&id)
                 .is_some_and(|entity| entity.context_published)
             {
+                if self.shadow_observed {
+                    crate::diagnostics::shadow::scheduler::make_ready(id, false);
+                }
                 return Ok(false);
             }
             let result = self.run_queue.enqueue(id);
+            if self.shadow_observed {
+                crate::diagnostics::shadow::scheduler::make_ready(id, true);
+            }
             if matches!(result, Ok(true)) {
                 crate::arch::x86_64::smp::notify_work();
             }
@@ -265,9 +338,15 @@ impl Scheduler {
         entity.latency_contract = contract;
         entity.must_run_by_tick = contract.map(|c| now.saturating_add(c.max_dispatch_ticks as u64));
         if !entity.context_published {
+            if self.shadow_observed {
+                crate::diagnostics::shadow::scheduler::make_ready(id, false);
+            }
             return Ok(false);
         }
         let result = self.run_queue.enqueue(id);
+        if self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::make_ready(id, true);
+        }
         if matches!(result, Ok(true)) {
             crate::arch::x86_64::smp::notify_work();
         }
@@ -276,18 +355,26 @@ impl Scheduler {
 
     pub fn block_entity(&mut self, id: EntityId) {
         self.run_queue.remove(id);
-        if let Some(entity) = self.entities.get_mut(&id) {
+        let existed = if let Some(entity) = self.entities.get_mut(&id) {
             entity.state = RunState::Blocked;
             entity.must_run_by_tick = None;
-        }
+            true
+        } else {
+            false
+        };
         for current in &mut self.current {
             if *current == Some(id) {
                 *current = None;
             }
         }
+        if existed && self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::block(id);
+        }
     }
 
     pub fn unregister_entity(&mut self, id: EntityId) {
+        let existed = self.entities.contains_key(&id);
+        let was_current = self.current.contains(&Some(id));
         self.run_queue.remove(id);
         for current in &mut self.current {
             if *current == Some(id) {
@@ -298,6 +385,9 @@ impl Scheduler {
             entity.state = RunState::Dead;
         }
         self.entities.remove(&id);
+        if existed && self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::unregister(id, was_current);
+        }
     }
 
     pub fn entity_state(&self, id: EntityId) -> Option<RunState> {
@@ -310,6 +400,9 @@ impl Scheduler {
         }
         let entity = self.entities.get_mut(&id).ok_or(())?;
         entity.cpu_affinity = cpu;
+        if self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::set_affinity(id, cpu);
+        }
         Ok(())
     }
 
@@ -322,17 +415,20 @@ impl Scheduler {
     pub fn mark_context_saving(&mut self, id: EntityId) {
         if let Some(entity) = self.entities.get_mut(&id) {
             entity.context_published = false;
+            if self.shadow_observed {
+                crate::diagnostics::shadow::scheduler::begin_save(id);
+            }
         }
     }
 
     pub fn publish_context(&mut self, id: EntityId) {
-        let ready = if let Some(entity) = self.entities.get_mut(&id) {
+        let (existed, ready) = if let Some(entity) = self.entities.get_mut(&id) {
             entity.context_published = true;
-            entity.state == RunState::Ready
+            (true, entity.state == RunState::Ready)
         } else {
-            false
+            (false, false)
         };
-        if ready {
+        let enqueued = if ready {
             let enqueued = self
                 .run_queue
                 .enqueue(id)
@@ -340,7 +436,14 @@ impl Scheduler {
             if enqueued {
                 crate::arch::x86_64::smp::notify_work();
             }
+            enqueued
+        } else {
+            false
+        };
+        if self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::publish(id);
         }
+        self.trace_context_publish(id, existed, enqueued);
     }
 
     pub fn publish_kernel_context_ptr(&mut self, context: *mut CpuContext) -> bool {
@@ -422,6 +525,14 @@ impl Scheduler {
             }
         }
         self.current[crate::arch::x86_64::percpu::cpu_id()] = Some(next);
+        if self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::dispatch(next);
+        }
+        self.trace_dispatch(
+            next,
+            crate::diagnostics::trace::DispatchSource::FairQueue,
+            missed,
+        );
         crate::arch::x86_64::percpu::record_dispatch();
         Some(next)
     }
@@ -464,6 +575,14 @@ impl Scheduler {
                 }
             }
             self.current[cpu] = Some(current);
+            if self.shadow_observed {
+                crate::diagnostics::shadow::scheduler::resume_same_cpu(current);
+            }
+            self.trace_dispatch(
+                current,
+                crate::diagnostics::trace::DispatchSource::ResumeSameCpu,
+                false,
+            );
             return Some(current);
         };
         if let EntityId::KernelThread(pid) = next {
@@ -490,6 +609,14 @@ impl Scheduler {
             entity.must_run_by_tick = None;
         }
         self.current[crate::arch::x86_64::percpu::cpu_id()] = Some(id);
+        if self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::dispatch(id);
+        }
+        self.trace_dispatch(
+            id,
+            crate::diagnostics::trace::DispatchSource::UserQueue,
+            false,
+        );
         Some(pid)
     }
 
@@ -504,19 +631,56 @@ impl Scheduler {
 
     pub fn clear_current_user(&mut self, pid: u32) {
         let cpu = crate::arch::x86_64::percpu::cpu_id();
-        if self.current[cpu] == Some(EntityId::UserProcess(pid)) {
+        let id = EntityId::UserProcess(pid);
+        if self.current[cpu] == Some(id) {
             self.current[cpu] = None;
+            if let Some(entity) = self.entities.get_mut(&id) {
+                if entity.state == RunState::Running {
+                    entity.state = RunState::Blocked;
+                    if self.shadow_observed {
+                        crate::diagnostics::shadow::scheduler::block(id);
+                    }
+                }
+            }
         }
     }
 
     pub fn set_running(&mut self, id: EntityId) {
-        self.entities.entry(id).or_insert(SchedEntity::new(id));
+        let cpu = crate::arch::x86_64::percpu::cpu_id();
+        if let Some(previous) = self.current[cpu].filter(|previous| *previous != id) {
+            if let Some(entity) = self.entities.get_mut(&previous) {
+                if entity.state == RunState::Running {
+                    entity.state = RunState::Blocked;
+                    if self.shadow_observed {
+                        crate::diagnostics::shadow::scheduler::block(previous);
+                    }
+                }
+            }
+        }
+        let inserted =
+            if let alloc::collections::btree_map::Entry::Vacant(entry) = self.entities.entry(id) {
+                entry.insert(SchedEntity::new(id));
+                true
+            } else {
+                false
+            };
+        if inserted && self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::register(id);
+        }
         self.run_queue.remove(id);
         if let Some(entity) = self.entities.get_mut(&id) {
             entity.state = RunState::Running;
             entity.must_run_by_tick = None;
         }
-        self.current[crate::arch::x86_64::percpu::cpu_id()] = Some(id);
+        self.current[cpu] = Some(id);
+        if self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::force_running(id);
+        }
+        self.trace_dispatch(
+            id,
+            crate::diagnostics::trace::DispatchSource::ForceRunning,
+            false,
+        );
     }
 
     pub fn yield_entity(&mut self, id: EntityId) {
@@ -532,6 +696,9 @@ impl Scheduler {
         self.run_queue
             .enqueue(id)
             .expect("scheduler entity capacity exceeded while yielding");
+        if self.shadow_observed {
+            crate::diagnostics::shadow::scheduler::yielded(id);
+        }
     }
 
     #[cfg(feature = "test")]
@@ -658,6 +825,9 @@ impl Scheduler {
             }
             // Remove from processes map
             self.processes.remove(&current_pid);
+            if self.shadow_observed {
+                crate::diagnostics::shadow::scheduler::block(EntityId::KernelThread(current_pid));
+            }
             self.unregister_entity(EntityId::KernelThread(current_pid));
             return retired_stack;
         }

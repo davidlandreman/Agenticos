@@ -22,6 +22,8 @@ pub mod desktop_backing_store;
 #[cfg(feature = "test")]
 pub mod desktop_window;
 #[cfg(feature = "test")]
+pub mod diagnostics;
+#[cfg(feature = "test")]
 pub mod display;
 #[cfg(feature = "test")]
 pub mod entropy;
@@ -232,6 +234,9 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("caret", crate::terminal::caret::get_tests),
     ("pty", crate::terminal::pty::get_tests),
     ("keys", crate::terminal::keys::get_tests),
+    // Keep diagnostics last so its final assertion observes every preceding
+    // production transition in a full or multi-module filtered run.
+    ("diagnostics", diagnostics::get_tests),
 ];
 
 /// Modules that are available through an explicit filter but are too slow for

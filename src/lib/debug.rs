@@ -14,7 +14,10 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use crate::arch::x86_64::interrupt_guard::InterruptMutex;
 
 static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(DebugLevel::Info as u8);
-static SERIAL_OUTPUT: InterruptMutex<()> = InterruptMutex::new(());
+static SERIAL_OUTPUT: InterruptMutex<()> = InterruptMutex::new_tracked(
+    (),
+    crate::diagnostics::shadow::locks::LockClassId::SerialLogger,
+);
 
 pub fn set_debug_level(level: DebugLevel) {
     DEBUG_LEVEL.store(level as u8, Ordering::Release);
@@ -38,6 +41,7 @@ pub fn write_line(prefix: &str, args: fmt::Arguments<'_>) {
 
 /// Panic-safe serial output. If another CPU died while owning the lock, emit
 /// anyway instead of deadlocking the panic path.
+#[allow(dead_code, reason = "post-capsule serial fallback API")]
 pub fn write_panic_line(prefix: &str, args: fmt::Arguments<'_>) {
     if let Some(_guard) = SERIAL_OUTPUT.try_lock() {
         qemu_print::qemu_print!("{}", prefix);

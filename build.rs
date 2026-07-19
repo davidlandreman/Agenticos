@@ -115,6 +115,22 @@ fn validate_ext2_image(path: &Path) {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=AGENTICOS_MKE2FS");
+    for name in [
+        "AGENTICOS_GIT_SHA",
+        "AGENTICOS_GIT_DIRTY",
+        "AGENTICOS_RUSTC_VERSION",
+        "AGENTICOS_DIAGNOSTICS",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    let git_sha = std::env::var("AGENTICOS_GIT_SHA").unwrap_or_else(|_| "unknown".into());
+    let git_dirty = std::env::var("AGENTICOS_GIT_DIRTY").unwrap_or_else(|_| "unknown".into());
+    let rustc = std::env::var("AGENTICOS_RUSTC_VERSION").unwrap_or_else(|_| "unknown".into());
+    let diagnostics = std::env::var("AGENTICOS_DIAGNOSTICS").unwrap_or_else(|_| "minimal".into());
+    println!("cargo:rustc-env=AGENTICOS_BUILD_GIT_SHA={git_sha}");
+    println!("cargo:rustc-env=AGENTICOS_BUILD_GIT_DIRTY={git_dirty}");
+    println!("cargo:rustc-env=AGENTICOS_BUILD_RUSTC={rustc}");
+    println!("cargo:rustc-env=AGENTICOS_BUILD_DIAGNOSTICS={diagnostics}");
     // Detect build profile (debug or release)
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
 

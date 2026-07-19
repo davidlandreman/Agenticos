@@ -180,6 +180,10 @@ pub fn set_current_user_pid(pid: Option<u32>) {
         .store(pid.unwrap_or(NO_PID), Ordering::Release);
 }
 
+pub fn kernel_rsp_top() -> u64 {
+    local().kernel_rsp_top
+}
+
 pub fn in_spawned_process() -> bool {
     local().in_spawned_process.load(Ordering::Acquire)
 }
@@ -260,6 +264,9 @@ pub fn record_reschedule_ipi(cpu: usize) {
 
 pub fn mapper_enter() {
     let was_in_mapper = local().in_mapper.swap(true, Ordering::AcqRel);
+    if was_in_mapper {
+        crate::diagnostics::shadow::memory::report_mapper_recursion(cpu_id() as u64);
+    }
     debug_assert!(!was_in_mapper, "recursive memory-mapper acquisition");
 }
 
@@ -272,12 +279,18 @@ pub fn set_pending_user_context_publish(pid: u32) {
     local()
         .pending_context_publish
         .store((1u64 << 63) | u64::from(pid), Ordering::Release);
+    crate::diagnostics::shadow::cpu::set_pending_publish(
+        crate::process::entity::EntityId::UserProcess(pid),
+    );
 }
 
 pub fn set_pending_kernel_context_publish(pid: crate::process::ProcessId) {
     local()
         .pending_context_publish
         .store(u64::from(pid), Ordering::Release);
+    crate::diagnostics::shadow::cpu::set_pending_publish(
+        crate::process::entity::EntityId::KernelThread(pid),
+    );
 }
 
 pub fn has_pending_context_publish() -> bool {
@@ -286,7 +299,7 @@ pub fn has_pending_context_publish() -> bool {
 
 pub fn take_pending_context_publish() -> Option<crate::process::entity::EntityId> {
     let encoded = local().pending_context_publish.swap(0, Ordering::AcqRel);
-    if encoded == 0 {
+    let entity = if encoded == 0 {
         None
     } else if encoded >> 63 != 0 {
         Some(crate::process::entity::EntityId::UserProcess(
@@ -296,5 +309,9 @@ pub fn take_pending_context_publish() -> Option<crate::process::entity::EntityId
         Some(crate::process::entity::EntityId::KernelThread(
             encoded as u32,
         ))
+    };
+    if let Some(entity) = entity {
+        crate::diagnostics::shadow::cpu::take_pending_publish(entity);
     }
+    entity
 }

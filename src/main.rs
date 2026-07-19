@@ -17,6 +17,7 @@ mod panic;
 // Module structure
 mod arch;
 mod commands;
+mod diagnostics;
 mod drivers;
 mod fs;
 mod graphics;

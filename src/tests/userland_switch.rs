@@ -642,6 +642,48 @@ fn test_real_timer_expiry_respects_signal_mask() {
     remove_process(9321);
 }
 
+/// An actionable signal may become pending while a lazy page-in continuation
+/// is sleeping on block I/O, but only the exact completed I/O token may wake
+/// that continuation. The signal is delivered after the continuation returns.
+fn test_signal_does_not_wake_block_io_continuation() {
+    use crate::userland::lifecycle::{
+        mark_ring3_blocked, pop_next_ring3, remove_process, wake_ring3_for_signal, with_process,
+        Ring3BlockReason,
+    };
+    use crate::userland::signal::{SigAction, SIGUSR1};
+
+    let _g = PreemptTestGuard::new();
+    insert_synthetic(9322);
+    with_process(9322, |process| {
+        process.signal_state.set_action(
+            SIGUSR1,
+            SigAction {
+                sa_handler: 0xDEAD_BEEF,
+                sa_flags: 0,
+                sa_restorer: 0,
+                sa_mask: 0,
+            },
+        );
+        process.signal_state.raise(SIGUSR1);
+    });
+    mark_ring3_blocked(
+        9322,
+        Ring3BlockReason::WaitingForBlockIo { token: 0x1234_5678 },
+    );
+
+    wake_ring3_for_signal(9322);
+
+    assert!(
+        pop_next_ring3().is_none(),
+        "signal must not make a block-I/O continuation runnable"
+    );
+    with_process(9322, |process| {
+        assert_ne!(process.signal_state.pending & (1 << (SIGUSR1 - 1)), 0);
+        assert!(!process.pending_syscall_interrupt);
+    });
+    remove_process(9322);
+}
+
 /// A `nanosleep` whose absolute deadline has elapsed is moved from the
 /// blocked set to the ready queue by `process_expired_sleeps` (kernel
 /// housekeeping); the re-fired SYSCALL then returns 0.
@@ -754,6 +796,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_signal_delivery_consumes_from_current_only,
         &test_real_timer_expiry_wakes_blocked_network_syscall,
         &test_real_timer_expiry_respects_signal_mask,
+        &test_signal_does_not_wake_block_io_continuation,
         &test_expired_nanosleep_wakes_blocked_process,
         &test_unexpired_nanosleep_stays_blocked,
         &test_kill_ring3_processes_on_terminal_removes_whole_tree,

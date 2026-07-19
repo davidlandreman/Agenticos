@@ -31,6 +31,8 @@ pub enum AddressSpaceError {
 pub struct AddressSpace {
     l4_frame: PhysFrame<Size4KiB>,
     vmas: crate::userland::vm::VmaSet,
+    vma_generation: u64,
+    shadow_generation: u64,
 }
 
 impl AddressSpace {
@@ -42,7 +44,7 @@ impl AddressSpace {
         let result = with_memory_mapper(|mapper| {
             let phys_offset = mapper.physical_memory_offset().as_u64();
             let frame = mapper
-                .allocate_one_frame()
+                .allocate_root_frame()
                 .ok_or(AddressSpaceError::OutOfFrames)?;
             mapper.zero_frame(frame);
 
@@ -66,9 +68,13 @@ impl AddressSpace {
                 }
             }
 
+            let shadow_generation =
+                crate::diagnostics::shadow::address_space::allocate(frame.start_address().as_u64());
             Ok(AddressSpace {
                 l4_frame: frame,
                 vmas: crate::userland::vm::VmaSet::new(),
+                vma_generation: 1,
+                shadow_generation,
             })
         });
 
@@ -89,7 +95,29 @@ impl AddressSpace {
     }
 
     pub fn vmas_mut(&mut self) -> &mut crate::userland::vm::VmaSet {
+        self.vma_generation = self.vma_generation.wrapping_add(1).max(1);
+        crate::diagnostics::shadow::address_space::update_vma_generation(
+            self.shadow_generation,
+            self.vma_generation,
+        );
         &mut self.vmas
+    }
+
+    pub fn vma_generation(&self) -> u64 {
+        self.vma_generation
+    }
+
+    pub fn shadow_generation(&self) -> u64 {
+        self.shadow_generation
+    }
+
+    pub fn publish_owner(&mut self, tgid: u32) {
+        crate::diagnostics::shadow::address_space::publish_owner(
+            self.shadow_generation,
+            tgid,
+            self.vma_generation,
+        );
+        let _ = with_memory_mapper(|mapper| mapper.audit_user_address_space(self.l4_frame));
     }
 
     pub fn initialize_vmas_from_image(
@@ -100,6 +128,11 @@ impl AddressSpace {
         use crate::userland::vm::{VmProt, Vma, VmaBacking};
 
         self.vmas = crate::userland::vm::VmaSet::new();
+        self.vma_generation = self.vma_generation.wrapping_add(1).max(1);
+        crate::diagnostics::shadow::address_space::update_vma_generation(
+            self.shadow_generation,
+            self.vma_generation,
+        );
         for mapping in image.mappings() {
             let prot = match mapping.perms {
                 UserPerms::ReadExecute => VmProt::READ.union(VmProt::EXEC),
@@ -153,6 +186,10 @@ impl AddressSpace {
             let phys_offset = mapper.physical_memory_offset().as_u64();
             let parent_l4_va = phys_offset + parent_l4_frame.start_address().as_u64();
             let child_l4_va = phys_offset + child.l4_frame.start_address().as_u64();
+            let parent_generation = crate::diagnostics::shadow::address_space::generation_for_l4(
+                parent_l4_frame.start_address().as_u64(),
+            );
+            let child_generation = child.shadow_generation;
 
             // SAFETY: both L4s are kernel-mapped through the
             // bootloader's offset region. The parent's L4 is a live
@@ -172,7 +209,7 @@ impl AddressSpace {
                     let parent_pdpt_pa = parent_table[slot].addr().as_u64();
                     let parent_flags = parent_table[slot].flags();
                     let child_pdpt_frame = mapper
-                        .allocate_one_frame()
+                        .allocate_page_table_frame()
                         .ok_or(AddressSpaceError::OutOfFrames)?;
                     mapper.zero_frame(child_pdpt_frame);
                     child_table[slot].set_addr(child_pdpt_frame.start_address(), parent_flags);
@@ -181,6 +218,9 @@ impl AddressSpace {
                         phys_offset,
                         parent_pdpt_pa,
                         child_pdpt_frame.start_address().as_u64(),
+                        parent_generation,
+                        child_generation,
+                        (slot as u64) << 39,
                     )?;
                 }
                 x86_64::instructions::tlb::flush_all();
@@ -206,6 +246,10 @@ impl AddressSpace {
     /// any kernel stack satisfies that.
     pub unsafe fn activate(&self) {
         Cr3::write(self.l4_frame, Cr3Flags::empty());
+        crate::diagnostics::shadow::address_space::activate(
+            self.shadow_generation,
+            self.l4_frame.start_address().as_u64(),
+        );
     }
 }
 
@@ -215,6 +259,9 @@ unsafe fn clone_pdpt(
     phys_offset: u64,
     parent_pa: u64,
     child_pa: u64,
+    parent_generation: u64,
+    child_generation: u64,
+    virtual_base: u64,
 ) -> Result<(), AddressSpaceError> {
     let parent = &mut *((phys_offset + parent_pa) as *mut PageTable);
     let child = &mut *((phys_offset + child_pa) as *mut PageTable);
@@ -225,7 +272,7 @@ unsafe fn clone_pdpt(
         let p_pa = parent[i].addr().as_u64();
         let flags = parent[i].flags();
         let new_frame = mapper
-            .allocate_one_frame()
+            .allocate_page_table_frame()
             .ok_or(AddressSpaceError::OutOfFrames)?;
         mapper.zero_frame(new_frame);
         child[i].set_addr(new_frame.start_address(), flags);
@@ -234,6 +281,9 @@ unsafe fn clone_pdpt(
             phys_offset,
             p_pa,
             new_frame.start_address().as_u64(),
+            parent_generation,
+            child_generation,
+            virtual_base | ((i as u64) << 30),
         )?;
     }
     Ok(())
@@ -244,6 +294,9 @@ unsafe fn clone_pd(
     phys_offset: u64,
     parent_pa: u64,
     child_pa: u64,
+    parent_generation: u64,
+    child_generation: u64,
+    virtual_base: u64,
 ) -> Result<(), AddressSpaceError> {
     let parent = &mut *((phys_offset + parent_pa) as *mut PageTable);
     let child = &mut *((phys_offset + child_pa) as *mut PageTable);
@@ -254,7 +307,7 @@ unsafe fn clone_pd(
         let p_pa = parent[i].addr().as_u64();
         let flags = parent[i].flags();
         let new_frame = mapper
-            .allocate_one_frame()
+            .allocate_page_table_frame()
             .ok_or(AddressSpaceError::OutOfFrames)?;
         mapper.zero_frame(new_frame);
         child[i].set_addr(new_frame.start_address(), flags);
@@ -263,6 +316,9 @@ unsafe fn clone_pd(
             phys_offset,
             p_pa,
             new_frame.start_address().as_u64(),
+            parent_generation,
+            child_generation,
+            virtual_base | ((i as u64) << 21),
         )?;
     }
     Ok(())
@@ -273,6 +329,9 @@ unsafe fn clone_pt(
     phys_offset: u64,
     parent_pa: u64,
     child_pa: u64,
+    parent_generation: u64,
+    child_generation: u64,
+    virtual_base: u64,
 ) -> Result<(), AddressSpaceError> {
     let parent = &mut *((phys_offset + parent_pa) as *mut PageTable);
     let child = &mut *((phys_offset + child_pa) as *mut PageTable);
@@ -281,7 +340,7 @@ unsafe fn clone_pt(
             continue;
         }
         let frame = PhysFrame::containing_address(parent[i].addr());
-        if !mapper.retain_frame(frame) {
+        if !mapper.retain_leaf_frame(frame) {
             return Err(AddressSpaceError::OutOfFrames);
         }
         let mut flags = parent[i].flags();
@@ -291,6 +350,21 @@ unsafe fn clone_pt(
             parent[i].set_flags(flags);
         }
         child[i].set_addr(frame.start_address(), flags);
+        let virtual_page = virtual_base | ((i as u64) << 12);
+        crate::diagnostics::shadow::memory::update_leaf_flags(
+            parent_generation,
+            virtual_page,
+            flags.bits(),
+        );
+        if let Some((frame_index, _)) = mapper.shadow_frame_identity(frame) {
+            crate::diagnostics::shadow::memory::map_leaf(
+                child_generation,
+                virtual_page,
+                frame.start_address().as_u64(),
+                frame_index,
+                flags.bits(),
+            );
+        }
     }
     Ok(())
 }
@@ -310,11 +384,15 @@ impl Drop for AddressSpace {
                 crate::mm::paging::activate_kernel_l4();
             }
         }
-        let destroyed =
-            with_memory_mapper(|mapper| mapper.destroy_user_address_space(self.l4_frame));
+        crate::diagnostics::shadow::address_space::begin_destroy(self.shadow_generation);
+        let destroyed = with_memory_mapper(|mapper| {
+            let _ = mapper.audit_user_address_space(self.l4_frame);
+            mapper.destroy_user_address_space(self.l4_frame);
+        });
         debug_assert!(
             destroyed.is_some(),
             "memory mapper unavailable during address-space drop"
         );
+        crate::diagnostics::shadow::address_space::release(self.shadow_generation);
     }
 }

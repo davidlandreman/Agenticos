@@ -245,5 +245,22 @@ extern "C" fn syscall_dispatch_entry(args: *mut SyscallArgs) -> i64 {
     // non-null pointer. We hold the pointer for the body of this function
     // only; the stub frees the slot via pops after we return.
     let args = unsafe { &mut *args };
-    crate::userland::abi::syscall_dispatch(args)
+    let syscall_number = args.rax;
+    let pid = crate::arch::x86_64::percpu::current_user_pid().unwrap_or(0);
+    crate::diagnostics::trace::record(
+        crate::diagnostics::trace::EventKind::InterruptEntry,
+        crate::diagnostics::trace::SYSCALL_BOUNDARY,
+        syscall_number,
+        u64::from(pid),
+        0,
+    );
+    let result = crate::userland::abi::syscall_dispatch(args);
+    crate::diagnostics::trace::record(
+        crate::diagnostics::trace::EventKind::InterruptExit,
+        crate::diagnostics::trace::SYSCALL_BOUNDARY,
+        syscall_number,
+        result as u64,
+        0,
+    );
+    result
 }

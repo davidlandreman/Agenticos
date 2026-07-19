@@ -90,6 +90,26 @@ fi
 REBUILD_USERLAND="${REBUILD_USERLAND:-0}"
 export REBUILD_USERLAND
 
+# Freeze build identity before Cargo runs. The same values are embedded in the
+# guest capsule and copied into the host manifest.
+AGENTICOS_GIT_SHA="${AGENTICOS_GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
+if [ -z "${AGENTICOS_GIT_DIRTY:-}" ]; then
+    if git diff-index --quiet HEAD -- 2>/dev/null && [ -z "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
+        AGENTICOS_GIT_DIRTY=0
+    else
+        AGENTICOS_GIT_DIRTY=1
+    fi
+fi
+AGENTICOS_RUSTC_VERSION="${AGENTICOS_RUSTC_VERSION:-$(rustc --version 2>/dev/null || echo unknown)}"
+AGENTICOS_DIAGNOSTICS="${AGENTICOS_DIAGNOSTICS:-minimal}"
+case "$AGENTICOS_DIAGNOSTICS" in
+    minimal) DIAGNOSTIC_FEATURE_ARGS=() ;;
+    record) DIAGNOSTIC_FEATURE_ARGS=(--features diagnostics) ;;
+    strict) DIAGNOSTIC_FEATURE_ARGS=(--features diagnostics-strict) ;;
+    *) echo "AGENTICOS_DIAGNOSTICS must be minimal, record, or strict" >&2; exit 2 ;;
+esac
+export AGENTICOS_GIT_SHA AGENTICOS_GIT_DIRTY AGENTICOS_RUSTC_VERSION AGENTICOS_DIAGNOSTICS
+
 # Clean if requested
 if [ "$CLEAN" = true ]; then
     echo "🧹 Cleaning build artifacts..."
@@ -128,7 +148,7 @@ fi
 
 # First build pass - compile the kernel
 echo "🔨 Building kernel (pass 1/2)..."
-cargo build $BUILD_FLAGS
+cargo build $BUILD_FLAGS "${DIAGNOSTIC_FEATURE_ARGS[@]}"
 if [ $? -ne 0 ]; then
     echo "❌ Build failed!"
     exit 1
@@ -136,7 +156,7 @@ fi
 
 # Second build pass - create disk images
 echo "💾 Creating disk images (pass 2/2)..."
-cargo build $BUILD_FLAGS
+cargo build $BUILD_FLAGS "${DIAGNOSTIC_FEATURE_ARGS[@]}"
 if [ $? -ne 0 ]; then
     echo "❌ Image creation failed!"
     exit 1
@@ -185,6 +205,10 @@ if [ "$RUN_QEMU" = true ]; then
     case "$QEMU_SMP" in 1|2|3|4|5|6|7|8) ;; *) echo "❌ AGENTICOS_QEMU_SMP must be 1-8" >&2; exit 2 ;; esac
     echo "🧠 QEMU memory: $QEMU_MEMORY (override with AGENTICOS_QEMU_MEMORY)"
     echo "🧮 QEMU CPUs: $QEMU_SMP (override with AGENTICOS_QEMU_SMP)"
+    RUN_ID="${AGENTICOS_RUN_ID:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}"
+    QEMU_PROFILE=release
+    if [ "$DEBUG" = true ]; then QEMU_PROFILE=debug; fi
+    KERNEL_ELF="target/x86_64-unknown-none/$QEMU_PROFILE/agenticos"
     # Restrict the socket to the launching user as soon as QEMU creates it.
     # Backgrounded so it races QEMU startup; if the socket isn't there yet,
     # chmod will fail silently — that's fine, we retry until QEMU is up.
@@ -265,6 +289,7 @@ if [ "$RUN_QEMU" = true ]; then
         -object "rng-random,id=agenticos-rng,filename=/dev/urandom"
         -device "virtio-rng-pci,disable-legacy=on,rng=agenticos-rng"
         -fw_cfg "name=opt/agenticos/force_dirty_mount,string=$FORCE_DIRTY_MOUNT"
+        -fw_cfg "name=opt/agenticos/run_id,string=$RUN_ID"
         -serial stdio
         -chardev "socket,id=rpc,path=$RPC_SOCK,server=on,wait=off"
         -serial chardev:rpc
@@ -280,6 +305,28 @@ if [ "$RUN_QEMU" = true ]; then
     QEMU_ARGS+=("${NETWORK_ARGS[@]}")
     QEMU_ARGS+=("${LEGACY_DATA_ARGS[@]}")
     QEMU_ARGS+=("${SHARED_ARGS[@]}")
+    if [ "$AGENTICOS_DIAGNOSTICS" != minimal ]; then
+        CRASH_DIR="${AGENTICOS_CRASH_DIR:-$(pwd)/.context/crashes/$RUN_ID}"
+        mkdir -p "$CRASH_DIR"
+        CRASH_STREAM="$CRASH_DIR/capsule.bin"
+        : > "$CRASH_STREAM"
+        QEMU_ARGS+=(
+            -chardev "file,id=agenticos-crash,path=$CRASH_STREAM"
+            -device "isa-debugcon,iobase=0xe9,chardev=agenticos-crash"
+        )
+        python3 tools/crash_manifest.py \
+            --output "$CRASH_DIR/manifest.json" \
+            --kernel "$KERNEL_ELF" \
+            --bios "$BIOS_IMAGE" \
+            --qemu "$QEMU_BIN" \
+            --run-id "$RUN_ID" \
+            --mode "$AGENTICOS_DIAGNOSTICS" \
+            --memory "$QEMU_MEMORY" \
+            --smp "$QEMU_SMP" \
+            -- "${QEMU_ARGS[@]}"
+        printf '%s\n' "$(pwd)/$KERNEL_ELF" > "$CRASH_DIR/kernel.elf.ref"
+        echo "🧭 Crash artifacts: $CRASH_DIR"
+    fi
     # On macOS the cocoa backend has no initial-scale flag, so open the window
     # then enlarge it to AGENTICOS_QEMU_SCALE (default 4x) via a backgrounded
     # AppleScript helper. zoom-to-fit=on (set by qemu-compositor.sh) scales the

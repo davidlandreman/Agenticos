@@ -197,10 +197,6 @@ pub fn notify_cpu(cpu_id: usize) {
     super::percpu::record_reschedule_ipi(cpu_id);
 }
 
-pub fn freeze_other_cpus() {
-    super::lapic::broadcast_halt();
-}
-
 fn prepare_trampoline() -> bool {
     let mapped = crate::mm::memory::with_memory_mapper(|mapper| {
         mapper.prepare_trampoline_page(PhysAddr::new(TRAMPOLINE_PHYS))
@@ -284,6 +280,7 @@ extern "C" fn ap_main(logical_id: usize) -> ! {
             cpu.lapic_id,
             super::gdt::kernel_rsp0_top_for(logical_id).as_u64(),
         );
+        crate::diagnostics::percpu_init();
         super::lapic::enable_this_cpu();
     }
     debug_assert_eq!(super::percpu::lapic_id(), cpu.lapic_id);

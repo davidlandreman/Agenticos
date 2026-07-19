@@ -1,6 +1,8 @@
 use crate::arch::x86_64::interrupt_guard::InterruptMutex;
 use crate::{debug_debug, debug_info};
+use alloc::vec::Vec;
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind, MemoryRegions};
+use x86_64::structures::paging::PhysFrame;
 use x86_64::VirtAddr;
 
 #[derive(Debug, Clone, Copy)]
@@ -171,7 +173,11 @@ pub fn init(memory_regions: &'static MemoryRegions, phys_mem_offset: Option<u64>
 }
 
 // Cross-CPU serialization for the page-table mapper and its frame allocator.
-static MAPPER: InterruptMutex<Option<crate::mm::paging::MemoryMapper>> = InterruptMutex::new(None);
+static MAPPER: InterruptMutex<Option<crate::mm::paging::MemoryMapper>> =
+    InterruptMutex::new_tracked(
+        None,
+        crate::diagnostics::shadow::locks::LockClassId::MemoryMapper,
+    );
 
 pub fn init_heap(phys_mem_offset: u64) {
     unsafe {
@@ -238,4 +244,41 @@ pub fn with_memory_mapper<R>(
     };
     crate::arch::x86_64::percpu::mapper_exit();
     result
+}
+
+/// Map a user range without allocating while the mapper lock is held.
+///
+/// Heap demand paging takes `HeapAllocator -> MemoryMapper`, so the reverse
+/// order is forbidden. The result buffer must therefore be reserved before
+/// entering the mapper serialization domain.
+pub fn map_user_region(
+    virt_start: VirtAddr,
+    num_pages: u64,
+    perms: crate::mm::paging::UserPerms,
+) -> Option<Result<Vec<PhysFrame>, crate::mm::paging::UserMapError>> {
+    if let Err(error) = crate::mm::paging::validate_user_range(virt_start, num_pages) {
+        return Some(Err(error));
+    }
+    let capacity = usize::try_from(num_pages).ok()?;
+    let mut frames = Vec::with_capacity(capacity);
+    let result = with_memory_mapper(|mapper| {
+        mapper.map_user_region_into(virt_start, num_pages, perms, &mut frames)
+    })?;
+    Some(result.map(|()| frames))
+}
+
+/// Unmap a user range with its result buffer allocated before taking MAPPER.
+pub fn unmap_user_region(
+    virt_start: VirtAddr,
+    num_pages: u64,
+) -> Option<Result<Vec<PhysFrame>, crate::mm::paging::UserMapError>> {
+    if let Err(error) = crate::mm::paging::validate_user_range(virt_start, num_pages) {
+        return Some(Err(error));
+    }
+    let capacity = usize::try_from(num_pages).ok()?;
+    let mut frames = Vec::with_capacity(capacity);
+    let result = with_memory_mapper(|mapper| {
+        mapper.unmap_user_region_into(virt_start, num_pages, &mut frames)
+    })?;
+    Some(result.map(|()| frames))
 }

@@ -364,6 +364,16 @@ fn perform(
                     complete: false,
                 },
             );
+            if let Waiter::RingThree(pid) = waiter {
+                crate::diagnostics::shadow::io::submitted(
+                    token,
+                    crate::diagnostics::shadow::pager::current_generation(),
+                    pid,
+                    index,
+                    head,
+                    buffer.len(),
+                );
+            }
             driver.queue.notify();
             head
         };
@@ -385,6 +395,9 @@ fn perform(
             .get_mut(index)
             .and_then(|driver| driver.requests.remove(&head))
             .ok_or("lost VirtIO block completion")?;
+        if matches!(request.waiter, Waiter::RingThree(_)) {
+            crate::diagnostics::shadow::io::consumed(request.token);
+        }
         let status = request.control.bytes(STATUS_OFFSET, 1).unwrap()[0];
         if status != VIRTIO_BLK_S_OK {
             return Err(if status == VIRTIO_BLK_S_IOERR {
@@ -451,6 +464,14 @@ pub fn handle_interrupt(irq: u8) {
                     Ok(Some(used)) => {
                         if let Some(request) = driver.requests.get_mut(&used.descriptor) {
                             request.complete = true;
+                            if matches!(request.waiter, Waiter::RingThree(_)) {
+                                let status = request.control.bytes(STATUS_OFFSET, 1).unwrap()[0];
+                                crate::diagnostics::shadow::io::completed(
+                                    request.token,
+                                    status,
+                                    used.len,
+                                );
+                            }
                             if wake_count < waking.len() {
                                 waking[wake_count] = Some((request.token, request.waiter));
                                 wake_count += 1;

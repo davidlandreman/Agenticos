@@ -386,8 +386,10 @@ impl RealTimerState {
 // mutex allows a kernel thread to be preempted while holding the table and the
 // ring-3 handler to spin forever on the same single CPU. Make the invariant
 // structural so new call sites cannot accidentally reintroduce that deadlock.
-pub(crate) static PROCESS_TABLE: InterruptMutex<ProcessTable> =
-    InterruptMutex::new(ProcessTable::empty());
+pub(crate) static PROCESS_TABLE: InterruptMutex<ProcessTable> = InterruptMutex::new_tracked(
+    ProcessTable::empty(),
+    crate::diagnostics::shadow::locks::LockClassId::ProcessTable,
+);
 
 /// Lazy initializer: ensures the sentinel entry at PID 0 exists. Called
 /// from every `with_current_process`/`with_process` path before lookup
@@ -632,8 +634,13 @@ pub fn robust_list(tid: u32) -> Option<(u64, usize)> {
     PROCESS_TABLE.lock().robust_lists.get(&tid).copied()
 }
 
-pub fn register_thread_task(tid: u32, tgid: u32, process: Process) -> Result<(), ()> {
+pub fn register_thread_task(tid: u32, tgid: u32, mut process: Process) -> Result<(), ()> {
     let cpu = crate::arch::x86_64::percpu::cpu_id();
+    process
+        .kernel_stack
+        .as_mut()
+        .expect("ring-3 thread without a kernel stack")
+        .publish_owner(tid);
     let members = {
         let mut g = PROCESS_TABLE.lock();
         if g.by_pid.len() >= 129 || !g.by_pid.contains_key(&tgid) || g.by_pid.contains_key(&tid) {
@@ -651,8 +658,15 @@ pub fn register_thread_task(tid: u32, tgid: u32, process: Process) -> Result<(),
         if home != cpu {
             return Err(());
         }
+        let address_space_generation = g
+            .by_pid
+            .get(&tgid)
+            .and_then(|group| group.address_space.as_ref())
+            .map(|space| space.shadow_generation())
+            .ok_or(())?;
         g.by_pid.insert(tid, process);
         g.thread_groups.insert(tid, tgid);
+        crate::diagnostics::shadow::address_space::member_join(address_space_generation, tgid);
         g.thread_groups
             .iter()
             .filter_map(|(&member, &group)| (group == tgid).then_some(member))
@@ -708,8 +722,14 @@ pub fn set_current_user_pid(pid: Option<u32>) {
 /// responsible for setting `current_user_pid` separately when the
 /// process should be the loaded one (today, only the install path
 /// does both atomically via [`install_new_process_opt`]).
-pub fn insert_process(p: Process) -> u32 {
+pub fn insert_process(mut p: Process) -> u32 {
     let pid = p.pid;
+    if let Some(space) = p.address_space.as_mut() {
+        space.publish_owner(pid);
+    }
+    if let Some(stack) = p.kernel_stack.as_mut() {
+        stack.publish_owner(pid);
+    }
     let mut g = PROCESS_TABLE.lock();
     g.by_pid.insert(pid, p);
     g.thread_groups.insert(pid, pid);
@@ -732,6 +752,11 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     let was_current = current_user_pid() == Some(pid);
     let mut g = PROCESS_TABLE.lock();
     let tgid = g.thread_groups.get(&pid).copied().unwrap_or(pid);
+    let address_space_generation = g
+        .by_pid
+        .get(&tgid)
+        .and_then(|group| group.address_space.as_ref())
+        .map(|space| space.shadow_generation());
     let members = if pid == tgid {
         g.thread_groups
             .iter()
@@ -757,7 +782,14 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     }
     let removed = removed?;
     drop(g);
+    if let Some(generation) = address_space_generation {
+        crate::diagnostics::shadow::address_space::member_leave(generation, members.len());
+    }
     if was_current {
+        // Legacy setjmp/long-jump exits have already abandoned the task's
+        // rsp0 stack when they return to the launcher, but do not pass through
+        // the scheduler publication callbacks used by ordinary handoffs.
+        crate::diagnostics::shadow::stack::deactivate_owner(pid);
         crate::arch::x86_64::percpu::set_current_user_pid(None);
     }
     for member in members {
@@ -804,6 +836,17 @@ pub fn reset_sentinel() {
 pub fn mark_ring3_ready(pid: u32) {
     if pid == KERNEL_PID {
         debug_assert!(false, "attempted to mark sentinel ring-3 ready");
+        return;
+    }
+    let blocked_io = {
+        let table = PROCESS_TABLE.lock();
+        match table.ring3_blocked.get(&pid) {
+            Some(Ring3BlockReason::WaitingForBlockIo { token }) => Some(*token),
+            _ => None,
+        }
+    };
+    if let Some(token) = blocked_io {
+        crate::diagnostics::shadow::io::reject_generic_io_wake(pid, token);
         return;
     }
     PROCESS_TABLE.lock().ring3_blocked.remove(&pid);
@@ -945,9 +988,11 @@ pub fn queue_ring3_io_wake(pid: u32, token: u64) {
             .is_ok()
         {
             slot.token.store(token, Ordering::Release);
+            crate::diagnostics::shadow::io::queue_wake(token, pid);
             return;
         }
     }
+    crate::diagnostics::shadow::io::wake_lost(token, pid);
     crate::debug_error!("ring-3 I/O wake queue full for PID {} token {}", pid, token);
 }
 
@@ -978,11 +1023,13 @@ fn try_wake_ring3_blocked_on_io(pid: u32, token: u64) -> bool {
         if !matches!(process.exit_kind, ExitKind::None) {
             return true;
         }
-        if !matches!(
-            table.ring3_blocked.get(&pid),
-            Some(Ring3BlockReason::WaitingForBlockIo { token: awaited }) if *awaited == token
-        ) {
-            return false;
+        match table.ring3_blocked.get(&pid) {
+            Some(Ring3BlockReason::WaitingForBlockIo { token: awaited }) if *awaited == token => {}
+            Some(Ring3BlockReason::WaitingForBlockIo { token: awaited }) => {
+                crate::diagnostics::shadow::io::wrong_wake(token, pid, *awaited);
+                return true;
+            }
+            _ => return false,
         }
     }
 
@@ -1004,6 +1051,8 @@ fn try_wake_ring3_blocked_on_io(pid: u32, token: u64) -> bool {
     ) {
         return false;
     }
+    crate::diagnostics::shadow::io::accept_wake(token, pid);
+    crate::diagnostics::shadow::continuation::wake(pid, token);
     mark_ring3_ready(pid);
     true
 }
@@ -1599,16 +1648,44 @@ pub fn clear_stale_network_wait(syscall_nr: u64) {
 /// set `pending_syscall_interrupt` so the re-fired syscall enters the
 /// dispatcher as `-EINTR`, and requeue as ready.
 pub fn wake_ring3_for_signal(pid: u32) {
-    let Some(mut g) = PROCESS_TABLE.try_lock() else {
-        return;
-    };
-    let actionable = g
-        .by_pid
-        .get(&pid)
-        .is_some_and(|p| p.signal_state.has_actionable_pending());
-    if !actionable {
-        return;
+    {
+        let Some(g) = PROCESS_TABLE.try_lock() else {
+            return;
+        };
+        let actionable = g
+            .by_pid
+            .get(&pid)
+            .is_some_and(|p| p.signal_state.has_actionable_pending());
+        if !actionable {
+            return;
+        }
+        // A kernel-managed block-I/O continuation is not an interruptible
+        // userspace syscall. Its saved kernel stack may resume only after the
+        // exact request token completes and `try_wake_ring3_blocked_on_io`
+        // accepts that token.
+        if let Some(Ring3BlockReason::WaitingForBlockIo { token }) =
+            g.ring3_blocked.get(&pid).copied()
+        {
+            crate::diagnostics::trace::record(
+                crate::diagnostics::trace::EventKind::SignalWakeDeferredIo,
+                u64::from(pid),
+                token,
+                0,
+                0,
+            );
+            return;
+        }
     }
+    crate::diagnostics::trace::record(
+        crate::diagnostics::trace::EventKind::SignalWakeAttempt,
+        u64::from(pid),
+        0,
+        0,
+        0,
+    );
+    // Do not hold PROCESS_TABLE while taking SCHEDULER. Procfs snapshots use
+    // the reviewed Scheduler -> ProcessTable order, so the reverse nesting
+    // would make a real cross-CPU deadlock cycle.
     let running_cpu = {
         let scheduler = crate::process::scheduler::SCHEDULER.lock();
         (0..crate::arch::x86_64::smp::online_cpu_count()).find(|cpu| {
@@ -1625,6 +1702,27 @@ pub fn wake_ring3_for_signal(pid: u32) {
             );
             crate::arch::x86_64::percpu::record_reschedule_ipi(cpu);
         }
+    }
+    let Some(mut g) = PROCESS_TABLE.try_lock() else {
+        return;
+    };
+    let actionable = g
+        .by_pid
+        .get(&pid)
+        .is_some_and(|p| p.signal_state.has_actionable_pending());
+    if !actionable {
+        return;
+    }
+    if let Some(Ring3BlockReason::WaitingForBlockIo { token }) = g.ring3_blocked.get(&pid).copied()
+    {
+        crate::diagnostics::trace::record(
+            crate::diagnostics::trace::EventKind::SignalWakeDeferredIo,
+            u64::from(pid),
+            token,
+            0,
+            0,
+        );
+        return;
     }
     let Some(reason) = g.ring3_blocked.remove(&pid) else {
         return;
@@ -1819,11 +1917,8 @@ pub fn try_preempt_ring3(
 
     let next = crate::process::scheduler::SCHEDULER
         .lock()
-        .pop_next_user()?;
+        .peek_next_user()?;
     if next == cur {
-        crate::process::scheduler::SCHEDULER
-            .lock()
-            .yield_entity(crate::process::entity::EntityId::UserProcess(next));
         return None;
     }
 
@@ -1836,9 +1931,9 @@ pub fn try_preempt_ring3(
         let cur_p = g.by_pid.get_mut(&cur)?;
         crate::userland::switch::save_ring3(cur_p, frame);
     }
-    crate::process::scheduler::SCHEDULER
-        .lock()
-        .yield_entity(crate::process::entity::EntityId::UserProcess(cur));
+    let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
+    scheduler.yield_entity(crate::process::entity::EntityId::UserProcess(cur));
+    let next = scheduler.pop_next_user()?;
 
     // current_user_pid is not flipped here — `resume_ring3` does
     // that atomically with the CR3 / TSS.rsp0 / GSBASE side-effects.
@@ -1896,7 +1991,7 @@ pub fn install_new_process_opt(
     image: UserImage,
     brk_base: u64,
     mmap_base: u64,
-    address_space: Option<AddressSpace>,
+    mut address_space: Option<AddressSpace>,
 ) -> u32 {
     let pid = alloc_pid();
     let stack_top = image.stack_top.as_u64();
@@ -1904,6 +1999,11 @@ pub fn install_new_process_opt(
     let stack_max_growth_floor = image.stack_max_growth_floor;
     let mut fd_table = FdTable::new();
     fd_table.install_default_streams();
+    if let Some(space) = address_space.as_mut() {
+        space.publish_owner(pid);
+    }
+    let mut kernel_stack = KernelStack::new();
+    kernel_stack.publish_owner(pid);
     let mut p = Process {
         pid,
         parent_pid: KERNEL_PID,
@@ -1924,7 +2024,7 @@ pub fn install_new_process_opt(
         signal_state: SignalState::new(),
         signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
         membarrier_private_registered: false,
-        kernel_stack: Some(KernelStack::new()),
+        kernel_stack: Some(kernel_stack),
         exe_path: None,
         cmdline: alloc::vec::Vec::new(),
         utime_ticks: 0,
@@ -2122,9 +2222,11 @@ pub fn try_grow_user_stack(fault_addr: x86_64::VirtAddr) -> GrowOutcome {
     };
 
     // Map one page R+W under the active address space.
-    let map_result = crate::mm::memory::with_memory_mapper(|m| {
-        m.map_user_region(x86_64::VirtAddr::new(new_page), 1, UserPerms::ReadWrite)
-    });
+    let map_result = crate::mm::memory::map_user_region(
+        x86_64::VirtAddr::new(new_page),
+        1,
+        UserPerms::ReadWrite,
+    );
     match map_result {
         Some(Ok(_)) => {}
         // The page was already mapped — the fault must have been a
@@ -2216,9 +2318,10 @@ pub fn unmap_user_stack(p: &mut Process) {
         return;
     }
     let page_count = (p.stack_top - p.stack_mapped_bottom) / 0x1000;
-    let _ = crate::mm::memory::with_memory_mapper(|m| {
-        m.unmap_user_region(x86_64::VirtAddr::new(p.stack_mapped_bottom), page_count)
-    });
+    let _ = crate::mm::memory::unmap_user_region(
+        x86_64::VirtAddr::new(p.stack_mapped_bottom),
+        page_count,
+    );
     // Tell `UserImage::Drop` we already handled the stack so it doesn't
     // try to unmap the (now unmapped) initial commit again.
     if let Some(img) = p.image.as_mut() {
@@ -2725,7 +2828,10 @@ pub fn cooperative_thread_exit(code: i64) -> ! {
     } else {
         crate::userland::process_service::notify_process_exit(tid);
     }
+    crate::diagnostics::shadow::stack::begin_abandon(tid);
+    crate::diagnostics::shadow::cpu::begin_kernel(None);
     set_current_user_pid(None);
+    crate::diagnostics::shadow::cpu::clear_current_pid();
     unsafe { crate::userland::switch::dispatch_after_user_stop() }
 }
 
@@ -2741,7 +2847,10 @@ pub fn cooperative_group_exit(code: i64) -> ! {
     }
     with_group(tgid, unmap_user_stack);
     finish_group(tgid, code);
+    crate::diagnostics::shadow::stack::begin_abandon(tid);
+    crate::diagnostics::shadow::cpu::begin_kernel(None);
     set_current_user_pid(None);
+    crate::diagnostics::shadow::cpu::clear_current_pid();
     unsafe { crate::userland::switch::dispatch_after_user_stop() }
 }
 
@@ -2787,7 +2896,10 @@ fn long_jump_to_run_or_halt() -> ! {
         // Clear current_user_pid — we're no longer running this
         // process. The next ring-3 dispatch (via resume_ring3) will
         // set it to the next pid.
+        crate::diagnostics::shadow::stack::begin_abandon(pid);
+        crate::diagnostics::shadow::cpu::begin_kernel(None);
         set_current_user_pid(None);
+        crate::diagnostics::shadow::cpu::clear_current_pid();
     }
 
     unsafe { crate::userland::switch::dispatch_after_user_stop() }

@@ -29,13 +29,15 @@ pub struct InterruptGuard {
 /// attempting the lock; the inner spin lock provides cross-CPU exclusion.
 pub struct InterruptMutex<T> {
     inner: spin::Mutex<T>,
+    class: crate::diagnostics::shadow::locks::LockClassId,
 }
 
-/// Guard returned by [`InterruptMutex`]. Field order is load-bearing: Rust
-/// drops fields in declaration order, so the spin guard releases the mutex
-/// before the interrupt guard restores IF.
+/// Guard returned by [`InterruptMutex`]. Its explicit drop order publishes
+/// shadow release, unlocks the spin mutex, and only then lets the interrupt
+/// guard restore IF.
 pub struct InterruptMutexGuard<'a, T> {
-    inner: spin::MutexGuard<'a, T>,
+    inner: core::mem::ManuallyDrop<spin::MutexGuard<'a, T>>,
+    class: crate::diagnostics::shadow::locks::LockClassId,
     _interrupt_guard: InterruptGuard,
 }
 
@@ -43,23 +45,63 @@ impl<T> InterruptMutex<T> {
     pub const fn new(value: T) -> Self {
         Self {
             inner: spin::Mutex::new(value),
+            class: crate::diagnostics::shadow::locks::LockClassId::Untracked,
         }
     }
 
+    pub const fn new_tracked(
+        value: T,
+        class: crate::diagnostics::shadow::locks::LockClassId,
+    ) -> Self {
+        Self {
+            inner: spin::Mutex::new(value),
+            class,
+        }
+    }
+
+    #[track_caller]
     pub fn lock(&self) -> InterruptMutexGuard<'_, T> {
         let interrupt_guard = InterruptGuard::disable();
+        let site = crate::diagnostics::shadow::locks::site_id(core::panic::Location::caller());
+        crate::diagnostics::shadow::locks::before_acquire(
+            self.class,
+            crate::diagnostics::shadow::locks::LockKind::Interrupt,
+            site,
+        );
         let inner = self.inner.lock();
+        crate::diagnostics::shadow::locks::acquired(
+            self.class,
+            crate::diagnostics::shadow::locks::LockKind::Interrupt,
+            site,
+        );
         InterruptMutexGuard {
-            inner,
+            inner: core::mem::ManuallyDrop::new(inner),
+            class: self.class,
             _interrupt_guard: interrupt_guard,
         }
     }
 
+    #[track_caller]
     pub fn try_lock(&self) -> Option<InterruptMutexGuard<'_, T>> {
         let interrupt_guard = InterruptGuard::disable();
-        let inner = self.inner.try_lock()?;
+        let site = crate::diagnostics::shadow::locks::site_id(core::panic::Location::caller());
+        crate::diagnostics::shadow::locks::before_acquire(
+            self.class,
+            crate::diagnostics::shadow::locks::LockKind::Interrupt,
+            site,
+        );
+        let Some(inner) = self.inner.try_lock() else {
+            crate::diagnostics::shadow::locks::failed_try(self.class);
+            return None;
+        };
+        crate::diagnostics::shadow::locks::acquired(
+            self.class,
+            crate::diagnostics::shadow::locks::LockKind::Interrupt,
+            site,
+        );
         Some(InterruptMutexGuard {
-            inner,
+            inner: core::mem::ManuallyDrop::new(inner),
+            class: self.class,
             _interrupt_guard: interrupt_guard,
         })
     }
@@ -76,6 +118,13 @@ impl<T> core::ops::Deref for InterruptMutexGuard<'_, T> {
 impl<T> core::ops::DerefMut for InterruptMutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
+    }
+}
+
+impl<T> Drop for InterruptMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        crate::diagnostics::shadow::locks::released(self.class);
+        unsafe { core::mem::ManuallyDrop::drop(&mut self.inner) };
     }
 }
 

@@ -54,10 +54,14 @@ loader and older kernel fixtures. Mapping operations:
 `UserPerms` (R-X, R, R-W) bakes in NX/WX hygiene. `EFER.NXE` is enabled during architecture initialization, so NX is enforced.
 
 All runtime access to the global `MemoryMapper` goes through
-`memory::with_memory_mapper`; do not call `paging::get_mapper` outside the
-`mm` module. The mapper is protected by an `InterruptMutex`, and a per-CPU
-debug flag rejects recursive acquisition. Closures must stay bounded, must not
-yield, and must not touch memory that could page-fault while the lock is held.
+`memory::with_memory_mapper` or the allocation-safe
+`memory::{map_user_region,unmap_user_region}` wrappers; do not call
+`paging::get_mapper` outside the `mm` module. The mapper is protected by a
+tracked `InterruptMutex`, and a per-CPU debug flag rejects recursive
+acquisition. Closures must stay bounded, must not yield, allocate, or touch
+memory that could page-fault while the lock is held. Mapping result `Vec`s are
+reserved before taking `MAPPER`: heap demand paging establishes
+HeapAllocator→MemoryMapper, so the reverse edge is a fatal `LOCK-004`.
 
 ## Page-fault flow
 
@@ -108,6 +112,11 @@ A `debug_assert!(bytes_read <= size)` makes the bound a runtime check in test bu
 - **`OffsetPageTable` requires the physical-memory offset.** Don't construct one directly; go through `MemoryMapper`.
 - **Frame 0 and allocator metadata are pinned.** Releasing pinned, unmanaged, already-free, or overflowing references is rejected rather than corrupting the bitmap.
 - **Every installed user leaf owns one frame reference.** COW fork retains leaves; every unmap/drop path must release exactly once. Never hide release calls inside `debug_assert!`, because release builds erase the assertion expression.
+- **Rich diagnostics audit independently.** Frame references are typed at
+  allocator commit points; user leaves are keyed by address-space generation
+  and VA; address-space publish/drop walks raw tables to reconcile USER
+  ancestry, W^X, frame types, counts, and mapping generations. Do not use the
+  shadow ledger to make a production mapping or refcount decision.
 
 ## Debugging
 
