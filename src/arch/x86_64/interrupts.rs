@@ -16,6 +16,13 @@ fn route_user_fault_or_panic(
     fault_addr: Option<x86_64::VirtAddr>,
     panic_msg: &'static str,
 ) -> ! {
+    crate::diagnostics::trace::record_interrupt_boundary(
+        crate::diagnostics::trace::EventKind::InterruptEntry,
+        vector,
+        (stack_frame.code_segment as u64 & 3) as u8,
+        false,
+        crate::diagnostics::trace::InterruptOutcome::Return,
+    );
     if frame_is_user(stack_frame.code_segment as u64) {
         cleanup_user_process(AbnormalExit {
             vector,
@@ -551,8 +558,7 @@ extern "x86-interrupt" fn page_fault_handler(
         if let Some(result) =
             crate::mm::memory::with_memory_mapper(|mapper| mapper.handle_page_fault(accessed_addr))
         {
-            if let Err(e) = result {
-                debug_error!("Failed to handle page fault: {:?}", e);
+            if result.is_err() {
                 crate::diagnostics::crash::begin_trap(
                     "kernel-demand-map-failed",
                     14,
@@ -567,13 +573,8 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    // Not a heap fault or couldn't handle it - panic
-    debug_error!("EXCEPTION: PAGE FAULT");
-    debug_error!("Accessed Address: {:?}", accessed_addr);
-    debug_error!("Error Code: {:?}", error_code);
-    debug_error!("Instruction Pointer: {:?}", stack_frame.instruction_pointer);
-    debug_error!("{:#?}", stack_frame);
-
+    // Not a heap fault or couldn't handle it: elect and serialize the crash
+    // owner before touching any contended logger state.
     crate::diagnostics::crash::begin_trap(
         "unhandled-page-fault",
         14,
@@ -584,6 +585,13 @@ extern "x86-interrupt" fn page_fault_handler(
 }
 
 extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame, _error_code: u64) {
+    crate::diagnostics::trace::record_interrupt_boundary(
+        crate::diagnostics::trace::EventKind::InterruptEntry,
+        8,
+        (stack_frame.code_segment as u64 & 3) as u8,
+        false,
+        crate::diagnostics::trace::InterruptOutcome::Return,
+    );
     crate::diagnostics::crash::begin_trap(
         "double-fault",
         8,
@@ -597,10 +605,6 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    debug_error!("EXCEPTION: GENERAL PROTECTION FAULT");
-    debug_error!("Error Code: {}", error_code);
-    debug_error!("{:#?}", stack_frame);
-
     route_user_fault_or_panic(
         &stack_frame,
         13,
@@ -611,30 +615,18 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    debug_error!("EXCEPTION: INVALID OPCODE");
-    debug_error!("{:#?}", stack_frame);
-
     route_user_fault_or_panic(&stack_frame, 6, None, None, "Invalid opcode");
 }
 
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
-    debug_error!("EXCEPTION: DIVIDE ERROR");
-    debug_error!("{:#?}", stack_frame);
-
     route_user_fault_or_panic(&stack_frame, 0, None, None, "Divide error");
 }
 
 extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
-    debug_error!("EXCEPTION: OVERFLOW");
-    debug_error!("{:#?}", stack_frame);
-
     route_user_fault_or_panic(&stack_frame, 4, None, None, "Overflow");
 }
 
 extern "x86-interrupt" fn bound_range_exceeded_handler(stack_frame: InterruptStackFrame) {
-    debug_error!("EXCEPTION: BOUND RANGE EXCEEDED");
-    debug_error!("{:#?}", stack_frame);
-
     route_user_fault_or_panic(&stack_frame, 5, None, None, "Bound range exceeded");
 }
 
@@ -646,10 +638,6 @@ extern "x86-interrupt" fn segment_not_present_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    debug_error!("EXCEPTION: SEGMENT NOT PRESENT");
-    debug_error!("Error Code: {}", error_code);
-    debug_error!("{:#?}", stack_frame);
-
     route_user_fault_or_panic(
         &stack_frame,
         11,
@@ -663,10 +651,6 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    debug_error!("EXCEPTION: STACK SEGMENT FAULT");
-    debug_error!("Error Code: {}", error_code);
-    debug_error!("{:#?}", stack_frame);
-
     route_user_fault_or_panic(
         &stack_frame,
         12,
@@ -680,10 +664,6 @@ extern "x86-interrupt" fn alignment_check_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    debug_error!("EXCEPTION: ALIGNMENT CHECK");
-    debug_error!("Error Code: {}", error_code);
-    debug_error!("{:#?}", stack_frame);
-
     route_user_fault_or_panic(&stack_frame, 17, Some(error_code), None, "Alignment check");
 }
 

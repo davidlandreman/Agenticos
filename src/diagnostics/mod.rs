@@ -68,6 +68,18 @@ pub fn maybe_inject_crash() {
         .unwrap_or(length);
     match &value[..end] {
         b"panic" => panic!("diagnostic crash injection"),
+        b"fatal-page-fault" => {
+            const UNMAPPED: u64 = 0xffff_f000_0000_0000;
+            unsafe {
+                core::arch::asm!(
+                    "mov rax, qword ptr [rdi]",
+                    in("rdi") UNMAPPED,
+                    out("rax") _,
+                    options(nostack, readonly),
+                );
+            }
+            panic!("fatal page-fault injection unexpectedly returned");
+        }
         b"sched-duplicate" => {
             use crate::diagnostics::shadow::scheduler::{OperationKind, Transition};
             use crate::process::entity::EntityId;

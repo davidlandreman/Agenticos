@@ -86,8 +86,18 @@ INTERRUPT_OUTCOME_NAMES = {
     7: "recovered_kernel_demand",
 }
 INTERRUPT_VECTOR_NAMES = {
+    0: "divide_error",
     2: "nmi",
+    4: "overflow",
+    5: "bound_range",
+    6: "invalid_opcode",
+    8: "double_fault",
+    10: "invalid_tss",
+    11: "segment_not_present",
+    12: "stack_segment_fault",
+    13: "general_protection",
     14: "page_fault",
+    17: "alignment_check",
     32: "pit_timer",
     0xEF: "lapic_timer",
     0xF0: "reschedule",

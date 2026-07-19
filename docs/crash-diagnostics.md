@@ -57,6 +57,7 @@ Run expected-fatal smoke cases with:
 
 ```sh
 scripts/test-crash-diagnostics.sh panic
+scripts/test-crash-diagnostics.sh fatal-page-fault
 scripts/test-crash-diagnostics.sh missing-cpu
 scripts/test-crash-diagnostics.sh sched-duplicate
 scripts/test-crash-diagnostics.sh cont-signal-wake
@@ -83,6 +84,9 @@ crashes must capture all four CPUs. `missing-cpu` deliberately withholds one
 NMI acknowledgement and requires a bounded, valid partial capsule instead of
 a hang. `sched-duplicate` requires strict mode to report `SCHED-001` as the
 first invariant.
+`fatal-page-fault` performs one inline-assembly read from a known unmapped
+canonical kernel address and requires vector 14 plus the exact CR2 address;
+this qualifies the logger-free fatal exception route itself.
 `cont-signal-wake` proves a generic wake cannot make a block-I/O continuation
 runnable and requires `CONT-004` as the first invariant.
 `cont-invalid-stack` attempts to dispatch a saved continuation outside its
@@ -102,6 +106,9 @@ IF/preemption context, and a dependency cycle.
   production lock after crash ownership is elected.
 - The first owner writes the capsule; nested entrants only increment the
   secondary marker and halt/exit.
+- Fatal exception handlers elect the capsule owner before any contended debug
+  logging. Their unmatched boundary entry and trigger section preserve the
+  vector, error code, fault address, and instruction pointer.
 - The owner captures itself, broadcasts a panic NMI, and waits only for a
   bounded TSC/spin budget. Remote CPUs snapshot on their private panic IST and
   halt without taking production locks.

@@ -4,6 +4,7 @@ set -eu
 CASE_NAME="${1:-panic}"
 case "$CASE_NAME" in
     panic) MISSING_CPU=""; DIAGNOSTICS=record; INJECT=panic ;;
+    fatal-page-fault) MISSING_CPU=""; DIAGNOSTICS=record; INJECT=fatal-page-fault ;;
     missing-cpu) MISSING_CPU=3; DIAGNOSTICS=record; INJECT=panic ;;
     sched-duplicate) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=sched-duplicate ;;
     cont-signal-wake) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cont-signal-wake ;;
@@ -22,7 +23,7 @@ case "$CASE_NAME" in
     cpu-wrong-pid) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-wrong-pid ;;
     cpu-kernel-cr3) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-kernel-cr3 ;;
     cpu-wrong-publication) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cpu-wrong-publication ;;
-    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active, mm-double-release, mm-wrong-unmap, mm-wx, lock-recursion, lock-wrong-owner, lock-wrong-context, lock-cycle, cpu-wrong-cr3, cpu-wrong-order, cpu-wrong-pid, cpu-kernel-cr3, cpu-wrong-publication" >&2; exit 2 ;;
+    *) echo "supported crash cases: panic, fatal-page-fault, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active, mm-double-release, mm-wrong-unmap, mm-wx, lock-recursion, lock-wrong-owner, lock-wrong-context, lock-cycle, cpu-wrong-cr3, cpu-wrong-order, cpu-wrong-pid, cpu-kernel-cr3, cpu-wrong-publication" >&2; exit 2 ;;
 esac
 
 RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -95,7 +96,7 @@ assert not report["missing"], report
 assert report["footer"]["complete"] is True, report
 assert report["backtrace"]["frames"] or report["backtrace"]["unavailable_reason"] != 0, report
 assert report["cpu_masks"]["online"] == 0x0f, report
-if case == "panic" or case in invariant_cases:
+if case in ("panic", "fatal-page-fault") or case in invariant_cases:
     assert report["cpu_masks"]["captured"] == 0x0f, report
     assert len(report["cpus"]) == 4, report
     assert report["flags"] & 0x04 == 0, report
@@ -105,6 +106,9 @@ else:
     assert report["flags"] & 0x04, report
 if case in ("panic", "missing-cpu"):
     assert report["trigger"]["signature"] == "VEC-ff:0xf3243b8bc636f3bd", report
+if case == "fatal-page-fault":
+    assert report["trigger"]["vector"] == 14, report
+    assert report["trigger"]["fault_address"] == "0xfffff00000000000", report
 if case == "sched-duplicate":
     assert report["violation"]["id"] == 0x01000001, report
     assert report["trigger"]["signature"] == "INV-01000001", report
