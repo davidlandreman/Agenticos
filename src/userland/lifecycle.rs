@@ -839,6 +839,15 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
     crate::process::scheduler::SCHEDULER
         .lock()
         .block_entity(crate::process::entity::EntityId::UserProcess(pid));
+    // PROCESS_TABLE and SCHEDULER are separate locks. A producer can remove
+    // the published reason and mark the entity Ready between the insertion
+    // above and block_entity, leaving the final scheduler state Blocked after
+    // the wake has already been consumed. Reconcile that interleaving after
+    // publishing Blocked; absence from the blocked index means a wake won.
+    if !PROCESS_TABLE.lock().ring3_blocked.contains_key(&pid) {
+        mark_ring3_ready(pid);
+        return;
+    }
     let entity = crate::process::entity::EntityId::UserProcess(pid);
     match reason {
         Ring3BlockReason::Sleeping { deadline_tick } => {

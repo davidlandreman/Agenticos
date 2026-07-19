@@ -8,6 +8,9 @@
 //! writable `/work` overlay (temp files to `/tmp`), and the fresh
 //! binaries run through the production loader. Missing artifacts are
 //! test failures, never skips.
+//! This module is deliberately excluded from the default suite because the
+//! multi-stage native pipeline is slow; run it explicitly with
+//! `./test.sh gcc`.
 //!
 //! Plan: docs/plans/2026-07-18-011-feat-gcc-port-plan.md (U4).
 
@@ -22,11 +25,16 @@ const GCC_DRIVER: &str = "/host/gcc/bin/gcc";
 /// cooperative exit code.
 fn run_to_exit(path: &str, argv: &[&str]) -> i64 {
     assert!(crate::fs::exists(path), "missing binary: {}", path);
+    // cc1 is a 27 MiB static image demand-paged from QEMU's FAT fixture;
+    // keep the wait bounded, but give the complete compile/link pipeline a
+    // realistic budget without weakening every other userland test.
+    let prior_timeout = crate::process::set_inline_ring3_test_timeout_ticks(30_000);
     let prior_trace = crate::userland::abi::is_trace_mode();
     crate::userland::abi::set_trace_mode(true);
     crate::userland::abi::reset_unknown_syscall_trace();
     let result =
         crate::userland::launcher::launch_user_binary(path, argv, &["PATH=/bin:/host", "LANG=C"]);
+    crate::process::set_inline_ring3_test_timeout_ticks(prior_timeout);
     crate::userland::abi::set_trace_mode(prior_trace);
     crate::userland::abi::clear_user_va_bounds();
     let (kind, code) = result.unwrap_or_else(|error| panic!("{} launch failed: {}", path, error));

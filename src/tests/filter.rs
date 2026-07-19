@@ -11,7 +11,8 @@
 //!   - `arc`              — exact module match
 //!   - `arc::test_weak*`  — prefix glob within a module
 //!   - `*scroll*`         — substring anywhere in `<module>::<fn>`
-//! Empty / unset filter runs everything.
+//! Empty / unset filter runs the default suite. Exceptionally slow opt-in
+//! modules remain available through an explicit filter such as `gcc`.
 
 use crate::debug_info;
 use crate::drivers::fw_cfg;
@@ -25,7 +26,7 @@ static mut FILTER_LEN: usize = 0;
 /// Read the filter string from fw_cfg into a static buffer.
 ///
 /// Idempotent and silent when fw_cfg is absent or the file is missing
-/// (in either case, no filter is set → all tests run).
+/// (in either case, no filter is set → the default suite runs).
 pub fn init() {
     let len = unsafe {
         let buf = &mut *core::ptr::addr_of_mut!(FILTER_BUF);
@@ -69,7 +70,7 @@ pub fn filter_str() -> Option<&'static str> {
     core::str::from_utf8(&buf[..len]).ok()
 }
 
-/// True when no filter is active (i.e., run everything).
+/// True when no filter is active (i.e., run the default suite).
 pub fn is_empty() -> bool {
     filter_str().is_none()
 }
@@ -78,7 +79,8 @@ pub fn is_empty() -> bool {
 ///
 /// `module` is the registry name (e.g. `"arc"`); `full_name` is
 /// `"<module>::<fn>"` (e.g. `"arc::test_weak_basic"`). Returns true when no
-/// filter is set.
+/// filter is set. The test registry separately excludes unusually slow opt-in
+/// modules from the default no-filter suite.
 pub fn matches(module: &str, full_name: &str) -> bool {
     let filter = match filter_str() {
         Some(s) => s,

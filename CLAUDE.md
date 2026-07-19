@@ -55,15 +55,14 @@ works — init, add, commit, branch, checkout, merge, log, diff, status,
 cat-file, rev-parse, config. The kernel seeds `/etc/gitconfig` (root identity,
 `init.defaultBranch=main`, `safe.directory=*`, `core.fileMode=false`,
 `core.pager=cat`, `gc.auto=0`, `maintenance.auto=false`); repos belong on
-`/work` or `/data`. **Pack-protocol transports (`clone`/`fetch`/`push`) do not
-yet complete** — they hold a bidirectional pipe conversation across a spawned
-helper and hit a pre-existing multi-process pipe/poll scheduler lost-wake (the
-same family as the links2-HTTPS hang), a separate kernel project; ssh and
-`git://` are also out of scope. Bringing git up fixed three real kernel bugs:
+`/work` or `/data`. Local and HTTP(S) pack-protocol transports work; ssh and
+`git://` remain out of scope. Bringing git up fixed several real kernel bugs:
 the missing `/dev/null`, a signal-frame red-zone clobber in `deliver_signal`
 (async-signal handlers now return without corrupting the interrupted context),
 and a fork→pipe→wait deadlock where a child's fds stayed open until reap (fds
-now close at exit).
+now close at exit). Follow-up diagnosis also fixed CLOEXEC endpoint teardown
+under `PROCESS_TABLE`, dup-family close-on-exec semantics, and a two-lock
+blocked→scheduler publication race that could consume a wake before parking.
 Kernel-requested programs use one persistent `process-service`: Start, Run, and Terminal enqueue requests and return immediately, and the service later reaps detached exits from its own stack.
 
 The legacy kernel-side command interpreter (the `shell/` process that hand-parsed commands) and its hardcoded utilities (`cat`, `ls`, `grep`, `pwd`, `wc`, `hexdump`, `echo`, `dir`, `head`, `tail`, `time`, `touch`, `wc`, `run`) were removed when zsh became the default — see `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`. Type those names in zsh and BusyBox handles them.
@@ -96,7 +95,8 @@ unused kernel-side file open/save dialogs have been removed.
 **QEMU Configuration**: 2 GiB RAM by default (override with `AGENTICOS_QEMU_MEMORY`), four CPUs by default (override with `AGENTICOS_QEMU_SMP=1..8`), serial output, a UTC CMOS RTC, host-`/dev/urandom`-backed modern VirtIO RNG, VirtIO tablet, explicit modern VirtIO-net with QEMU user-mode NAT, and `isa-debug-exit` for test integration. Set `AGENTICOS_NETWORK=off` for a no-NIC interactive boot; tests use restricted networking plus repository-owned guest-forwarded services. QEMU builds without the slirp `user` backend (the pinned macOS VirGL bottle) automatically get networking through a stock-QEMU slirp bridge (`scripts/qemu-slirp-bridge.sh`), so VirGL GPU launches are networked too.
 
 ### Testing
-- `./test.sh` — Run all kernel tests in QEMU with automatic exit
+- `./test.sh` — Run the default kernel test suite in QEMU with automatic exit
+- `./test.sh gcc` — Run the opt-in slow GCC end-to-end pipeline
 - `./test.sh arc heap` — Run only the listed test modules
 - `./test.sh 'arc::test_weak*'` — Glob within a module
 - `./test.sh -l` — List available modules and exit

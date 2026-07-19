@@ -37,6 +37,14 @@ implementation details live in `src/userland/`.
 
 **Multi-ring-3 integration:** ring-3 processes and kernel threads share the tagged scheduler queue. Production launchers do not wait: `process-service` installs the process as Ready, then returns to its queue. On exit the user entity is unregistered and the service is woken to drop the `Process` from a safe kernel stack. `WaitingForRing3Exit` remains only for synchronous QEMU-test compatibility.
 
+Ring-3 blocking is published in two structures guarded by different locks:
+`PROCESS_TABLE.ring3_blocked` records the targeted wake reason and the unified
+scheduler records the entity as Blocked. `mark_ring3_blocked` must reconcile
+the scheduler state after both writes: a producer may remove the reason and
+mark Ready between them, and without the final reason-presence check the later
+Blocked write would consume that wake. Git's multi-process transport exposed
+this ordering race.
+
 **Pthread affinity rule:** several ring-3 task entities may share one TGID and
 address space. Until user TLB shootdown exists, the group is assigned a home
 CPU on its first pthread clone and all members receive scheduler affinity to
