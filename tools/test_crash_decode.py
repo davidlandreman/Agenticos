@@ -167,6 +167,22 @@ class CrashDecodeTests(unittest.TestCase):
         self.assertEqual(operands["device"], 3)
         self.assertEqual(operands["queue_head"], 17)
 
+    def test_page_in_terminal_operands_are_decoded(self):
+        terminal = struct.pack(
+            "<8Q", 1, 2, 3, 77, 0x7FFF_F000, 10 | (4096 << 16), 2048, 0x0100_0401
+        )
+        trace = (
+            struct.pack("<HHHHBBHQQQI", 1, 1024, 128, 0, 0, 0, 0, 2, 0, 0, 1)
+            + terminal
+        )
+        report, _ = crash_decode.parse_capsule(capsule([section(5, trace)]))
+        operands = report["trace"]["cpus"][0]["records"][0]["operands"]
+        self.assertEqual(operands["page"], "0x000000007ffff000")
+        self.assertEqual(operands["reason"], "short_read")
+        self.assertEqual(operands["requested_bytes"], 4096)
+        self.assertEqual(operands["actual_bytes"], 2048)
+        self.assertEqual(operands["page_generation"], 77)
+
     def test_missing_rich_sections_are_absent_evidence(self):
         metadata = struct.pack("<BBHI", 2, 0, 0, 3)
         for value in ("abc", "0", "rustc", "strict"):

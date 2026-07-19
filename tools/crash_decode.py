@@ -112,6 +112,23 @@ IO_PHASE_NAMES = {
     0x82: "wrong_wake",
     0x83: "generic_wake_rejected",
 }
+PAGE_IN_TERMINAL_NAMES = {
+    0: "present_committed",
+    1: "no_address_space",
+    2: "no_vma",
+    3: "permission_denied",
+    4: "mapper_unavailable",
+    5: "frame_allocation_failed",
+    6: "physical_alias_failed",
+    7: "file_extent_overflow",
+    8: "file_offset_invalid",
+    9: "io_completion_error",
+    10: "short_read",
+    11: "vma_changed_during_io",
+    12: "leaf_collision",
+    13: "map_failed",
+    14: "rollback_release_failed",
+}
 LOCK_CLASS_NAMES = {
     1: "scheduler",
     2: "process_table",
@@ -405,6 +422,17 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
                         "state": RUN_STATE_NAMES.get(arg0, f"unknown({arg0})"),
                         "entity_existed": bool(arg1 & 1),
                         "newly_enqueued": bool(arg1 & 2),
+                    }
+                elif kind == 0x401:
+                    reason = arg0 & 0xFFFF
+                    record["operands"] = {
+                        "page": f"0x{subject:016x}",
+                        "reason": PAGE_IN_TERMINAL_NAMES.get(
+                            reason, f"unknown({reason})"
+                        ),
+                        "requested_bytes": arg0 >> 16,
+                        "actual_bytes": arg1,
+                        "page_generation": epoch,
                     }
                 elif kind == 0x500:
                     phase = arg0 & 0xFF

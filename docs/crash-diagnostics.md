@@ -154,6 +154,11 @@ available in the bounded I/O shadow but do not consume recorder bandwidth;
 rejected, lost, and wrong-token pager wakes are explicit phases rather than
 inferred from a missing success record.
 
+`page_in_terminal` names the stable terminal reason and preserves the page,
+requested byte count, actual byte count, and pager generation. In rich modes
+that generation joins the terminal result to the matching pager-shadow record;
+zero means the minimal recorder observed the result without a shadow handle.
+
 Lazy file page-in now follows a private-frame commit protocol: allocate and
 zero privately, perform an exact-length read, revalidate the L4/VMA, and then
 install the present leaf. Signals stay pending while a kernel block-I/O

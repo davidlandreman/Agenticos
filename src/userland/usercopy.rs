@@ -73,7 +73,7 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
         page,
         u64::from(reason as u16) | ((requested as u64) << 16),
         actual as u64,
-        0,
+        pager.map_or(0, crate::diagnostics::shadow::pager::Handle::generation),
     );
     if let (Some(handle), Err(failure)) = (pager, outcome) {
         crate::diagnostics::shadow::pager::abort(

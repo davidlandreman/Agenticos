@@ -117,6 +117,12 @@ pub struct Handle {
     generation: u64,
 }
 
+impl Handle {
+    pub fn generation(self) -> u64 {
+        self.generation
+    }
+}
+
 fn report(id: u32, transaction: Transaction, expected: u64, observed: u64) {
     let first = latch(ViolationRecord {
         invariant_id: id,

@@ -71,6 +71,11 @@ pub enum EventKind {
 //             4 dead, 0 missing)
 //   arg1    = entity-existed flag in bit 0, newly-enqueued flag in bit 1
 //   epoch   = committed scheduler-shadow epoch
+// PageInTerminal:
+//   subject = page-aligned user virtual address
+//   arg0    = PageInTerminalReason in bits 0..15, requested bytes above bit 15
+//   arg1    = actual bytes populated
+//   epoch   = pager-shadow generation in rich modes, otherwise 0
 // IoToken:
 //   subject = monotonic block request token
 //   arg0    = IoPhase
