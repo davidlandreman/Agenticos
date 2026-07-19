@@ -102,6 +102,16 @@ INTERRUPT_VECTOR_NAMES = {
     0xEF: "lapic_timer",
     0xF0: "reschedule",
 }
+IO_PHASE_NAMES = {
+    1: "submitted",
+    2: "completed",
+    3: "wake_queued",
+    4: "wake_accepted",
+    5: "consumed",
+    0x81: "wake_lost",
+    0x82: "wrong_wake",
+    0x83: "generic_wake_rejected",
+}
 LOCK_CLASS_NAMES = {
     1: "scheduler",
     2: "process_table",
@@ -396,6 +406,30 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
                         "entity_existed": bool(arg1 & 1),
                         "newly_enqueued": bool(arg1 & 2),
                     }
+                elif kind == 0x500:
+                    phase = arg0 & 0xFF
+                    operands = {
+                        "token": subject,
+                        "phase": IO_PHASE_NAMES.get(phase, f"unknown({phase})"),
+                        "page_generation": epoch,
+                    }
+                    if phase == 1:
+                        operands.update(
+                            {
+                                "pid": arg1 & 0xFFFF_FFFF,
+                                "device": (arg1 >> 32) & 0xFFFF,
+                                "queue_head": (arg1 >> 48) & 0xFFFF,
+                            }
+                        )
+                    elif phase == 2:
+                        operands.update(
+                            {"status": arg1 & 0xFF, "actual_bytes": arg1 >> 32}
+                        )
+                    elif phase == 0x82:
+                        operands["awaited_token"] = arg1
+                    else:
+                        operands["pid"] = arg1 & 0xFFFF_FFFF
+                    record["operands"] = operands
                 records.append(record)
             cpus.append(
                 {

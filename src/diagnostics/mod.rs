@@ -102,7 +102,7 @@ pub fn maybe_inject_crash() {
         b"cont-signal-wake" => {
             let token = 0xfeed_0001;
             let pid = 0x7fff_ff01;
-            shadow::io::submitted(token, 0, pid, 1, 7, 4096);
+            shadow::io::submitted(token, 0xfeed, pid, 1, 7, 4096);
             shadow::io::completed(token, 0, 4096);
             shadow::io::queue_wake(token, pid);
             shadow::io::reject_generic_io_wake(pid, token);

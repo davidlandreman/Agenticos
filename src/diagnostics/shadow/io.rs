@@ -100,6 +100,24 @@ impl Slot {
 
 static SLOTS: [Slot; CAPACITY] = [const { Slot::new() }; CAPACITY];
 
+fn record(request: Request, phase: crate::diagnostics::trace::IoPhase, arg: u64) {
+    // Ordinary filesystem traffic is already represented in the bounded I/O
+    // shadow. Reserve the flight-recorder bandwidth for requests causally
+    // attached to a pager transaction; otherwise command-heavy workloads can
+    // evict the paging history we are trying to preserve and measurably alter
+    // scheduler timing.
+    if request.page_generation == 0 {
+        return;
+    }
+    crate::diagnostics::trace::record(
+        crate::diagnostics::trace::EventKind::IoToken,
+        request.token,
+        u64::from(phase as u8),
+        arg,
+        request.page_generation,
+    );
+}
+
 fn enabled() -> bool {
     crate::diagnostics::personality() != crate::diagnostics::Personality::Minimal
 }
@@ -182,6 +200,11 @@ pub fn submitted(
         }
         slot.sequence.fetch_add(1, Ordering::Release);
         slot.key.store(token, Ordering::Release);
+        record(
+            unsafe { *slot.request.get() },
+            crate::diagnostics::trace::IoPhase::Submitted,
+            u64::from(pid) | ((device as u64) << 32) | (u64::from(queue_head) << 48),
+        );
         return;
     }
     report(
@@ -226,10 +249,36 @@ fn mutate(token: u64, operation: Operation, pid: Option<u32>, update: impl FnOnc
         Ok(next) => {
             update(request);
             request.state = next;
+            let snapshot = *request;
             slot.sequence.fetch_add(1, Ordering::Release);
             if next == State::Consumed {
                 slot.terminal.store(true, Ordering::Release);
             }
+            let (phase, arg) = match next {
+                State::Submitted => (
+                    crate::diagnostics::trace::IoPhase::Submitted,
+                    u64::from(snapshot.pid)
+                        | (u64::from(snapshot.device) << 32)
+                        | (u64::from(snapshot.queue_head) << 48),
+                ),
+                State::Completed => (
+                    crate::diagnostics::trace::IoPhase::Completed,
+                    u64::from(snapshot.status) | (u64::from(snapshot.actual) << 32),
+                ),
+                State::WakePending => (
+                    crate::diagnostics::trace::IoPhase::WakeQueued,
+                    u64::from(snapshot.pid),
+                ),
+                State::WakeAccepted => (
+                    crate::diagnostics::trace::IoPhase::WakeAccepted,
+                    u64::from(snapshot.pid),
+                ),
+                State::Consumed => (
+                    crate::diagnostics::trace::IoPhase::Consumed,
+                    u64::from(snapshot.pid),
+                ),
+            };
+            record(snapshot, phase, arg);
         }
         Err(id) => {
             report(id, *request, operation as u64, request.state as u64);
@@ -268,6 +317,11 @@ pub fn wake_lost(token: u64, pid: u32) {
             pid,
             ..Request::empty()
         });
+    record(
+        request,
+        crate::diagnostics::trace::IoPhase::WakeLost,
+        u64::from(pid),
+    );
     report(IO_004, request, 1, 0);
 }
 
@@ -282,6 +336,11 @@ pub fn wrong_wake(token: u64, pid: u32, awaited: u64) {
             pid,
             ..Request::empty()
         });
+    record(
+        request,
+        crate::diagnostics::trace::IoPhase::WrongWake,
+        awaited,
+    );
     report(IO_003, request, awaited, token);
 }
 
@@ -296,6 +355,11 @@ pub fn reject_generic_io_wake(pid: u32, token: u64) {
             pid,
             ..Request::empty()
         });
+    record(
+        request,
+        crate::diagnostics::trace::IoPhase::GenericWakeRejected,
+        u64::from(pid),
+    );
     report(CONT_004, request, token, 0);
 }
 

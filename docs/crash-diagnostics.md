@@ -138,6 +138,13 @@ vector: entry records carry the Linux syscall number and current PID; paired
 exits carry the same number and signed return value. A blocking handoff may
 legitimately have no paired exit on that CPU.
 
+`io_token` follows a pager-associated monotonic VirtIO block token through
+submit, complete, wake queue, wake acceptance, and consumption. Its causal
+epoch is the nonzero page-in generation. Ordinary filesystem requests remain
+available in the bounded I/O shadow but do not consume recorder bandwidth;
+rejected, lost, and wrong-token pager wakes are explicit phases rather than
+inferred from a missing success record.
+
 Lazy file page-in now follows a private-frame commit protocol: allocate and
 zero privately, perform an exact-length read, revalidate the L4/VMA, and then
 install the present leaf. Signals stay pending while a kernel block-I/O

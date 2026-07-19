@@ -150,6 +150,23 @@ class CrashDecodeTests(unittest.TestCase):
         self.assertEqual(event["operands"]["number"], 257)
         self.assertEqual(event["operands"]["return_value"], -9)
 
+    def test_io_token_trace_operands_are_decoded(self):
+        submit_arg = 42 | (3 << 32) | (17 << 48)
+        io_submit = struct.pack(
+            "<8Q", 1, 2, 3, 99, 0xFEED, 1, submit_arg, 0x0100_0500
+        )
+        trace = (
+            struct.pack("<HHHHBBHQQQI", 1, 1024, 128, 0, 0, 0, 0, 2, 0, 0, 1)
+            + io_submit
+        )
+        report, _ = crash_decode.parse_capsule(capsule([section(5, trace)]))
+        operands = report["trace"]["cpus"][0]["records"][0]["operands"]
+        self.assertEqual(operands["phase"], "submitted")
+        self.assertEqual(operands["page_generation"], 99)
+        self.assertEqual(operands["pid"], 42)
+        self.assertEqual(operands["device"], 3)
+        self.assertEqual(operands["queue_head"], 17)
+
     def test_missing_rich_sections_are_absent_evidence(self):
         metadata = struct.pack("<BBHI", 2, 0, 0, 3)
         for value in ("abc", "0", "rustc", "strict"):

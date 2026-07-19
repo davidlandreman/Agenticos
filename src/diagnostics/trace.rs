@@ -71,6 +71,14 @@ pub enum EventKind {
 //             4 dead, 0 missing)
 //   arg1    = entity-existed flag in bit 0, newly-enqueued flag in bit 1
 //   epoch   = committed scheduler-shadow epoch
+// IoToken:
+//   subject = monotonic block request token
+//   arg0    = IoPhase
+//   arg1    = submit: PID/device/queue packed low-to-high; complete: status
+//             in bits 0..7 and actual bytes in bits 32..63; wake: PID;
+//             wrong-wake: awaited token
+//   epoch   = associated nonzero page-in generation; ordinary I/O remains in
+//             the bounded I/O shadow without consuming recorder bandwidth
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -92,6 +100,19 @@ pub enum InterruptOutcome {
     RecoveredPageIn = 5,
     RecoveredStackGrowth = 6,
     RecoveredKernelDemand = 7,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum IoPhase {
+    Submitted = 1,
+    Completed = 2,
+    WakeQueued = 3,
+    WakeAccepted = 4,
+    Consumed = 5,
+    WakeLost = 0x81,
+    WrongWake = 0x82,
+    GenericWakeRejected = 0x83,
 }
 
 #[derive(Clone, Copy, Default)]
