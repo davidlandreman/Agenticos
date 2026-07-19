@@ -118,9 +118,10 @@ class CrashDecodeTests(unittest.TestCase):
 
     def test_continuation_shadow_section(self):
         continuation = struct.pack(
-            "<QQQQQQQIBB2x",
+            "<QQQQQQQQIBB2x",
             5,
             17,
+            9,
             0xFFFF800000001234,
             0xFFFF900000002000,
             0x202,
@@ -135,11 +136,30 @@ class CrashDecodeTests(unittest.TestCase):
         )
         saved = report["shadow"]["continuation"]["continuations"][0]
         self.assertEqual(saved["pid"], 42)
+        self.assertEqual(saved["stack_generation"], 9)
         self.assertTrue(saved["wake_pending_before_publish"])
 
     def test_continuation_shadow_rejects_bad_count(self):
         with self.assertRaisesRegex(crash_decode.DecodeError, "continuation shadow layout"):
             crash_decode.parse_capsule(capsule([section(9, struct.pack("<I", 1))]))
+
+    def test_address_space_and_stack_shadow_sections(self):
+        root = struct.pack(
+            "<QQIHBBQQQ", 3, 0x9000, 42, 2, 3, 1, 7, 11, 0
+        )
+        stack = struct.pack(
+            "<QQQIBBHQQ", 5, 0x1000, 0x3000, 43, 3, 0, 0, 0x2FF0, 12
+        )
+        report, _ = crash_decode.parse_capsule(
+            capsule(
+                [
+                    section(13, struct.pack("<I", 1) + root),
+                    section(14, struct.pack("<I", 1) + stack),
+                ]
+            )
+        )
+        self.assertEqual(report["shadow"]["address_space"]["roots"][0]["owner_tgid"], 42)
+        self.assertEqual(report["shadow"]["stack"]["stacks"][0]["owner_pid"], 43)
 
 
 if __name__ == "__main__":

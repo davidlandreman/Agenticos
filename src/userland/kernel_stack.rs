@@ -46,6 +46,7 @@ pub const KERNEL_STACK_BYTES: usize = 64 * 1024;
 /// there.
 pub struct KernelStack {
     buffer: Box<[u8]>,
+    shadow_generation: u64,
 }
 
 impl KernelStack {
@@ -54,8 +55,13 @@ impl KernelStack {
         // but cheap with a fresh heap page) and to stay within the
         // existing heap allocator's path. The conversion to a boxed
         // slice drops length tracking we don't need.
+        let buffer = alloc::vec![0u8; KERNEL_STACK_BYTES].into_boxed_slice();
+        let bottom = buffer.as_ptr() as u64;
+        let shadow_generation =
+            crate::diagnostics::shadow::stack::allocate(bottom, bottom + buffer.len() as u64);
         Self {
-            buffer: alloc::vec![0u8; KERNEL_STACK_BYTES].into_boxed_slice(),
+            buffer,
+            shadow_generation,
         }
     }
 
@@ -65,10 +71,25 @@ impl KernelStack {
         let base = self.buffer.as_ptr() as u64;
         VirtAddr::new(base + self.buffer.len() as u64)
     }
+
+    pub fn shadow_generation(&self) -> u64 {
+        self.shadow_generation
+    }
+
+    pub fn publish_owner(&mut self, pid: u32) {
+        crate::diagnostics::shadow::stack::publish_owner(self.shadow_generation, pid);
+    }
 }
 
 impl Default for KernelStack {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for KernelStack {
+    fn drop(&mut self) {
+        crate::diagnostics::shadow::stack::begin_retire(self.shadow_generation);
+        crate::diagnostics::shadow::stack::release(self.shadow_generation);
     }
 }

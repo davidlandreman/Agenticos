@@ -1953,6 +1953,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     // 10. Move new image and aspace onto the Process; reset brk/mmap
     //     anchors and exit info. Retain PID, parent_pid, FD table,
     //     cwd, continuation.
+    new_aspace.publish_owner(tgid);
     crate::userland::lifecycle::with_current_group(|p| {
         p.image = Some(image);
         p.address_space = Some(new_aspace);

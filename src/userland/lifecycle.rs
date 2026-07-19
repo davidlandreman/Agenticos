@@ -632,8 +632,13 @@ pub fn robust_list(tid: u32) -> Option<(u64, usize)> {
     PROCESS_TABLE.lock().robust_lists.get(&tid).copied()
 }
 
-pub fn register_thread_task(tid: u32, tgid: u32, process: Process) -> Result<(), ()> {
+pub fn register_thread_task(tid: u32, tgid: u32, mut process: Process) -> Result<(), ()> {
     let cpu = crate::arch::x86_64::percpu::cpu_id();
+    process
+        .kernel_stack
+        .as_mut()
+        .expect("ring-3 thread without a kernel stack")
+        .publish_owner(tid);
     let members = {
         let mut g = PROCESS_TABLE.lock();
         if g.by_pid.len() >= 129 || !g.by_pid.contains_key(&tgid) || g.by_pid.contains_key(&tid) {
@@ -651,8 +656,15 @@ pub fn register_thread_task(tid: u32, tgid: u32, process: Process) -> Result<(),
         if home != cpu {
             return Err(());
         }
+        let address_space_generation = g
+            .by_pid
+            .get(&tgid)
+            .and_then(|group| group.address_space.as_ref())
+            .map(|space| space.shadow_generation())
+            .ok_or(())?;
         g.by_pid.insert(tid, process);
         g.thread_groups.insert(tid, tgid);
+        crate::diagnostics::shadow::address_space::member_join(address_space_generation, tgid);
         g.thread_groups
             .iter()
             .filter_map(|(&member, &group)| (group == tgid).then_some(member))
@@ -708,8 +720,14 @@ pub fn set_current_user_pid(pid: Option<u32>) {
 /// responsible for setting `current_user_pid` separately when the
 /// process should be the loaded one (today, only the install path
 /// does both atomically via [`install_new_process_opt`]).
-pub fn insert_process(p: Process) -> u32 {
+pub fn insert_process(mut p: Process) -> u32 {
     let pid = p.pid;
+    if let Some(space) = p.address_space.as_mut() {
+        space.publish_owner(pid);
+    }
+    if let Some(stack) = p.kernel_stack.as_mut() {
+        stack.publish_owner(pid);
+    }
     let mut g = PROCESS_TABLE.lock();
     g.by_pid.insert(pid, p);
     g.thread_groups.insert(pid, pid);
@@ -732,6 +750,11 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     let was_current = current_user_pid() == Some(pid);
     let mut g = PROCESS_TABLE.lock();
     let tgid = g.thread_groups.get(&pid).copied().unwrap_or(pid);
+    let address_space_generation = g
+        .by_pid
+        .get(&tgid)
+        .and_then(|group| group.address_space.as_ref())
+        .map(|space| space.shadow_generation());
     let members = if pid == tgid {
         g.thread_groups
             .iter()
@@ -757,7 +780,14 @@ pub fn remove_process(pid: u32) -> Option<Process> {
     }
     let removed = removed?;
     drop(g);
+    if let Some(generation) = address_space_generation {
+        crate::diagnostics::shadow::address_space::member_leave(generation, members.len());
+    }
     if was_current {
+        // Legacy setjmp/long-jump exits have already abandoned the task's
+        // rsp0 stack when they return to the launcher, but do not pass through
+        // the scheduler publication callbacks used by ordinary handoffs.
+        crate::diagnostics::shadow::stack::deactivate_owner(pid);
         crate::arch::x86_64::percpu::set_current_user_pid(None);
     }
     for member in members {
@@ -1926,7 +1956,7 @@ pub fn install_new_process_opt(
     image: UserImage,
     brk_base: u64,
     mmap_base: u64,
-    address_space: Option<AddressSpace>,
+    mut address_space: Option<AddressSpace>,
 ) -> u32 {
     let pid = alloc_pid();
     let stack_top = image.stack_top.as_u64();
@@ -1934,6 +1964,11 @@ pub fn install_new_process_opt(
     let stack_max_growth_floor = image.stack_max_growth_floor;
     let mut fd_table = FdTable::new();
     fd_table.install_default_streams();
+    if let Some(space) = address_space.as_mut() {
+        space.publish_owner(pid);
+    }
+    let mut kernel_stack = KernelStack::new();
+    kernel_stack.publish_owner(pid);
     let mut p = Process {
         pid,
         parent_pid: KERNEL_PID,
@@ -1954,7 +1989,7 @@ pub fn install_new_process_opt(
         signal_state: SignalState::new(),
         signal_alt_stack: crate::userland::signal::SignalAltStack::default(),
         membarrier_private_registered: false,
-        kernel_stack: Some(KernelStack::new()),
+        kernel_stack: Some(kernel_stack),
         exe_path: None,
         cmdline: alloc::vec::Vec::new(),
         utime_ticks: 0,
@@ -2755,6 +2790,7 @@ pub fn cooperative_thread_exit(code: i64) -> ! {
     } else {
         crate::userland::process_service::notify_process_exit(tid);
     }
+    crate::diagnostics::shadow::stack::begin_abandon(tid);
     set_current_user_pid(None);
     unsafe { crate::userland::switch::dispatch_after_user_stop() }
 }
@@ -2771,6 +2807,7 @@ pub fn cooperative_group_exit(code: i64) -> ! {
     }
     with_group(tgid, unmap_user_stack);
     finish_group(tgid, code);
+    crate::diagnostics::shadow::stack::begin_abandon(tid);
     set_current_user_pid(None);
     unsafe { crate::userland::switch::dispatch_after_user_stop() }
 }
@@ -2817,6 +2854,7 @@ fn long_jump_to_run_or_halt() -> ! {
         // Clear current_user_pid — we're no longer running this
         // process. The next ring-3 dispatch (via resume_ring3) will
         // set it to the next pid.
+        crate::diagnostics::shadow::stack::begin_abandon(pid);
         set_current_user_pid(None);
     }
 

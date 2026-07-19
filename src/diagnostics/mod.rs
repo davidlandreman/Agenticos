@@ -97,12 +97,27 @@ pub fn maybe_inject_crash() {
             let mut context = crate::process::CpuContext::default();
             context.rip = 0xffff_8000_0000_1000;
             context.rsp = 0x1800;
-            shadow::continuation::allocate(pid, token, 0x1000, 0x2000);
+            shadow::continuation::allocate(pid, token, 0, 0x1000, 0x2000);
             shadow::continuation::published(pid, &context);
             shadow::continuation::wake(pid, token);
             context.rsp = 0;
             shadow::continuation::dispatch(pid, &context);
             panic!("strict invalid continuation stack injection did not escalate");
+        }
+        b"as-destroy-active" => {
+            let generation = shadow::address_space::allocate(0x1234_5000);
+            shadow::address_space::publish_owner(generation, 0x7fff_ff03, 1);
+            shadow::address_space::activate(generation, 0x1234_5000);
+            shadow::address_space::begin_destroy(generation);
+            panic!("strict active address-space destroy injection did not escalate");
+        }
+        b"stack-retire-active" => {
+            let pid = 0x7fff_ff04;
+            let generation = shadow::stack::allocate(0x3000, 0x5000);
+            shadow::stack::publish_owner(generation, pid);
+            shadow::stack::activate(generation, pid, 0x5000);
+            shadow::stack::begin_retire(generation);
+            panic!("strict active stack retirement injection did not escalate");
         }
         _ => {}
     }

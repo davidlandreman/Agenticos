@@ -132,6 +132,7 @@ pub(crate) extern "C" fn publish_handoff_context(old_context: *mut CpuContext) -
     drop(scheduler);
     if let Some(crate::process::entity::EntityId::UserProcess(pid)) = pending {
         crate::diagnostics::shadow::continuation::published(pid, unsafe { &*old_context });
+        crate::diagnostics::shadow::stack::deactivate_owner(pid);
     }
     pending.is_some() || kernel_published
 }
@@ -139,12 +140,15 @@ pub(crate) extern "C" fn publish_handoff_context(old_context: *mut CpuContext) -
 /// Publish the entity whose interrupt-driven save is complete. The assembly
 /// caller has already installed a different stack before entering here.
 pub(crate) extern "C" fn publish_pending_context() {
-    let Some(entity) = crate::arch::x86_64::percpu::take_pending_context_publish() else {
-        return;
-    };
-    crate::process::scheduler::SCHEDULER
-        .lock()
-        .publish_context(entity);
+    if let Some(entity) = crate::arch::x86_64::percpu::take_pending_context_publish() {
+        crate::process::scheduler::SCHEDULER
+            .lock()
+            .publish_context(entity);
+        if let crate::process::entity::EntityId::UserProcess(pid) = entity {
+            crate::diagnostics::shadow::stack::deactivate_owner(pid);
+        }
+    }
+    crate::diagnostics::shadow::stack::complete_abandon();
 }
 
 /// Switch to a new process context without saving the old one.
@@ -158,7 +162,11 @@ pub(crate) extern "C" fn publish_pending_context() {
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_to_context(new_ctx: *const CpuContext) {
     naked_asm!(
-        "mov r11, rdi",
+        "mov r12, rdi",
+        "mov rsp, [r12 + 48]",
+        "and rsp, -16",
+        "call {complete_stack_abandon}",
+        "mov r11, r12",
         "mov rsp, [r11 + 48]",
         "push qword ptr [r11 + 56]",
         // Load flags with IF masked until the register image is complete.
@@ -183,7 +191,12 @@ pub unsafe extern "C" fn switch_to_context(new_ctx: *const CpuContext) {
         "mov r11, [r11 + 136]",
         "sti",
         "ret",
+        complete_stack_abandon = sym complete_stack_abandon,
     );
+}
+
+extern "C" fn complete_stack_abandon() {
+    crate::diagnostics::shadow::stack::complete_abandon();
 }
 
 /// Abandon a terminated kernel thread, retire its stack from a different

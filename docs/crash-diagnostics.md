@@ -35,6 +35,8 @@ scripts/test-crash-diagnostics.sh missing-cpu
 scripts/test-crash-diagnostics.sh sched-duplicate
 scripts/test-crash-diagnostics.sh cont-signal-wake
 scripts/test-crash-diagnostics.sh cont-invalid-stack
+scripts/test-crash-diagnostics.sh as-destroy-active
+scripts/test-crash-diagnostics.sh stack-retire-active
 ```
 
 The harness requires a non-success QEMU exit, a complete decodable capsule,
@@ -47,6 +49,9 @@ first invariant.
 runnable and requires `CONT-004` as the first invariant.
 `cont-invalid-stack` attempts to dispatch a saved continuation outside its
 declared live kernel stack and requires `CONT-002` as the first invariant.
+`as-destroy-active` requires `AS-003` before an active user L4 can be freed;
+`stack-retire-active` requires `STACK-001` before an active rsp0 stack can be
+retired or reused.
 
 ## Crash-path rules
 
@@ -97,3 +102,10 @@ bounds. The shadow distinguishes save publication, exact wake acceptance,
 dispatch, and one-time consumption. A completion that races ahead of context
 publication is retained as an explicit pending-wake fact; the scheduler and
 continuation become runnable only after the save is published.
+
+Each user L4 and per-task kernel stack also has an independent lifetime
+generation. Address-space records retain the owning TGID, shared-task count,
+VMA generation, active CPU mask, and build/live/destroy state. Stack records
+retain the owner PID, exact bounds, active CPU, last installed RSP, and
+allocation/live/retirement state. Exit handoffs publish stack inactivity only
+after assembly has moved to a different stack.

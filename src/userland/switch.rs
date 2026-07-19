@@ -154,6 +154,9 @@ extern "C" fn dispatch_resume_ring3_diverging(pid: u32) -> ! {
 pub unsafe fn yield_to_kernel_main_loop() -> ! {
     use core::sync::atomic::Ordering;
     // No ring-3 process is loaded on this CPU after the switch.
+    if let Some(pid) = crate::userland::lifecycle::current_user_pid() {
+        crate::diagnostics::shadow::stack::begin_abandon(pid);
+    }
     crate::userland::lifecycle::set_current_user_pid(None);
     crate::process::set_in_spawned_process(false);
     crate::mm::paging::activate_kernel_l4();
@@ -257,7 +260,9 @@ pub unsafe fn resume_ring3(pid: u32) -> ! {
     // Timer preemption saves an entity while still on its kernel stack. Move
     // to this CPU's idle/main stack before publishing that entity to the
     // shared run queue, otherwise another CPU can reuse the live stack.
-    if crate::arch::x86_64::percpu::has_pending_context_publish() {
+    if crate::arch::x86_64::percpu::has_pending_context_publish()
+        || crate::diagnostics::shadow::stack::has_pending_abandon()
+    {
         resume_ring3_after_stack_handoff(pid)
     }
     resume_ring3_inner(pid)
@@ -293,31 +298,41 @@ unsafe fn resume_ring3_inner(pid: u32) -> ! {
     // paths (kernel-only L4, no per-process kstack). Real ring-3
     // launches always populate both; tests skip them and rely on
     // staying on the kernel L4 + global rsp0 stack.
-    let (state_copy, kernel_continuation, l4_frame, kstack_top) = {
+    let (state_copy, kernel_continuation, l4, kstack) = {
         let mut g = PROCESS_TABLE.lock();
         let tgid = g.thread_groups.get(&pid).copied().unwrap_or(pid);
-        let l4 = g
-            .by_pid
-            .get(&tgid)
-            .and_then(|group| group.address_space.as_ref().map(|a| a.l4_frame()));
+        let l4 = g.by_pid.get(&tgid).and_then(|group| {
+            group
+                .address_space
+                .as_ref()
+                .map(|space| (space.l4_frame(), space.shadow_generation()))
+        });
         let p = g.by_pid.get_mut(&pid).expect("resume_ring3: unknown pid");
         let state = p.saved_user_state;
         let continuation = p.kernel_continuation.take().map(|saved| *saved);
-        let top = p.kernel_stack.as_ref().map(|k| k.top());
-        (state, continuation, l4, top)
+        let stack = p
+            .kernel_stack
+            .as_ref()
+            .map(|stack| (stack.top(), stack.shadow_generation()));
+        (state, continuation, l4, stack)
     };
 
     // CR3 swap — only if the process has its own address space.
-    if let Some(frame) = l4_frame {
+    if let Some((frame, generation)) = l4 {
         use x86_64::registers::control::{Cr3, Cr3Flags};
         Cr3::write(frame, Cr3Flags::empty());
+        crate::diagnostics::shadow::address_space::activate(
+            generation,
+            frame.start_address().as_u64(),
+        );
     }
 
     // TSS.rsp0 + per-CPU SYSCALL rsp top — per-process kernel stack
     // when present, otherwise leave at the global default.
-    if let Some(top) = kstack_top {
+    if let Some((top, generation)) = kstack {
         set_kernel_rsp0(top);
         set_percpu_kernel_rsp_top(top.as_u64());
+        crate::diagnostics::shadow::stack::activate(generation, pid, top.as_u64());
     }
 
     // FS_BASE + FPU. Re-borrow under the lock briefly to get a
@@ -350,7 +365,7 @@ pub fn block_current_ring3_on_io(token: u64) {
     let Some(pid) = current_user_pid() else {
         return;
     };
-    let (old_context, stack_bottom, stack_top) = {
+    let (old_context, stack_generation, stack_bottom, stack_top) = {
         let mut table = PROCESS_TABLE.lock();
         let process = table
             .by_pid
@@ -372,13 +387,24 @@ pub fn block_current_ring3_on_io(token: u64) {
             .expect("ring-3 I/O block without a kernel stack")
             .top()
             .as_u64();
+        let stack_generation = process
+            .kernel_stack
+            .as_ref()
+            .expect("ring-3 I/O block without a kernel stack")
+            .shadow_generation();
         let stack_bottom = stack_top - crate::userland::kernel_stack::KERNEL_STACK_BYTES as u64;
         table
             .ring3_blocked
             .insert(pid, Ring3BlockReason::WaitingForBlockIo { token });
-        (pointer, stack_bottom, stack_top)
+        (pointer, stack_generation, stack_bottom, stack_top)
     };
-    crate::diagnostics::shadow::continuation::allocate(pid, token, stack_bottom, stack_top);
+    crate::diagnostics::shadow::continuation::allocate(
+        pid,
+        token,
+        stack_generation,
+        stack_bottom,
+        stack_top,
+    );
     crate::process::scheduler::SCHEDULER
         .lock()
         .mark_context_saving(crate::process::entity::EntityId::UserProcess(pid));
@@ -588,6 +614,7 @@ pub unsafe fn block_current_ring3_and_yield(args: &SyscallArgs, reason: Ring3Blo
         }
     }
 
+    crate::diagnostics::shadow::stack::begin_abandon(me);
     dispatch_after_user_stop()
 }
 
@@ -633,5 +660,6 @@ pub unsafe fn yield_current_ring3(args: &SyscallArgs) -> ! {
     crate::process::scheduler::SCHEDULER
         .lock()
         .yield_entity(crate::process::entity::EntityId::UserProcess(me));
+    crate::diagnostics::shadow::stack::begin_abandon(me);
     dispatch_after_user_stop()
 }

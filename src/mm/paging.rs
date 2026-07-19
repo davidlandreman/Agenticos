@@ -193,6 +193,7 @@ pub unsafe fn activate_kernel_l4() {
     use x86_64::registers::control::{Cr3, Cr3Flags};
     let frame = kernel_l4_frame().expect("kernel L4 not captured at boot");
     Cr3::write(frame, Cr3Flags::empty());
+    crate::diagnostics::shadow::address_space::deactivate_cpu();
 }
 
 /// Build a fresh `OffsetPageTable` over whatever L4 is currently

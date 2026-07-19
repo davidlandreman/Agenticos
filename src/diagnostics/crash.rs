@@ -475,6 +475,22 @@ unsafe fn serialize(
             let _ = super::shadow::continuation::write_snapshot(section);
         },
     );
+    writer.section(
+        SectionKind::ShadowAddressSpace,
+        1,
+        super::shadow::address_space::snapshot_flags(),
+        |section| {
+            let _ = super::shadow::address_space::write_snapshot(section);
+        },
+    );
+    writer.section(
+        SectionKind::ShadowStack,
+        1,
+        super::shadow::stack::snapshot_flags(),
+        |section| {
+            let _ = super::shadow::stack::write_snapshot(section);
+        },
+    );
     if let Some(violation) = super::shadow::first() {
         writer.section(SectionKind::Violation, 1, 0, |section| {
             section.u32(violation.invariant_id);

@@ -28,6 +28,8 @@ SECTION_NAMES = {
     10: "violation",
     11: "backtrace",
     12: "footer",
+    13: "shadow_address_space",
+    14: "shadow_stack",
 }
 MAX_CAPSULE = 16 * 1024 * 1024
 MAX_SECTIONS = 256
@@ -154,6 +156,8 @@ def parse_capsule(blob: bytes, offset: int = 0) -> tuple[dict[str, Any], int]:
         required.add(7)
         required.add(8)
         required.add(9)
+        required.add(13)
+        required.add(14)
     present = {section.kind for section in sections}
     report["missing"] = [SECTION_NAMES[kind] for kind in sorted(required - present)]
     trigger = report["trigger"]
@@ -342,30 +346,86 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
         if len(payload) < 4:
             raise DecodeError("short continuation shadow section")
         count = struct.unpack_from("<I", payload)[0]
-        if len(payload) != 4 + count * 64:
+        if len(payload) != 4 + count * 72:
             raise DecodeError("invalid continuation shadow layout")
         continuations = []
         cursor = 4
         for _ in range(count):
-            values = struct.unpack_from("<QQQQQQQIBB2x", payload, cursor)
-            cursor += 64
+            values = struct.unpack_from("<QQQQQQQQIBB2x", payload, cursor)
+            cursor += 72
             continuations.append(
                 {
                     "generation": values[0],
                     "token": values[1],
-                    "rip": f"0x{values[2]:x}",
-                    "rsp": f"0x{values[3]:x}",
-                    "rflags": f"0x{values[4]:x}",
-                    "stack_bottom": f"0x{values[5]:x}",
-                    "stack_top": f"0x{values[6]:x}",
-                    "pid": values[7],
-                    "state": values[8],
-                    "wake_pending_before_publish": bool(values[9] & 1),
+                    "stack_generation": values[2],
+                    "rip": f"0x{values[3]:x}",
+                    "rsp": f"0x{values[4]:x}",
+                    "rflags": f"0x{values[5]:x}",
+                    "stack_bottom": f"0x{values[6]:x}",
+                    "stack_top": f"0x{values[7]:x}",
+                    "pid": values[8],
+                    "state": values[9],
+                    "wake_pending_before_publish": bool(values[10] & 1),
                 }
             )
         report.setdefault("shadow", {})["continuation"] = {
             "stable": not bool(section.flags & 1),
             "continuations": continuations,
+        }
+    elif section.kind == 13:
+        if len(payload) < 4:
+            raise DecodeError("short address-space shadow section")
+        count = struct.unpack_from("<I", payload)[0]
+        if len(payload) != 4 + count * 48:
+            raise DecodeError("invalid address-space shadow layout")
+        roots = []
+        cursor = 4
+        for _ in range(count):
+            values = struct.unpack_from("<QQIHBBQQQ", payload, cursor)
+            cursor += 48
+            roots.append(
+                {
+                    "generation": values[0],
+                    "l4": f"0x{values[1]:x}",
+                    "owner_tgid": values[2],
+                    "member_count": values[3],
+                    "state": values[4],
+                    "active_cpu_mask": values[5],
+                    "vma_generation": values[6],
+                    "last_epoch": values[7],
+                }
+            )
+        report.setdefault("shadow", {})["address_space"] = {
+            "stable": not bool(section.flags & 1),
+            "roots": roots,
+        }
+    elif section.kind == 14:
+        if len(payload) < 4:
+            raise DecodeError("short stack shadow section")
+        count = struct.unpack_from("<I", payload)[0]
+        if len(payload) != 4 + count * 48:
+            raise DecodeError("invalid stack shadow layout")
+        stacks = []
+        cursor = 4
+        for _ in range(count):
+            values = struct.unpack_from("<QQQIBBHQQ", payload, cursor)
+            cursor += 48
+            stacks.append(
+                {
+                    "generation": values[0],
+                    "bottom": f"0x{values[1]:x}",
+                    "top": f"0x{values[2]:x}",
+                    "owner_pid": values[3],
+                    "state": values[4],
+                    "active_cpu": values[5],
+                    "flags": values[6],
+                    "last_rsp": f"0x{values[7]:x}",
+                    "last_epoch": values[8],
+                }
+            )
+        report.setdefault("shadow", {})["stack"] = {
+            "stable": not bool(section.flags & 1),
+            "stacks": stacks,
         }
 
 

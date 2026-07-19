@@ -1,9 +1,11 @@
 //! Independently shaped, crash-readable diagnostic state machines.
 
+pub mod address_space;
 pub mod continuation;
 pub mod io;
 pub mod pager;
 pub mod scheduler;
+pub mod stack;
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};

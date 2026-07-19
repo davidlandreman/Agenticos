@@ -32,6 +32,7 @@ pub struct AddressSpace {
     l4_frame: PhysFrame<Size4KiB>,
     vmas: crate::userland::vm::VmaSet,
     vma_generation: u64,
+    shadow_generation: u64,
 }
 
 impl AddressSpace {
@@ -67,10 +68,13 @@ impl AddressSpace {
                 }
             }
 
+            let shadow_generation =
+                crate::diagnostics::shadow::address_space::allocate(frame.start_address().as_u64());
             Ok(AddressSpace {
                 l4_frame: frame,
                 vmas: crate::userland::vm::VmaSet::new(),
                 vma_generation: 1,
+                shadow_generation,
             })
         });
 
@@ -92,11 +96,27 @@ impl AddressSpace {
 
     pub fn vmas_mut(&mut self) -> &mut crate::userland::vm::VmaSet {
         self.vma_generation = self.vma_generation.wrapping_add(1).max(1);
+        crate::diagnostics::shadow::address_space::update_vma_generation(
+            self.shadow_generation,
+            self.vma_generation,
+        );
         &mut self.vmas
     }
 
     pub fn vma_generation(&self) -> u64 {
         self.vma_generation
+    }
+
+    pub fn shadow_generation(&self) -> u64 {
+        self.shadow_generation
+    }
+
+    pub fn publish_owner(&mut self, tgid: u32) {
+        crate::diagnostics::shadow::address_space::publish_owner(
+            self.shadow_generation,
+            tgid,
+            self.vma_generation,
+        );
     }
 
     pub fn initialize_vmas_from_image(
@@ -108,6 +128,10 @@ impl AddressSpace {
 
         self.vmas = crate::userland::vm::VmaSet::new();
         self.vma_generation = self.vma_generation.wrapping_add(1).max(1);
+        crate::diagnostics::shadow::address_space::update_vma_generation(
+            self.shadow_generation,
+            self.vma_generation,
+        );
         for mapping in image.mappings() {
             let prot = match mapping.perms {
                 UserPerms::ReadExecute => VmProt::READ.union(VmProt::EXEC),
@@ -214,6 +238,10 @@ impl AddressSpace {
     /// any kernel stack satisfies that.
     pub unsafe fn activate(&self) {
         Cr3::write(self.l4_frame, Cr3Flags::empty());
+        crate::diagnostics::shadow::address_space::activate(
+            self.shadow_generation,
+            self.l4_frame.start_address().as_u64(),
+        );
     }
 }
 
@@ -318,11 +346,13 @@ impl Drop for AddressSpace {
                 crate::mm::paging::activate_kernel_l4();
             }
         }
+        crate::diagnostics::shadow::address_space::begin_destroy(self.shadow_generation);
         let destroyed =
             with_memory_mapper(|mapper| mapper.destroy_user_address_space(self.l4_frame));
         debug_assert!(
             destroyed.is_some(),
             "memory mapper unavailable during address-space drop"
         );
+        crate::diagnostics::shadow::address_space::release(self.shadow_generation);
     }
 }

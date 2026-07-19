@@ -51,6 +51,7 @@ pub fn transition_state(state: State, operation: Operation) -> Result<State, u32
 struct Continuation {
     generation: u64,
     token: u64,
+    stack_generation: u64,
     rip: u64,
     rsp: u64,
     rflags: u64,
@@ -67,6 +68,7 @@ impl Continuation {
         Self {
             generation: 0,
             token: 0,
+            stack_generation: 0,
             rip: 0,
             rsp: 0,
             rflags: 0,
@@ -141,7 +143,7 @@ fn slot_for_pid(pid: u32) -> Option<&'static Slot> {
     })
 }
 
-pub fn allocate(pid: u32, token: u64, stack_bottom: u64, stack_top: u64) {
+pub fn allocate(pid: u32, token: u64, stack_generation: u64, stack_bottom: u64, stack_top: u64) {
     if !enabled() {
         return;
     }
@@ -168,6 +170,7 @@ pub fn allocate(pid: u32, token: u64, stack_bottom: u64, stack_top: u64) {
             slot.continuation.get().write(Continuation {
                 generation,
                 token,
+                stack_generation,
                 rip: 0,
                 rsp: 0,
                 rflags: 0,
@@ -189,6 +192,7 @@ pub fn allocate(pid: u32, token: u64, stack_bottom: u64, stack_top: u64) {
         Continuation {
             generation,
             token,
+            stack_generation,
             pid,
             stack_bottom,
             stack_top,
@@ -297,7 +301,12 @@ pub fn dispatch(pid: u32, context: &CpuContext) {
     let valid_rsp = context.rsp >= continuation.stack_bottom
         && context.rsp < continuation.stack_top
         && context.rsp & 7 == 0;
-    if !valid_rip || !valid_rsp {
+    let live_stack = crate::diagnostics::shadow::stack::validate(
+        continuation.stack_generation,
+        pid,
+        context.rsp,
+    );
+    if !valid_rip || !valid_rsp || !live_stack {
         report(CONT_002, continuation, continuation.stack_top, context.rsp);
         return;
     }
@@ -332,6 +341,7 @@ pub fn write_snapshot(writer: &mut crate::diagnostics::wire::Writer<'_>) -> u32 
         }
         writer.u64(continuation.generation);
         writer.u64(continuation.token);
+        writer.u64(continuation.stack_generation);
         writer.u64(continuation.rip);
         writer.u64(continuation.rsp);
         writer.u64(continuation.rflags);

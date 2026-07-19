@@ -147,6 +147,48 @@ fn test_continuation_shadow_transition_table() {
     );
 }
 
+fn test_address_space_shadow_transition_table() {
+    use crate::diagnostics::shadow::address_space::{
+        transition_state, Operation, State, AS_002, AS_003,
+    };
+
+    let state = transition_state(State::Building, Operation::Publish).unwrap();
+    let state = transition_state(state, Operation::Activate).unwrap();
+    let state = transition_state(state, Operation::Deactivate).unwrap();
+    let state = transition_state(state, Operation::BeginDestroy).unwrap();
+    let state = transition_state(state, Operation::Release).unwrap();
+    assert_eq!(state, State::Dead);
+    assert_eq!(
+        transition_state(State::Dead, Operation::Activate).unwrap_err(),
+        AS_002
+    );
+    assert_eq!(
+        transition_state(State::Active, Operation::BeginDestroy).unwrap_err(),
+        AS_003
+    );
+}
+
+fn test_stack_shadow_transition_table() {
+    use crate::diagnostics::shadow::stack::{
+        transition_state, Operation, State, STACK_001, STACK_002,
+    };
+
+    let state = transition_state(State::Allocated, Operation::Publish).unwrap();
+    let state = transition_state(state, Operation::Activate).unwrap();
+    let state = transition_state(state, Operation::Deactivate).unwrap();
+    let state = transition_state(state, Operation::BeginRetire).unwrap();
+    let state = transition_state(state, Operation::Release).unwrap();
+    assert_eq!(state, State::Dead);
+    assert_eq!(
+        transition_state(State::Allocated, Operation::Activate).unwrap_err(),
+        STACK_002
+    );
+    assert_eq!(
+        transition_state(State::Active, Operation::BeginRetire).unwrap_err(),
+        STACK_001
+    );
+}
+
 fn test_no_production_shadow_violation_latched() {
     if let Some(violation) = crate::diagnostics::shadow::first() {
         crate::debug_error!(
@@ -180,6 +222,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_pager_shadow_transition_table,
         &test_io_shadow_transition_table,
         &test_continuation_shadow_transition_table,
+        &test_address_space_shadow_transition_table,
+        &test_stack_shadow_transition_table,
         &test_no_production_shadow_violation_latched,
     ]
 }

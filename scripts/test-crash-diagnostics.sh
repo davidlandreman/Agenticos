@@ -8,7 +8,9 @@ case "$CASE_NAME" in
     sched-duplicate) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=sched-duplicate ;;
     cont-signal-wake) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cont-signal-wake ;;
     cont-invalid-stack) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=cont-invalid-stack ;;
-    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack" >&2; exit 2 ;;
+    as-destroy-active) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=as-destroy-active ;;
+    stack-retire-active) MISSING_CPU=""; DIAGNOSTICS=strict; INJECT=stack-retire-active ;;
+    *) echo "supported crash cases: panic, missing-cpu, sched-duplicate, cont-signal-wake, cont-invalid-stack, as-destroy-active, stack-retire-active" >&2; exit 2 ;;
 esac
 
 RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -42,12 +44,19 @@ import sys
 
 report = json.loads(pathlib.Path(sys.argv[1]).read_text())
 case = sys.argv[2]
-expected_kind = "invariant" if case in ("sched-duplicate", "cont-signal-wake", "cont-invalid-stack") else "fatal"
+invariant_cases = (
+    "sched-duplicate",
+    "cont-signal-wake",
+    "cont-invalid-stack",
+    "as-destroy-active",
+    "stack-retire-active",
+)
+expected_kind = "invariant" if case in invariant_cases else "fatal"
 assert report["trigger"]["kind"] == expected_kind, report
 assert report["run"]["manifest_trusted"] is True, report
 assert not report["missing"], report
 assert report["cpu_masks"]["online"] == 0x0f, report
-if case in ("panic", "sched-duplicate", "cont-signal-wake", "cont-invalid-stack"):
+if case == "panic" or case in invariant_cases:
     assert report["cpu_masks"]["captured"] == 0x0f, report
     assert len(report["cpus"]) == 4, report
     assert report["flags"] & 0x04 == 0, report
@@ -64,5 +73,11 @@ if case == "cont-signal-wake":
 if case == "cont-invalid-stack":
     assert report["violation"]["id"] == 0x05000002, report
     assert report["trigger"]["signature"] == "INV-05000002", report
+if case == "as-destroy-active":
+    assert report["violation"]["id"] == 0x06000003, report
+    assert report["trigger"]["signature"] == "INV-06000003", report
+if case == "stack-retire-active":
+    assert report["violation"]["id"] == 0x07000001, report
+    assert report["trigger"]["signature"] == "INV-07000001", report
 print(f"validated {report['trigger']['signature']}: {sys.argv[1]}")
 PY
