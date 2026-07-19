@@ -43,10 +43,89 @@ fn test_trace_commit_and_wrap() {
     assert_eq!(record.arg0, (writes - 1) ^ 0x55aa);
 }
 
+fn test_scheduler_shadow_legal_save_publish_cycle() {
+    use crate::diagnostics::shadow::scheduler::{
+        initial_for_test, transition_state, OperationKind, ShadowState, Transition,
+    };
+    let transition = |operation, cpu, published| Transition {
+        operation,
+        cpu,
+        published,
+        allow_running_exit: false,
+    };
+    let mut entity = initial_for_test(42);
+    entity = transition_state(entity, transition(OperationKind::Register, u8::MAX, true)).unwrap();
+    entity = transition_state(entity, transition(OperationKind::MakeReady, 0, true)).unwrap();
+    entity = transition_state(entity, transition(OperationKind::Dispatch, 0, true)).unwrap();
+    entity = transition_state(entity, transition(OperationKind::BeginSave, 0, false)).unwrap();
+    assert_eq!(entity.state, ShadowState::ReadyUnpublished);
+    entity = transition_state(entity, transition(OperationKind::Publish, u8::MAX, true)).unwrap();
+    assert_eq!(entity.state, ShadowState::ReadyQueued);
+}
+
+fn test_scheduler_shadow_rejects_illegal_edges() {
+    use crate::diagnostics::shadow::scheduler::{
+        initial_for_test, transition_state, OperationKind, Transition, SCHED_004, SCHED_005,
+        SCHED_007,
+    };
+    let transition = |operation, cpu| Transition {
+        operation,
+        cpu,
+        published: true,
+        allow_running_exit: false,
+    };
+    let blocked = transition_state(
+        initial_for_test(77),
+        transition(OperationKind::Register, u8::MAX),
+    )
+    .unwrap();
+    assert_eq!(
+        transition_state(blocked, transition(OperationKind::Dispatch, 0)).unwrap_err(),
+        SCHED_004
+    );
+    let mut ready = transition_state(blocked, transition(OperationKind::MakeReady, 0)).unwrap();
+    ready.affinity = 1;
+    assert_eq!(
+        transition_state(ready, transition(OperationKind::Dispatch, 0)).unwrap_err(),
+        SCHED_005
+    );
+    let running = transition_state(ready, transition(OperationKind::Dispatch, 1)).unwrap();
+    assert_eq!(
+        transition_state(running, transition(OperationKind::Unregister, u8::MAX)).unwrap_err(),
+        SCHED_007
+    );
+}
+
+fn test_no_production_shadow_violation_latched() {
+    if let Some(violation) = crate::diagnostics::shadow::first() {
+        crate::debug_error!(
+            "scheduler shadow violation invariant={:#010x} cpu={} epoch={} subject={:#x} expected={:#x} observed={:#x}",
+            violation.invariant_id,
+            violation.cpu,
+            violation.epoch,
+            violation.subject,
+            violation.expected0,
+            violation.observed0,
+        );
+        panic!(
+            "clean production transitions latched invariant={:#010x} cpu={} epoch={} subject={:#x} expected={:#x} observed={:#x}",
+            violation.invariant_id,
+            violation.cpu,
+            violation.epoch,
+            violation.subject,
+            violation.expected0,
+            violation.observed0,
+        );
+    }
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_crc32_golden_vector,
         &test_wire_layout_contract,
         &test_trace_commit_and_wrap,
+        &test_scheduler_shadow_legal_save_publish_cycle,
+        &test_scheduler_shadow_rejects_illegal_edges,
+        &test_no_production_shadow_violation_latched,
     ]
 }

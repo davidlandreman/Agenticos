@@ -15,6 +15,10 @@ const STREAM_PREAMBLE: &[u8] = b"\0AGCRASH\x1e";
 const STREAM_COMPLETE: &[u8] = b"AGEND\0";
 const FLAG_TRUNCATED: u64 = 1 << 0;
 const FLAG_NESTED: u64 = 1 << 1;
+const FLAG_PARTIAL_CPU_SET: u64 = 1 << 2;
+const FLAG_RENDEZVOUS_SEND_FAILED: u64 = 1 << 3;
+const RENDEZVOUS_TSC_BUDGET: u64 = 50_000_000;
+const RENDEZVOUS_SPIN_BUDGET: usize = 5_000_000;
 
 const STATE_IDLE: u8 = 0;
 const STATE_CAPTURING: u8 = 1;
@@ -53,6 +57,49 @@ static ARENA: Arena = Arena(UnsafeCell::new([0; ARENA_LEN]));
 static STATE: AtomicU8 = AtomicU8::new(STATE_IDLE);
 static RECORD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static NESTED_COUNT: AtomicU64 = AtomicU64::new(0);
+static CAPTURED_CPUS: AtomicU8 = AtomicU8::new(0);
+#[cfg(feature = "test")]
+static REFUSE_CAPTURE_MASK: AtomicU8 = AtomicU8::new(0);
+
+struct SnapshotSlot {
+    commit: AtomicU64,
+    snapshot: UnsafeCell<RegisterSnapshot>,
+}
+
+unsafe impl Sync for SnapshotSlot {}
+
+impl SnapshotSlot {
+    const fn new() -> Self {
+        Self {
+            commit: AtomicU64::new(0),
+            snapshot: UnsafeCell::new(RegisterSnapshot {
+                rip: 0,
+                rsp: 0,
+                rbp: 0,
+                rflags: 0,
+                cr0: 0,
+                cr2: 0,
+                cr3: 0,
+                cr4: 0,
+                fs_base: 0,
+                gs_base: 0,
+                current_pid: 0,
+                fidelity: 0,
+                _reserved: [0; 7],
+            }),
+        }
+    }
+}
+
+static CPU_SNAPSHOTS: [SnapshotSlot; crate::arch::x86_64::acpi::MAX_CPUS] =
+    [const { SnapshotSlot::new() }; crate::arch::x86_64::acpi::MAX_CPUS];
+
+#[derive(Clone, Copy)]
+struct RendezvousResult {
+    online_mask: u8,
+    captured_mask: u8,
+    send_failed: bool,
+}
 
 const BUILD_HASH_A: u64 = fnv1a64(env!("AGENTICOS_BUILD_GIT_SHA").as_bytes())
     ^ fnv1a64(env!("AGENTICOS_BUILD_GIT_DIRTY").as_bytes()).rotate_left(17);
@@ -112,6 +159,21 @@ pub fn begin_trap(
     })
 }
 
+pub fn begin_invariant(invariant_id: u32) -> ! {
+    begin(Trigger {
+        kind: RecordKind::Invariant,
+        vector: 0xfe,
+        fidelity: FIDELITY_HANDLER_LIVE,
+        reason_hash: u64::from(invariant_id),
+        error_code: u64::from(invariant_id),
+        fault_address: read_cr2(),
+        rip: 0,
+        file_hash: 0,
+        line: 0,
+        column: 0,
+    })
+}
+
 fn read_cr2() -> u64 {
     let value: u64;
     unsafe { core::arch::asm!("mov {}, cr2", out(reg) value, options(nomem, nostack)) };
@@ -152,22 +214,130 @@ fn begin(trigger: Trigger) -> ! {
         0,
     );
     let registers = capture_live(trigger.rip, trigger.fidelity);
-    let length = unsafe { serialize(&mut *ARENA.0.get(), owner_cpu, trigger, registers) };
+    let rendezvous = rendezvous(owner_cpu, registers);
+    let length = unsafe { serialize(&mut *ARENA.0.get(), owner_cpu, trigger, rendezvous) };
     unsafe {
         emit(STREAM_PREAMBLE);
         emit(&(&*ARENA.0.get())[..length]);
         emit(STREAM_COMPLETE);
     }
     STATE.store(STATE_COMPLETE, Ordering::Release);
-    crate::arch::x86_64::smp::freeze_other_cpus();
+    let _ = crate::arch::x86_64::lapic::broadcast_halt_bounded();
     halt_or_exit()
+}
+
+/// NMI-side rendezvous hook. The IDT assigns this handler a dedicated IST so
+/// it does not depend on the interrupted production stack being healthy.
+pub fn handle_nmi(rip: u64) {
+    match STATE.load(Ordering::Acquire) {
+        STATE_IDLE => {
+            super::trace::record(super::trace::EventKind::UnexpectedNmi, rip, 0, 0, 0);
+            return;
+        }
+        STATE_CAPTURING => {
+            let cpu = crate::arch::x86_64::percpu::cpu_id();
+            #[cfg(feature = "test")]
+            if REFUSE_CAPTURE_MASK.load(Ordering::Acquire) & (1u8 << cpu) != 0 {
+                loop {
+                    x86_64::instructions::hlt();
+                }
+            }
+            let snapshot = capture_live(rip, FIDELITY_CPU_PUSHED);
+            publish_snapshot(cpu, snapshot);
+            CAPTURED_CPUS.fetch_or(1u8 << cpu, Ordering::AcqRel);
+            super::trace::record_on(cpu, super::trace::EventKind::CpuRendezvous, rip, 0, 0, 0);
+        }
+        _ => {}
+    }
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+#[cfg(feature = "test")]
+pub fn init_test_policy() {
+    let mut value = [0u8; 8];
+    let Some(length) =
+        crate::drivers::fw_cfg::read_file("opt/agenticos/crash_missing_cpu", &mut value)
+    else {
+        return;
+    };
+    let end = value[..length]
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(length);
+    if end == 1 && value[0].is_ascii_digit() {
+        let cpu = usize::from(value[0] - b'0');
+        if cpu < crate::arch::x86_64::acpi::MAX_CPUS {
+            REFUSE_CAPTURE_MASK.store(1u8 << cpu, Ordering::Release);
+        }
+    }
+}
+
+fn rendezvous(owner_cpu: u8, owner_snapshot: RegisterSnapshot) -> RendezvousResult {
+    publish_snapshot(owner_cpu as usize, owner_snapshot);
+    let owner_bit = 1u8 << owner_cpu;
+    CAPTURED_CPUS.store(owner_bit, Ordering::Release);
+    let cpu_count = crate::arch::x86_64::percpu::initialized_cpu_count().clamp(1, 8);
+    let online_mask = ((1u16 << cpu_count) - 1) as u8;
+    if online_mask == owner_bit {
+        return RendezvousResult {
+            online_mask,
+            captured_mask: owner_bit,
+            send_failed: false,
+        };
+    }
+
+    let send_failed = !crate::arch::x86_64::lapic::broadcast_panic_nmi();
+    let started = read_tsc();
+    let mut spins = RENDEZVOUS_SPIN_BUDGET;
+    while CAPTURED_CPUS.load(Ordering::Acquire) & online_mask != online_mask && spins != 0 {
+        if read_tsc().wrapping_sub(started) >= RENDEZVOUS_TSC_BUDGET {
+            break;
+        }
+        spins -= 1;
+        core::hint::spin_loop();
+    }
+    RendezvousResult {
+        online_mask,
+        captured_mask: CAPTURED_CPUS.load(Ordering::Acquire) & online_mask,
+        send_failed,
+    }
+}
+
+fn publish_snapshot(cpu: usize, snapshot: RegisterSnapshot) {
+    let Some(slot) = CPU_SNAPSHOTS.get(cpu) else {
+        return;
+    };
+    slot.commit.store(1, Ordering::Relaxed);
+    unsafe { slot.snapshot.get().write(snapshot) };
+    slot.commit.store(2, Ordering::Release);
+}
+
+fn read_snapshot(cpu: usize) -> Option<RegisterSnapshot> {
+    let slot = CPU_SNAPSHOTS.get(cpu)?;
+    let before = slot.commit.load(Ordering::Acquire);
+    if before != 2 {
+        return None;
+    }
+    let snapshot = unsafe { slot.snapshot.get().read() };
+    (slot.commit.load(Ordering::Acquire) == before).then_some(snapshot)
+}
+
+fn read_tsc() -> u64 {
+    let low: u32;
+    let high: u32;
+    unsafe {
+        core::arch::asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack));
+    }
+    (u64::from(high) << 32) | u64::from(low)
 }
 
 unsafe fn serialize(
     arena: &mut [u8; ARENA_LEN],
     owner_cpu: u8,
     trigger: Trigger,
-    registers: RegisterSnapshot,
+    rendezvous: RendezvousResult,
 ) -> usize {
     let mut writer = Writer::new(arena);
     let _ = writer.zeros(HEADER_LEN);
@@ -197,27 +367,36 @@ unsafe fn serialize(
         section.u32(trigger.line);
         section.u32(trigger.column);
     });
-    writer.section(SectionKind::CpuSnapshots, 1, 0, |section| {
-        section.u8(1);
-        section.u8(owner_cpu);
+    writer.section(SectionKind::CpuSnapshots, 2, 0, |section| {
+        section.u8(rendezvous.captured_mask.count_ones() as u8);
+        section.u8(0);
         section.u16(core::mem::size_of::<RegisterSnapshot>() as u16);
-        for value in [
-            registers.rip,
-            registers.rsp,
-            registers.rbp,
-            registers.rflags,
-            registers.cr0,
-            registers.cr2,
-            registers.cr3,
-            registers.cr4,
-            registers.fs_base,
-            registers.gs_base,
-            registers.current_pid,
-        ] {
-            section.u64(value);
+        for cpu in 0..crate::arch::x86_64::acpi::MAX_CPUS {
+            if rendezvous.captured_mask & (1u8 << cpu) == 0 {
+                continue;
+            }
+            let Some(registers) = read_snapshot(cpu) else {
+                continue;
+            };
+            section.u8(cpu as u8);
+            section.u8(registers.fidelity);
+            section.raw(&[0; 6]);
+            for value in [
+                registers.rip,
+                registers.rsp,
+                registers.rbp,
+                registers.rflags,
+                registers.cr0,
+                registers.cr2,
+                registers.cr3,
+                registers.cr4,
+                registers.fs_base,
+                registers.gs_base,
+                registers.current_pid,
+            ] {
+                section.u64(value);
+            }
         }
-        section.u8(registers.fidelity);
-        section.raw(&registers._reserved);
     });
     writer.section(SectionKind::TraceTail, 1, 0, |section| {
         const EXPORT_PER_CPU: usize = 128;
@@ -263,6 +442,15 @@ unsafe fn serialize(
             section.patch_u32(count_at, count);
         }
     });
+    let scheduler_flags = super::shadow::scheduler::snapshot_flags();
+    writer.section(
+        SectionKind::ShadowScheduler,
+        1,
+        scheduler_flags,
+        |section| {
+            let _ = super::shadow::scheduler::write_snapshot(section);
+        },
+    );
     if let Some(violation) = super::shadow::first() {
         writer.section(SectionKind::Violation, 1, 0, |section| {
             section.u32(violation.invariant_id);
@@ -301,10 +489,13 @@ unsafe fn serialize(
     if NESTED_COUNT.load(Ordering::Relaxed) != 0 {
         flags |= FLAG_NESTED;
     }
+    if rendezvous.captured_mask != rendezvous.online_mask {
+        flags |= FLAG_PARTIAL_CPU_SET;
+    }
+    if rendezvous.send_failed {
+        flags |= FLAG_RENDEZVOUS_SEND_FAILED;
+    }
     let total_len = writer.len();
-    let initialized = crate::arch::x86_64::percpu::initialized_cpu_count().clamp(1, 8);
-    let online_mask = ((1u16 << initialized) - 1) as u8;
-    let captured_mask = 1u8 << owner_cpu;
     let sequence = RECORD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let build_id = build_id();
 
@@ -316,8 +507,8 @@ unsafe fn serialize(
     arena[24..40].copy_from_slice(&super::identity::run_id());
     arena[40..60].copy_from_slice(&build_id);
     arena[60] = owner_cpu;
-    arena[61] = online_mask;
-    arena[62] = captured_mask;
+    arena[61] = rendezvous.online_mask;
+    arena[62] = rendezvous.captured_mask;
     arena[63] = trigger.kind as u8;
     arena[64..72].copy_from_slice(&sequence.to_le_bytes());
     let payload_crc = crc32(&arena[HEADER_LEN..total_len]);

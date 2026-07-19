@@ -74,6 +74,11 @@ lazy_static! {
 
         // Set up exception handlers
         idt.breakpoint.set_handler_fn(breakpoint_handler);
+        unsafe {
+            idt.non_maskable_interrupt
+                .set_handler_fn(crash_nmi_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::PANIC_NMI_IST_INDEX);
+        }
         idt.page_fault.set_handler_fn(page_fault_handler);
         // Wire #DF to the IST stack so a kernel-stack overflow during user-mode
         // work cannot triple-fault the machine. Same `set_handler_addr` workaround
@@ -367,6 +372,10 @@ pub fn eoi(vector: u8) {
 }
 
 // Exception Handlers
+
+extern "x86-interrupt" fn crash_nmi_handler(stack_frame: InterruptStackFrame) {
+    crate::diagnostics::crash::handle_nmi(stack_frame.instruction_pointer.as_u64());
+}
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     debug_error!("EXCEPTION: BREAKPOINT");

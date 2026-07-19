@@ -44,6 +44,7 @@ pub enum SectionKind {
     Trigger = 2,
     CpuSnapshots = 3,
     TraceTail = 5,
+    ShadowScheduler = 6,
     Violation = 10,
     Backtrace = 11,
     Footer = 12,

@@ -1835,11 +1835,8 @@ pub fn try_preempt_ring3(
 
     let next = crate::process::scheduler::SCHEDULER
         .lock()
-        .pop_next_user()?;
+        .peek_next_user()?;
     if next == cur {
-        crate::process::scheduler::SCHEDULER
-            .lock()
-            .yield_entity(crate::process::entity::EntityId::UserProcess(next));
         return None;
     }
 
@@ -1852,9 +1849,9 @@ pub fn try_preempt_ring3(
         let cur_p = g.by_pid.get_mut(&cur)?;
         crate::userland::switch::save_ring3(cur_p, frame);
     }
-    crate::process::scheduler::SCHEDULER
-        .lock()
-        .yield_entity(crate::process::entity::EntityId::UserProcess(cur));
+    let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
+    scheduler.yield_entity(crate::process::entity::EntityId::UserProcess(cur));
+    let next = scheduler.pop_next_user()?;
 
     // current_user_pid is not flipped here — `resume_ring3` does
     // that atomically with the CR3 / TSS.rsp0 / GSBASE side-effects.

@@ -238,6 +238,9 @@ fi
 if [ -n "${AGENTICOS_CRASH_INJECT:-}" ]; then
     QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/crash_inject,string=$AGENTICOS_CRASH_INJECT")
 fi
+if [ -n "${AGENTICOS_CRASH_MISSING_CPU:-}" ]; then
+    QEMU_ARGS+=(-fw_cfg "name=opt/agenticos/crash_missing_cpu,string=$AGENTICOS_CRASH_MISSING_CPU")
+fi
 
 COMPOSITOR_REQUEST="${AGENTICOS_COMPOSITOR:-legacy}"
 GPU_STRICT="${AGENTICOS_GPU_STRICT:-0}"

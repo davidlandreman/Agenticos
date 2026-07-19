@@ -35,6 +35,9 @@ const REG_TIMER_DIVIDE: u32 = 0x3e0;
 const LVT_MASKED: u32 = 1 << 16;
 const TIMER_PERIODIC: u32 = 1 << 17;
 const ICR_DELIVERY_PENDING: u32 = 1 << 12;
+const ICR_ALL_EXCLUDING_SELF: u32 = 3 << 18;
+const ICR_DELIVERY_NMI: u32 = 4 << 8;
+const CRASH_ICR_BUDGET: usize = 1_000_000;
 
 static BASE: AtomicU64 = AtomicU64::new(0);
 
@@ -101,15 +104,33 @@ pub fn send_startup(apic_id: u8, page_vector: u8) {
     unsafe { send_ipi(apic_id, 0x0000_0600 | u32::from(page_vector)) }
 }
 
-pub fn broadcast_halt() {
+/// Send a panic rendezvous NMI without an unbounded APIC wait. Returns false
+/// when a prior or newly-issued ICR command remains pending past the budget.
+pub fn broadcast_panic_nmi() -> bool {
     if !available() {
-        return;
+        return false;
     }
     unsafe {
-        wait_icr();
-        // Fixed delivery, all excluding self destination shorthand.
-        write(REG_ICR_LOW, (3 << 18) | u32::from(HALT_VECTOR));
-        wait_icr();
+        if !wait_icr_bounded(CRASH_ICR_BUDGET) {
+            return false;
+        }
+        write(REG_ICR_LOW, ICR_ALL_EXCLUDING_SELF | ICR_DELIVERY_NMI);
+        wait_icr_bounded(CRASH_ICR_BUDGET)
+    }
+}
+
+/// Best-effort post-capsule fixed halt for a CPU that did not acknowledge the
+/// NMI. This is intentionally bounded so a wedged LAPIC cannot wedge panic.
+pub fn broadcast_halt_bounded() -> bool {
+    if !available() {
+        return false;
+    }
+    unsafe {
+        if !wait_icr_bounded(CRASH_ICR_BUDGET) {
+            return false;
+        }
+        write(REG_ICR_LOW, ICR_ALL_EXCLUDING_SELF | u32::from(HALT_VECTOR));
+        wait_icr_bounded(CRASH_ICR_BUDGET)
     }
 }
 
@@ -148,6 +169,17 @@ unsafe fn wait_icr() {
     while read(REG_ICR_LOW) & ICR_DELIVERY_PENDING != 0 {
         core::hint::spin_loop();
     }
+}
+
+unsafe fn wait_icr_bounded(mut budget: usize) -> bool {
+    while read(REG_ICR_LOW) & ICR_DELIVERY_PENDING != 0 {
+        if budget == 0 {
+            return false;
+        }
+        budget -= 1;
+        core::hint::spin_loop();
+    }
+    true
 }
 
 #[inline]

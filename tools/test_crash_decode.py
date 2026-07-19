@@ -73,6 +73,15 @@ class CrashDecodeTests(unittest.TestCase):
         reports = crash_decode.parse_stream(b"noise" + valid[:40] + b"junk" + valid)
         self.assertEqual(len(reports), 1)
 
+    def test_v2_multi_cpu_snapshots(self):
+        def cpu(cpu_id, fidelity, base):
+            return struct.pack("<BB6x11Q", cpu_id, fidelity, *range(base, base + 11))
+
+        payload = struct.pack("<BBH", 2, 0, 96) + cpu(0, 2, 10) + cpu(3, 2, 30)
+        report, _ = crash_decode.parse_capsule(capsule([section(3, payload, version=2)]))
+        self.assertEqual([entry["cpu"] for entry in report["cpus"]], [0, 3])
+        self.assertEqual(report["cpus"][1]["cr3"], "0x24")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -58,11 +58,16 @@ counters are monotonic and never require the scheduler or process-table lock.
 
 Each CPU owns a TSS. `privilege_stack_table[0]` (`rsp0`) points at that CPU's
 current ring-3 process kernel stack and is updated on migration.
-`interrupt_stack_table[0]` points at a private double-fault stack.
+`interrupt_stack_table[0]` points at a private double-fault stack and index 1
+points at a separate per-CPU panic-NMI stack. The panic NMI handler captures a
+lock-free register snapshot, acknowledges the crash owner, and halts; never
+route ordinary NMI work through that entry.
 
 ## Boot ordering
 
-`gdt::init()` runs *before* `interrupts::init_idt()` in `src/kernel.rs`. The IDT entry for `#DF` references IST index 0 in the TSS; the CPU consults the TSS only at fault time, so loading the IDT before the TSS is in TR is technically safe — but if the very first interrupt arrives between the two calls, IST lookup would fail. Keep the order: GDT → IDT/PIT → `time::init()` RTC anchor → … .
+`gdt::init()` runs *before* `interrupts::init_idt()` in `src/kernel.rs`. The IDT
+entries for `#DF` and panic NMI reference TSS IST indexes 0 and 1. Keep the
+order: GDT → IDT/PIT → `time::init()` RTC anchor → … .
 
 ## What the userland platform adds
 

@@ -11,7 +11,8 @@ implementation details live in `src/userland/`.
 - `pcb.rs` — process control block. Carries name, PID, kernel stack, `CpuContext`, watchdog `last_activity_tick`, terminal id, optional entry-fn closure.
 - `context.rs` — `CpuContext` (all GPRs + RIP/RSP/RFLAGS + CS/SS). The CS/SS fields default to kernel selectors (0x08/0x10) so existing kernel-process flows don't change.
 - `scheduler.rs` — shared privilege-neutral run queue with per-CPU current slots,
-  save-before-steal context publication, and optional entity CPU affinity.
+  save-before-steal context publication, optional entity CPU affinity, and
+  production-only scheduler-shadow transition hooks.
 - `stack.rs` — `StackAllocator` over a fixed VA range at `0x_5555_0000_0000`.
 
 ## What's wired up today
@@ -36,6 +37,12 @@ implementation details live in `src/userland/`.
 `CpuContext` carries explicit `cs` and `ss` fields (offsets 144 and 152). The naked-asm `iretq` frames in `preemption.rs` and `context_switch.rs` read CS/SS from those fields rather than literal `push 0x08` / `push 0x10`. Kernel processes default to `cs=0x08, ss=0x10`; the kernel-thread scheduler doesn't directly schedule ring-3 (each ring-3 process is in the userland subsystem's `PROCESS_TABLE`, not the kernel-thread scheduler).
 
 **Multi-ring-3 integration:** ring-3 processes and kernel threads share the tagged scheduler queue. Production launchers do not wait: `process-service` installs the process as Ready, then returns to its queue. On exit the user entity is unregistered and the service is woken to drop the `Process` from a safe kernel stack. `WaitingForRing3Exit` remains only for synchronous QEMU-test compatibility.
+
+**Scheduler-shadow rule:** `process::init_scheduler` marks only the singleton
+production scheduler as observed. Hook calls belong immediately after their
+production state/queue commit. A handoff must save/yield the old entity before
+dispatching the next one; temporarily publishing two `Running` entities on one
+CPU is `SCHED-002`, even if the next instruction would repair it.
 
 **Pthread affinity rule:** several ring-3 task entities may share one TGID and
 address space. Until user TLB shootdown exists, the group is assigned a home

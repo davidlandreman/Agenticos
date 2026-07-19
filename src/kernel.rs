@@ -84,11 +84,11 @@ pub fn init(boot_info: &'static mut BootInfo) {
     debug_info!("[boot] scheduler");
     crate::process::init_scheduler();
     crate::diagnostics::shadow_init();
-    #[cfg(feature = "test")]
-    crate::diagnostics::maybe_inject_crash();
     crate::process::timer::init();
     crate::process::timer::start_service();
     crate::arch::x86_64::smp::init();
+    #[cfg(feature = "test")]
+    crate::diagnostics::maybe_inject_crash();
 
     debug_info!("[boot] entropy");
     crate::random::init();

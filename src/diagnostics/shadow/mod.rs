@@ -1,4 +1,6 @@
-//! Crash-readable first-invariant-violation latch.
+//! Independently shaped, crash-readable diagnostic state machines.
+
+pub mod scheduler;
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -39,10 +41,6 @@ static RECORD: Latch = Latch(UnsafeCell::new(ViolationRecord {
     trace_sequence: 0,
 }));
 
-#[allow(
-    dead_code,
-    reason = "shadow domains call this as they are instrumented"
-)]
 pub fn latch(mut record: ViolationRecord) -> bool {
     if ID
         .compare_exchange(0, u32::MAX, Ordering::AcqRel, Ordering::Acquire)

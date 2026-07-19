@@ -138,7 +138,6 @@ type GetTestsFn = fn() -> &'static [&'static dyn crate::lib::test_utils::Testabl
 #[cfg(feature = "test")]
 static MODULES: &[(&str, GetTestsFn)] = &[
     ("basic", basic::get_tests),
-    ("diagnostics", diagnostics::get_tests),
     ("binutils", binutils::get_tests),
     ("memory", memory::get_tests),
     ("network", network::get_tests),
@@ -241,6 +240,9 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("caret", crate::terminal::caret::get_tests),
     ("pty", crate::terminal::pty::get_tests),
     ("keys", crate::terminal::keys::get_tests),
+    // Keep diagnostics last so its final assertion observes every preceding
+    // production transition in a full or multi-module filtered run.
+    ("diagnostics", diagnostics::get_tests),
 ];
 
 /// Strip the `agenticos::tests::<topic>::` prefix from a test's `type_name`,

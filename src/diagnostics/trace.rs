@@ -25,6 +25,8 @@ pub enum EventKind {
     CpuOnline = 3,
     FatalElected = 4,
     NestedFatal = 5,
+    CpuRendezvous = 6,
+    UnexpectedNmi = 7,
     InterruptEntry = 0x100,
     InterruptExit = 0x101,
     SchedulerDispatch = 0x200,

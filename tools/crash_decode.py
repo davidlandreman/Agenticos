@@ -21,6 +21,7 @@ SECTION_NAMES = {
     2: "trigger",
     3: "cpu_snapshots",
     5: "trace_tail",
+    6: "shadow_scheduler",
     10: "violation",
     11: "backtrace",
     12: "footer",
@@ -145,6 +146,8 @@ def parse_capsule(blob: bytes, offset: int = 0) -> tuple[dict[str, Any], int]:
         )
         _decode_section(report, section)
     required = {1, 2, 3, 5, 11, 12}
+    if report["run"].get("personality") in ("record", "strict"):
+        required.add(6)
     present = {section.kind for section in sections}
     report["missing"] = [SECTION_NAMES[kind] for kind in sorted(required - present)]
     trigger = report["trigger"]
@@ -199,12 +202,31 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
     elif section.kind == 3:
         if len(payload) < 4:
             raise DecodeError("short CPU snapshot section")
-        count, cpu, size = struct.unpack_from("<BBH", payload)
-        if count != 1 or size != 96 or len(payload) != 4 + size:
-            raise DecodeError("invalid CPU snapshot layout")
-        values = struct.unpack_from("<11QB7x", payload, 4)
+        count, second, size = struct.unpack_from("<BBH", payload)
         keys = ("rip", "rsp", "rbp", "rflags", "cr0", "cr2", "cr3", "cr4", "fs_base", "gs_base", "current_pid")
-        report["cpus"] = [{"cpu": cpu, **{key: f"0x{value:x}" for key, value in zip(keys, values[:11])}, "fidelity": values[11]}]
+        if size != 96:
+            raise DecodeError("invalid CPU snapshot record size")
+        if section.version == 1:
+            if count != 1 or len(payload) != 4 + size:
+                raise DecodeError("invalid v1 CPU snapshot layout")
+            values = struct.unpack_from("<11QB7x", payload, 4)
+            report["cpus"] = [{"cpu": second, **{key: f"0x{value:x}" for key, value in zip(keys, values[:11])}, "fidelity": values[11]}]
+        elif section.version == 2:
+            if len(payload) != 4 + count * size:
+                raise DecodeError("invalid v2 CPU snapshot layout")
+            cpus = []
+            cursor = 4
+            seen = set()
+            for _ in range(count):
+                cpu, fidelity, *values = struct.unpack_from("<BB6x11Q", payload, cursor)
+                cursor += size
+                if cpu in seen or cpu >= 8:
+                    raise DecodeError("invalid or duplicate CPU snapshot ID")
+                seen.add(cpu)
+                cpus.append({"cpu": cpu, **{key: f"0x{value:x}" for key, value in zip(keys, values)}, "fidelity": fidelity})
+            report["cpus"] = cpus
+        else:
+            raise DecodeError(f"unsupported CPU snapshot version {section.version}")
     elif section.kind == 10:
         if len(payload) != 64:
             raise DecodeError("invalid violation size")
@@ -220,6 +242,37 @@ def _decode_section(report: dict[str, Any], section: Section) -> None:
             "expected": [values[7], values[9]],
             "observed": [values[8], values[10]],
             "trace_sequence": values[11],
+        }
+    elif section.kind == 6:
+        if len(payload) < 28:
+            raise DecodeError("short scheduler shadow section")
+        epoch, pending_operation, pending_subject, count = struct.unpack_from("<QQQI", payload)
+        if len(payload) != 28 + count * 28:
+            raise DecodeError("invalid scheduler shadow layout")
+        entities = []
+        cursor = 28
+        for _ in range(count):
+            key, state, cpu, affinity, generation, last_epoch, operation = struct.unpack_from(
+                "<QBBBBQB7x", payload, cursor
+            )
+            cursor += 28
+            entities.append(
+                {
+                    "key": f"0x{key:016x}",
+                    "state": state,
+                    "cpu": cpu,
+                    "affinity": affinity,
+                    "generation": generation,
+                    "last_epoch": last_epoch,
+                    "last_operation": operation,
+                }
+            )
+        report.setdefault("shadow", {})["scheduler"] = {
+            "epoch": epoch,
+            "stable": not bool(section.flags & 1) and epoch % 2 == 0,
+            "pending_operation": pending_operation,
+            "pending_subject": f"0x{pending_subject:016x}",
+            "entities": entities,
         }
 
 

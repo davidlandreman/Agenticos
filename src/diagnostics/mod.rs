@@ -27,6 +27,8 @@ static PERSONALITY: AtomicU8 = AtomicU8::new(Personality::Minimal as u8);
 
 pub fn early_init() {
     identity::init();
+    #[cfg(feature = "test")]
+    crash::init_test_policy();
     let configured = match env!("AGENTICOS_BUILD_DIAGNOSTICS") {
         "strict" if cfg!(feature = "diagnostics-strict") => Personality::Strict,
         "record" if cfg!(feature = "diagnostics") => Personality::Record,
@@ -59,8 +61,28 @@ pub fn maybe_inject_crash() {
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(length);
-    if &value[..end] == b"panic" {
-        panic!("diagnostic crash injection");
+    match &value[..end] {
+        b"panic" => panic!("diagnostic crash injection"),
+        b"sched-duplicate" => {
+            use crate::diagnostics::shadow::scheduler::{OperationKind, Transition};
+            use crate::process::entity::EntityId;
+
+            let id = EntityId::UserProcess(0x7fff_ff00);
+            shadow::scheduler::register(id);
+            shadow::scheduler::make_ready(id, true);
+            shadow::scheduler::dispatch(id);
+            shadow::scheduler::apply(
+                id,
+                Transition {
+                    operation: OperationKind::ForceRunning,
+                    cpu: 1,
+                    published: true,
+                    allow_running_exit: false,
+                },
+            );
+            panic!("strict scheduler corruption injection did not escalate");
+        }
+        _ => {}
     }
 }
 
