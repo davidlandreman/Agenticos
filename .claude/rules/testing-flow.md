@@ -5,8 +5,9 @@ The kernel has a custom `no_std` test framework that runs tests directly inside 
 ## Running tests
 
 ```sh
-./test.sh                       # all tests
+./test.sh                       # default test suite
 ./test.sh arc                   # one module
+./test.sh gcc                   # opt-in slow GCC end-to-end pipeline
 ./test.sh arc heap              # several modules
 ./test.sh 'arc::test_weak*'     # glob within a module
 ./test.sh '*scroll*'            # substring across module::fn
@@ -27,7 +28,7 @@ Other (non-zero) exit codes mean the kernel crashed before tests could complete.
 
 The filter string is delivered via QEMU `fw_cfg` (file `opt/agenticos/test_filter`) and read by the kernel at boot (`src/tests/filter.rs`). No rebuild is needed when the filter changes — only the QEMU command line.
 
-Syntax: comma-separated patterns. Each pattern matches against `<module>` or `<module>::<fn>`, with `*` allowed at the start and/or end of a pattern. A pattern with no `*` must match exactly. An empty/unset filter runs everything.
+Syntax: comma-separated patterns. Each pattern matches against `<module>` or `<module>::<fn>`, with `*` allowed at the start and/or end of a pattern. A pattern with no `*` must match exactly. An empty/unset filter runs the default suite. Exceptionally slow modules may remain opt-in; currently `gcc` runs only when an explicit filter matches it.
 
 ## Output
 

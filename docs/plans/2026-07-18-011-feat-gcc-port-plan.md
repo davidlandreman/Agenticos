@@ -318,25 +318,20 @@ valuable — any large binary would eventually hit them):**
    binary stalled for minutes. Fixed with a single-entry resume-hint cache
    in `FatFilesystem` (`read_file_at`), making sequential page-in O(n).
    Invalidated on any write.
-4. execve now honors `FD_CLOEXEC` (`FdTable::close_on_exec`) — required so
+4. execve now honors `FD_CLOEXEC` (`FdTable::take_cloexec`) — required so
    musl posix_spawn's CLOEXEC status pipe signals a successful exec.
 
-**Known gap (blocks U4/completion): `cc1` hangs early in userspace.**
-When `cc1` (GCC's 27 MiB C front/back end) runs as a fork+execve child, it
-issues only its first few syscalls (`arch_prctl`, …) then spins in userspace
-with no further syscalls and no termination — a resolvable-fault or
-busy-loop, not an unhandled fault (which would SIGSEGV-kill it). It reaches
-further when launched directly via `launch_user_binary` than as a spawned
-child, which points at the fork/spawn/execve-of-a-large-binary path rather
-than cc1 itself. Not yet root-caused. The `src/tests/gcc.rs` module and its
-staged fixtures are complete and kept in-tree but unregistered from the test
-`MODULES` list until this is resolved, so `./test.sh` stays green.
-
-Next debugging steps to try: compare the COW-forked child's initial
-`UserState`/page tables against a direct launch; verify the spawn-clone
-child RSP and the post-execve entry frame for a 27 MiB image; check whether
-`close_on_exec` closes a descriptor cc1 still needs; bisect by having the
-driver `fork`+`execve` a *small* binary vs cc1.
+**Resolved follow-up: the reported `cc1` hang was misdiagnosed.** The fixed
+30-second synchronous-test deadline included demand-paging and initializing
+the 27 MiB `cc1`; with a realistic bounded deadline, `cc1` exits 0. A second
+bug then stranded the GCC driver in musl posix_spawn's successful-exec read:
+`execve` dropped the CLOEXEC status-pipe writer while holding
+`PROCESS_TABLE`, so the endpoint's `try_lock` wake could not reach the blocked
+parent. CLOEXEC slots are now taken under the lock and dropped afterward. A
+separate blocked-index/scheduler publication race is also reconciled after
+parking. The opt-in GCC acceptance test (`./test.sh gcc`) now completes
+`gcc → cc1 → as → collect2 → ld` and runs the resulting binary;
+it is excluded from the default suite because that pipeline is unusually slow.
 
 ## Completion criteria
 

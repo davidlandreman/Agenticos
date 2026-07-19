@@ -288,21 +288,17 @@ exercise them hard:
    paths (`wake_ring3_blocked_by_locking`) since those handlers hold no
    process lock and a dropped wake strands a pipe peer.
 
-### Known limitation: pack-protocol transports
+### Resolved follow-up: pack-protocol transports
 
-`git clone`/`fetch`/`push` over the pack protocol (a local
-`git-upload-pack` spawned via `sh -c`, or the HTTP helper) still do not
-complete on this kernel. They spawn a helper and hold a *bidirectional*
-pipe conversation across two or three processes; that multi-process
-pipe/poll IPC hits a deeper scheduler lost-wake interaction beyond the
-single-child EOF case fixed above — the same "its own kernel project"
-concurrency area as the links2-HTTPS hang. The transport is wired and
-reachable (`git-upload-pack`/`git-receive-pack`/`git-upload-archive`
-resolve to `GIT.ELF` via `argv[0]` dispatch; `git-remote-http{,s}` →
-`GITRHTTP.ELF`; `tools/git-fixture` is a committed dumb-HTTP repo), so
-the clone tests can be switched on once that lands. Everything
-in-process — init, add, commit, branch, checkout, merge, log, diff,
-status, cat-file, rev-parse, config, fsck's non-forking checks — works.
+The remaining local and HTTP clone stalls had two kernel causes. First,
+`execve` destroyed CLOEXEC pipe endpoints while holding `PROCESS_TABLE`, so
+the helper-success EOF wake was dropped. Second, a waiter published its
+blocked reason and scheduler state under separate locks; a producer could
+consume the reason and mark it Ready before the waiter overwrote the final
+scheduler state with Blocked. CLOEXEC teardown is now two-phase and
+`mark_ring3_blocked` reconciles that ordering after publication. The booted
+suite covers both a local `git-upload-pack` clone and a dumb-HTTP clone through
+`GITRHTTP.ELF`, including the helper's nested `rev-list` child.
 
 ## Out of scope
 
