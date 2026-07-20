@@ -35,9 +35,9 @@ PCI bus, VirtIO block storage, PS/2 keyboard and mouse, VirtIO input/network/GPU
 
 ## VirtIO block completion (load-bearing)
 
-Block requests use modern device ID `0x1042`, require `VIRTIO_F_VERSION_1`, and identify root/host/data disks through `VIRTIO_BLK_T_GET_ID`. Each descriptor chain is header + DMA data pages + status byte. The request owns every page until its used-ring entry arrives; callers never expose stack or user virtual addresses to DMA.
+Block requests use modern device ID `0x1042`, require `VIRTIO_F_VERSION_1`, and identify root/host/data disks through `VIRTIO_BLK_T_GET_ID`. Each descriptor chain is header + DMA data pages + status byte. The request owns every page until its exact waiter consumes the completed request; callers never expose stack or user virtual addresses to DMA.
 
-The shared PCI INTx handler reads the VirtIO ISR, reclaims every used descriptor, and wakes the request's exact waiter. Ring-3 storage waits save both the in-progress kernel continuation and the live FS_BASE/FPU image so partially completed syscalls and page faults resume without re-firing or corrupting user SSE state. Any inline wait that can become `KERNEL_CONTEXT` must return from `hlt` with IF enabled; otherwise the eventual ring-3 exit restores an interrupt-disabled kernel caller. Early boot waits with `hlt`. Do not hold ordinary spin locks or the memory-mapper lock across a `BlockDevice` call.
+The shared PCI INTx handler reads the VirtIO ISR, marks each used request complete, and wakes the request's exact waiter. It must not release the descriptor chain there: the head remains pinned until that waiter removes the completed request and takes its DMA storage, preventing a new submission from reusing the same request-map key. Ring-3 storage waits save both the in-progress kernel continuation and the live FS_BASE/FPU image so partially completed syscalls and page faults resume without re-firing or corrupting user SSE state. Any inline wait that can become `KERNEL_CONTEXT` must return from `hlt` with IF enabled; otherwise the eventual ring-3 exit restores an interrupt-disabled kernel caller. Early boot waits with `hlt`. Do not hold ordinary spin locks or the memory-mapper lock across a `BlockDevice` call.
 
 ## Mouse input-method selection
 

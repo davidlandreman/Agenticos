@@ -643,21 +643,23 @@ pub unsafe fn block_current_ring3_and_yield(args: &SyscallArgs, reason: Ring3Blo
         p.saved_user_state = snapshot;
         save_user_cpu_state(p);
     }
+    // The process kernel stack is still live on this CPU. Keep the saved
+    // continuation unpublished until the architecture handoff has moved to
+    // the per-CPU kernel stack; otherwise an early pipe/readiness wake can
+    // enqueue this process and another CPU can restore it concurrently.
+    let entity = crate::process::entity::EntityId::UserProcess(me);
+    crate::process::scheduler::SCHEDULER
+        .lock()
+        .mark_context_saving(entity);
+    crate::arch::x86_64::percpu::set_pending_user_context_publish(me);
     mark_ring3_blocked(me, reason);
 
-    // A readiness producer may have fired after the syscall scanned its fds
-    // but before the blocked reason became visible. Producers increment the
-    // sequence before waking, so a post-publication recheck closes both sides
-    // of that race. The conservative wake removes us from the blocked index
-    // and makes the saved continuation runnable again before dispatch.
-    if let Ring3BlockReason::WaitingForReadiness {
-        observed_sequence, ..
-    } = reason
-    {
-        if crate::userland::readiness::changed_since(observed_sequence) {
-            crate::userland::lifecycle::wake_ring3_blocked_on_readiness();
-        }
-    }
+    // A readiness producer may have fired after the syscall checked its fd
+    // but before the blocked reason became visible. This includes ordinary
+    // pipe reads/writes as well as poll/select/epoll. Producers increment the
+    // sequence before waking, so a post-publication recheck closes the early
+    // side of the lost-wake race for this exact waiter.
+    crate::userland::lifecycle::reconcile_readiness_after_block(me, reason);
 
     crate::diagnostics::shadow::stack::begin_abandon(me);
     dispatch_after_user_stop()

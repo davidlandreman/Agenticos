@@ -1914,6 +1914,33 @@ fn test_run_zsh_external_ls() {
     assert_eq!(code, 0);
 }
 
+/// Exact sustained-pipeline reproducer from the interactive shell. Three
+/// processes must interleave through two 4 KiB pipes until one MiB has moved;
+/// the command must neither lose a pipe wake nor corrupt a fork continuation.
+fn test_run_zsh_yes_head_wc_pipeline() {
+    let output = "/work/pipe-stress-count";
+    let _ = crate::fs::vfs::vfs_unlink(output);
+    let Some((kind, code)) = drive_zsh(&[
+        "-f",
+        "+m",
+        "-c",
+        "yes x | head -c 1048576 | wc -c > /work/pipe-stress-count",
+    ]) else {
+        return;
+    };
+    assert!(matches!(
+        kind,
+        crate::userland::lifecycle::ExitKind::Cooperative
+    ));
+    assert_eq!(code, 0, "yes|head|wc pipeline failed");
+    let count = crate::fs::File::open_read(output)
+        .expect("open pipeline count")
+        .read_to_string()
+        .expect("read pipeline count");
+    assert_eq!(count.trim(), "1048576");
+    crate::fs::vfs::vfs_unlink(output).expect("remove pipeline count");
+}
+
 /// Interactive zsh must source the staged global config and build an Agnoster
 /// prompt in-process, without leaving upstream's per-redraw `$()` fork in PS1.
 fn test_run_zsh_global_rc_agnoster_prompt() {
@@ -4005,6 +4032,78 @@ fn test_pipe_short_write_at_capacity() {
     // Subsequent write rejects (buffer full).
     let m = writer.pipe().write(b"more");
     assert_eq!(m, 0);
+}
+
+/// A pipe event can land after a syscall observes empty/full state but before
+/// its blocked reason is published. The producer's immediate wake then finds
+/// no waiter. The readiness sequence carried by pipe block reasons must make
+/// that exact waiter runnable after publication instead of stranding both
+/// sides of a sustained pipeline.
+fn test_pipe_prepublication_wakes_are_reconciled() {
+    use crate::userland::lifecycle::{
+        mark_ring3_blocked, mark_ring3_ready, reconcile_readiness_after_block, Ring3BlockReason,
+    };
+    use crate::userland::pipe::{Pipe, PipeReadHandle, PipeWriteHandle};
+
+    clear_ring3_queues();
+    let pipe = Pipe::new();
+    let writer = PipeWriteHandle::new(pipe.clone(), false);
+    let reader = PipeReadHandle::new(pipe, false);
+
+    // Reader race: data arrives before WaitingForPipeRead is visible.
+    let read_observed = crate::userland::readiness::sequence();
+    assert_eq!(writer.pipe().write(b"x"), 1);
+    let read_reason = Ring3BlockReason::WaitingForPipeRead {
+        observed_sequence: read_observed,
+    };
+    mark_ring3_ready(32);
+    let read_entity = crate::process::entity::EntityId::UserProcess(32);
+    crate::process::scheduler::SCHEDULER
+        .lock()
+        .mark_context_saving(read_entity);
+    mark_ring3_blocked(32, read_reason);
+    reconcile_readiness_after_block(32, read_reason);
+    assert!(
+        crate::userland::lifecycle::peek_next_ring3().is_none(),
+        "an early wake must not publish a still-live kernel stack"
+    );
+    crate::process::scheduler::SCHEDULER
+        .lock()
+        .publish_context(read_entity);
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(32));
+
+    // Writer race: capacity becomes available before WaitingForPipeWrite is
+    // visible. A real read supplies the notification just as the live path
+    // does.
+    let write_observed = crate::userland::readiness::sequence();
+    let mut byte = [0u8; 1];
+    assert_eq!(reader.pipe().read(&mut byte), 1);
+    let write_reason = Ring3BlockReason::WaitingForPipeWrite {
+        observed_sequence: write_observed,
+    };
+    mark_ring3_ready(33);
+    let write_entity = crate::process::entity::EntityId::UserProcess(33);
+    crate::process::scheduler::SCHEDULER
+        .lock()
+        .mark_context_saving(write_entity);
+    mark_ring3_blocked(33, write_reason);
+    reconcile_readiness_after_block(33, write_reason);
+    assert!(crate::userland::lifecycle::peek_next_ring3().is_none());
+    crate::process::scheduler::SCHEDULER
+        .lock()
+        .publish_context(write_entity);
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(33));
+
+    // With no intervening event, reconciliation must leave the waiter parked.
+    let unchanged = Ring3BlockReason::WaitingForPipeRead {
+        observed_sequence: crate::userland::readiness::sequence(),
+    };
+    mark_ring3_ready(34);
+    mark_ring3_blocked(34, unchanged);
+    reconcile_readiness_after_block(34, unchanged);
+    assert!(crate::userland::lifecycle::peek_next_ring3().is_none());
+    mark_ring3_ready(34);
+    assert_eq!(crate::userland::lifecycle::pop_next_ring3(), Some(34));
 }
 
 /// `pipe2(fds, 0)` allocates two fds, writes them to the user int[2],
@@ -6209,6 +6308,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_run_zsh_echo_command,
         &test_run_zsh_pwd,
         &test_run_zsh_external_ls,
+        &test_run_zsh_yes_head_wc_pipeline,
         &test_run_zsh_global_rc_agnoster_prompt,
         &test_run_links_version,
         &test_run_fault_pf,
@@ -6296,6 +6396,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_pipe_basic_write_then_read,
         &test_pipe_handle_clone_drop_tracks_counts,
         &test_pipe_short_write_at_capacity,
+        &test_pipe_prepublication_wakes_are_reconciled,
         &test_dispatch_pipe2_round_trip,
         &test_dispatch_pipe2_nonblocking_and_fcntl_status,
         &test_dispatch_select_pipe_readiness,

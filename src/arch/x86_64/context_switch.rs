@@ -198,8 +198,12 @@ pub unsafe extern "C" fn switch_to_context(new_ctx: *const CpuContext) {
 }
 
 extern "C" fn complete_stack_abandon() {
-    crate::diagnostics::shadow::stack::complete_abandon();
-    crate::diagnostics::shadow::cpu::commit_kernel();
+    // `switch_to_context` is also the empty-run-queue path for a ring-3
+    // syscall that just blocked. Its continuation cannot be published until
+    // RSP has moved off the process's live kernel stack, which is true here.
+    // Without this publication, a later pipe/readiness wake can mark the
+    // entity Ready but cannot enqueue its still-unpublished context.
+    publish_pending_context();
 }
 
 /// Abandon a terminated kernel thread, retire its stack from a different

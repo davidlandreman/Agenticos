@@ -410,6 +410,16 @@ pub fn mount_p9(
 
 /// Convenience functions that operate on the global VFS
 
+/// Resolve a path while holding the mount-table lock, then return only the
+/// selected static filesystem pointer and the caller-owned relative path.
+/// Filesystem operations may sleep on block I/O, so none may run while the
+/// global VFS lock is held.
+fn resolve_mount(path: &str) -> Result<(&'static dyn Filesystem, &str), FilesystemError> {
+    get_vfs()
+        .find_filesystem(path)
+        .ok_or(FilesystemError::NotFound)
+}
+
 #[expect(
     dead_code,
     reason = "legacy convenience API; File pins its mount directly"
@@ -418,49 +428,33 @@ pub fn vfs_open(
     path: &str,
     mode: crate::fs::filesystem::FileMode,
 ) -> Result<crate::fs::filesystem::FileHandle, FilesystemError> {
-    let vfs = get_vfs();
-    if let Some((fs, rel_path)) = vfs.find_filesystem(path) {
-        fs.open(rel_path, mode)
-    } else {
-        Err(FilesystemError::NotFound)
-    }
+    let (filesystem, relative) = resolve_mount(path)?;
+    filesystem.open(relative, mode)
 }
 
 pub fn vfs_read_dir(
     path: &str,
 ) -> Result<crate::fs::filesystem::DirectoryIterator<'_>, FilesystemError> {
-    let vfs = get_vfs();
-    if let Some((fs, rel_path)) = vfs.find_filesystem(path) {
-        fs.read_dir(rel_path)
-    } else {
-        Err(FilesystemError::NotFound)
-    }
+    let (filesystem, relative) = resolve_mount(path)?;
+    filesystem.read_dir(relative)
 }
 
 pub fn vfs_stat(path: &str) -> Result<crate::fs::filesystem::DirectoryEntry, FilesystemError> {
-    let vfs = get_vfs();
-    if let Some((fs, rel_path)) = vfs.find_filesystem(path) {
-        fs.stat(rel_path)
-    } else {
-        Err(FilesystemError::NotFound)
-    }
+    let (filesystem, relative) = resolve_mount(path)?;
+    filesystem.stat(relative)
 }
 
 pub fn vfs_unix_metadata(
     path: &str,
 ) -> Result<crate::fs::filesystem::UnixMetadata, FilesystemError> {
-    let (filesystem, relative) = get_vfs()
-        .find_filesystem(path)
-        .ok_or(FilesystemError::NotFound)?;
+    let (filesystem, relative) = resolve_mount(path)?;
     filesystem.unix_metadata(relative)
 }
 
 pub fn vfs_symlink_metadata(
     path: &str,
 ) -> Result<crate::fs::filesystem::UnixMetadata, FilesystemError> {
-    let (filesystem, relative) = get_vfs()
-        .find_filesystem(path)
-        .ok_or(FilesystemError::NotFound)?;
+    let (filesystem, relative) = resolve_mount(path)?;
     filesystem.symlink_metadata(relative)
 }
 
@@ -469,9 +463,7 @@ pub fn vfs_set_times(
     accessed: Option<u64>,
     modified: Option<u64>,
 ) -> Result<(), FilesystemError> {
-    let (filesystem, relative) = get_vfs()
-        .find_filesystem(path)
-        .ok_or(FilesystemError::NotFound)?;
+    let (filesystem, relative) = resolve_mount(path)?;
     if filesystem.is_read_only() {
         return Err(FilesystemError::ReadOnly);
     }
@@ -479,16 +471,12 @@ pub fn vfs_set_times(
 }
 
 pub fn vfs_read_link(path: &str) -> Result<alloc::vec::Vec<u8>, FilesystemError> {
-    let (filesystem, relative) = get_vfs()
-        .find_filesystem(path)
-        .ok_or(FilesystemError::NotFound)?;
+    let (filesystem, relative) = resolve_mount(path)?;
     filesystem.read_link(relative)
 }
 
 pub fn vfs_symlink(target: &str, link_path: &str) -> Result<(), FilesystemError> {
-    let (filesystem, relative) = get_vfs()
-        .find_filesystem(link_path)
-        .ok_or(FilesystemError::NotFound)?;
+    let (filesystem, relative) = resolve_mount(link_path)?;
     if filesystem.is_read_only() {
         return Err(FilesystemError::ReadOnly);
     }
@@ -496,12 +484,8 @@ pub fn vfs_symlink(target: &str, link_path: &str) -> Result<(), FilesystemError>
 }
 
 pub fn vfs_link(old_path: &str, new_path: &str) -> Result<(), FilesystemError> {
-    let (old_fs, old_relative) = get_vfs()
-        .find_filesystem(old_path)
-        .ok_or(FilesystemError::NotFound)?;
-    let (new_fs, new_relative) = get_vfs()
-        .find_filesystem(new_path)
-        .ok_or(FilesystemError::NotFound)?;
+    let (old_fs, old_relative) = resolve_mount(old_path)?;
+    let (new_fs, new_relative) = resolve_mount(new_path)?;
     if (old_fs as *const dyn Filesystem as *const ())
         != (new_fs as *const dyn Filesystem as *const ())
     {
@@ -514,8 +498,7 @@ pub fn vfs_link(old_path: &str, new_path: &str) -> Result<(), FilesystemError> {
 }
 
 pub fn vfs_mkdir(path: &str) -> Result<(), FilesystemError> {
-    let vfs = get_vfs();
-    let (fs, rel) = vfs.find_filesystem(path).ok_or(FilesystemError::NotFound)?;
+    let (fs, rel) = resolve_mount(path)?;
     if fs.is_read_only() {
         return Err(FilesystemError::ReadOnly);
     }
@@ -523,8 +506,7 @@ pub fn vfs_mkdir(path: &str) -> Result<(), FilesystemError> {
 }
 
 pub fn vfs_unlink(path: &str) -> Result<(), FilesystemError> {
-    let vfs = get_vfs();
-    let (fs, rel) = vfs.find_filesystem(path).ok_or(FilesystemError::NotFound)?;
+    let (fs, rel) = resolve_mount(path)?;
     if fs.is_read_only() {
         return Err(FilesystemError::ReadOnly);
     }
@@ -532,8 +514,7 @@ pub fn vfs_unlink(path: &str) -> Result<(), FilesystemError> {
 }
 
 pub fn vfs_rmdir(path: &str) -> Result<(), FilesystemError> {
-    let vfs = get_vfs();
-    let (fs, rel) = vfs.find_filesystem(path).ok_or(FilesystemError::NotFound)?;
+    let (fs, rel) = resolve_mount(path)?;
     if fs.is_read_only() {
         return Err(FilesystemError::ReadOnly);
     }
@@ -544,13 +525,8 @@ pub fn vfs_rmdir(path: &str) -> Result<(), FilesystemError> {
 /// same mount; cross-mount renames return `ReadOnly` (mapped to EXDEV
 /// at the syscall boundary).
 pub fn vfs_rename(old_path: &str, new_path: &str) -> Result<(), FilesystemError> {
-    let vfs = get_vfs();
-    let (fs_old, rel_old) = vfs
-        .find_filesystem(old_path)
-        .ok_or(FilesystemError::NotFound)?;
-    let (fs_new, rel_new) = vfs
-        .find_filesystem(new_path)
-        .ok_or(FilesystemError::NotFound)?;
+    let (fs_old, rel_old) = resolve_mount(old_path)?;
+    let (fs_new, rel_new) = resolve_mount(new_path)?;
     // Use trait-object pointer identity to enforce same-mount.
     if (fs_old as *const dyn Filesystem as *const ())
         != (fs_new as *const dyn Filesystem as *const ())
@@ -587,8 +563,7 @@ pub fn vfs_sync_all() -> Result<(), FilesystemError> {
 /// handle the case where the mount itself rejects a specific
 /// operation (e.g., `/bin` namespace shielding).
 pub fn vfs_is_writable(path: &str) -> bool {
-    let vfs = get_vfs();
-    vfs.find_filesystem(path)
+    resolve_mount(path)
         .map(|(fs, _)| !fs.is_read_only())
         .unwrap_or(false)
 }

@@ -37,6 +37,27 @@ fn test_virtqueue_full_and_reuse() {
     queue.submit(page.phys_addr(), 8, false, 3).unwrap();
 }
 
+fn test_virtqueue_deferred_completion_pins_descriptor() {
+    let mut notify = 0;
+    let mut queue = queue(1, &mut notify);
+    let page = DmaPage::new_zeroed().expect("DMA page");
+    let descriptor = queue.submit(page.phys_addr(), 8, true, 41).unwrap();
+    queue.inject_used_for_test(descriptor as u32, 8);
+    let used = queue
+        .pop_used_deferred()
+        .expect("valid completion")
+        .expect("used");
+    assert_eq!(used.token, 41);
+    assert_eq!(queue.free_count_for_test(), 0);
+    assert_eq!(
+        queue.submit(page.phys_addr(), 8, true, 42),
+        Err(QueueError::Full)
+    );
+    queue.release_used(descriptor).unwrap();
+    assert_eq!(queue.free_count_for_test(), 1);
+    queue.submit(page.phys_addr(), 8, true, 42).unwrap();
+}
+
 fn test_virtqueue_rejects_malformed_completions() {
     let mut notify = 0;
     let mut queue = queue(2, &mut notify);
@@ -121,6 +142,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_virtqueue_token_round_trip,
         &test_virtqueue_full_and_reuse,
+        &test_virtqueue_deferred_completion_pins_descriptor,
         &test_virtqueue_rejects_malformed_completions,
         &test_virtqueue_used_index_wraps,
         &test_dhcp_and_bounded_udp_registry,

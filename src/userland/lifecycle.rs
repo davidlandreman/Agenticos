@@ -319,12 +319,22 @@ pub enum Ring3BlockReason {
     /// Wake is conservative (all `WaitingForPipeRead` blockers wake on
     /// any pipe event); each woken reader re-fires its SYSCALL and
     /// either succeeds or blocks again.
-    WaitingForPipeRead,
+    WaitingForPipeRead {
+        /// Global descriptor-readiness sequence sampled before checking the
+        /// pipe. If it changes before the blocked state is published, the
+        /// switch path makes this process ready again so the read re-fires.
+        observed_sequence: u64,
+    },
     /// `write(fd, ...)` on a pipe whose ring buffer is full but at
     /// least one reader still exists. Wakes when any pipe read drains
     /// bytes, or when the last reader drops (so the writer re-fires
     /// and returns `EPIPE`) — see [`wake_ring3_blocked_on_pipe_writable`].
-    WaitingForPipeWrite,
+    WaitingForPipeWrite {
+        /// Same check-to-park handshake as `WaitingForPipeRead`, covering a
+        /// reader that frees capacity before the writer becomes visible as
+        /// blocked.
+        observed_sequence: u64,
+    },
     WaitingForNetwork {
         deadline_tick: Option<u64>,
     },
@@ -838,14 +848,11 @@ pub fn mark_ring3_ready(pid: u32) {
         debug_assert!(false, "attempted to mark sentinel ring-3 ready");
         return;
     }
-    let blocked_io = {
+    let blocked_reason = {
         let table = PROCESS_TABLE.lock();
-        match table.ring3_blocked.get(&pid) {
-            Some(Ring3BlockReason::WaitingForBlockIo { token }) => Some(*token),
-            _ => None,
-        }
+        table.ring3_blocked.get(&pid).copied()
     };
-    if let Some(token) = blocked_io {
+    if let Some(Ring3BlockReason::WaitingForBlockIo { token }) = blocked_reason {
         crate::diagnostics::shadow::io::reject_generic_io_wake(pid, token);
         return;
     }
@@ -939,8 +946,8 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
         | Ring3BlockReason::WaitingForSignal
         | Ring3BlockReason::WaitingForInput
         | Ring3BlockReason::WaitingForGuiEvent
-        | Ring3BlockReason::WaitingForPipeRead
-        | Ring3BlockReason::WaitingForPipeWrite
+        | Ring3BlockReason::WaitingForPipeRead { .. }
+        | Ring3BlockReason::WaitingForPipeWrite { .. }
         | Ring3BlockReason::WaitingForBlockIo { .. }
         | Ring3BlockReason::WaitingForFutex {
             deadline_tick: None,
@@ -953,6 +960,27 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
             deadline_tick: None,
             ..
         } => {}
+    }
+}
+
+/// Close the event-between-check-and-park race for descriptor waits.
+///
+/// Producers increment the global readiness sequence before attempting a
+/// wake. A pipe reader/writer samples that sequence before inspecting the
+/// buffer, then calls this after publishing its blocked reason. If an event
+/// landed in between, its wake may have found no blocked entry; re-readying
+/// the exact waiter here makes the syscall re-fire and observe the new state.
+pub fn reconcile_readiness_after_block(pid: u32, reason: Ring3BlockReason) {
+    let observed_sequence = match reason {
+        Ring3BlockReason::WaitingForPipeRead { observed_sequence }
+        | Ring3BlockReason::WaitingForPipeWrite { observed_sequence }
+        | Ring3BlockReason::WaitingForReadiness {
+            observed_sequence, ..
+        } => observed_sequence,
+        _ => return,
+    };
+    if crate::userland::readiness::changed_since(observed_sequence) {
+        mark_ring3_ready(pid);
     }
 }
 
@@ -1094,8 +1122,8 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
             Some(Ring3BlockReason::WaitingForSignal)
             | Some(Ring3BlockReason::WaitingForInput)
             | Some(Ring3BlockReason::WaitingForGuiEvent)
-            | Some(Ring3BlockReason::WaitingForPipeRead)
-            | Some(Ring3BlockReason::WaitingForPipeWrite)
+            | Some(Ring3BlockReason::WaitingForPipeRead { .. })
+            | Some(Ring3BlockReason::WaitingForPipeWrite { .. })
             | Some(Ring3BlockReason::WaitingForNetwork { .. })
             | Some(Ring3BlockReason::WaitingForReadiness { .. })
             | Some(Ring3BlockReason::Sleeping { .. })
@@ -1275,7 +1303,7 @@ pub fn wake_ring3_blocked_on_pipe_readable() {
     wake_ring3_blocked_by(|r| {
         matches!(
             r,
-            Ring3BlockReason::WaitingForPipeRead
+            Ring3BlockReason::WaitingForPipeRead { .. }
                 | Ring3BlockReason::WaitingForNetwork { .. }
                 | Ring3BlockReason::WaitingForReadiness { .. }
         )
@@ -1291,7 +1319,7 @@ pub fn wake_ring3_blocked_on_pipe_writable() {
     wake_ring3_blocked_by(|r| {
         matches!(
             r,
-            Ring3BlockReason::WaitingForPipeWrite
+            Ring3BlockReason::WaitingForPipeWrite { .. }
                 | Ring3BlockReason::WaitingForNetwork { .. }
                 | Ring3BlockReason::WaitingForReadiness { .. }
         )
@@ -1307,7 +1335,7 @@ pub fn wake_ring3_blocked_on_pipe_readable_reliable() {
     wake_ring3_blocked_by_locking(|r| {
         matches!(
             r,
-            Ring3BlockReason::WaitingForPipeRead
+            Ring3BlockReason::WaitingForPipeRead { .. }
                 | Ring3BlockReason::WaitingForNetwork { .. }
                 | Ring3BlockReason::WaitingForReadiness { .. }
         )
@@ -1318,7 +1346,7 @@ pub fn wake_ring3_blocked_on_pipe_writable_reliable() {
     wake_ring3_blocked_by_locking(|r| {
         matches!(
             r,
-            Ring3BlockReason::WaitingForPipeWrite
+            Ring3BlockReason::WaitingForPipeWrite { .. }
                 | Ring3BlockReason::WaitingForNetwork { .. }
                 | Ring3BlockReason::WaitingForReadiness { .. }
         )
@@ -2589,7 +2617,6 @@ pub fn cleanup_user_process(reason: AbnormalExit) -> ! {
     // vs not-present vs permission issues from the boot log.
     let walk_target = reason.fault_addr.unwrap_or(reason.fault_rip);
     log_page_table_walk(live_cr3.start_address().as_u64(), walk_target);
-
     // Demand-grown stack (U4): release the [stack_mapped_bottom,
     // stack_top) range before UserImage::Drop runs. unmap_user_stack
     // also clears the image's stack_initial_bottom so Drop skips a
