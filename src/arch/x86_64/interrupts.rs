@@ -529,7 +529,13 @@ extern "x86-interrupt" fn page_fault_handler(
             | GrowOutcome::LockContended
             | GrowOutcome::MapFailed => {}
         }
-        debug_error!("EXCEPTION: PAGE FAULT (ring 3)");
+        debug_error!(
+            "EXCEPTION: PAGE FAULT (ring 3) rip={:?} rsp={:?} address={:?} error={:?}",
+            stack_frame.instruction_pointer,
+            stack_frame.stack_pointer,
+            accessed_addr,
+            error_code,
+        );
         cleanup_user_process(AbnormalExit {
             vector: 14,
             error_code: Some(error_code.bits()),

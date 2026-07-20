@@ -463,6 +463,24 @@ impl Virtqueue {
 
     /// Get the next used buffer
     pub fn pop_used(&mut self) -> Result<Option<UsedBuffer>, QueueError> {
+        let used = match self.pop_used_deferred() {
+            Ok(Some(used)) => used,
+            Ok(None) => return Ok(None),
+            Err(error @ QueueError::InvalidUsedLength { descriptor, .. }) => {
+                let _ = self.release_used(descriptor);
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        self.release_used(used.descriptor)?;
+        Ok(Some(used))
+    }
+
+    /// Read one used-ring entry without returning its descriptor chain to the
+    /// free list. Block I/O uses this so the completed request's descriptor
+    /// identity and DMA ownership remain stable until its sleeping waiter
+    /// consumes the result.
+    pub fn pop_used_deferred(&mut self) -> Result<Option<UsedBuffer>, QueueError> {
         let used_idx = self.used().idx.load(Ordering::Acquire);
         if used_idx == self.last_used_idx {
             return Ok(None);
@@ -478,11 +496,31 @@ impl Virtqueue {
         }
         let desc_idx = raw_id as u16;
         let capacity = self.capacities[desc_idx as usize];
-        let Some(token) = self.tokens[desc_idx as usize].take() else {
+        let Some(token) = self.tokens[desc_idx as usize] else {
             return Err(QueueError::DuplicateCompletion(desc_idx));
         };
 
-        // Return the full descriptor chain to the free list.
+        if elem.len > capacity {
+            return Err(QueueError::InvalidUsedLength {
+                descriptor: desc_idx,
+                token,
+                used: elem.len,
+                capacity,
+            });
+        }
+        Ok(Some(UsedBuffer {
+            descriptor: desc_idx,
+            token,
+            len: elem.len,
+        }))
+    }
+
+    /// Return a deferred used descriptor chain to the queue after its owner
+    /// has consumed every device-written byte.
+    pub fn release_used(&mut self, desc_idx: u16) -> Result<(), QueueError> {
+        if desc_idx >= self.size || self.tokens[desc_idx as usize].take().is_none() {
+            return Err(QueueError::DuplicateCompletion(desc_idx));
+        }
         let mut current = desc_idx;
         let mut released = 0u16;
         loop {
@@ -504,20 +542,7 @@ impl Virtqueue {
             current = next;
         }
         self.capacities[desc_idx as usize] = 0;
-
-        if elem.len > capacity {
-            return Err(QueueError::InvalidUsedLength {
-                descriptor: desc_idx,
-                token,
-                used: elem.len,
-                capacity,
-            });
-        }
-        Ok(Some(UsedBuffer {
-            descriptor: desc_idx,
-            token,
-            len: elem.len,
-        }))
+        Ok(())
     }
 
     #[cfg(feature = "test")]

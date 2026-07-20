@@ -245,6 +245,10 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
 
     match target {
         Target::Pipe(handle) => {
+            // Sample before inspecting the pipe. If a reader changes the
+            // state before our blocked reason becomes visible, the switch
+            // path observes the sequence change and re-readies us.
+            let observed_sequence = crate::userland::readiness::sequence();
             // Short-write cap: see the WRITE_MAX_LEN comment. A full
             // pipe blocks by restarting the whole SYSCALL, so chunking
             // here would duplicate already-consumed bytes.
@@ -278,10 +282,18 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
             if handle.nonblocking() {
                 return EAGAIN;
             }
+            // This syscall restarts by abandoning its kernel frame rather
+            // than unwinding it. Release temporary fd/staging clones first;
+            // otherwise each block leaks a pipe endpoint and EOF/EPIPE can
+            // never become observable after the real peer exits.
+            drop(staging);
+            drop(handle);
             unsafe {
                 crate::userland::switch::block_current_ring3_and_yield(
                     args,
-                    crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeWrite,
+                    crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeWrite {
+                        observed_sequence,
+                    },
                 )
             }
         }
@@ -398,6 +410,7 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
     // pipes and sockets take one staging trip per iov and short-write
     // at the staging bound (see the WRITE_MAX_LEN comment).
     let mut written: u64 = 0;
+    let mut pipe_block_sequence = None;
     for (base, len) in iovecs {
         if len == 0 {
             continue;
@@ -422,6 +435,10 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                 }
             }
             Target::Pipe(handle) => {
+                // See write_handler's check-to-park handshake. Each iovec is
+                // its own possible blocking attempt, so sample immediately
+                // before checking this one.
+                let observed_sequence = crate::userland::readiness::sequence();
                 let take = core::cmp::min(len, WRITE_MAX_LEN as u64) as usize;
                 let mut bytes = alloc::vec![0u8; take];
                 if let Err(e) = crate::userland::usercopy::copy_from_user(&mut bytes, base) {
@@ -456,12 +473,8 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                 if handle.nonblocking() {
                     return EAGAIN;
                 }
-                unsafe {
-                    crate::userland::switch::block_current_ring3_and_yield(
-                        args,
-                        crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeWrite,
-                    )
-                }
+                pipe_block_sequence = Some(observed_sequence);
+                break;
             }
             Target::File(handle) => {
                 let n = write_file_chunked(handle, base, len);
@@ -500,6 +513,19 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                     break;
                 }
             }
+        }
+    }
+    if let Some(observed_sequence) = pipe_block_sequence {
+        // See write_handler: the divergent restart path must not retain the
+        // cloned Target::Pipe handle on its abandoned kernel frame.
+        drop(target);
+        unsafe {
+            crate::userland::switch::block_current_ring3_and_yield(
+                args,
+                crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeWrite {
+                    observed_sequence,
+                },
+            )
         }
     }
     written as i64
@@ -667,6 +693,11 @@ fn read_fd_once(args: &SyscallArgs, fd: i32, ptr: u64, len: u64) -> i64 {
                 .map_or_else(|error| error, |_| byte_len as i64)
         }
         Some(FdSlot::PipeRead(handle, _)) => {
+            // Sample before inspecting the pipe. A writer may append data (or
+            // the final writer may close) after the empty check but before we
+            // publish the blocked reason; the post-publication sequence
+            // recheck prevents that wake from being lost.
+            let observed_sequence = crate::userland::readiness::sequence();
             // Drain bytes from the pipe. EOF when empty *and* no
             // writers remain. When empty but writers exist, block via
             // the ring-3 scheduler — `Pipe::write` and the last
@@ -689,10 +720,14 @@ fn read_fd_once(args: &SyscallArgs, fd: i32, ptr: u64, len: u64) -> i64 {
             if handle.nonblocking() {
                 return EAGAIN;
             }
+            drop(staging);
+            drop(handle);
             unsafe {
                 crate::userland::switch::block_current_ring3_and_yield(
                     args,
-                    crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeRead,
+                    crate::userland::lifecycle::Ring3BlockReason::WaitingForPipeRead {
+                        observed_sequence,
+                    },
                 );
             }
         }

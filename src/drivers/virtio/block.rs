@@ -390,11 +390,21 @@ fn perform(
             },
         }
 
-        let request = DRIVERS
-            .lock()
-            .get_mut(index)
-            .and_then(|driver| driver.requests.remove(&head))
-            .ok_or("lost VirtIO block completion")?;
+        let request = {
+            let mut drivers = DRIVERS.lock();
+            let driver = drivers
+                .get_mut(index)
+                .ok_or("missing VirtIO block device")?;
+            let request = driver
+                .requests
+                .remove(&head)
+                .ok_or("lost VirtIO block completion")?;
+            driver
+                .queue
+                .release_used(head)
+                .map_err(|_| "lost VirtIO block descriptor ownership")?;
+            request
+        };
         if matches!(request.waiter, Waiter::RingThree(_)) {
             crate::diagnostics::shadow::io::consumed(request.token);
         }
@@ -460,7 +470,7 @@ pub fn handle_interrupt(irq: u8) {
                 continue;
             }
             loop {
-                match driver.queue.pop_used() {
+                match driver.queue.pop_used_deferred() {
                     Ok(Some(used)) => {
                         if let Some(request) = driver.requests.get_mut(&used.descriptor) {
                             request.complete = true;

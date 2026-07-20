@@ -228,6 +228,16 @@ endpoint, so their final `Drop` can acquire the process table. Ordinary
 `dup`/`dup2`/`F_DUPFD` clear the new descriptor's `FD_CLOEXEC` bit;
 `F_DUPFD_CLOEXEC` sets it.
 
+Blocking pipe reads and writes use the descriptor-readiness sequence as a
+check-to-park handshake: sample before inspecting the pipe, publish the block
+reason, then reconcile the sampled sequence before dispatch. Preserve this
+ordering when adding a pipe syscall path; a producer wake can otherwise land
+before the waiter is visible and strand both sides of a full/empty pipeline.
+The blocking path abandons its kernel frame instead of unwinding it, so it must
+explicitly drop temporary cloned pipe handles and staging buffers before the
+divergent yield. Leaking a clone leaves a phantom reader or writer that can
+permanently suppress EOF or EPIPE after the real endpoint exits.
+
 `CLOCK_MONOTONIC`, scheduler sleeps, polling deadlines, interval timers, and
 watchdogs remain based on the 100 Hz PIT. `CLOCK_REALTIME` and `gettimeofday`
 use the boot CMOS RTC snapshot advanced by PIT ticks through `crate::time`;
