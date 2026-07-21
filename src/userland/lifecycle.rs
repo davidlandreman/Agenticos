@@ -1797,6 +1797,56 @@ pub fn wake_ring3_for_signal(pid: u32) {
     mark_ring3_ready(pid);
 }
 
+/// Housekeeping backstop for best-effort signal wakes that were silently
+/// dropped.
+///
+/// [`wake_ring3_for_signal`] re-readies a parked, signal-pending process
+/// under `PROCESS_TABLE.try_lock()` (lines above). Under SMP another CPU can
+/// hold the table at raise time, so the wake is skipped with no retry: a
+/// process parked in an *interruptible* syscall (a shell in `rt_sigsuspend`
+/// awaiting SIGCHLD, or any `kill` target parked on a pipe/futex/wait) then
+/// never wakes to take the signal. That stranded a `wait4` reaper — the root
+/// cause behind "unreapable/unkillable" processes after a heavy
+/// fork→pipe→exit workload such as `tar xzf` (many exit races across CPUs).
+///
+/// This re-scans the blocked index and retries the wake for every parked
+/// process that still carries an actionable pending signal. Because it runs
+/// every kernel-housekeeping pass (and the PIT reliably un-halts the main
+/// loop within a tick), a single lost `try_lock` is recovered promptly.
+/// `WaitingForBlockIo` is excluded, exactly as in `wake_ring3_for_signal`:
+/// that is a kernel continuation wakeable only by its own I/O token, never a
+/// signal.
+///
+/// Returns true if it found (and attempted to wake) at least one such
+/// process, so the caller can treat the pass as non-idle.
+pub fn retry_dropped_signal_wakes() -> bool {
+    let candidates: alloc::vec::Vec<u32> = {
+        let Some(g) = PROCESS_TABLE.try_lock() else {
+            return false;
+        };
+        let mut candidates = alloc::vec::Vec::new();
+        for (pid, reason) in g.ring3_blocked.iter() {
+            if matches!(reason, Ring3BlockReason::WaitingForBlockIo { .. }) {
+                continue;
+            }
+            if g
+                .by_pid
+                .get(pid)
+                .is_some_and(|p| p.signal_state.has_actionable_pending())
+            {
+                candidates.push(*pid);
+            }
+        }
+        candidates
+    };
+    let found = !candidates.is_empty();
+    // The table guard is released; `wake_ring3_for_signal` re-acquires it.
+    for pid in candidates {
+        wake_ring3_for_signal(pid);
+    }
+    found
+}
+
 fn wake_ring3_blocked_by<F>(matcher: F) -> bool
 where
     F: Fn(&Ring3BlockReason) -> bool,
@@ -2855,6 +2905,18 @@ fn finish_group(tgid: u32, code: i64) {
     // parent blocked reading this process's pipe observes EOF and can
     // proceed to reap.
     close_group_fds(tgid);
+    // The pipe-endpoint `Drop` inside `close_group_fds` wakes a peer parked on
+    // those pipes only through the best-effort `try_lock` variant
+    // (`PipeWriteHandle::Drop` -> `wake_ring3_blocked_on_pipe_readable`). Under
+    // SMP another CPU can hold `PROCESS_TABLE` at that instant, dropping the
+    // EOF/EPIPE wake with no retry and permanently stranding the peer — e.g.
+    // BusyBox `tar xzf`'s gunzip child exits, but `tar` never sees EOF, never
+    // `wait4`s it, and the child lingers as an unreapable zombie. We now hold
+    // no lock, so issue a guaranteed blocking-lock follow-up in both
+    // directions; the woken peer re-checks its own pipe and either drains or
+    // re-blocks.
+    wake_ring3_blocked_on_pipe_readable_reliable();
+    wake_ring3_blocked_on_pipe_writable_reliable();
     // Drop every advisory record lock the process held and wake any
     // `F_SETLKW` waiter that was blocked behind them.
     if crate::userland::record_lock::release_owner(tgid) {
