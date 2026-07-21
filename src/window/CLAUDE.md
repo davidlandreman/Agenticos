@@ -23,14 +23,14 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   `spec_for(kind)`; adding a theme means adding a spec + palette/style and a
   painter only if it introduces a new finish. Three built-ins: `classic`
   renders Windows 98 "Windows Standard" chrome — raised 3D bevel border,
-  horizontal caption gradient, raised ButtonFace close button; `aero`
+  horizontal caption gradient, raised ButtonFace caption buttons; `aero`
   supplies translucent rounded glass, shadows, and radius-6 backdrop blur;
   `futurism` (the Auto default on retained CPU/VirGL) draws a frosted dark
   translucent title bar over radius-6 backdrop blur (the qualified VirGL
   pipeline's maximum) meeting the content well directly, content flush to
   the window edge inside a 1px dark hairline
   rim (no light borders), 12px-rounded top corners, a soft 22px drop shadow,
-  and a rounded soft-red close button. Backdrop strength follows the frame's
+  and rounded caption controls with a soft-red close button. Backdrop strength follows the frame's
   effective alpha, so the blurred shadow gutter fades smoothly to the sharp
   desktop. Its rounded *bottom* corners are
   carved by `Window::paint_overlay` — a post-children pass the manager runs
@@ -38,8 +38,10 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   (surface ARGB writes are exact replacement); `ThemeSpec.draw_frame_overlay`
   opts a theme in. `frame_util.rs` holds the shared shadow/corner geometry
   both translucent painters use. Caption-button geometry is data-driven via
-  `FrameMetrics.button_*`, shared by painting and `manager.rs` hit-testing
-  through `theme::close_button_rect`. `controls.rs` is the single source of
+  `FrameMetrics.button_*` and `theme::caption_button_layout`, shared by all
+  three painters and `manager.rs` hit-testing. Resizable frames expose real
+  minimize, maximize/restore, and close controls; fixed frames are close-only.
+  `controls.rs` is the single source of
   truth for *control* surfaces: a theme-dispatched `ControlPalette`
   (`controls::palette()`) plus a `ControlStyle` whose `ControlFinish`
   (`Bevel98` / `GlassKd4` / `SoftRounded`) drives the drawing helpers
@@ -80,7 +82,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | Type | Purpose | Notes |
 |---|---|---|
 | `DesktopWindow` | Full-screen background | Owns optional live-replaceable BMP wallpaper bytes and blits them through `GraphicsDevice::draw_image_scaled`. Falls back to solid blue (RGB `0, 50, 100`) when no wallpaper is provided or parsing fails — boot must succeed in either branch. |
-| `FrameWindow` | Title bar + borders | Metrics and painting come from the active Classic/Aero theme. Aero requires the retained renderer. Uses `WindowBase`. |
+| `FrameWindow` | Title bar + borders | Theme-painted caption controls; resizable frames minimize to the taskbar and maximize/restore within the desktop work area, while fixed frames remain close-only. Uses `WindowBase`. |
 | `TextWindow` | Grid-based text rendering | Cell size derived from the terminal TTF (`get_terminal_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. The default `#202020` well is opaque in Classic/Legacy and alpha-232 frosted glass in Aero/Futurism; explicit ANSI cell backgrounds stay opaque. |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
@@ -102,6 +104,8 @@ Boot lands in GUI mode:
   Programs launches the six pinned apps (including GL Arena), Run opens a modal command field, and
   Shut Down is an explicit safe placeholder until a clean power-off path
   exists. Task-button layout reserves the tray span and never overlaps it.
+  Minimized frames keep their task button; activating it restores the frame in
+  its retained normal/maximized placement and returns focus to its content.
 
 ## TerminalWindow ↔ terminal subsystem
 
@@ -157,8 +161,10 @@ runtime fallback to legacy activates Classic before repainting.
 ## Implementation status
 
 - **Phases 1-3** (core + basic windows + graphics integration): complete.
-- **Phase 4** (UI controls): partial — `FrameWindow`, focus management, mouse interaction done.
-- **Phase 5** (drag/drop, resize, menus): future.
+- **Phase 4** (UI controls): partial — decorated `FrameWindow`, functional
+  caption controls, focus management, and mouse interaction done.
+- **Phase 5** (advanced interaction): moving, edge resize, minimize/maximize,
+  menus, and dialogs done; drag/drop and snapping remain future work.
 
 ## Cross-references
 

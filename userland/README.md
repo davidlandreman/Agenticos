@@ -297,7 +297,10 @@ multi-window/filesystem reference. `gui::Window` creates a server-decorated
 window, `Canvas` renders XRGB8888 pixels, `gui::next_event()` blocks without
 polling, and `Window::present()` performs a full-surface copy. Resize events
 must resize the canvas before the next present; Close remains an application
-decision. Add a direct `/bin` rewrite only when the app should be discoverable
+decision. `Window::new` is resizable and receives functional minimize and
+maximize/restore controls; use `Window::new_with_options` with
+`WindowOptions { resizable: false }` for a close-only fixed dialog. Add a
+direct `/bin` rewrite only when the app should be discoverable
 through `PATH`.
 
 `apps/glgame` is the reference for a self-driven 3D app. `libs/gl` transforms

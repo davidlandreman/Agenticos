@@ -386,6 +386,21 @@ fn test_gui_syscall_argument_errors() {
         crate::userland::gui_syscalls::gui_win_create_handler(&mut create),
         EFAULT
     );
+    let mut too_narrow = SyscallArgs::default();
+    too_narrow.rdi = crate::window::theme::minimum_resizable_client_width() as u64 - 1;
+    too_narrow.rsi = 100;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_win_create_handler(&mut too_narrow),
+        EINVAL
+    );
+    let mut unknown_flags = SyscallArgs::default();
+    unknown_flags.rdi = 100;
+    unknown_flags.rsi = 100;
+    unknown_flags.r8 = 1 << 1;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_win_create_handler(&mut unknown_flags),
+        EINVAL
+    );
     let mut destroy = SyscallArgs::default();
     destroy.rdi = 999;
     assert_eq!(
@@ -453,6 +468,17 @@ fn test_gui_create_destroy_lifecycle() {
         handle as u32,
     )
     .expect("window record");
+    let resizable = crate::window::with_window_manager(|wm| {
+        wm.window_registry
+            .get(&record.frame_id)
+            .and_then(|window| window.as_frame_window())
+            .is_some_and(|frame| frame.is_resizable())
+    })
+    .unwrap_or(false);
+    assert!(
+        resizable,
+        "flags=0 must remain backward-compatible/resizable"
+    );
     let actual_title = crate::window::with_window_manager(|wm| {
         wm.window_registry
             .get(&record.frame_id)
@@ -470,6 +496,36 @@ fn test_gui_create_destroy_lifecycle() {
     );
     assert_eq!(
         gui::window_count_for_test(crate::userland::gui_syscalls::TEST_GUI_CALLER_PID),
+        0
+    );
+
+    let mut create_fixed = SyscallArgs::default();
+    create_fixed.rdi = 80;
+    create_fixed.rsi = 100;
+    create_fixed.r8 = gui::GUI_WINDOW_FIXED_SIZE;
+    let fixed_handle = crate::userland::gui_syscalls::gui_win_create_handler(&mut create_fixed);
+    assert!(
+        fixed_handle >= 1,
+        "fixed create failed with errno {}",
+        fixed_handle
+    );
+    let fixed_record = gui::window_record(
+        crate::userland::gui_syscalls::TEST_GUI_CALLER_PID,
+        fixed_handle as u32,
+    )
+    .expect("fixed window record");
+    let fixed_is_resizable = crate::window::with_window_manager(|wm| {
+        wm.window_registry
+            .get(&fixed_record.frame_id)
+            .and_then(|window| window.as_frame_window())
+            .is_some_and(|frame| frame.is_resizable())
+    })
+    .unwrap_or(true);
+    assert!(!fixed_is_resizable);
+    let mut destroy_fixed = SyscallArgs::default();
+    destroy_fixed.rdi = fixed_handle as u64;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_win_destroy_handler(&mut destroy_fixed),
         0
     );
     gui::reset_for_test();

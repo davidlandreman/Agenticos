@@ -1,12 +1,26 @@
 use crate::graphics::color::Color;
 use crate::window::theme::frame_util::{self, ShadowSpec};
 use crate::window::theme::{lerp_color, lerp_u8, FrameChrome, AERO_METRICS};
-use crate::window::GraphicsDevice;
+use crate::window::{GraphicsDevice, Rect};
 
 pub(super) fn draw(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
     frame_util::draw_shadow(device, chrome.bounds, &shadow_spec(chrome.active));
     draw_glass(chrome, device);
     finish_rounded_corners(chrome, device);
+    if let Some(button) = chrome.buttons.minimize {
+        draw_neutral_button(button, NeutralGlyph::Minimize, device);
+    }
+    if let Some(button) = chrome.buttons.maximize {
+        draw_neutral_button(
+            button,
+            if chrome.maximized {
+                NeutralGlyph::Restore
+            } else {
+                NeutralGlyph::Maximize
+            },
+            device,
+        );
+    }
     draw_close_button(chrome, device);
     draw_title(chrome, device);
 }
@@ -122,7 +136,7 @@ fn finish_rounded_corners(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDev
 }
 
 fn draw_close_button(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
-    let button = chrome.close_button_rect;
+    let button = chrome.buttons.close;
     let radius = 3i32;
     for y in button.y..button.bottom() {
         let row = (y - button.y) as u32;
@@ -163,6 +177,77 @@ fn draw_close_button(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) 
     device.draw_line(x2 - 1, y1, x1 - 1, y2, Color::WHITE);
 }
 
+#[derive(Clone, Copy)]
+enum NeutralGlyph {
+    Minimize,
+    Maximize,
+    Restore,
+}
+
+fn draw_neutral_button(button: Rect, glyph: NeutralGlyph, device: &mut dyn GraphicsDevice) {
+    let radius = 3i32;
+    for y in button.y..button.bottom() {
+        let row = (y - button.y) as u32;
+        let color = lerp_color(
+            Color::new(226, 239, 250),
+            Color::new(132, 170, 205),
+            row,
+            button.height.saturating_sub(1).max(1),
+        );
+        for x in button.x..button.right() {
+            let local_x = x - button.x;
+            let local_y = y - button.y;
+            if frame_util::outside_rounded_rect(
+                local_x,
+                local_y,
+                button.width as i32,
+                button.height as i32,
+                radius,
+            ) {
+                continue;
+            }
+            let edge = local_x == 0
+                || local_y == 0
+                || local_x == button.width as i32 - 1
+                || local_y == button.height as i32 - 1;
+            device.draw_pixel_argb(
+                x,
+                y,
+                if edge {
+                    Color::new(70, 105, 135)
+                } else {
+                    color
+                },
+                220,
+            );
+        }
+    }
+    draw_neutral_glyph(button, glyph, device);
+}
+
+fn draw_neutral_glyph(button: Rect, glyph: NeutralGlyph, device: &mut dyn GraphicsDevice) {
+    let color = Color::new(25, 45, 65);
+    let left = button.x + (button.width as i32 - 8) / 2;
+    let top = button.y + (button.height as i32 - 7) / 2;
+    match glyph {
+        NeutralGlyph::Minimize => device.fill_rect(left, top + 5, 8, 2, color),
+        NeutralGlyph::Maximize => {
+            device.draw_line(left, top, left + 7, top, color);
+            device.draw_line(left, top + 1, left, top + 6, color);
+            device.draw_line(left + 7, top + 1, left + 7, top + 6, color);
+            device.draw_line(left, top + 6, left + 7, top + 6, color);
+        }
+        NeutralGlyph::Restore => {
+            device.draw_line(left + 2, top, left + 7, top, color);
+            device.draw_line(left + 7, top, left + 7, top + 4, color);
+            device.draw_line(left, top + 2, left + 5, top + 2, color);
+            device.draw_line(left, top + 2, left, top + 6, color);
+            device.draw_line(left + 5, top + 2, left + 5, top + 6, color);
+            device.draw_line(left, top + 6, left + 5, top + 6, color);
+        }
+    }
+}
+
 fn draw_title(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
     let font = crate::graphics::fonts::core_font::get_default_font();
     let line_h = font.line_height() as i32;
@@ -170,5 +255,13 @@ fn draw_title(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
     let y = chrome.bounds.y
         + AERO_METRICS.border_width as i32
         + (AERO_METRICS.title_bar_height as i32 - line_h) / 2;
+    let clip_right = chrome.buttons.leftmost_x() - 3;
+    device.set_clip_rect(Some(Rect::new(
+        x,
+        chrome.bounds.y + AERO_METRICS.border_width as i32,
+        (clip_right - x).max(0) as u32,
+        AERO_METRICS.title_bar_height,
+    )));
     device.draw_text(x, y, chrome.title, font.as_font(), Color::BLACK);
+    device.set_clip_rect(None);
 }

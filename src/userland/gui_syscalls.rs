@@ -82,8 +82,10 @@ pub fn gui_win_create_handler(args: &mut SyscallArgs) -> i64 {
         || height == 0
         || width > MAX_SURFACE_DIMENSION
         || height > MAX_SURFACE_DIMENSION
+        || (flags & gui::GUI_WINDOW_FIXED_SIZE == 0
+            && width < crate::window::theme::minimum_resizable_client_width())
         || title_len > MAX_TITLE_BYTES
-        || flags != 0
+        || flags & !gui::GUI_WINDOW_FIXED_SIZE != 0
     {
         return EINVAL;
     }
@@ -120,6 +122,7 @@ pub fn gui_win_create_handler(args: &mut SyscallArgs) -> i64 {
 
         let frame_id = wm.create_window(Some(desktop_id));
         let mut frame = Box::new(FrameWindow::new(frame_id, &title));
+        frame.set_resizable(flags & gui::GUI_WINDOW_FIXED_SIZE == 0);
         frame.set_parent(Some(desktop_id));
         frame.set_bounds(Rect::new(x, y, frame_width, frame_height));
 

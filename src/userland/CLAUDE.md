@@ -279,7 +279,9 @@ paths.
 
 The AgenticOS-private range extends syscall 5000 with ten GUI calls:
 
-- 5001 `gui_win_create(width, height, title, title_len, flags)`
+- 5001 `gui_win_create(width, height, title, title_len, flags)` — flags zero is
+  backward-compatible/resizable; `GUI_WINDOW_FIXED_SIZE` requests close-only,
+  non-resizable frame chrome
 - 5002 `gui_win_present(handle, pixels, width, height, stride)`
 - 5003 `gui_next_event(event, len, flags)`
 - 5004 `gui_win_destroy(handle)`
@@ -308,6 +310,9 @@ in payload slots 4 and 5; mouse modifier bits occupy payload slot 2 above the
 button-state byte.
 Title updates and destruction are ownership-checked. Removing a process
 destroys every frame it owns.
+Maximize/restore reaches clients through the existing resize event; minimize
+changes server-side visibility/focus only and keeps the owned window record
+alive for taskbar restoration.
 
 GL packets are versioned, self-contained colored-triangle frames capped at
 192 KiB, 1,024 draws, and 4,096 vertices. The kernel validates every offset,

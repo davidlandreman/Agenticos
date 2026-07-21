@@ -391,9 +391,7 @@ pub enum HitTestResult {
     /// On the close button
     CloseButton,
     /// On the minimize button
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     MinimizeButton,
     /// On the maximize button
-    #[expect(dead_code, reason = "intentional kernel API surface")]
     MaximizeButton,
 }

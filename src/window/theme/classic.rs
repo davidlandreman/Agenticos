@@ -53,8 +53,30 @@ pub(super) fn draw(chrome: &FrameChrome<'_>, device: &mut dyn GraphicsDevice) {
 
     draw_bevel_frame(bounds, device);
     draw_caption_gradient(bounds, border, title_height, chrome.active, device);
-    draw_close_button(chrome.close_button_rect, device);
+    if let Some(button) = chrome.buttons.minimize {
+        draw_caption_button(button, CaptionGlyph::Minimize, device);
+    }
+    if let Some(button) = chrome.buttons.maximize {
+        draw_caption_button(
+            button,
+            if chrome.maximized {
+                CaptionGlyph::Restore
+            } else {
+                CaptionGlyph::Maximize
+            },
+            device,
+        );
+    }
+    draw_caption_button(chrome.buttons.close, CaptionGlyph::Close, device);
     draw_caption_text(chrome, bounds, border, title_height, device);
+}
+
+#[derive(Clone, Copy)]
+enum CaptionGlyph {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
 }
 
 /// Two raised bevel rings (light/dark outer, highlight/shadow inner) plus the
@@ -123,7 +145,7 @@ fn draw_caption_gradient(
 /// Raised ButtonFace push button with a black ✕. The button edge order is the
 /// standard control bevel (highlight outermost, light inner) — the inverse of
 /// the window edge above.
-fn draw_close_button(button: Rect, device: &mut dyn GraphicsDevice) {
+fn draw_caption_button(button: Rect, glyph: CaptionGlyph, device: &mut dyn GraphicsDevice) {
     let x = button.x;
     let y = button.y;
     let w = button.width;
@@ -143,17 +165,54 @@ fn draw_close_button(button: Rect, device: &mut dyn GraphicsDevice) {
         device.fill_rect(x + w as i32 - 1 - ring, y + ring, 1, side_h, bottom_right);
     }
 
-    // Center the glyph in the button face.
-    let glyph_h = CLOSE_GLYPH.len() as i32;
-    let ox = x + (w as i32 - CLOSE_GLYPH_W) / 2;
-    let oy = y + (h as i32 - glyph_h) / 2;
-    for (row, bits) in CLOSE_GLYPH.iter().enumerate() {
-        for col in 0..CLOSE_GLYPH_W {
-            if bits & (0b1000_0000 >> col) != 0 {
-                device.draw_pixel(ox + col, oy + row as i32, colors::GLYPH);
+    match glyph {
+        CaptionGlyph::Close => {
+            let glyph_h = CLOSE_GLYPH.len() as i32;
+            let ox = x + (w as i32 - CLOSE_GLYPH_W) / 2;
+            let oy = y + (h as i32 - glyph_h) / 2;
+            for (row, bits) in CLOSE_GLYPH.iter().enumerate() {
+                for col in 0..CLOSE_GLYPH_W {
+                    if bits & (0b1000_0000 >> col) != 0 {
+                        device.draw_pixel(ox + col, oy + row as i32, colors::GLYPH);
+                    }
+                }
             }
         }
+        CaptionGlyph::Minimize => {
+            let left = x + (w as i32 - 8) / 2;
+            let bottom = y + h as i32 - 5;
+            device.fill_rect(left, bottom, 8, 2, colors::GLYPH);
+        }
+        CaptionGlyph::Maximize => {
+            let left = x + (w as i32 - 9) / 2;
+            let top = y + (h as i32 - 8) / 2;
+            device.fill_rect(left, top, 9, 2, colors::GLYPH);
+            device.draw_line(left, top + 1, left, top + 7, colors::GLYPH);
+            device.draw_line(left + 8, top + 1, left + 8, top + 7, colors::GLYPH);
+            device.draw_line(left, top + 7, left + 8, top + 7, colors::GLYPH);
+        }
+        CaptionGlyph::Restore => {
+            let left = x + (w as i32 - 10) / 2;
+            let top = y + (h as i32 - 9) / 2;
+            draw_restore_boxes(device, left, top, colors::GLYPH);
+        }
     }
+}
+
+fn draw_restore_boxes(
+    device: &mut dyn GraphicsDevice,
+    left: i32,
+    top: i32,
+    color: crate::graphics::color::Color,
+) {
+    device.draw_line(left + 3, top, left + 9, top, color);
+    device.draw_line(left + 3, top + 1, left + 9, top + 1, color);
+    device.draw_line(left + 9, top + 1, left + 9, top + 6, color);
+    device.draw_line(left + 1, top + 3, left + 7, top + 3, color);
+    device.draw_line(left + 1, top + 4, left + 7, top + 4, color);
+    device.draw_line(left + 1, top + 4, left + 1, top + 8, color);
+    device.draw_line(left + 7, top + 4, left + 7, top + 8, color);
+    device.draw_line(left + 1, top + 8, left + 7, top + 8, color);
 }
 
 /// Bold, focus-colored caption text, clipped so it never draws into the close
@@ -179,7 +238,7 @@ fn draw_caption_text(
     let text_y = bounds.y + border + (title_height - line_h) / 2;
 
     // Elide the caption text before it reaches the close button.
-    let clip_right = chrome.close_button_rect.x - 2;
+    let clip_right = chrome.buttons.leftmost_x() - 2;
     let clip_width = (clip_right - text_x).max(0) as u32;
     device.set_clip_rect(Some(Rect::new(
         text_x,

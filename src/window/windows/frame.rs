@@ -7,12 +7,21 @@ use crate::window::{
 
 use super::base::WindowBase;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FramePlacement {
+    Normal,
+    Maximized { restore_bounds: Rect },
+}
+
 /// A window with themed decorations (title bar, borders, and retained shadow).
 pub struct FrameWindow {
     base: WindowBase,
     title: String,
     active: bool,
     content_window_id: Option<WindowId>,
+    resizable: bool,
+    placement: FramePlacement,
+    minimized: bool,
 }
 
 impl FrameWindow {
@@ -30,6 +39,9 @@ impl FrameWindow {
             title: title.to_string(),
             active: false,
             content_window_id: None,
+            resizable: true,
+            placement: FramePlacement::Normal,
+            minimized: false,
         }
     }
 
@@ -43,6 +55,57 @@ impl FrameWindow {
         self.title.clear();
         self.title.push_str(title);
         self.base.invalidate();
+    }
+
+    pub fn set_resizable(&mut self, resizable: bool) {
+        if self.resizable != resizable {
+            self.resizable = resizable;
+            self.base.invalidate();
+        }
+    }
+
+    pub const fn is_resizable(&self) -> bool {
+        self.resizable
+    }
+
+    pub const fn is_maximized(&self) -> bool {
+        matches!(self.placement, FramePlacement::Maximized { .. })
+    }
+
+    pub const fn is_minimized(&self) -> bool {
+        self.minimized
+    }
+
+    pub fn set_minimized(&mut self, minimized: bool) -> bool {
+        if !self.resizable || self.minimized == minimized {
+            return false;
+        }
+        self.minimized = minimized;
+        self.base.set_visible(!minimized);
+        self.base.invalidate();
+        true
+    }
+
+    pub fn toggle_maximized(&mut self, work_area: Rect) -> Option<(Rect, Rect)> {
+        if !self.resizable || self.minimized {
+            return None;
+        }
+        let old = self.base.bounds();
+        let next = match self.placement {
+            FramePlacement::Normal => {
+                self.placement = FramePlacement::Maximized {
+                    restore_bounds: old,
+                };
+                work_area
+            }
+            FramePlacement::Maximized { restore_bounds } => {
+                self.placement = FramePlacement::Normal;
+                restore_bounds
+            }
+        };
+        self.base.set_bounds(next);
+        self.base.invalidate();
+        Some((old, next))
     }
 
     pub fn content_area(&self) -> Rect {
@@ -61,19 +124,28 @@ impl FrameWindow {
 
     /// Update decoration geometry/effects while preserving client dimensions.
     pub fn apply_theme(&mut self, old: FrameMetrics, new: FrameMetrics, kind: ThemeKind) {
-        let bounds = self.base.bounds();
-        let client_width = bounds.width.saturating_sub(old.border_width * 2);
-        let client_height = bounds
-            .height
-            .saturating_sub(old.title_bar_height + old.border_width * 2);
-        self.base.set_bounds(Rect::new(
-            bounds.x,
-            bounds.y,
-            client_width.saturating_add(new.border_width * 2),
-            client_height
-                .saturating_add(new.title_bar_height)
-                .saturating_add(new.border_width * 2),
-        ));
+        let reframe = |bounds: Rect| {
+            let client_width = bounds.width.saturating_sub(old.border_width * 2);
+            let client_height = bounds
+                .height
+                .saturating_sub(old.title_bar_height + old.border_width * 2);
+            Rect::new(
+                bounds.x,
+                bounds.y,
+                client_width.saturating_add(new.border_width * 2),
+                client_height
+                    .saturating_add(new.title_bar_height)
+                    .saturating_add(new.border_width * 2),
+            )
+        };
+        match self.placement {
+            FramePlacement::Normal => self.base.set_bounds(reframe(self.base.bounds())),
+            FramePlacement::Maximized { restore_bounds } => {
+                self.placement = FramePlacement::Maximized {
+                    restore_bounds: reframe(restore_bounds),
+                };
+            }
+        }
         self.base.set_compositor_properties(CompositorProperties {
             effect: theme::frame_effect_for(kind),
             ..CompositorProperties::OPAQUE
@@ -100,7 +172,8 @@ impl Window for FrameWindow {
                 bounds,
                 title: &self.title,
                 active: self.active,
-                close_button_rect: theme::close_button_rect(bounds, theme::metrics()),
+                buttons: theme::caption_button_layout(bounds, theme::metrics(), self.resizable),
+                maximized: self.is_maximized(),
             },
             device,
         );
@@ -121,7 +194,8 @@ impl Window for FrameWindow {
                 bounds,
                 title: &self.title,
                 active: self.active,
-                close_button_rect: theme::close_button_rect(bounds, theme::metrics()),
+                buttons: theme::caption_button_layout(bounds, theme::metrics(), self.resizable),
+                maximized: self.is_maximized(),
             },
             device,
         );
@@ -153,6 +227,10 @@ impl Window for FrameWindow {
     }
     fn window_title(&self) -> Option<&str> {
         Some(&self.title)
+    }
+
+    fn as_frame_window(&self) -> Option<&FrameWindow> {
+        Some(self)
     }
 
     fn as_frame_window_mut(&mut self) -> Option<&mut FrameWindow> {

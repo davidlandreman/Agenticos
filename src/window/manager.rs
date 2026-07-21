@@ -8,7 +8,6 @@ use super::renderer::{
 };
 use super::types::{
     clamp_drag_x, clamp_drag_y, HitTestResult, InteractionState, ResizeEdge, MIN_WINDOW_HEIGHT,
-    MIN_WINDOW_WIDTH,
 };
 use super::windows::MenuBarPopup;
 use super::{
@@ -427,7 +426,7 @@ impl WindowManager {
         let can_focus = self
             .window_registry
             .get(&id)
-            .map(|w| w.can_focus())
+            .map(|w| w.can_focus() && self.window_effectively_visible(id))
             .unwrap_or(false);
         if !can_focus {
             return;
@@ -474,6 +473,158 @@ impl WindowManager {
     /// Get the currently focused window
     pub fn focused_window(&self) -> Option<WindowId> {
         self.focus_stack.last().copied()
+    }
+
+    fn window_effectively_visible(&self, id: WindowId) -> bool {
+        let mut current = Some(id);
+        while let Some(window_id) = current {
+            let Some(window) = self.window_registry.get(&window_id) else {
+                return false;
+            };
+            if !window.visible() {
+                return false;
+            }
+            current = window.parent();
+        }
+        true
+    }
+
+    /// The desktop area available to ordinary frames. The current shell has
+    /// one bottom-docked taskbar; if it is absent or hidden, use the screen.
+    pub fn desktop_work_area(&self) -> Rect {
+        let (width, height) = self.screen_dimensions();
+        let mut work_area = Rect::new(0, 0, width, height);
+        let Some(taskbar_id) = self.taskbar_id else {
+            return work_area;
+        };
+        let Some(taskbar) = self.window_registry.get(&taskbar_id) else {
+            return work_area;
+        };
+        if !taskbar.visible() {
+            return work_area;
+        }
+        if let Some(bounds) = self.get_global_bounds(taskbar_id) {
+            if bounds.y > 0 && bounds.y < height as i32 {
+                work_area.height = bounds.y as u32;
+            }
+        }
+        work_area
+    }
+
+    /// Hide a resizable frame while retaining its registry/taskbar identity.
+    pub fn minimize_frame(&mut self, frame_id: WindowId) -> bool {
+        let can_minimize = self
+            .window_registry
+            .get(&frame_id)
+            .and_then(|window| window.as_frame_window())
+            .is_some_and(|frame| frame.is_resizable() && !frame.is_minimized());
+        if !can_minimize {
+            return false;
+        }
+
+        let subtree = self.subtree_ids(frame_id);
+        for id in &subtree {
+            if let Some(window) = self.window_registry.get_mut(id) {
+                window.set_focus(false);
+            }
+        }
+        self.focus_stack.retain(|id| !subtree.contains(id));
+        if self.pointer_capture.is_some_and(|id| subtree.contains(&id)) {
+            self.pointer_capture = None;
+        }
+        if matches!(
+            self.interaction_state,
+            InteractionState::Dragging { window, .. }
+                | InteractionState::Resizing { window, .. }
+                if window == frame_id
+        ) {
+            self.interaction_state = InteractionState::Idle;
+        }
+        let changed = self
+            .window_registry
+            .get_mut(&frame_id)
+            .and_then(|window| window.as_frame_window_mut())
+            .is_some_and(|frame| frame.set_minimized(true));
+        if !changed {
+            return false;
+        }
+        self.compositor.dirty.mark_full_repaint();
+
+        let next = self.next_visible_frame(frame_id);
+        if let Some(next) = next {
+            self.focus_frame_and_content(next);
+        }
+        true
+    }
+
+    /// Toggle a resizable frame between its normal bounds and the work area.
+    pub fn toggle_maximize_frame(&mut self, frame_id: WindowId) -> bool {
+        let work_area = self.desktop_work_area();
+        let changed = self
+            .window_registry
+            .get_mut(&frame_id)
+            .and_then(|window| window.as_frame_window_mut())
+            .and_then(|frame| frame.toggle_maximized(work_area));
+        let Some((old_bounds, new_bounds)) = changed else {
+            return false;
+        };
+        self.update_children_for_resized_window(frame_id);
+        self.compositor
+            .dirty
+            .mark_dirty(old_bounds.union(&new_bounds));
+        self.focus_frame_and_content(frame_id);
+        true
+    }
+
+    /// Restore a minimized frame if necessary, then raise and focus it.
+    pub fn activate_frame(&mut self, frame_id: WindowId) -> bool {
+        let is_frame = self
+            .window_registry
+            .get(&frame_id)
+            .and_then(|window| window.as_frame_window())
+            .is_some();
+        if !is_frame {
+            return false;
+        }
+        let restored = self
+            .window_registry
+            .get_mut(&frame_id)
+            .and_then(|window| window.as_frame_window_mut())
+            .is_some_and(|frame| frame.set_minimized(false));
+        if restored {
+            self.compositor.dirty.mark_full_repaint();
+        }
+        self.focus_frame_and_content(frame_id);
+        true
+    }
+
+    fn subtree_ids(&self, root: WindowId) -> Vec<WindowId> {
+        fn collect(manager: &WindowManager, id: WindowId, ids: &mut Vec<WindowId>) {
+            ids.push(id);
+            if let Some(window) = manager.window_registry.get(&id) {
+                for &child in window.children() {
+                    collect(manager, child, ids);
+                }
+            }
+        }
+        let mut ids = Vec::new();
+        if self.window_registry.contains_key(&root) {
+            collect(self, root, &mut ids);
+        }
+        ids
+    }
+
+    fn next_visible_frame(&self, excluded: WindowId) -> Option<WindowId> {
+        let root_id = self.get_active_screen()?.root_window?;
+        let root = self.window_registry.get(&root_id)?;
+        root.children().iter().rev().copied().find(|&id| {
+            id != excluded
+                && Some(id) != self.taskbar_id
+                && self
+                    .window_registry
+                    .get(&id)
+                    .is_some_and(|window| window.visible() && window.as_frame_window().is_some())
+        })
     }
 
     // Event routing
@@ -2152,7 +2303,9 @@ impl WindowManager {
                         edge,
                         delta_x,
                         delta_y,
-                        MIN_WINDOW_WIDTH,
+                        crate::window::theme::minimum_resizable_frame_width(
+                            crate::window::theme::metrics(),
+                        ),
                         MIN_WINDOW_HEIGHT,
                     );
 
@@ -2217,9 +2370,14 @@ impl WindowManager {
                 // border geometry. Other top-level desktop elements (notably
                 // the taskbar) must still receive clicks, but are never
                 // draggable or resizable.
-                if !window.visible() || window.window_title().is_none() {
+                let Some(frame) = window.as_frame_window() else {
+                    continue;
+                };
+                if !window.visible() {
                     continue;
                 }
+                let resizable = frame.is_resizable();
+                let maximized = frame.is_maximized();
                 let bounds = window.bounds();
                 let local_x = mouse_x - bounds.x;
                 let local_y = mouse_y - bounds.y;
@@ -2235,51 +2393,73 @@ impl WindowManager {
                     let at_top = local_y < border;
                     let at_bottom = local_y >= bounds.height as i32 - border;
 
-                    if at_top && at_left {
+                    if resizable && !maximized && at_top && at_left {
                         target_window = Some(window_id);
                         target_hit = HitTestResult::Border(ResizeEdge::TopLeft);
                         break;
-                    } else if at_top && at_right {
+                    } else if resizable && !maximized && at_top && at_right {
                         target_window = Some(window_id);
                         target_hit = HitTestResult::Border(ResizeEdge::TopRight);
                         break;
-                    } else if at_bottom && at_left {
+                    } else if resizable && !maximized && at_bottom && at_left {
                         target_window = Some(window_id);
                         target_hit = HitTestResult::Border(ResizeEdge::BottomLeft);
                         break;
-                    } else if at_bottom && at_right {
+                    } else if resizable && !maximized && at_bottom && at_right {
                         target_window = Some(window_id);
                         target_hit = HitTestResult::Border(ResizeEdge::BottomRight);
                         break;
-                    } else if at_top {
+                    } else if resizable && !maximized && at_top {
                         target_window = Some(window_id);
                         target_hit = HitTestResult::Border(ResizeEdge::Top);
                         break;
-                    } else if at_bottom {
+                    } else if resizable && !maximized && at_bottom {
                         target_window = Some(window_id);
                         target_hit = HitTestResult::Border(ResizeEdge::Bottom);
                         break;
-                    } else if at_left {
+                    } else if resizable && !maximized && at_left {
                         target_window = Some(window_id);
                         target_hit = HitTestResult::Border(ResizeEdge::Left);
                         break;
-                    } else if at_right {
+                    } else if resizable && !maximized && at_right {
                         target_window = Some(window_id);
                         target_hit = HitTestResult::Border(ResizeEdge::Right);
                         break;
                     } else if local_y >= border && local_y < border + title_height {
-                        let local_button = crate::window::theme::close_button_rect(
+                        let buttons = crate::window::theme::caption_button_layout(
                             Rect::new(0, 0, bounds.width, bounds.height),
                             metrics,
+                            resizable,
                         );
-                        if local_button.contains_point(Point::new(local_x, local_y)) {
+                        let point = Point::new(local_x, local_y);
+                        if buttons.close.contains_point(point) {
                             target_window = Some(window_id);
                             target_hit = HitTestResult::CloseButton;
                             break;
                         }
+                        if buttons
+                            .maximize
+                            .is_some_and(|rect| rect.contains_point(point))
+                        {
+                            target_window = Some(window_id);
+                            target_hit = HitTestResult::MaximizeButton;
+                            break;
+                        }
+                        if buttons
+                            .minimize
+                            .is_some_and(|rect| rect.contains_point(point))
+                        {
+                            target_window = Some(window_id);
+                            target_hit = HitTestResult::MinimizeButton;
+                            break;
+                        }
 
                         target_window = Some(window_id);
-                        target_hit = HitTestResult::TitleBar;
+                        target_hit = if maximized {
+                            HitTestResult::Client
+                        } else {
+                            HitTestResult::TitleBar
+                        };
                         break;
                     } else {
                         // Client area - focus the window but don't start drag/resize
@@ -2343,6 +2523,14 @@ impl WindowManager {
                             self.compositor.dirty.mark_full_repaint();
                         }
                     }
+                    HitTestResult::MinimizeButton => {
+                        crate::debug_info!("Minimize button clicked for {:?}", window_id);
+                        self.minimize_frame(window_id);
+                    }
+                    HitTestResult::MaximizeButton => {
+                        crate::debug_info!("Maximize button clicked for {:?}", window_id);
+                        self.toggle_maximize_frame(window_id);
+                    }
                     _ => {}
                 }
             }
@@ -2367,7 +2555,10 @@ impl WindowManager {
         let window = self.window_registry.get(&id)?;
         for &child_id in window.children() {
             if let Some(child) = self.window_registry.get(&child_id) {
-                if child.can_focus() {
+                if !child.visible() {
+                    continue;
+                }
+                if child.can_focus() && self.window_effectively_visible(child_id) {
                     return Some(child_id);
                 }
                 if let Some(found) = self.first_focusable_descendant(child_id) {

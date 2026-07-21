@@ -292,6 +292,24 @@ fn test_metrics_and_decoration_geometry() {
     assert_eq!(FUTURISM_METRICS.button_width, 30);
     assert_eq!(FUTURISM_METRICS.button_height, 22);
     assert_eq!(FUTURISM_METRICS.button_right_margin, 10);
+    assert_eq!(theme::minimum_resizable_client_width(), 96);
+
+    for metrics in [CLASSIC_METRICS, AERO_METRICS, FUTURISM_METRICS] {
+        let width = theme::minimum_resizable_frame_width(metrics);
+        let bounds = Rect::new(0, 0, width, 80);
+        let buttons = theme::caption_button_layout(bounds, metrics, true);
+        let minimize = buttons.minimize.expect("resizable minimize button");
+        let maximize = buttons.maximize.expect("resizable maximize button");
+        assert!(minimize.x >= metrics.border_width as i32);
+        assert!(minimize.right() <= maximize.x);
+        assert!(maximize.right() <= buttons.close.x);
+        assert!(buttons.close.right() <= bounds.right() - metrics.border_width as i32);
+
+        let fixed = theme::caption_button_layout(bounds, metrics, false);
+        assert!(fixed.minimize.is_none());
+        assert!(fixed.maximize.is_none());
+        assert_eq!(fixed.close, buttons.close);
+    }
 
     // Classic close button for an 80×50 window: x = right − border − margin −
     // width, y = top + border + (title − button_height)/2.
@@ -335,12 +353,14 @@ fn test_retained_surface_uses_decorated_bounds() {
 
 fn test_classic_key_pixels_regression() {
     let bounds = Rect::new(0, 0, 80, 50);
-    let button = theme::close_button_rect(bounds, CLASSIC_METRICS);
+    let buttons = theme::caption_button_layout(bounds, CLASSIC_METRICS, false);
+    let button = buttons.close;
     let chrome = FrameChrome {
         bounds,
         title: "",
         active: true,
-        close_button_rect: button,
+        buttons,
+        maximized: false,
     };
     let mut surface = Surface::new(SurfaceDesc::new(80, 50)).unwrap();
     let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (80, 50));
@@ -405,13 +425,66 @@ fn test_classic_key_pixels_regression() {
     );
 }
 
+fn test_resizable_caption_buttons_paint_in_every_theme() {
+    for (kind, metrics) in [
+        (ThemeKind::Classic, CLASSIC_METRICS),
+        (ThemeKind::Aero, AERO_METRICS),
+        (ThemeKind::Futurism, FUTURISM_METRICS),
+    ] {
+        let bounds = Rect::new(20, 20, 140, 90);
+        let buttons = theme::caption_button_layout(bounds, metrics, true);
+        let chrome = FrameChrome {
+            bounds,
+            title: "Window",
+            active: true,
+            buttons,
+            maximized: false,
+        };
+        let mut surface = Surface::new(SurfaceDesc::new(180, 130)).unwrap();
+        let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (180, 130));
+        theme::draw_frame_for(kind, &chrome, &mut canvas);
+        drop(canvas);
+
+        let minimize = buttons.minimize.unwrap();
+        let minimize_x = minimize.x + (minimize.width as i32 - 8) / 2;
+        let minimize_y = match kind {
+            ThemeKind::Classic => minimize.y + minimize.height as i32 - 5,
+            ThemeKind::Aero | ThemeKind::Futurism => {
+                minimize.y + (minimize.height as i32 - 7) / 2 + 5
+            }
+        };
+        let pixel = surface.pixel(minimize_x as u32, minimize_y as u32).unwrap();
+        match kind {
+            ThemeKind::Classic => assert_eq!(pixel.to_rgba(), (0, 0, 0, 255)),
+            ThemeKind::Aero => {
+                assert!(pixel.r() < 80 && pixel.g() < 100 && pixel.a() == 255)
+            }
+            ThemeKind::Futurism => assert_eq!(pixel.to_rgba(), (255, 255, 255, 255)),
+        }
+
+        let maximize = buttons.maximize.unwrap();
+        assert!(
+            surface
+                .pixel(
+                    (maximize.x + maximize.width as i32 / 2) as u32,
+                    (maximize.y + 1) as u32,
+                )
+                .unwrap()
+                .a()
+                > 0,
+            "{kind:?} maximize control was not painted"
+        );
+    }
+}
+
 fn test_aero_alpha_corners_shadow_and_client() {
     let bounds = Rect::new(16, 16, 80, 50);
     let chrome = FrameChrome {
         bounds,
         title: "M",
         active: true,
-        close_button_rect: theme::close_button_rect(bounds, AERO_METRICS),
+        buttons: theme::caption_button_layout(bounds, AERO_METRICS, false),
+        maximized: false,
     };
     let mut surface = Surface::new(SurfaceDesc::new(112, 82)).unwrap();
     let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (112, 82));
@@ -476,7 +549,8 @@ fn test_futurism_translucent_chrome_shadow_and_close_button() {
         bounds,
         title: "M",
         active: true,
-        close_button_rect: theme::close_button_rect(bounds, FUTURISM_METRICS),
+        buttons: theme::caption_button_layout(bounds, FUTURISM_METRICS, false),
+        maximized: false,
     };
     let mut surface = Surface::new(SurfaceDesc::new(170, 140)).unwrap();
     let mut canvas = SurfaceCanvas::new(&mut surface, (0, 0), (170, 140));
@@ -506,7 +580,7 @@ fn test_futurism_translucent_chrome_shadow_and_close_button() {
     assert!(cutout.a() < 96, "corner alpha {}", cutout.a());
 
     // Close button: soft red rounded button with a white × glyph.
-    let button = chrome.close_button_rect;
+    let button = chrome.buttons.close;
     let face = surface
         .pixel((button.x + 10) as u32, (button.y + 5) as u32)
         .unwrap();
@@ -597,6 +671,7 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_terminal_well_material_uses_existing_frame_backdrop_effect,
         &test_retained_surface_uses_decorated_bounds,
         &test_classic_key_pixels_regression,
+        &test_resizable_caption_buttons_paint_in_every_theme,
         &test_aero_alpha_corners_shadow_and_client,
         &test_futurism_translucent_chrome_shadow_and_close_button,
         &test_frame_runtime_theme_change_preserves_client_size_and_effect,

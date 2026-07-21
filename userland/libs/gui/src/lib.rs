@@ -26,7 +26,7 @@ pub use menu::{MenuEntry, MenuEntryFlags, MenuPopup, MenuPopupAction};
 pub use runtime::{
     GuiEvent, GUI_EVENT_CLOSE, GUI_EVENT_FOCUS_CHANGE, GUI_EVENT_KEY, GUI_EVENT_MOUSE,
     GUI_EVENT_RESIZE, GUI_EVENT_SETTINGS_CHANGED, GUI_EVENT_THEME_CHANGED, GUI_MOUSE_DOWN,
-    GUI_MOUSE_MOVE, GUI_MOUSE_SCROLL, GUI_MOUSE_UP,
+    GUI_MOUSE_MOVE, GUI_MOUSE_SCROLL, GUI_MOUSE_UP, GUI_WINDOW_FIXED_SIZE,
 };
 pub use scrollbar::{Scrollbar, ScrollbarAction, SCROLLBAR_THICKNESS};
 pub use slider::{Slider, SliderAction};
@@ -272,9 +272,34 @@ pub struct Window {
     canvas: Canvas,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowOptions {
+    pub resizable: bool,
+}
+
+impl Default for WindowOptions {
+    fn default() -> Self {
+        Self { resizable: true }
+    }
+}
+
 impl Window {
     pub fn new(width: u32, height: u32, title: &str) -> Result<Self, i64> {
-        let result = runtime::gui_win_create(width, height, title, 0);
+        Self::new_with_options(width, height, title, WindowOptions::default())
+    }
+
+    pub fn new_with_options(
+        width: u32,
+        height: u32,
+        title: &str,
+        options: WindowOptions,
+    ) -> Result<Self, i64> {
+        let flags = if options.resizable {
+            0
+        } else {
+            GUI_WINDOW_FIXED_SIZE
+        };
+        let result = runtime::gui_win_create(width, height, title, flags);
         if result < 0 {
             return Err(result);
         }
