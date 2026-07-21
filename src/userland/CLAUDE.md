@@ -52,7 +52,8 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   `chmod`/`fchmod` are validated success no-ops (no permission bits on
   FAT/tmpfs, no +x check in execve). Native-tool compatibility includes
   bounded `readv`, per-process `umask`, writable-fd `F_GETFL`, and
-  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` routed through the VFS.
+  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` and nanosecond precision routed
+  through the VFS.
 - `network_syscalls.rs` — finite Linux `AF_INET` socket ABI, sockaddr/iovec
   usercopy, blocking/restart behavior, and socket option mapping. Protocol
   state and buffers remain in `src/net/`.

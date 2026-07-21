@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::fs::filesystem::{
     DirectoryEntry, DirectoryIterator, FileAttributes, FileHandle, FileMode, FileType, Filesystem,
-    FilesystemError, FilesystemStats,
+    FilesystemError, FilesystemStats, UnixMetadata, UnixTimestamp,
 };
 
 /// Maximum file size we will copy-up from lower into upper in a
@@ -197,6 +197,7 @@ impl Overlay {
     /// `BufferTooSmall` for oversized files.
     fn copy_up(&self, path: &str) -> Result<(), FilesystemError> {
         let meta = self.lower.stat(path)?;
+        let lower_times = self.lower.unix_metadata(path).ok();
         if meta.file_type == FileType::Directory {
             return Err(FilesystemError::IsADirectory);
         }
@@ -242,6 +243,10 @@ impl Overlay {
             written += n;
         }
         let _ = self.upper.close(&mut upper_handle);
+        if let Some(lower_times) = lower_times {
+            self.upper
+                .set_times(path, Some(lower_times.accessed), Some(lower_times.modified))?;
+        }
         Ok(())
     }
 
@@ -368,6 +373,20 @@ impl Filesystem for Overlay {
 
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError> {
         self.locate(path).map(|(_, e)| e)
+    }
+
+    fn unix_metadata(&self, path: &str) -> Result<UnixMetadata, FilesystemError> {
+        match self.locate(path)?.0 {
+            Layer::Upper => self.upper.unix_metadata(path),
+            Layer::Lower => self.lower.unix_metadata(path),
+        }
+    }
+
+    fn symlink_metadata(&self, path: &str) -> Result<UnixMetadata, FilesystemError> {
+        match self.locate(path)?.0 {
+            Layer::Upper => self.upper.symlink_metadata(path),
+            Layer::Lower => self.lower.symlink_metadata(path),
+        }
     }
 
     fn open(&self, path: &str, mode: FileMode) -> Result<FileHandle, FilesystemError> {
@@ -522,8 +541,8 @@ impl Filesystem for Overlay {
     fn set_times(
         &self,
         path: &str,
-        accessed: Option<u64>,
-        modified: Option<u64>,
+        accessed: Option<UnixTimestamp>,
+        modified: Option<UnixTimestamp>,
     ) -> Result<(), FilesystemError> {
         if self.upper.stat(path).is_err() {
             self.copy_up(path)?;

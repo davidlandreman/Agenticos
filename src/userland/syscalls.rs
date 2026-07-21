@@ -3921,27 +3921,6 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
 
 // ---------- stat / access ----------
 
-fn fill_stat(
-    meta: &crate::fs::filesystem::DirectoryEntry,
-    size_override: Option<u64>,
-) -> LinuxStat {
-    use crate::fs::filesystem::FileType;
-    let is_dir = meta.file_type == FileType::Directory;
-    let mut st = LinuxStat::default();
-    st.st_mode = if is_dir {
-        S_IFDIR | PERM_RX_ALL
-    } else {
-        S_IFREG | PERM_READ_ALL
-    };
-    st.st_nlink = if is_dir { 2 } else { 1 };
-    st.st_uid = 0;
-    st.st_gid = 0;
-    st.st_size = size_override.unwrap_or(meta.size) as i64;
-    st.st_blksize = 4096;
-    st.st_blocks = (st.st_size + 511) / 512;
-    st
-}
-
 fn fill_unix_stat(meta: &crate::fs::filesystem::UnixMetadata) -> LinuxStat {
     let mut stat = LinuxStat::default();
     stat.st_ino = meta.inode;
@@ -3952,9 +3931,12 @@ fn fill_unix_stat(meta: &crate::fs::filesystem::UnixMetadata) -> LinuxStat {
     stat.st_size = meta.size as i64;
     stat.st_blksize = meta.block_size as i64;
     stat.st_blocks = meta.blocks_512 as i64;
-    stat.st_atime = meta.accessed as i64;
-    stat.st_mtime = meta.modified as i64;
-    stat.st_ctime = meta.changed as i64;
+    stat.st_atime = meta.accessed.seconds as i64;
+    stat.st_atime_nsec = meta.accessed.nanoseconds as u64;
+    stat.st_mtime = meta.modified.seconds as i64;
+    stat.st_mtime_nsec = meta.modified.nanoseconds as u64;
+    stat.st_ctime = meta.changed.seconds as i64;
+    stat.st_ctime_nsec = meta.changed.nanoseconds as u64;
     stat
 }
 
@@ -4153,11 +4135,11 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
                 st.st_blksize = 4096;
                 st
             } else {
-                let meta = match crate::fs::metadata(&path) {
+                let meta = match crate::fs::vfs::vfs_unix_metadata(&path) {
                     Ok(m) => m,
-                    Err(ref e) => return map_fs_err(e),
+                    Err(ref e) => return map_filesystem_err(e),
                 };
-                fill_stat(&meta, None)
+                fill_unix_stat(&meta)
             };
             write_stat(out_ptr, &st)
         }
@@ -4500,11 +4482,17 @@ pub fn umask_handler(args: &mut SyscallArgs) -> i64 {
     })
 }
 
-fn decode_utimens_value(value: LinuxTimespec, now: u64) -> Result<Option<u64>, i64> {
+fn decode_utimens_value(
+    value: LinuxTimespec,
+    now: crate::fs::filesystem::UnixTimestamp,
+) -> Result<Option<crate::fs::filesystem::UnixTimestamp>, i64> {
     match value.tv_nsec {
         UTIME_NOW => Ok(Some(now)),
         UTIME_OMIT => Ok(None),
-        0..=999_999_999 if value.tv_sec >= 0 => Ok(Some(value.tv_sec as u64)),
+        0..=999_999_999 if value.tv_sec >= 0 => Ok(Some(crate::fs::filesystem::UnixTimestamp {
+            seconds: value.tv_sec as u64,
+            nanoseconds: value.tv_nsec as u32,
+        })),
         _ => Err(EINVAL),
     }
 }
@@ -4540,7 +4528,7 @@ pub fn utimensat_handler(args: &mut SyscallArgs) -> i64 {
         return error;
     }
 
-    let now = crate::time::realtime_ns() / 1_000_000_000;
+    let now = crate::fs::filesystem::UnixTimestamp::from_nanoseconds(crate::time::realtime_ns());
     let (accessed, modified) = if times_ptr == 0 {
         (Some(now), Some(now))
     } else {

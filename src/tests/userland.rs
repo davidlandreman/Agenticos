@@ -2835,14 +2835,20 @@ fn test_dispatch_utimensat_values_now_omit_and_errors() {
             .expect("write ext2 utimens fixture"),
         1
     );
-    crate::fs::vfs::vfs_set_times("/utimens.tmp", Some(11), Some(22)).expect("seed timestamps");
+    crate::fs::vfs::vfs_set_times(
+        "/utimens.tmp",
+        Some(crate::fs::filesystem::UnixTimestamp::from_seconds(11)),
+        Some(crate::fs::filesystem::UnixTimestamp::from_seconds(22)),
+    )
+    .expect("seed timestamps");
 
     let path = b"/utimens.tmp\0";
     let data_path = b"/data/utimens-data.tmp\0";
     let missing = b"/utimens-missing.tmp\0";
     let host = b"/host/BB.ELF\0";
-    let explicit = [123i64, 0, 456, 0];
+    let explicit = [123i64, 120_000_000, 456, 340_000_000];
     let sentinels = [0i64, UTIME_OMIT, 0, UTIME_NOW];
+    let mut statbuf = [0u8; 144];
     let pointers = [
         path.as_ptr() as u64,
         data_path.as_ptr() as u64,
@@ -2850,6 +2856,7 @@ fn test_dispatch_utimensat_values_now_omit_and_errors() {
         host.as_ptr() as u64,
         explicit.as_ptr() as u64,
         sentinels.as_ptr() as u64,
+        statbuf.as_mut_ptr() as u64,
     ];
     let start = *pointers.iter().min().unwrap();
     let end = [
@@ -2859,6 +2866,7 @@ fn test_dispatch_utimensat_values_now_omit_and_errors() {
         host.as_ptr() as u64 + host.len() as u64,
         explicit.as_ptr() as u64 + 32,
         sentinels.as_ptr() as u64 + 32,
+        statbuf.as_ptr() as u64 + statbuf.len() as u64,
     ]
     .into_iter()
     .max()
@@ -2872,23 +2880,49 @@ fn test_dispatch_utimensat_values_now_omit_and_errors() {
     args.rdx = explicit.as_ptr() as u64;
     assert_eq!(syscall_dispatch(&mut args), 0);
     let metadata = crate::fs::vfs::vfs_unix_metadata("/utimens.tmp").expect("explicit stat");
-    assert_eq!(metadata.accessed, 123);
-    assert_eq!(metadata.modified, 456);
+    assert_eq!(metadata.accessed.seconds, 123);
+    assert_eq!(metadata.accessed.nanoseconds, 120_000_000);
+    assert_eq!(metadata.modified.seconds, 456);
+    assert_eq!(metadata.modified.nanoseconds, 340_000_000);
+
+    let mut stat_args = SyscallArgs::default();
+    stat_args.rax = nr::STAT;
+    stat_args.rdi = path.as_ptr() as u64;
+    stat_args.rsi = statbuf.as_mut_ptr() as u64;
+    assert_eq!(syscall_dispatch(&mut stat_args), 0);
+    assert_eq!(
+        u64::from_ne_bytes(statbuf[80..88].try_into().unwrap()),
+        120_000_000,
+        "stat must expose atime nanoseconds"
+    );
+    assert_eq!(
+        u64::from_ne_bytes(statbuf[96..104].try_into().unwrap()),
+        340_000_000,
+        "stat must expose mtime nanoseconds"
+    );
+    assert_eq!(
+        u64::from_ne_bytes(statbuf[112..120].try_into().unwrap()) % 10_000_000,
+        0,
+        "ctime nanoseconds must use PIT's 10 ms resolution"
+    );
 
     args.rsi = data_path.as_ptr() as u64;
     assert_eq!(syscall_dispatch(&mut args), 0);
     let data_metadata =
         crate::fs::vfs::vfs_unix_metadata("/data/utimens-data.tmp").expect("ext2 explicit stat");
-    assert_eq!(data_metadata.accessed, 123);
-    assert_eq!(data_metadata.modified, 456);
+    assert_eq!(data_metadata.accessed.seconds, 123);
+    assert_eq!(data_metadata.modified.seconds, 456);
     args.rsi = path.as_ptr() as u64;
 
     args.rdx = sentinels.as_ptr() as u64;
     assert_eq!(syscall_dispatch(&mut args), 0);
     let metadata = crate::fs::vfs::vfs_unix_metadata("/utimens.tmp").expect("sentinel stat");
-    assert_eq!(metadata.accessed, 123, "UTIME_OMIT must preserve atime");
+    assert_eq!(
+        metadata.accessed.seconds, 123,
+        "UTIME_OMIT must preserve atime"
+    );
     assert!(
-        metadata.modified > 1_500_000_000,
+        metadata.modified.seconds > 1_500_000_000,
         "UTIME_NOW must use realtime"
     );
 

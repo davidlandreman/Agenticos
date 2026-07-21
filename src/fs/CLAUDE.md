@@ -78,14 +78,18 @@ Copy-up is size-capped at 64 KiB (`overlay::filesystem::MAX_COPY_UP_BYTES`) to b
 Writes directly to `/data/<file>` skip the overlay and go straight to ext2. `fsync`, `fdatasync`, or `sync` checkpoints the filesystem clean bit and flushes the device.
 
 `Filesystem::set_times` is the path-based timestamp mutation hook behind
-`utimensat(2)`. `None` preserves a field. Tmpfs retains atime/mtime seconds in
-a side map, overlay copies lower nodes up before a legal mutation, and ext2
-updates inode atime/mtime plus ctime. Read-only FAT/vvfat mounts are rejected
-by VFS policy before reaching the filesystem implementation.
+`utimensat(2)`. `None` preserves a field. Tmpfs retains atime/mtime/ctime in
+each inode with PIT-resolution nanoseconds; create, write, truncate, and
+namespace mutations update them automatically. Overlay copies
+lower nodes up before a legal mutation and preserves timestamps in its
+versioned persistence blob. Ext2 updates inode atime/mtime plus ctime at its
+native second resolution, while 9P carries host nanoseconds. Read-only
+FAT/vvfat mounts are rejected by VFS policy before reaching the filesystem
+implementation.
 
 ## tmpfs and overlay
 
-- `tmpfs/` — `BTreeMap<String, TmpNode>` directories with `Arc<Mutex<Vec<u8>>>` file bodies. Open handles are anchored in a per-FS side table so `unlink` doesn't drop data out from under live readers (POSIX unlink-while-open).
+- `tmpfs/` — inode-owned file/directory bodies and timestamps behind `Arc<Mutex<...>>`. Open handles are anchored in a per-FS side table so `unlink` doesn't drop data or metadata out from under live readers (POSIX unlink-while-open).
 - `overlay/` — merge upper writable FS over lower read-only FS. Whiteouts are `.wh.<name>` sentinel files; opaque dir markers are `.wh..wh..opq`. Reads check upper first, fall through to lower unless whiteouted. Writes copy-up if needed, then mutate upper.
 
 ## Long filenames (VFAT LFN)

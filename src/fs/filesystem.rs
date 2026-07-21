@@ -135,6 +135,33 @@ pub struct FilesystemStats {
     pub free_inodes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnixTimestamp {
+    pub seconds: u64,
+    pub nanoseconds: u32,
+}
+
+impl UnixTimestamp {
+    pub const ZERO: Self = Self {
+        seconds: 0,
+        nanoseconds: 0,
+    };
+
+    pub const fn from_seconds(seconds: u64) -> Self {
+        Self {
+            seconds,
+            nanoseconds: 0,
+        }
+    }
+
+    pub const fn from_nanoseconds(value: u64) -> Self {
+        Self {
+            seconds: value / 1_000_000_000,
+            nanoseconds: (value % 1_000_000_000) as u32,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct UnixMetadata {
     pub inode: u64,
@@ -145,9 +172,9 @@ pub struct UnixMetadata {
     pub size: u64,
     pub blocks_512: u64,
     pub block_size: u32,
-    pub accessed: u64,
-    pub modified: u64,
-    pub changed: u64,
+    pub accessed: UnixTimestamp,
+    pub modified: UnixTimestamp,
+    pub changed: UnixTimestamp,
 }
 
 /// Main filesystem trait that all filesystem implementations must implement
@@ -205,9 +232,9 @@ pub trait Filesystem: Sync {
             size: entry.size,
             blocks_512: entry.size.div_ceil(512),
             block_size: self.stats().map(|stats| stats.block_size).unwrap_or(4096),
-            accessed: entry.accessed,
-            modified: entry.modified,
-            changed: entry.created,
+            accessed: UnixTimestamp::from_seconds(entry.accessed),
+            modified: UnixTimestamp::from_seconds(entry.modified),
+            changed: UnixTimestamp::from_seconds(entry.created),
         })
     }
 
@@ -246,8 +273,8 @@ pub trait Filesystem: Sync {
     fn set_times(
         &self,
         _path: &str,
-        _accessed: Option<u64>,
-        _modified: Option<u64>,
+        _accessed: Option<UnixTimestamp>,
+        _modified: Option<UnixTimestamp>,
     ) -> Result<(), FilesystemError> {
         Err(FilesystemError::UnsupportedOperation)
     }

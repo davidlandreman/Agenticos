@@ -8,6 +8,7 @@
 
 use crate::drivers::virtio::p9::P9Transport;
 use crate::fs::filesystem::FilesystemError;
+use crate::fs::filesystem::UnixTimestamp;
 use crate::fs::p9::protocol::{
     map_errno, msg, P9Dirent, P9Stat, Qid, WireReader, WireWriter, GETATTR_BASIC, MAX_WELEM, NOFID,
     NOTAG, TAG,
@@ -240,8 +241,8 @@ impl P9Client {
         fid: u32,
         valid: u32,
         size: u64,
-        atime_sec: u64,
-        mtime_sec: u64,
+        atime: UnixTimestamp,
+        mtime: UnixTimestamp,
     ) -> Result<(), FilesystemError> {
         let mut writer = WireWriter::request(msg::TSETATTR, TAG);
         writer
@@ -251,10 +252,10 @@ impl P9Client {
             .u32(0) // uid
             .u32(0) // gid
             .u64(size)
-            .u64(atime_sec)
-            .u64(0) // atime_nsec
-            .u64(mtime_sec)
-            .u64(0); // mtime_nsec
+            .u64(atime.seconds)
+            .u64(atime.nanoseconds as u64)
+            .u64(mtime.seconds)
+            .u64(mtime.nanoseconds as u64);
         self.rpc(writer.finish(), msg::RSETATTR, TAG).map(|_| ())
     }
 
