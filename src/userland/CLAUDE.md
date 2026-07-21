@@ -51,9 +51,10 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   the whole SYSCALL, so chunking would duplicate consumed bytes).
   `chmod`/`fchmod` are validated success no-ops (no permission bits on
   FAT/tmpfs, no +x check in execve). Native-tool compatibility includes
-  bounded `readv`, per-process `umask`, writable-fd `F_GETFL`, and
+  bounded `readv`, per-process `umask`, writable-fd `F_GETFL`,
   `utimensat` with `UTIME_NOW`/`UTIME_OMIT` and nanosecond precision routed
-  through the VFS.
+  through the VFS, and `fcntl` advisory record locks
+  (`F_GETLK`/`F_SETLK`/`F_SETLKW`; see `record_lock.rs`).
   `select`/`pselect6`/`poll`/`ppoll` share one readiness-scan/block core
   (`select_common`, `poll_common`); the four handlers differ only in argument
   parsing. `pselect6` is `select` with a nanosecond `timespec` timeout (const,
@@ -64,6 +65,17 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   `pselect`'s SIGCHLD-race protection); plain `-j1` and non-recursive readiness/
   timeout waits work. Applying the mask is the follow-up that also unblocks
   `rt_sigsuspend`'s blocking path.
+- `record_lock.rs` — POSIX advisory record locks behind
+  `fcntl(F_GETLK/F_SETLK/F_SETLKW)`. Process-associated (owned by TGID,
+  released on close of any descriptor to the file or on exit), advisory only,
+  and keyed on the file's **absolute path** (tmpfs assigns per-open-handle
+  inode ids, so inode identity is not a stable cross-open key). Only
+  `FdSlot::File` descriptors are lockable — other fd kinds return `EINVAL`
+  rather than a fake grant. `F_SETLKW` parks on
+  `Ring3BlockReason::WaitingForFileLock`; releases bump the readiness sequence
+  so the readiness wake path re-readies waiters. `F_OFD_*`, mandatory locking,
+  and `EDEADLK` detection are out of scope. Motivating consumer: GNU Make
+  `--output-sync`.
 - `network_syscalls.rs` — finite Linux `AF_INET` socket ABI, sockaddr/iovec
   usercopy, blocking/restart behavior, and socket option mapping. Protocol
   state and buffers remain in `src/net/`.

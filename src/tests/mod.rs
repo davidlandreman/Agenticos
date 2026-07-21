@@ -30,6 +30,8 @@ pub mod entropy;
 #[cfg(feature = "test")]
 pub mod fat_write;
 #[cfg(feature = "test")]
+pub mod fcntl_lock;
+#[cfg(feature = "test")]
 pub mod filesystem;
 #[cfg(feature = "test")]
 pub mod fonts;
@@ -169,6 +171,11 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("gcc", gcc::get_tests),
     ("userland_switch", userland_switch::get_tests),
     ("path", crate::userland::path::path_tests),
+    (
+        "record_lock",
+        crate::userland::record_lock::record_lock_tests,
+    ),
+    ("fcntl_lock", fcntl_lock::get_tests),
     ("etc", crate::userland::etc::etc_tests),
     (
         "system_control",

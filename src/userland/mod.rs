@@ -28,6 +28,7 @@ pub mod pipe;
 pub mod process_service;
 pub mod procfs;
 pub mod readiness;
+pub mod record_lock;
 pub mod signal;
 pub mod stdin;
 pub mod switch;

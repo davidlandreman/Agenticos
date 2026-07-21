@@ -2713,8 +2713,32 @@ const F_GETFD: i32 = 1;
 const F_SETFD: i32 = 2;
 const F_GETFL: i32 = 3;
 const F_SETFL: i32 = 4;
+/// Advisory record-locking commands. Classic (process-associated) POSIX
+/// semantics — see `crate::userland::record_lock`.
+const F_GETLK: i32 = 5;
+const F_SETLK: i32 = 6;
+const F_SETLKW: i32 = 7;
 const F_DUPFD_CLOEXEC: i32 = 1030;
 const FD_CLOEXEC: u64 = 1;
+
+/// `struct flock` lock types (x86-64 Linux).
+const F_RDLCK: i16 = 0;
+const F_WRLCK: i16 = 1;
+const F_UNLCK: i16 = 2;
+
+/// x86-64 Linux `struct flock` (32 bytes). `off_t`/`pid_t` are 64/32-bit on
+/// this arch, so musl passes this same layout for all three lock commands.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct LinuxFlock {
+    l_type: i16,
+    l_whence: i16,
+    _pad0: u32,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+    _pad1: u32,
+}
 
 const _R_OK: u32 = 4;
 const _W_OK: u32 = 2;
@@ -3051,7 +3075,21 @@ pub fn close_handler(args: &mut SyscallArgs) -> i64 {
         // POSIX permits closing stdin/stdout/stderr; we just no-op.
         return 0;
     }
+    // Capture the closed file's lock key before the slot is dropped. Classic
+    // POSIX: closing *any* descriptor to a file releases *all* of the process's
+    // advisory record locks on it, regardless of other open descriptors.
+    let lock_path = match slot.as_ref() {
+        Some(FdSlot::File { handle, .. }) => Some(handle.path()),
+        _ => None,
+    };
     let result = with_fd_table_mut(|t| t.close(fd)).err().unwrap_or(0);
+    if result == 0 {
+        if let Some(path) = lock_path {
+            let owner = crate::userland::lifecycle::current_tgid();
+            crate::userland::record_lock::release_all(&path, owner);
+            crate::userland::record_lock::wake_lock_waiters();
+        }
+    }
     let prune_from = slot.as_ref().filter(|description| {
         result == 0
             && !crate::userland::lifecycle::with_current_group(|process| {
@@ -3820,9 +3858,10 @@ pub fn dup2_handler(args: &mut SyscallArgs) -> i64 {
     result
 }
 
-/// `fcntl(fd, cmd, arg) -> int`. Implements just enough of the cmd
-/// surface for libc startup: F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD,
-/// F_SETFD, F_GETFL, and F_SETFL. Socket and pipe nonblocking state lives
+/// `fcntl(fd, cmd, arg) -> int`. Implements the descriptor/status cmd surface
+/// libc uses at startup — F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, F_GETFL,
+/// F_SETFL — plus the POSIX advisory record-locking commands F_GETLK, F_SETLK,
+/// and F_SETLKW (see [`fcntl_lock`]). Socket and pipe nonblocking state lives
 /// on the shared open-file description so duplicated fds observe changes.
 pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
     let fd = args.rdi as i32;
@@ -3914,6 +3953,155 @@ pub fn fcntl_handler(args: &mut SyscallArgs) -> i64 {
             }
             Some(_) => 0,
             None => EBADF,
+        },
+        F_GETLK | F_SETLK | F_SETLKW => fcntl_lock(args, fd, cmd, arg),
+        _ => ENOSYS,
+    }
+}
+
+/// POSIX advisory record locking for `fcntl(F_GETLK/F_SETLK/F_SETLKW)`.
+///
+/// Only regular-file descriptors are lockable here — the lock space is keyed on
+/// the file's absolute path (`crate::userland::record_lock`), which sentinels,
+/// pipes, sockets, and synthetic files do not have. Locking one of those
+/// returns `-EINVAL` rather than a fake grant, so a consumer relying on real
+/// serialization (GNU Make `--output-sync`) fails loudly instead of silently
+/// interleaving. Make 4.4 locks a real temp file, so `FdSlot::File` is the only
+/// case that must work.
+fn fcntl_lock(args: &SyscallArgs, fd: i32, cmd: i32, arg: u64) -> i64 {
+    use crate::userland::record_lock::{self, LockKind, LockRange};
+
+    // Only regular files carry a lockable identity.
+    let handle = match with_fd_slot(fd) {
+        Some(FdSlot::File { handle, .. }) => handle,
+        Some(_) => return EINVAL,
+        None => return EBADF,
+    };
+
+    let flock: LinuxFlock = match crate::userland::usercopy::read_unaligned(arg) {
+        Ok(value) => value,
+        Err(e) => return e,
+    };
+
+    // Resolve l_whence + l_start + l_len into an absolute inclusive [start, end].
+    let base: i64 = match flock.l_whence as i32 {
+        SEEK_SET => 0,
+        SEEK_CUR => handle.position() as i64,
+        SEEK_END => handle.size() as i64,
+        _ => return EINVAL,
+    };
+    let abs_start = base.checked_add(flock.l_start);
+    let (start, end) = match flock.l_len {
+        0 => match abs_start {
+            Some(s) if s >= 0 => (s as u64, u64::MAX),
+            _ => return EINVAL,
+        },
+        len if len > 0 => {
+            let s = match abs_start {
+                Some(s) if s >= 0 => s,
+                _ => return EINVAL,
+            };
+            // Inclusive end = start + len - 1.
+            match s.checked_add(len - 1) {
+                Some(e) => (s as u64, e as u64),
+                None => return EINVAL,
+            }
+        }
+        len => {
+            // Negative length: the range is [abs_start + len, abs_start - 1].
+            let s = match abs_start.and_then(|s| s.checked_add(len)) {
+                Some(s) if s >= 0 => s,
+                _ => return EINVAL,
+            };
+            let e = match abs_start {
+                Some(a) if a >= 1 => a - 1,
+                _ => return EINVAL,
+            };
+            (s as u64, e as u64)
+        }
+    };
+    let range = LockRange { start, end };
+
+    let kind = match flock.l_type {
+        F_RDLCK => Some(LockKind::Read),
+        F_WRLCK => Some(LockKind::Write),
+        F_UNLCK => None,
+        _ => return EINVAL,
+    };
+
+    let owner = crate::userland::lifecycle::current_tgid();
+    let key = handle.path();
+
+    match cmd {
+        F_GETLK => {
+            // F_UNLCK is not a valid probe type.
+            let Some(probe) = kind else {
+                return EINVAL;
+            };
+            let mut reply = flock;
+            match record_lock::test(&key, range, probe, owner) {
+                Some(conflict) => {
+                    reply.l_type = match conflict.kind {
+                        LockKind::Read => F_RDLCK,
+                        LockKind::Write => F_WRLCK,
+                    };
+                    reply.l_whence = SEEK_SET as i16;
+                    reply.l_start = conflict.range.start as i64;
+                    reply.l_len = if conflict.range.end == u64::MAX {
+                        0
+                    } else {
+                        (conflict.range.end - conflict.range.start + 1) as i64
+                    };
+                    reply.l_pid = conflict.owner as i32;
+                }
+                None => reply.l_type = F_UNLCK,
+            }
+            crate::userland::usercopy::write_unaligned(arg, &reply).map_or_else(|e| e, |_| 0)
+        }
+        F_SETLK => match kind {
+            None => {
+                record_lock::unlock(&key, range, owner);
+                record_lock::wake_lock_waiters();
+                0
+            }
+            Some(kind) => record_lock::set_or_errno(&key, range, kind, owner, EAGAIN),
+        },
+        F_SETLKW => match kind {
+            None => {
+                record_lock::unlock(&key, range, owner);
+                record_lock::wake_lock_waiters();
+                0
+            }
+            Some(kind) => {
+                // Sample the readiness sequence *before* the conflict check so a
+                // release racing our park re-readies us (see the block reason
+                // and `reconcile_readiness_after_block`).
+                let observed = crate::userland::readiness::sequence();
+                match record_lock::set(&key, range, kind, owner) {
+                    Ok(()) => 0,
+                    Err(conflict) if conflict.owner == u32::MAX => {
+                        crate::userland::abi::ENOLCK
+                    }
+                    Err(_) => {
+                        // Synthetic dispatch (tests, sentinel PID 0) cannot
+                        // yield — report the contention rather than hang.
+                        if !matches!(
+                            crate::userland::lifecycle::current_user_pid(),
+                            Some(pid) if pid != crate::userland::lifecycle::KERNEL_PID
+                        ) {
+                            return EAGAIN;
+                        }
+                        unsafe {
+                            crate::userland::switch::block_current_ring3_and_yield(
+                                args,
+                                crate::userland::lifecycle::Ring3BlockReason::WaitingForFileLock {
+                                    observed_sequence: observed,
+                                },
+                            )
+                        }
+                    }
+                }
+            }
         },
         _ => ENOSYS,
     }
