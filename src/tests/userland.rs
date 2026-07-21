@@ -402,6 +402,127 @@ fn test_dispatch_select_unknown_fd_returns_ebadf() {
     clear_streams_after_dispatcher_test();
 }
 
+/// `struct timespec` mirror for the pselect6 tests.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PselectTimespec {
+    seconds: i64,
+    nanoseconds: i64,
+}
+
+/// The pselect6 6th argument: `{const sigset_t *ss, size_t ss_len}`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PselectSigmask {
+    ss: u64,
+    ss_len: u64,
+}
+
+/// A negative `nfds` is rejected before any pointer is touched.
+fn test_dispatch_pselect6_negative_nfds_returns_einval() {
+    let mut args = SyscallArgs::default();
+    args.rax = nr::PSELECT6;
+    args.rdi = u64::MAX; // -1 as i64
+    assert_eq!(syscall_dispatch(&mut args), EINVAL);
+}
+
+/// An `nfds` beyond the descriptor table is rejected, matching select.
+fn test_dispatch_pselect6_nfds_over_cap_returns_einval() {
+    let mut args = SyscallArgs::default();
+    args.rax = nr::PSELECT6;
+    args.rdi = crate::userland::fdtable::FD_TABLE_SIZE as u64 + 1;
+    assert_eq!(syscall_dispatch(&mut args), EINVAL);
+}
+
+/// pselect6 parses its timeout as a nanosecond `timespec`; an out-of-range
+/// nanoseconds field is `EINVAL` (the microsecond bound would wrongly accept).
+fn test_dispatch_pselect6_bad_timeout_nanoseconds_returns_einval() {
+    let timeout = PselectTimespec {
+        seconds: 0,
+        nanoseconds: 1_000_000_000, // == 1e9 is out of the [0, 1e9) range
+    };
+    let timeout_ptr = &timeout as *const PselectTimespec as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: timeout_ptr,
+        end: timeout_ptr + core::mem::size_of::<PselectTimespec>() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::PSELECT6;
+    args.rdi = 4;
+    // Null mask pointers → empty sets, so only the timeout is inspected.
+    args.r8 = timeout_ptr;
+    assert_eq!(syscall_dispatch(&mut args), EINVAL);
+    abi::clear_user_va_bounds();
+}
+
+/// A present sigmask pointer must carry our one-u64 sigset length; anything
+/// else is `EINVAL`. (A NULL `ss` inside the struct is unconstrained — covered
+/// by the streams test below, which passes `ss = 0`.)
+fn test_dispatch_pselect6_bad_sigmask_len_returns_einval() {
+    let mask = 0u64;
+    let mask_ptr = &mask as *const u64 as u64;
+    let sig = PselectSigmask {
+        ss: mask_ptr,
+        ss_len: 16, // wrong — sigset_t is 8 bytes here
+    };
+    let sig_ptr = &sig as *const PselectSigmask as u64;
+    let lo = core::cmp::min(sig_ptr, mask_ptr);
+    let hi = core::cmp::max(
+        sig_ptr + core::mem::size_of::<PselectSigmask>() as u64,
+        mask_ptr + 8,
+    );
+    abi::set_user_va_bounds(UserVaBounds { start: lo, end: hi });
+    let mut args = SyscallArgs::default();
+    args.rax = nr::PSELECT6;
+    args.rdi = 4;
+    // Null timeout and masks: the handler reaches the sigmask validation.
+    args.r9 = sig_ptr;
+    assert_eq!(syscall_dispatch(&mut args), EINVAL);
+    abi::clear_user_va_bounds();
+}
+
+/// pselect6 uses the same descriptor-readiness model as select: with a
+/// zero `timespec` (poll, don't block) and a valid empty sigmask struct it
+/// returns the ready-writer count without parking.
+fn test_dispatch_pselect6_streams_ready() {
+    install_streams_for_dispatcher_test();
+    let mut read_mask = 1u64 << 0;
+    let mut write_mask = (1u64 << 1) | (1u64 << 2);
+    let timeout = PselectTimespec {
+        seconds: 0,
+        nanoseconds: 0,
+    };
+    // ss = NULL inside the struct: "no mask", no length constraint.
+    let sig = PselectSigmask { ss: 0, ss_len: 0 };
+    let read_ptr = &mut read_mask as *mut u64 as u64;
+    let write_ptr = &mut write_mask as *mut u64 as u64;
+    let timeout_ptr = &timeout as *const PselectTimespec as u64;
+    let sig_ptr = &sig as *const PselectSigmask as u64;
+    let lo = read_ptr
+        .min(write_ptr)
+        .min(timeout_ptr)
+        .min(sig_ptr);
+    let hi = (read_ptr + 8)
+        .max(write_ptr + 8)
+        .max(timeout_ptr + core::mem::size_of::<PselectTimespec>() as u64)
+        .max(sig_ptr + core::mem::size_of::<PselectSigmask>() as u64);
+    abi::set_user_va_bounds(UserVaBounds { start: lo, end: hi });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::PSELECT6;
+    args.rdi = 3;
+    args.rsi = read_ptr;
+    args.rdx = write_ptr;
+    args.r8 = timeout_ptr;
+    args.r9 = sig_ptr;
+    assert_eq!(syscall_dispatch(&mut args), 2);
+    assert_eq!(read_mask, 0);
+    assert_eq!(write_mask, (1u64 << 1) | (1u64 << 2));
+
+    abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
 /// `poll` on an unknown fd reports POLLNVAL and counts toward the result.
 fn test_dispatch_poll_unknown_fd_returns_pollnval() {
     install_streams_for_dispatcher_test();
@@ -6248,6 +6369,11 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_poll_nfds_over_cap_returns_einval,
         &test_dispatch_select_streams_ready,
         &test_dispatch_select_unknown_fd_returns_ebadf,
+        &test_dispatch_pselect6_negative_nfds_returns_einval,
+        &test_dispatch_pselect6_nfds_over_cap_returns_einval,
+        &test_dispatch_pselect6_bad_timeout_nanoseconds_returns_einval,
+        &test_dispatch_pselect6_bad_sigmask_len_returns_einval,
+        &test_dispatch_pselect6_streams_ready,
         &test_dispatch_readlink_proc_self_exe,
         &test_dispatch_readlink_proc_self_fd_stdin,
         &test_dispatch_readlink_proc_self_fd_negative_rejected,

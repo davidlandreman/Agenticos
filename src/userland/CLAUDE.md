@@ -53,6 +53,16 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   FAT/tmpfs, no +x check in execve). Native-tool compatibility includes
   bounded `readv`, per-process `umask`, writable-fd `F_GETFL`, and
   `utimensat` with `UTIME_NOW`/`UTIME_OMIT` routed through the VFS.
+  `select`/`pselect6`/`poll`/`ppoll` share one readiness-scan/block core
+  (`select_common`, `poll_common`); the four handlers differ only in argument
+  parsing. `pselect6` is `select` with a nanosecond `timespec` timeout (const,
+  never written back) and a struct-wrapped `{sigset_t *ss, size_t ss_len}` 6th
+  arg. Like `ppoll`, its temporary signal mask is **validated but not applied**
+  — we do not atomically unblock a signal for the duration of a blocking wait.
+  Consequently GNU Make must run `--disable-job-server` (its jobserver relies on
+  `pselect`'s SIGCHLD-race protection); plain `-j1` and non-recursive readiness/
+  timeout waits work. Applying the mask is the follow-up that also unblocks
+  `rt_sigsuspend`'s blocking path.
 - `network_syscalls.rs` — finite Linux `AF_INET` socket ABI, sockaddr/iovec
   usercopy, blocking/restart behavior, and socket option mapping. Protocol
   state and buffers remain in `src/net/`.
