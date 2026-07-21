@@ -102,6 +102,10 @@ pub struct FrameMetrics {
     pub button_width: u32,
     pub button_height: u32,
     pub button_right_margin: u32,
+    /// Width of the neutral minimize/maximize controls to the left of close.
+    pub secondary_button_width: u32,
+    /// Horizontal gap between adjacent caption buttons.
+    pub button_gap: u32,
 }
 
 pub const CLASSIC_METRICS: FrameMetrics = FrameMetrics {
@@ -113,6 +117,8 @@ pub const CLASSIC_METRICS: FrameMetrics = FrameMetrics {
     button_width: 18,
     button_height: 16,
     button_right_margin: 2,
+    secondary_button_width: 18,
+    button_gap: 2,
 };
 
 pub const AERO_METRICS: FrameMetrics = FrameMetrics {
@@ -126,6 +132,8 @@ pub const AERO_METRICS: FrameMetrics = FrameMetrics {
     button_width: 16,
     button_height: 16,
     button_right_margin: 4,
+    secondary_button_width: 16,
+    button_gap: 2,
 };
 
 pub const FUTURISM_METRICS: FrameMetrics = FrameMetrics {
@@ -139,7 +147,37 @@ pub const FUTURISM_METRICS: FrameMetrics = FrameMetrics {
     button_width: 30,
     button_height: 22,
     button_right_margin: 10,
+    secondary_button_width: 24,
+    button_gap: 4,
 };
+
+const fn resizable_caption_client_width(metrics: FrameMetrics) -> u32 {
+    metrics
+        .button_right_margin
+        .saturating_add(metrics.button_width)
+        .saturating_add(metrics.button_gap.saturating_mul(2))
+        .saturating_add(metrics.secondary_button_width.saturating_mul(2))
+}
+
+/// Minimum client width that can retain all caption buttons through any live
+/// theme transition without overlap.
+pub const fn minimum_resizable_client_width() -> u32 {
+    let classic = resizable_caption_client_width(CLASSIC_METRICS);
+    let aero = resizable_caption_client_width(AERO_METRICS);
+    let futurism = resizable_caption_client_width(FUTURISM_METRICS);
+    let classic_or_aero = if classic > aero { classic } else { aero };
+    if classic_or_aero > futurism {
+        classic_or_aero
+    } else {
+        futurism
+    }
+}
+
+pub fn minimum_resizable_frame_width(metrics: FrameMetrics) -> u32 {
+    minimum_resizable_client_width()
+        .saturating_add(metrics.border_width.saturating_mul(2))
+        .max(crate::window::types::MIN_WINDOW_WIDTH)
+}
 
 pub const AERO_BACKDROP_RADIUS: u16 = 6;
 /// Capped at the qualified VirGL blur pipeline's maximum: the three-box
@@ -248,7 +286,25 @@ pub struct FrameChrome<'a> {
     pub bounds: Rect,
     pub title: &'a str,
     pub active: bool,
-    pub close_button_rect: Rect,
+    pub buttons: CaptionButtonLayout,
+    pub maximized: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptionButtonLayout {
+    pub minimize: Option<Rect>,
+    pub maximize: Option<Rect>,
+    pub close: Rect,
+}
+
+impl CaptionButtonLayout {
+    pub const fn leftmost_x(self) -> i32 {
+        match (self.minimize, self.maximize) {
+            (Some(rect), _) => rect.x,
+            (None, Some(rect)) => rect.x,
+            (None, None) => self.close.x,
+        }
+    }
 }
 
 static ACTIVE: AtomicU8 = AtomicU8::new(ThemeKind::Classic as u8);
@@ -361,7 +417,11 @@ pub const fn metrics_for(kind: ThemeKind) -> FrameMetrics {
     spec_for(kind).metrics
 }
 
-pub fn close_button_rect(bounds: Rect, metrics: FrameMetrics) -> Rect {
+pub fn caption_button_layout(
+    bounds: Rect,
+    metrics: FrameMetrics,
+    resizable: bool,
+) -> CaptionButtonLayout {
     let x = bounds
         .right()
         .saturating_sub(metrics.border_width as i32)
@@ -370,7 +430,44 @@ pub fn close_button_rect(bounds: Rect, metrics: FrameMetrics) -> Rect {
     let y = bounds.y
         + metrics.border_width as i32
         + (metrics.title_bar_height as i32 - metrics.button_height as i32) / 2;
-    Rect::new(x, y, metrics.button_width, metrics.button_height)
+    let close = Rect::new(x, y, metrics.button_width, metrics.button_height);
+    if !resizable {
+        return CaptionButtonLayout {
+            minimize: None,
+            maximize: None,
+            close,
+        };
+    }
+
+    let maximize_x = x
+        .saturating_sub(metrics.button_gap as i32)
+        .saturating_sub(metrics.secondary_button_width as i32);
+    let minimize_x = maximize_x
+        .saturating_sub(metrics.button_gap as i32)
+        .saturating_sub(metrics.secondary_button_width as i32);
+    CaptionButtonLayout {
+        minimize: Some(Rect::new(
+            minimize_x,
+            y,
+            metrics.secondary_button_width,
+            metrics.button_height,
+        )),
+        maximize: Some(Rect::new(
+            maximize_x,
+            y,
+            metrics.secondary_button_width,
+            metrics.button_height,
+        )),
+        close,
+    }
+}
+
+#[cfg_attr(
+    not(feature = "test"),
+    expect(dead_code, reason = "QEMU geometry regression API")
+)]
+pub fn close_button_rect(bounds: Rect, metrics: FrameMetrics) -> Rect {
+    caption_button_layout(bounds, metrics, false).close
 }
 
 /// Linear interpolation of one channel; `position`/`span` give the fraction.

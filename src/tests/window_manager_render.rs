@@ -835,6 +835,156 @@ fn test_drag_tick_with_no_position_change_does_nothing() {
     );
 }
 
+fn test_frame_minimize_maximize_restore_transitions() {
+    use crate::window::windows::FrameWindow;
+    use crate::window::ScreenMode;
+
+    let (mut wm, _state) = make_manager(800, 600);
+    let screen_id = wm.create_screen(ScreenMode::Gui);
+    wm.switch_screen(screen_id);
+
+    let root_id = install_test_window(&mut wm, None, Rect::new(0, 0, 800, 600), ROOT_COLOR, false);
+    wm.get_active_screen_mut().unwrap().set_root_window(root_id);
+
+    let frame1_id = wm.create_window(Some(root_id));
+    let mut frame1 = Box::new(FrameWindow::new(frame1_id, "One"));
+    frame1.set_parent(Some(root_id));
+    let normal_bounds = Rect::new(100, 80, 320, 240);
+    frame1.set_bounds(normal_bounds);
+    let content1_id = wm.create_window(Some(frame1_id));
+    let mut content1 = Box::new(TestWindow::new(
+        content1_id,
+        frame1.content_area(),
+        CHILD0_COLOR,
+    ));
+    content1.focusable = true;
+    content1.set_parent(Some(frame1_id));
+    frame1.set_content_window(content1_id);
+    wm.set_window_impl(frame1_id, frame1);
+    wm.set_window_impl(content1_id, content1);
+
+    let frame2_id = wm.create_window(Some(root_id));
+    let mut frame2 = Box::new(FrameWindow::new(frame2_id, "Two"));
+    frame2.set_parent(Some(root_id));
+    frame2.set_bounds(Rect::new(440, 100, 260, 200));
+    let content2_id = wm.create_window(Some(frame2_id));
+    let mut content2 = Box::new(TestWindow::new(
+        content2_id,
+        frame2.content_area(),
+        Color::new(40, 90, 140),
+    ));
+    content2.focusable = true;
+    content2.set_parent(Some(frame2_id));
+    frame2.set_content_window(content2_id);
+    wm.set_window_impl(frame2_id, frame2);
+    wm.set_window_impl(content2_id, content2);
+
+    let taskbar_id = install_test_window(
+        &mut wm,
+        Some(root_id),
+        Rect::new(0, 568, 800, 32),
+        Color::new(90, 90, 90),
+        false,
+    );
+    wm.set_taskbar_id(Some(taskbar_id));
+
+    wm.focus_window(content1_id);
+    assert_eq!(wm.focused_window(), Some(content1_id));
+    assert_eq!(wm.desktop_work_area(), Rect::new(0, 0, 800, 568));
+
+    assert!(wm.toggle_maximize_frame(frame1_id));
+    assert_eq!(
+        wm.window_registry.get(&frame1_id).unwrap().bounds(),
+        Rect::new(0, 0, 800, 568)
+    );
+    assert!(wm
+        .window_registry
+        .get(&frame1_id)
+        .unwrap()
+        .as_frame_window()
+        .unwrap()
+        .is_maximized());
+    let metrics = crate::window::theme::metrics();
+    assert_eq!(
+        wm.window_registry.get(&content1_id).unwrap().bounds(),
+        Rect::new(
+            metrics.border_width as i32,
+            (metrics.border_width + metrics.title_bar_height) as i32,
+            800 - metrics.border_width * 2,
+            568 - metrics.title_bar_height - metrics.border_width * 2,
+        )
+    );
+
+    assert!(wm.minimize_frame(frame1_id));
+    assert!(!wm.window_registry.get(&frame1_id).unwrap().visible());
+    assert_eq!(wm.focused_window(), Some(content2_id));
+
+    assert!(wm.activate_frame(frame1_id));
+    assert!(wm.window_registry.get(&frame1_id).unwrap().visible());
+    assert_eq!(wm.focused_window(), Some(content1_id));
+    assert_eq!(
+        wm.window_registry.get(&frame1_id).unwrap().bounds(),
+        Rect::new(0, 0, 800, 568),
+        "restoring a minimized maximized frame must keep it maximized"
+    );
+
+    assert!(wm.toggle_maximize_frame(frame1_id));
+    assert_eq!(
+        wm.window_registry.get(&frame1_id).unwrap().bounds(),
+        normal_bounds
+    );
+
+    let buttons = crate::window::theme::caption_button_layout(normal_bounds, metrics, true);
+    let maximize = buttons.maximize.unwrap();
+    wm.test_start_drag_if_on_title_bar(
+        maximize.x + maximize.width as i32 / 2,
+        maximize.y + maximize.height as i32 / 2,
+    );
+    assert!(
+        wm.window_registry
+            .get(&frame1_id)
+            .unwrap()
+            .as_frame_window()
+            .unwrap()
+            .is_maximized(),
+        "maximize caption hit must execute the placement transition"
+    );
+    let maximized_bounds = wm.window_registry.get(&frame1_id).unwrap().bounds();
+    let restore = crate::window::theme::caption_button_layout(maximized_bounds, metrics, true)
+        .maximize
+        .unwrap();
+    wm.test_start_drag_if_on_title_bar(
+        restore.x + restore.width as i32 / 2,
+        restore.y + restore.height as i32 / 2,
+    );
+    assert_eq!(
+        wm.window_registry.get(&frame1_id).unwrap().bounds(),
+        normal_bounds
+    );
+
+    let minimize = buttons.minimize.unwrap();
+    wm.test_start_drag_if_on_title_bar(
+        minimize.x + minimize.width as i32 / 2,
+        minimize.y + minimize.height as i32 / 2,
+    );
+    assert!(!wm.window_registry.get(&frame1_id).unwrap().visible());
+    assert!(wm.activate_frame(frame1_id));
+
+    let fixed_id = wm.create_window(Some(root_id));
+    let mut fixed = Box::new(FrameWindow::new(fixed_id, "Fixed"));
+    fixed.set_parent(Some(root_id));
+    fixed.set_resizable(false);
+    let fixed_bounds = Rect::new(220, 160, 240, 150);
+    fixed.set_bounds(fixed_bounds);
+    wm.set_window_impl(fixed_id, fixed);
+    assert!(!wm.toggle_maximize_frame(fixed_id));
+    assert!(!wm.minimize_frame(fixed_id));
+    assert_eq!(
+        wm.window_registry.get(&fixed_id).unwrap().bounds(),
+        fixed_bounds
+    );
+}
+
 // ---- U9 tests: opt-in compositor blit path -----------------------------
 
 fn test_opt_in_window_blits_instead_of_painting() {
@@ -1145,6 +1295,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_non_frame_top_level_window_is_not_draggable,
         &test_drag_tick_marks_bounds_union_not_full_repaint,
         &test_drag_tick_with_no_position_change_does_nothing,
+        &test_frame_minimize_maximize_restore_transitions,
         // U9 — opt-in compositor blit path
         &test_opt_in_window_blits_instead_of_painting,
         &test_opt_in_skips_rasterization_when_content_unchanged,

@@ -2,7 +2,9 @@
 
 use alloc::format;
 
-use gui::{decode_control_input, theme, Button, ButtonAction, ControlInput, Slider, Window};
+use gui::{
+    decode_control_input, theme, Button, ButtonAction, ControlInput, Slider, Window, WindowOptions,
+};
 
 use crate::DialogStatus;
 
@@ -37,7 +39,8 @@ pub struct ColorPicker {
 
 impl ColorPicker {
     pub fn new(initial: u32) -> Result<Self, i64> {
-        let window = Window::new(360, 320, "Choose Color")?;
+        let window =
+            Window::new_with_options(360, 320, "Choose Color", WindowOptions { resizable: false })?;
         let mut dialog = Self {
             window,
             sliders: [

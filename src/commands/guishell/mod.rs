@@ -57,7 +57,7 @@ pub enum PendingAction {
     SpawnControl,
     OpenRunDialog,
     ShowShutdownNotice,
-    FocusWindow(WindowId),
+    ActivateWindow(WindowId),
 }
 
 impl GUIShellState {
@@ -594,7 +594,7 @@ fn add_window_button(frame_id: WindowId, title: &str) {
         // Use deferred action to avoid deadlock
         let focus_frame_id = frame_id;
         button.on_click(move || {
-            queue_action(PendingAction::FocusWindow(focus_frame_id));
+            queue_action(PendingAction::ActivateWindow(focus_frame_id));
         });
 
         wm.set_window_impl(button_id, Box::new(button));
@@ -669,25 +669,11 @@ fn update_button_layout() {
     });
 }
 
-/// Focus a window (called when taskbar button is clicked)
-fn focus_window(frame_id: WindowId) {
+/// Restore/focus a window (called when its taskbar button is clicked).
+fn activate_window(frame_id: WindowId) {
     with_window_manager(|wm| {
-        // Bring to front
-        wm.bring_to_front(frame_id);
-
-        // Focus the frame (for blue title bar)
-        if let Some(frame) = wm.window_registry.get_mut(&frame_id) {
-            frame.set_focus(true);
-        }
-
-        // Focus the content (terminal) for keyboard input
-        if let Some(frame) = wm.window_registry.get(&frame_id) {
-            if let Some(&content_id) = frame.children().first() {
-                wm.focus_window(content_id);
-            }
-        }
-
-        crate::debug_info!("GUIShell: Focused window {:?}", frame_id);
+        wm.activate_frame(frame_id);
+        crate::debug_info!("GUIShell: Activated window {:?}", frame_id);
     });
 }
 
@@ -834,8 +820,8 @@ fn process_pending_actions() {
                     "Shutdown is not available yet. Close the QEMU window to stop AgenticOS.",
                 );
             }
-            PendingAction::FocusWindow(frame_id) => {
-                focus_window(frame_id);
+            PendingAction::ActivateWindow(frame_id) => {
+                activate_window(frame_id);
             }
         }
     }

@@ -49,6 +49,7 @@ pub fn open_run_dialog() -> Result<WindowId, &'static str> {
 
         let frame_id = wm.create_window(Some(desktop_id));
         let mut frame = FrameWindow::new(frame_id, "Run");
+        frame.set_resizable(false);
         frame.set_bounds(Rect::new(dialog_x, dialog_y, DIALOG_WIDTH, DIALOG_HEIGHT));
         frame.set_parent(Some(desktop_id));
         let content = frame.content_area();

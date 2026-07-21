@@ -478,15 +478,16 @@ pub struct TerminalWindow {
 - [ ] Window buffers (decided against for performance)
 
 ### Phase 4: UI Controls 🚧 PARTIAL
-- [ ] FrameWindow with decorations
+- [x] FrameWindow with themed decorations and functional caption controls
 - [ ] Button, Label, TextBox
 - [x] Focus management
 - [x] Mouse interaction and cursor rendering
 
 ### Phase 5: Advanced Features ⏳ FUTURE
 - [ ] Drag and drop
-- [ ] Window resizing/moving
-- [ ] Menus and dialogs
+- [x] Window resizing/moving
+- [x] Minimize-to-taskbar and work-area maximize/restore
+- [x] Menus and dialogs
 - [ ] Inline terminal graphics
 
 ## Migration from Current System

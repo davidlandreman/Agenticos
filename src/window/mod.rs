@@ -291,6 +291,11 @@ pub trait Window: Send {
         None
     }
 
+    /// Typed immutable accessor for decorated-frame policy and state.
+    fn as_frame_window(&self) -> Option<&windows::frame::FrameWindow> {
+        None
+    }
+
     /// Take a title update intended for this window's enclosing frame.
     fn take_pending_frame_title(&mut self) -> Option<alloc::string::String> {
         None

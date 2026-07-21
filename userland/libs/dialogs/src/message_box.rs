@@ -4,8 +4,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use gui::{
-    decode_control_input, theme, Button, ButtonAction, ControlInput, Window, FONT_CELL_WIDTH,
-    FONT_LINE_HEIGHT,
+    decode_control_input, theme, Button, ButtonAction, ControlInput, Window, WindowOptions,
+    FONT_CELL_WIDTH, FONT_LINE_HEIGHT,
 };
 
 use crate::DialogStatus;
@@ -54,7 +54,8 @@ impl MessageBox {
         );
         let height = (MARGIN * 2 + lines.len() as i32 * LINE_HEIGHT + 16 + BUTTON_H as i32)
             .clamp(120, 360) as u32;
-        let window = Window::new(width, height, title)?;
+        let window =
+            Window::new_with_options(width, height, title, WindowOptions { resizable: false })?;
         let (affirmative_label, negative_label) = match buttons {
             Buttons::Ok => ("OK", None),
             Buttons::OkCancel => ("OK", Some("Cancel")),

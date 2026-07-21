@@ -8,6 +8,12 @@ the Task Manager (`userland/apps/taskmgr/`, replacing the kernel-side
 `docs/plans/2026-07-18-003-feat-ring3-task-manager-and-procfs-plan.md`) all
 live under `userland/apps/`.
 
+`guishell` also owns taskbar policy. Each frame retains a task button while
+minimized; task-button activation delegates to
+`WindowManager::activate_frame`, which restores visibility, raises the frame,
+and focuses its first focusable descendant without duplicating placement state
+inside `GUIShellState`.
+
 `gui_launch_table` retains the `GLAUNCH.ELF` / syscall-5000 dispatch
 skeleton for a future workload that genuinely needs ring 0; its match arms
 must stay in sync with `GUI_APPLETS` in `src/userland/bin_namespace.rs`

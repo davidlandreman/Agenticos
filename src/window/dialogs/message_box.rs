@@ -47,6 +47,7 @@ pub fn show_message(title: &str, message: &str, msg_type: MessageBoxType) {
         // Create frame window
         let frame_id = wm.create_window(Some(desktop_id));
         let mut frame = FrameWindow::new(frame_id, title);
+        frame.set_resizable(false);
         frame.set_bounds(Rect::new(dialog_x, dialog_y, dialog_width, dialog_height));
         frame.set_parent(Some(desktop_id));
 

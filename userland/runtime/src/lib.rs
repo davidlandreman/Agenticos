@@ -34,6 +34,7 @@ pub const WNOHANG: u32 = 1;
 pub const GUI_ABI_VERSION: u32 = 1;
 pub const GUI_PIXEL_FORMAT_XRGB8888: u32 = 1;
 pub const GUI_NONBLOCK: u64 = 1;
+pub const GUI_WINDOW_FIXED_SIZE: u64 = 1 << 0;
 pub const GUI_EVENT_KEY: u32 = 1;
 pub const GUI_EVENT_MOUSE: u32 = 2;
 pub const GUI_EVENT_RESIZE: u32 = 3;
