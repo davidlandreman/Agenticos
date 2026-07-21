@@ -28,28 +28,36 @@
 //! Format:
 //! ```text
 //!   [magic   4 bytes = b"AGOV"]
-//!   [version 1 byte  = 1]
+//!   [version 1 byte  = 2]
 //!   [crc32   4 bytes over everything that follows]
 //!   [entry_count u32 LE]
 //!   foreach entry:
-//!     [kind u8]              0 = file, 1 = whiteout, 2 = opaque-dir marker
+//!     [kind u8]              0 = file, 1 = whiteout, 2 = opaque marker,
+//!                            3 = directory
 //!     [path_len u16 LE]
 //!     [path utf8]
+//!     if file/dir: [atime sec u64 + nsec u32]
+//!                  [mtime sec u64 + nsec u32]
+//!                  [ctime sec u64 + nsec u32]
 //!     if file: [data_len u32 LE][data bytes]
 //! ```
+//! Version 1 blobs remain readable; their entries simply have no stored
+//! timestamps and acquire restore-time metadata during the one-time upgrade.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::fs::filesystem::{FileMode, Filesystem, FilesystemError};
-use crate::fs::tmpfs::filesystem::{DirBody, TmpNode, Tmpfs};
+use crate::fs::tmpfs::filesystem::{DirBody, NodeTimes, TmpNode, Tmpfs};
 use spin::Mutex;
 
 const MAGIC: &[u8; 4] = b"AGOV";
-const VERSION: u8 = 1;
+const LEGACY_VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const KIND_FILE: u8 = 0;
 const KIND_WHITEOUT: u8 = 1;
 const KIND_OPAQUE: u8 = 2;
+const KIND_DIRECTORY: u8 = 3;
 
 const SLOT0_PATH: &str = "/data/overlay-state.0";
 const SLOT1_PATH: &str = "/data/overlay-state.1";
@@ -88,9 +96,59 @@ fn crc32_ieee(data: &[u8]) -> u32 {
 
 #[derive(Debug, Clone)]
 pub enum Entry {
-    File { path: String, data: Vec<u8> },
-    Whiteout { path: String },
-    Opaque { dir_path: String },
+    File {
+        path: String,
+        data: Vec<u8>,
+        times: Option<NodeTimes>,
+    },
+    Directory {
+        path: String,
+        times: Option<NodeTimes>,
+    },
+    Whiteout {
+        path: String,
+    },
+    Opaque {
+        dir_path: String,
+    },
+}
+
+fn push_timestamp(out: &mut Vec<u8>, value: crate::fs::filesystem::UnixTimestamp) {
+    out.extend_from_slice(&value.seconds.to_le_bytes());
+    out.extend_from_slice(&value.nanoseconds.to_le_bytes());
+}
+
+fn push_times(out: &mut Vec<u8>, times: NodeTimes) {
+    push_timestamp(out, times.accessed);
+    push_timestamp(out, times.modified);
+    push_timestamp(out, times.changed);
+}
+
+fn read_timestamp(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<crate::fs::filesystem::UnixTimestamp, &'static str> {
+    if *offset + 12 > data.len() {
+        return Err("truncated timestamp");
+    }
+    let seconds = u64::from_le_bytes(data[*offset..*offset + 8].try_into().unwrap());
+    let nanoseconds = u32::from_le_bytes(data[*offset + 8..*offset + 12].try_into().unwrap());
+    *offset += 12;
+    if nanoseconds >= 1_000_000_000 {
+        return Err("invalid timestamp nanoseconds");
+    }
+    Ok(crate::fs::filesystem::UnixTimestamp {
+        seconds,
+        nanoseconds,
+    })
+}
+
+fn read_times(data: &[u8], offset: &mut usize) -> Result<NodeTimes, &'static str> {
+    Ok(NodeTimes {
+        accessed: read_timestamp(data, offset)?,
+        modified: read_timestamp(data, offset)?,
+        changed: read_timestamp(data, offset)?,
+    })
 }
 
 /// Walk a tmpfs subtree rooted at `dir` (with the given path
@@ -100,7 +158,11 @@ pub enum Entry {
 /// overlay's whiteout state exactly.
 fn walk_tmpfs_dir(dir: &DirBody, prefix: &str, out: &mut Vec<Entry>) {
     let children = dir.lock();
-    for (name, node) in children.iter() {
+    out.push(Entry::Directory {
+        path: prefix.to_string(),
+        times: Some(children.times),
+    });
+    for (name, node) in children.children.iter() {
         let mut full_path = String::with_capacity(prefix.len() + 1 + name.len());
         full_path.push_str(prefix);
         if !prefix.ends_with('/') {
@@ -128,10 +190,11 @@ fn walk_tmpfs_dir(dir: &DirBody, prefix: &str, out: &mut Vec<Entry>) {
         }
         match node {
             TmpNode::File(body) => {
-                let data = body.lock().clone();
+                let file = body.lock();
                 out.push(Entry::File {
                     path: full_path,
-                    data,
+                    data: file.data.clone(),
+                    times: Some(file.times),
                 });
             }
             TmpNode::Dir(sub) => {
@@ -156,12 +219,25 @@ pub fn serialize_upper(upper: &Tmpfs) -> Vec<u8> {
     inner.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for entry in &entries {
         match entry {
-            Entry::File { path, data } => {
+            Entry::File { path, data, times } => {
                 inner.push(KIND_FILE);
                 inner.extend_from_slice(&(path.len() as u16).to_le_bytes());
                 inner.extend_from_slice(path.as_bytes());
+                push_times(
+                    &mut inner,
+                    times.expect("serialized tmpfs file has timestamps"),
+                );
                 inner.extend_from_slice(&(data.len() as u32).to_le_bytes());
                 inner.extend_from_slice(data);
+            }
+            Entry::Directory { path, times } => {
+                inner.push(KIND_DIRECTORY);
+                inner.extend_from_slice(&(path.len() as u16).to_le_bytes());
+                inner.extend_from_slice(path.as_bytes());
+                push_times(
+                    &mut inner,
+                    times.expect("serialized tmpfs directory has timestamps"),
+                );
             }
             Entry::Whiteout { path } => {
                 inner.push(KIND_WHITEOUT);
@@ -194,7 +270,8 @@ pub fn deserialize_blob(blob: &[u8]) -> Result<Vec<Entry>, &'static str> {
     if &blob[..4] != MAGIC {
         return Err("bad magic");
     }
-    if blob[4] != VERSION {
+    let version = blob[4];
+    if version != VERSION && version != LEGACY_VERSION {
         return Err("unsupported version");
     }
     let expected_crc = u32::from_le_bytes([blob[5], blob[6], blob[7], blob[8]]);
@@ -228,6 +305,11 @@ pub fn deserialize_blob(blob: &[u8]) -> Result<Vec<Entry>, &'static str> {
         p += path_len;
         match kind {
             KIND_FILE => {
+                let times = if version >= VERSION {
+                    Some(read_times(inner, &mut p)?)
+                } else {
+                    None
+                };
                 if p + 4 > inner.len() {
                     return Err("truncated data_len");
                 }
@@ -240,8 +322,12 @@ pub fn deserialize_blob(blob: &[u8]) -> Result<Vec<Entry>, &'static str> {
                 }
                 let data = inner[p..p + data_len].to_vec();
                 p += data_len;
-                entries.push(Entry::File { path, data });
+                entries.push(Entry::File { path, data, times });
             }
+            KIND_DIRECTORY if version >= VERSION => entries.push(Entry::Directory {
+                path,
+                times: Some(read_times(inner, &mut p)?),
+            }),
             KIND_WHITEOUT => entries.push(Entry::Whiteout { path }),
             KIND_OPAQUE => entries.push(Entry::Opaque { dir_path: path }),
             _ => return Err("unknown entry kind"),
@@ -361,9 +447,10 @@ fn load_slot(path: &str) -> Result<Vec<Entry>, &'static str> {
 /// current state should be overwritten). Creates parent directories
 /// as needed via tmpfs mkdir.
 fn apply_entries(upper: &Tmpfs, entries: Vec<Entry>) {
+    let mut restored_times: Vec<(String, NodeTimes)> = Vec::new();
     for entry in entries {
         match entry {
-            Entry::File { path, data } => {
+            Entry::File { path, data, times } => {
                 ensure_parents(upper, &path);
                 if let Ok(mut handle) = upper.open(
                     &path,
@@ -377,6 +464,18 @@ fn apply_entries(upper: &Tmpfs, entries: Vec<Entry>) {
                 ) {
                     let _ = upper.write(&mut handle, &data);
                     let _ = upper.close(&mut handle);
+                }
+                if let Some(times) = times {
+                    restored_times.push((path, times));
+                }
+            }
+            Entry::Directory { path, times } => {
+                if !path.is_empty() && path != "/" {
+                    ensure_parents(upper, &path);
+                    let _ = upper.mkdir(&path);
+                }
+                if let Some(times) = times {
+                    restored_times.push((path, times));
                 }
             }
             Entry::Whiteout { path } => {
@@ -431,6 +530,10 @@ fn apply_entries(upper: &Tmpfs, entries: Vec<Entry>) {
                 }
             }
         }
+    }
+    for (path, times) in restored_times {
+        let path = if path.is_empty() { "/" } else { &path };
+        let _ = upper.restore_node_times(path, times);
     }
 }
 

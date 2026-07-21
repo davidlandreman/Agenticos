@@ -9,7 +9,7 @@
 use crate::drivers::virtio::p9::P9Transport;
 use crate::fs::filesystem::{
     DirectoryEntry, DirectoryIterator, FileAttributes, FileHandle, FileMode, FileType, Filesystem,
-    FilesystemError, FilesystemStats, UnixMetadata,
+    FilesystemError, FilesystemStats, UnixMetadata, UnixTimestamp,
 };
 use crate::fs::p9::client::{P9Client, MAX_SYMLINK_DEPTH, ROOT_FID};
 use crate::fs::p9::protocol::{open_flags, setattr_valid, P9Stat, AT_REMOVEDIR};
@@ -116,9 +116,18 @@ fn metadata_from_stat(stat: &P9Stat) -> UnixMetadata {
         size: stat.size,
         blocks_512: stat.blocks,
         block_size: (stat.blksize as u32).max(512),
-        accessed: stat.atime_sec,
-        modified: stat.mtime_sec,
-        changed: stat.ctime_sec,
+        accessed: UnixTimestamp {
+            seconds: stat.atime_sec,
+            nanoseconds: stat.atime_nsec,
+        },
+        modified: UnixTimestamp {
+            seconds: stat.mtime_sec,
+            nanoseconds: stat.mtime_nsec,
+        },
+        changed: UnixTimestamp {
+            seconds: stat.ctime_sec,
+            nanoseconds: stat.ctime_nsec,
+        },
     }
 }
 
@@ -423,7 +432,13 @@ impl Filesystem for P9Filesystem {
             return Err(FilesystemError::PermissionDenied);
         }
         let mut client = self.state.lock();
-        client.setattr(handle.inode as u32, setattr_valid::SIZE, size, 0, 0)?;
+        client.setattr(
+            handle.inode as u32,
+            setattr_valid::SIZE,
+            size,
+            UnixTimestamp::ZERO,
+            UnixTimestamp::ZERO,
+        )?;
         handle.size = size;
         Ok(())
     }
@@ -431,8 +446,8 @@ impl Filesystem for P9Filesystem {
     fn set_times(
         &self,
         path: &str,
-        accessed: Option<u64>,
-        modified: Option<u64>,
+        accessed: Option<UnixTimestamp>,
+        modified: Option<UnixTimestamp>,
     ) -> Result<(), FilesystemError> {
         if accessed.is_none() && modified.is_none() {
             return Ok(());
@@ -446,7 +461,13 @@ impl Filesystem for P9Filesystem {
         if modified.is_some() {
             valid |= setattr_valid::MTIME | setattr_valid::MTIME_SET;
         }
-        let result = client.setattr(fid, valid, 0, accessed.unwrap_or(0), modified.unwrap_or(0));
+        let result = client.setattr(
+            fid,
+            valid,
+            0,
+            accessed.unwrap_or(UnixTimestamp::ZERO),
+            modified.unwrap_or(UnixTimestamp::ZERO),
+        );
         clunk_quiet(&mut client, fid);
         result
     }

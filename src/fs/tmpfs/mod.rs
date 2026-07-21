@@ -1,8 +1,8 @@
 //! In-RAM `tmpfs` filesystem.
 //!
-//! Backed entirely by the kernel heap. Files are `Vec<u8>` wrapped in
-//! `Arc<Mutex<…>>`; directories are `BTreeMap<String, TmpNode>` of the
-//! same.
+//! Backed entirely by the kernel heap. Files and directories are inode-like
+//! bodies wrapped in `Arc<Mutex<…>>`; each body owns its content/children and
+//! atime/mtime/ctime metadata.
 //!
 //! Open handles are anchored in a per-FS side table keyed by a unique
 //! handle id. The `FileHandle.inode` field carries that id, so the

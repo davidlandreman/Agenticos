@@ -1135,9 +1135,11 @@ impl<'a> Ext2Filesystem<'a> {
             size: inode.size(),
             blocks_512: inode.sectors() as u64,
             block_size: self.geometry.block_size,
-            accessed: le32(&inode.raw, 8) as u64,
-            changed: le32(&inode.raw, 12) as u64,
-            modified: le32(&inode.raw, 16) as u64,
+            accessed: crate::fs::filesystem::UnixTimestamp::from_seconds(le32(&inode.raw, 8) as u64),
+            changed: crate::fs::filesystem::UnixTimestamp::from_seconds(le32(&inode.raw, 12) as u64),
+            modified: crate::fs::filesystem::UnixTimestamp::from_seconds(
+                le32(&inode.raw, 16) as u64
+            ),
         }
     }
 
@@ -1693,18 +1695,18 @@ impl Filesystem for Ext2Filesystem<'_> {
     fn set_times(
         &self,
         path: &str,
-        accessed: Option<u64>,
-        modified: Option<u64>,
+        accessed: Option<crate::fs::filesystem::UnixTimestamp>,
+        modified: Option<crate::fs::filesystem::UnixTimestamp>,
     ) -> Result<(), FilesystemError> {
         let mut state = self.state.lock();
         self.mark_dirty(&mut state)?;
         let number = self.resolve_with_groups(path, &state.groups)?;
         let mut inode = self.read_inode_with_groups(number, &state.groups)?;
         if let Some(value) = accessed {
-            inode.set_accessed(value.min(u32::MAX as u64) as u32);
+            inode.set_accessed(value.seconds.min(u32::MAX as u64) as u32);
         }
         if let Some(value) = modified {
-            inode.set_modified(value.min(u32::MAX as u64) as u32);
+            inode.set_modified(value.seconds.min(u32::MAX as u64) as u32);
         }
         inode.set_changed(Self::now());
         self.write_inode(&inode, &state.groups)

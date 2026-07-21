@@ -106,8 +106,7 @@ impl Qid {
     }
 }
 
-/// The Rgetattr fields the kernel consumes (times truncated to seconds — the
-/// VFS metadata surface is second-granular).
+/// The Rgetattr fields the kernel consumes, including host nanoseconds.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct P9Stat {
     pub qid: Qid,
@@ -119,8 +118,11 @@ pub struct P9Stat {
     pub blksize: u64,
     pub blocks: u64,
     pub atime_sec: u64,
+    pub atime_nsec: u32,
     pub mtime_sec: u64,
+    pub mtime_nsec: u32,
     pub ctime_sec: u64,
+    pub ctime_nsec: u32,
 }
 
 /// One Rreaddir entry. `type_byte` is a Linux `d_type` value. The entry's
@@ -279,10 +281,11 @@ impl<'a> WireReader<'a> {
         let blksize = self.u64()?;
         let blocks = self.u64()?;
         let atime_sec = self.u64()?;
-        let _atime_nsec = self.u64()?;
+        let atime_nsec = self.u64()?;
         let mtime_sec = self.u64()?;
-        let _mtime_nsec = self.u64()?;
+        let mtime_nsec = self.u64()?;
         let ctime_sec = self.u64()?;
+        let ctime_nsec = self.u64()?;
         // btime/gen/data_version follow; callers don't consume them.
         Ok(P9Stat {
             qid,
@@ -294,8 +297,11 @@ impl<'a> WireReader<'a> {
             blksize,
             blocks,
             atime_sec,
+            atime_nsec: atime_nsec.min(999_999_999) as u32,
             mtime_sec,
+            mtime_nsec: mtime_nsec.min(999_999_999) as u32,
             ctime_sec,
+            ctime_nsec: ctime_nsec.min(999_999_999) as u32,
         })
     }
 

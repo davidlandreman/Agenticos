@@ -795,6 +795,9 @@ fn test_u11_flush_then_restore_on_live_data() {
     let f = crate::fs::File::create("/u11-marker.txt").expect("create");
     f.write(b"survived a reboot\n").expect("write");
     drop(f);
+    let original_times = upper
+        .unix_metadata("/u11-marker.txt")
+        .expect("stat marker before flush");
 
     flush_upper_to_disk(upper).expect("flush");
 
@@ -811,6 +814,12 @@ fn test_u11_flush_then_restore_on_live_data() {
     let mut buf = [0u8; 32];
     let n = fresh.read(&mut h, &mut buf).expect("read");
     assert_eq!(&buf[..n], b"survived a reboot\n");
+    let restored_times = fresh
+        .unix_metadata("/u11-marker.txt")
+        .expect("stat restored marker");
+    assert_eq!(restored_times.accessed, original_times.accessed);
+    assert_eq!(restored_times.modified, original_times.modified);
+    assert_eq!(restored_times.changed, original_times.changed);
 }
 
 fn test_u11_pointer_flip_is_atomic() {
@@ -1200,11 +1209,68 @@ fn test_tmp_directory_provisioned_and_writable() {
     crate::fs::vfs::vfs_unlink(path).expect("cleanup temp probe");
 }
 
+fn wait_for_filesystem_tick() {
+    let start = crate::arch::x86_64::interrupts::get_timer_ticks();
+    while crate::arch::x86_64::interrupts::get_timer_ticks() == start {
+        core::hint::spin_loop();
+    }
+}
+
+fn timestamp_ns(value: crate::fs::filesystem::UnixTimestamp) -> u128 {
+    u128::from(value.seconds) * 1_000_000_000 + u128::from(value.nanoseconds)
+}
+
+fn test_work_timestamps_support_incremental_build_ordering() {
+    let source_path = "/work/make-source.c";
+    let target_path = "/work/make-target.o";
+    for path in [source_path, target_path] {
+        if crate::fs::exists(path) {
+            crate::fs::vfs::vfs_unlink(path).expect("clean timestamp fixture");
+        }
+    }
+
+    let source = crate::fs::File::create(source_path).expect("create source");
+    source.write(b"v1").expect("write source");
+    wait_for_filesystem_tick();
+    let target = crate::fs::File::create(target_path).expect("create target");
+    target.write(b"object-v1").expect("write target");
+
+    let source_v1 = crate::fs::vfs::vfs_unix_metadata(source_path).expect("stat source v1");
+    let target_v1 = crate::fs::vfs::vfs_unix_metadata(target_path).expect("stat target v1");
+    assert!(
+        timestamp_ns(target_v1.modified) > timestamp_ns(source_v1.modified),
+        "a completed target must be newer than its prerequisite"
+    );
+
+    wait_for_filesystem_tick();
+    source.seek(0).expect("rewind source");
+    source.write(b"v2").expect("rewrite source");
+    let source_v2 = crate::fs::vfs::vfs_unix_metadata(source_path).expect("stat source v2");
+    assert!(
+        timestamp_ns(source_v2.modified) > timestamp_ns(target_v1.modified),
+        "rewriting a prerequisite must make it newer than the target"
+    );
+
+    wait_for_filesystem_tick();
+    target.truncate(0).expect("truncate rebuilt target");
+    let target_v2 = crate::fs::vfs::vfs_unix_metadata(target_path).expect("stat target v2");
+    assert!(
+        timestamp_ns(target_v2.modified) > timestamp_ns(source_v2.modified),
+        "rebuilding a target must restore target-newer ordering"
+    );
+
+    drop(source);
+    drop(target);
+    crate::fs::vfs::vfs_unlink(source_path).expect("cleanup source fixture");
+    crate::fs::vfs::vfs_unlink(target_path).expect("cleanup target fixture");
+}
+
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_work_directory_provisioned_and_writable,
         &test_root_home_provisioned_and_writable,
         &test_tmp_directory_provisioned_and_writable,
+        &test_work_timestamps_support_incremental_build_ordering,
         &test_seek_past_eof_tmpfs_zero_fill,
         &test_seek_past_eof_data_zero_fill,
         &test_seek_past_eof_readonly_rejected,

@@ -52,7 +52,8 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   `chmod`/`fchmod` are validated success no-ops (no permission bits on
   FAT/tmpfs, no +x check in execve). Native-tool compatibility includes
   bounded `readv`, per-process `umask`, writable-fd `F_GETFL`, and
-  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` routed through the VFS.
+  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` and nanosecond precision routed
+  through the VFS.
   `select`/`pselect6`/`poll`/`ppoll` share one readiness-scan/block core
   (`select_common`, `poll_common`); the four handlers differ only in argument
   parsing. `pselect6` is `select` with a nanosecond `timespec` timeout (const,
