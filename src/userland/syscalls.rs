@@ -5139,12 +5139,6 @@ pub fn poll_handler(args: &mut SyscallArgs) -> i64 {
 /// Linux-x86-64 ppoll. The timeout is honored; temporary signal masks are
 /// not implemented yet.
 pub fn ppoll_handler(args: &mut SyscallArgs) -> i64 {
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct Timespec {
-        seconds: i64,
-        nanoseconds: i64,
-    }
     let timeout_ticks = if args.rdx == 0 {
         None
     } else {
@@ -5241,6 +5235,15 @@ struct SelectTimeval {
     microseconds: i64,
 }
 
+/// Linux `struct timespec` — 16 bytes, seconds + nanoseconds. Shared by
+/// `ppoll` and `pselect6`, both of which take a nanosecond-resolution timeout.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Timespec {
+    seconds: i64,
+    nanoseconds: i64,
+}
+
 fn select_read_mask(pointer: u64, nfds: usize) -> Result<u64, i64> {
     if pointer == 0 || nfds == 0 {
         return Ok(0);
@@ -5298,6 +5301,23 @@ pub fn select_handler(args: &mut SyscallArgs) -> i64 {
         Some((milliseconds + 9) / 10)
     };
 
+    select_common(args, nfds, read_in, write_in, except_in, timeout_ticks)
+}
+
+/// Shared readiness-scan / block / write-back core for `select` and
+/// `pselect6`. Both entry points read the same three fd masks from
+/// rsi/rdx/r10 and differ only in how they parse the timeout (and, for
+/// `pselect6`, an ignored temporary signal mask), so the subtle part —
+/// `poll_once` ordering, the pre-scan `observed_sequence` sample, and the
+/// `clear_network_wait`-vs-`block` branch — lives here once.
+fn select_common(
+    args: &mut SyscallArgs,
+    nfds: usize,
+    read_in: u64,
+    write_in: u64,
+    except_in: u64,
+    timeout_ticks: Option<u64>,
+) -> i64 {
     crate::net::poll_once();
     let observed_sequence = crate::userland::readiness::sequence();
     let requested = read_in | write_in | except_in;
@@ -5349,13 +5369,82 @@ pub fn select_handler(args: &mut SyscallArgs) -> i64 {
     ready
 }
 
-/// `pselect6(nfds, *readfds, *writefds, *exceptfds, *timeout, *sigmask) -> int`
+/// `pselect6(nfds, *readfds, *writefds, *exceptfds, *timeout, *sig) -> int`
 ///
-/// Stubbed `-ENOSYS` for now. The trace mode in U2 will surface a real
-/// pselect6 call from zsh if its build calls it (most don't — `poll`
-/// covers ZLE's needs in the common configuration).
-pub fn pselect6_handler(_args: &mut SyscallArgs) -> i64 {
-    ENOSYS
+/// `select(2)` with a nanosecond `timespec` timeout (const — never written
+/// back, per POSIX) and a 6th argument that packs `{const sigset_t *ss,
+/// size_t ss_len}` into a 16-byte struct (the pointer/length cannot be two
+/// separate registers the way `ppoll`'s are, because syscalls cap at 6 args).
+///
+/// The temporary signal mask is validated but **not** applied: like `ppoll`,
+/// we do not atomically unblock a signal for the duration of a blocking wait.
+/// This is why GNU Make's jobserver must stay `--disable-job-server` — its
+/// SIGCHLD-race protection depends on the mask actually taking effect. Plain
+/// `-j1` and non-recursive readiness/timeout waits work regardless.
+pub fn pselect6_handler(args: &mut SyscallArgs) -> i64 {
+    // nfds + the three fd masks are identical to select_handler.
+    let nfds_signed = args.rdi as i64;
+    if nfds_signed < 0 || nfds_signed as usize > crate::userland::fdtable::FD_TABLE_SIZE {
+        return EINVAL;
+    }
+    let nfds = nfds_signed as usize;
+    let read_in = match select_read_mask(args.rsi, nfds) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let write_in = match select_read_mask(args.rdx, nfds) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let except_in = match select_read_mask(args.r10, nfds) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+
+    // Timeout is a nanosecond `timespec` (const), mirroring ppoll_handler.
+    let timeout_ticks = if args.r8 == 0 {
+        None
+    } else {
+        let timeout = match crate::userland::usercopy::read_unaligned::<Timespec>(args.r8) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        if timeout.seconds < 0 || !(0..1_000_000_000).contains(&timeout.nanoseconds) {
+            return EINVAL;
+        }
+        let milliseconds = (timeout.seconds as u64)
+            .saturating_mul(1000)
+            .saturating_add((timeout.nanoseconds as u64 + 999_999) / 1_000_000);
+        Some((milliseconds + 9) / 10)
+    };
+
+    // 6th arg: pointer to {const sigset_t *ss, size_t ss_len}. Validate the
+    // ABI (bad length / faulting pointer must fail here rather than being
+    // silently ignored) but do not install the mask — see the doc comment.
+    if args.r9 != 0 {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Sigmask {
+            ss: u64,
+            ss_len: u64,
+        }
+        let sig = match crate::userland::usercopy::read_unaligned::<Sigmask>(args.r9) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        // A NULL ss means "no mask" and carries no length constraint. When ss
+        // is present it must be our one-u64 sigset_t and must be readable.
+        if sig.ss != 0 {
+            if sig.ss_len != 8 {
+                return EINVAL;
+            }
+            if let Err(error) = crate::userland::usercopy::read_unaligned::<u64>(sig.ss) {
+                return error;
+            }
+        }
+    }
+
+    select_common(args, nfds, read_in, write_in, except_in, timeout_ticks)
 }
 
 /// Linux `sched_yield(2)`. The full voluntary ring-3 handoff is wired after
