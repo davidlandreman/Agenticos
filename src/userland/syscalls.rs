@@ -1155,7 +1155,7 @@ pub fn arch_prctl_handler(args: &mut SyscallArgs) -> i64 {
                 );
                 return EINVAL;
             }
-            crate::debug_info!("arch_prctl(SET_FS, {:#x}) accepted", addr);
+            crate::debug_trace!("arch_prctl(SET_FS, {:#x}) accepted", addr);
             crate::arch::x86_64::msr::set_fs_base(addr);
             // U8/bugfix: keep Process.fs_base in sync with the MSR so
             // resume_ring3 restores the right value after a block/wake
@@ -1648,7 +1648,7 @@ fn fork_like(args: &mut SyscallArgs, child_rsp_override: Option<u64>) -> i64 {
     insert_process(child_process);
     mark_ring3_ready(child_pid);
 
-    crate::debug_info!(
+    crate::debug_trace!(
         "fork(): registered child pid={} as Ready; parent returns immediately",
         child_pid
     );
@@ -2040,7 +2040,7 @@ pub fn execve_handler(args: &mut SyscallArgs) -> i64 {
     // Phase 3 termios: a freshly exec'd process gets a default tty.
     crate::userland::tty::install_default();
 
-    crate::debug_info!(
+    crate::debug_trace!(
         "execve({}): entry={:#x}, rsp={:#x}, argv={:?}",
         resolved_path,
         entry,
@@ -2335,7 +2335,7 @@ unsafe fn deliver_signal(
         );
     }
 
-    crate::debug_info!(
+    crate::debug_trace!(
         "deliver_signal: sig={} handler={:#x} restorer={:#x} frame={:#x} saved_blocked={:#x}",
         signum,
         action.sa_handler,
@@ -2660,7 +2660,7 @@ pub fn exit_group_handler(args: &mut SyscallArgs) -> i64 {
     // `notify_parent_of_exit` is a no-op when parent_pid == 0 (top-
     // level kernel-launched binary — no userland parent).
     if parent_pid != 0 {
-        crate::debug_info!(
+        crate::debug_trace!(
             "USERLAND: child pid={} exit_group({}) — yielding to next ring-3",
             pid,
             code,
