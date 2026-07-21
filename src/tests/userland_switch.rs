@@ -684,6 +684,79 @@ fn test_signal_does_not_wake_block_io_continuation() {
     remove_process(9322);
 }
 
+/// Regression: a process parked in an *interruptible* syscall with a fatal
+/// signal pending, whose direct `wake_ring3_for_signal` was dropped by
+/// `try_lock` contention, is recovered by the housekeeping backstop
+/// `retry_dropped_signal_wakes`. This is the mechanism that reaps an
+/// otherwise-permanent zombie after a heavy fork→pipe→exit workload
+/// (`tar xzf`) on SMP.
+fn test_retry_dropped_signal_wakes_readies_parked_process() {
+    use crate::userland::lifecycle::{
+        mark_ring3_blocked, pop_next_ring3, remove_process, retry_dropped_signal_wakes,
+        with_process, Ring3BlockReason,
+    };
+    use crate::userland::signal::SIGKILL;
+
+    let _g = PreemptTestGuard::new();
+    insert_synthetic(9340);
+    // Fatal-default SIGKILL is always actionable and can never be blocked.
+    with_process(9340, |p| p.signal_state.raise(SIGKILL));
+    // Park on an interruptible reason (a full/empty pipe read), simulating a
+    // reaper whose direct signal wake was lost to SMP lock contention — we
+    // deliberately never call `wake_ring3_for_signal` here.
+    mark_ring3_blocked(
+        9340,
+        Ring3BlockReason::WaitingForPipeRead {
+            observed_sequence: 0,
+        },
+    );
+
+    assert!(
+        retry_dropped_signal_wakes(),
+        "backstop must report it found a parked signal-pending process"
+    );
+
+    assert_eq!(
+        pop_next_ring3(),
+        Some(9340),
+        "backstop must re-ready the stranded process so its SYSCALL re-fires"
+    );
+    with_process(9340, |p| {
+        assert!(
+            p.pending_syscall_interrupt,
+            "re-fired syscall must observe the interrupt and take the signal"
+        );
+    });
+    remove_process(9340);
+}
+
+/// The backstop must honor the same uninterruptible exclusion as
+/// `wake_ring3_for_signal`: a process parked on a kernel block-I/O
+/// continuation is wakeable only by its I/O token, never by a signal.
+fn test_retry_dropped_signal_wakes_skips_block_io() {
+    use crate::userland::lifecycle::{
+        mark_ring3_blocked, pop_next_ring3, remove_process, retry_dropped_signal_wakes,
+        with_process, Ring3BlockReason,
+    };
+    use crate::userland::signal::SIGKILL;
+
+    let _g = PreemptTestGuard::new();
+    insert_synthetic(9341);
+    with_process(9341, |p| p.signal_state.raise(SIGKILL));
+    mark_ring3_blocked(
+        9341,
+        Ring3BlockReason::WaitingForBlockIo { token: 0xABCD },
+    );
+
+    let _ = retry_dropped_signal_wakes();
+
+    assert!(
+        pop_next_ring3().is_none(),
+        "a block-I/O continuation must not be made runnable by a signal backstop"
+    );
+    remove_process(9341);
+}
+
 /// A `nanosleep` whose absolute deadline has elapsed is moved from the
 /// blocked set to the ready queue by `process_expired_sleeps` (kernel
 /// housekeeping); the re-fired SYSCALL then returns 0.
@@ -797,6 +870,8 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_real_timer_expiry_wakes_blocked_network_syscall,
         &test_real_timer_expiry_respects_signal_mask,
         &test_signal_does_not_wake_block_io_continuation,
+        &test_retry_dropped_signal_wakes_readies_parked_process,
+        &test_retry_dropped_signal_wakes_skips_block_io,
         &test_expired_nanosleep_wakes_blocked_process,
         &test_unexpired_nanosleep_stays_blocked,
         &test_kill_ring3_processes_on_terminal_removes_whole_tree,

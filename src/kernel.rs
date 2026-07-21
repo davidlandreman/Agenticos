@@ -872,6 +872,12 @@ pub fn run() -> ! {
         }
 
         let _ = crate::process::drain_kernel_io_wakes();
+        // Backstop for signal wakes dropped by `wake_ring3_for_signal`'s
+        // `try_lock` under SMP PROCESS_TABLE contention (e.g. a SIGCHLD reaper
+        // or `kill` target parked in an interruptible syscall). Runs here with
+        // interrupts enabled and no locks held, so its blocking scheduler lock
+        // is safe; the timer ISR path is deliberately not used for it.
+        let _ = crate::userland::lifecycle::retry_dropped_signal_wakes();
 
         // Dispatch one kernel-thread or user-process entity from the single
         // fair queue. Direct cross-privilege switches keep normal execution
@@ -889,11 +895,15 @@ pub fn run() -> ! {
         // interrupt) without imposing a 10 ms PIT tick on every request.
         x86_64::instructions::interrupts::disable();
         let io_woke = crate::process::drain_kernel_io_wakes();
+        // Recover any signal wake dropped since the housekeeping pass above,
+        // before committing to STI+HLT — otherwise a parked signal-pending
+        // process could sleep until the next unrelated interrupt.
+        let signal_woke = crate::userland::lifecycle::retry_dropped_signal_wakes();
         let scheduler_ready = crate::process::scheduler::SCHEDULER
             .try_lock()
             .map(|scheduler| scheduler.ready_entity_count() != 0)
             .unwrap_or(true);
-        if io_woke || scheduler_ready {
+        if io_woke || signal_woke || scheduler_ready {
             x86_64::instructions::interrupts::enable();
             continue;
         }
