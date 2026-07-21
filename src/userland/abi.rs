@@ -60,6 +60,7 @@ pub const EFBIG: i64 = -27;
 pub const ENOTEMPTY: i64 = -39;
 pub const ENOMEM: i64 = -12;
 pub const ENFILE: i64 = -23;
+pub const ENOLCK: i64 = -37;
 pub const EAFNOSUPPORT: i64 = -97;
 pub const EPROTONOSUPPORT: i64 = -93;
 pub const EOPNOTSUPP: i64 = -95;

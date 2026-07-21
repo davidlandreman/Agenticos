@@ -51,8 +51,21 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   the whole SYSCALL, so chunking would duplicate consumed bytes).
   `chmod`/`fchmod` are validated success no-ops (no permission bits on
   FAT/tmpfs, no +x check in execve). Native-tool compatibility includes
-  bounded `readv`, per-process `umask`, writable-fd `F_GETFL`, and
-  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` routed through the VFS.
+  bounded `readv`, per-process `umask`, writable-fd `F_GETFL`,
+  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` routed through the VFS, and
+  `fcntl` advisory record locks (`F_GETLK`/`F_SETLK`/`F_SETLKW`; see
+  `record_lock.rs`).
+- `record_lock.rs` — POSIX advisory record locks behind
+  `fcntl(F_GETLK/F_SETLK/F_SETLKW)`. Process-associated (owned by TGID,
+  released on close of any descriptor to the file or on exit), advisory only,
+  and keyed on the file's **absolute path** (tmpfs assigns per-open-handle
+  inode ids, so inode identity is not a stable cross-open key). Only
+  `FdSlot::File` descriptors are lockable — other fd kinds return `EINVAL`
+  rather than a fake grant. `F_SETLKW` parks on
+  `Ring3BlockReason::WaitingForFileLock`; releases bump the readiness sequence
+  so the readiness wake path re-readies waiters. `F_OFD_*`, mandatory locking,
+  and `EDEADLK` detection are out of scope. Motivating consumer: GNU Make
+  `--output-sync`.
 - `network_syscalls.rs` — finite Linux `AF_INET` socket ABI, sockaddr/iovec
   usercopy, blocking/restart behavior, and socket option mapping. Protocol
   state and buffers remain in `src/net/`.

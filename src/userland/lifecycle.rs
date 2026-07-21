@@ -344,6 +344,16 @@ pub enum Ring3BlockReason {
         deadline_tick: Option<u64>,
         observed_sequence: u64,
     },
+    /// `fcntl(F_SETLKW)` blocked on a conflicting advisory record lock. There
+    /// is no deadline — `F_SETLKW` waits indefinitely (interruptible by a
+    /// signal). `observed_sequence` is the readiness sequence sampled before
+    /// the conflict check; a lock release bumps the sequence, and both the
+    /// readiness wake path and `reconcile_readiness_after_block` re-ready the
+    /// waiter, whose re-fired SYSCALL re-attempts the lock. See
+    /// `crate::userland::record_lock`.
+    WaitingForFileLock {
+        observed_sequence: u64,
+    },
     /// `nanosleep` with a not-yet-elapsed absolute PIT deadline. The shared
     /// timer service calls [`expire_user_sleep`] once `now >= deadline_tick`;
     /// the re-fired SYSCALL then sees its `sleep_deadline` elapsed and returns
@@ -959,7 +969,8 @@ pub fn mark_ring3_blocked(pid: u32, reason: Ring3BlockReason) {
         | Ring3BlockReason::WaitingForReadiness {
             deadline_tick: None,
             ..
-        } => {}
+        }
+        | Ring3BlockReason::WaitingForFileLock { .. } => {}
     }
 }
 
@@ -976,7 +987,8 @@ pub fn reconcile_readiness_after_block(pid: u32, reason: Ring3BlockReason) {
         | Ring3BlockReason::WaitingForPipeWrite { observed_sequence }
         | Ring3BlockReason::WaitingForReadiness {
             observed_sequence, ..
-        } => observed_sequence,
+        }
+        | Ring3BlockReason::WaitingForFileLock { observed_sequence } => observed_sequence,
         _ => return,
     };
     if crate::userland::readiness::changed_since(observed_sequence) {
@@ -1126,6 +1138,7 @@ pub fn wake_ring3_blocked_on_child(parent_pid: u32, child_pid: u32) {
             | Some(Ring3BlockReason::WaitingForPipeWrite { .. })
             | Some(Ring3BlockReason::WaitingForNetwork { .. })
             | Some(Ring3BlockReason::WaitingForReadiness { .. })
+            | Some(Ring3BlockReason::WaitingForFileLock { .. })
             | Some(Ring3BlockReason::Sleeping { .. })
             | Some(Ring3BlockReason::WaitingForFutex { .. })
             | Some(Ring3BlockReason::WaitingForBlockIo { .. })
@@ -1415,7 +1428,13 @@ pub fn wake_ring3_blocked_on_network(state_changed: bool) {
 /// global readiness sequence. Conservative wakeups are cheap at the bounded
 /// process-table size; every waiter re-scans its own descriptors.
 pub fn wake_ring3_blocked_on_readiness() -> bool {
-    wake_ring3_blocked_by(|reason| matches!(reason, Ring3BlockReason::WaitingForReadiness { .. }))
+    wake_ring3_blocked_by(|reason| {
+        matches!(
+            reason,
+            Ring3BlockReason::WaitingForReadiness { .. }
+                | Ring3BlockReason::WaitingForFileLock { .. }
+        )
+    })
 }
 
 /// Deliver one exact `ITIMER_REAL` expiry from the shared timer heap.
@@ -2836,6 +2855,11 @@ fn finish_group(tgid: u32, code: i64) {
     // parent blocked reading this process's pipe observes EOF and can
     // proceed to reap.
     close_group_fds(tgid);
+    // Drop every advisory record lock the process held and wake any
+    // `F_SETLKW` waiter that was blocked behind them.
+    if crate::userland::record_lock::release_owner(tgid) {
+        crate::userland::record_lock::wake_lock_waiters();
+    }
     if parent_pid != KERNEL_PID {
         notify_parent_of_exit(tgid, parent_pid, code);
     }
