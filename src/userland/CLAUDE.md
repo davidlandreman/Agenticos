@@ -52,9 +52,19 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   `chmod`/`fchmod` are validated success no-ops (no permission bits on
   FAT/tmpfs, no +x check in execve). Native-tool compatibility includes
   bounded `readv`, per-process `umask`, writable-fd `F_GETFL`,
-  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` routed through the VFS, and
-  `fcntl` advisory record locks (`F_GETLK`/`F_SETLK`/`F_SETLKW`; see
-  `record_lock.rs`).
+  `utimensat` with `UTIME_NOW`/`UTIME_OMIT` and nanosecond precision routed
+  through the VFS, and `fcntl` advisory record locks
+  (`F_GETLK`/`F_SETLK`/`F_SETLKW`; see `record_lock.rs`).
+  `select`/`pselect6`/`poll`/`ppoll` share one readiness-scan/block core
+  (`select_common`, `poll_common`); the four handlers differ only in argument
+  parsing. `pselect6` is `select` with a nanosecond `timespec` timeout (const,
+  never written back) and a struct-wrapped `{sigset_t *ss, size_t ss_len}` 6th
+  arg. Like `ppoll`, its temporary signal mask is **validated but not applied**
+  — we do not atomically unblock a signal for the duration of a blocking wait.
+  Consequently GNU Make must run `--disable-job-server` (its jobserver relies on
+  `pselect`'s SIGCHLD-race protection); plain `-j1` and non-recursive readiness/
+  timeout waits work. Applying the mask is the follow-up that also unblocks
+  `rt_sigsuspend`'s blocking path.
 - `record_lock.rs` — POSIX advisory record locks behind
   `fcntl(F_GETLK/F_SETLK/F_SETLKW)`. Process-associated (owned by TGID,
   released on close of any descriptor to the file or on exit), advisory only,

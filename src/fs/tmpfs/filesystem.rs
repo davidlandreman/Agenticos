@@ -8,15 +8,71 @@ use spin::Mutex;
 
 use crate::fs::filesystem::{
     DirectoryEntry, DirectoryIterator, FileAttributes, FileHandle, FileMode, FileType, Filesystem,
-    FilesystemError, FilesystemStats,
+    FilesystemError, FilesystemStats, UnixMetadata, UnixTimestamp,
 };
 use crate::lib::arc::Arc;
 
 /// In-memory file body.
-pub type FileBody = Arc<Mutex<Vec<u8>>>;
+pub type FileBody = Arc<Mutex<TmpFile>>;
 
 /// In-memory directory body. Children are name → node.
-pub type DirBody = Arc<Mutex<BTreeMap<String, TmpNode>>>;
+pub type DirBody = Arc<Mutex<TmpDirectory>>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct NodeTimes {
+    pub accessed: UnixTimestamp,
+    pub modified: UnixTimestamp,
+    pub changed: UnixTimestamp,
+}
+
+impl NodeTimes {
+    fn now() -> Self {
+        let now = current_time();
+        Self {
+            accessed: now,
+            modified: now,
+            changed: now,
+        }
+    }
+
+    fn touch_content(&mut self, now: UnixTimestamp) {
+        self.modified = now;
+        self.changed = now;
+    }
+
+    fn touch_namespace(&mut self, now: UnixTimestamp) {
+        self.modified = now;
+        self.changed = now;
+    }
+}
+
+pub struct TmpFile {
+    pub(crate) data: Vec<u8>,
+    pub(crate) times: NodeTimes,
+}
+
+pub struct TmpDirectory {
+    pub(crate) children: BTreeMap<String, TmpNode>,
+    pub(crate) times: NodeTimes,
+}
+
+fn current_time() -> UnixTimestamp {
+    UnixTimestamp::from_nanoseconds(crate::time::realtime_ns())
+}
+
+fn new_file_body() -> FileBody {
+    Arc::new(Mutex::new(TmpFile {
+        data: Vec::new(),
+        times: NodeTimes::now(),
+    }))
+}
+
+fn new_dir_body() -> DirBody {
+    Arc::new(Mutex::new(TmpDirectory {
+        children: BTreeMap::new(),
+        times: NodeTimes::now(),
+    }))
+}
 
 /// Either a regular file or a directory. Nodes are reference-counted
 /// via `Arc` so multiple paths (or a path + open handles) can hold
@@ -35,6 +91,18 @@ impl Tmpfs {
     pub fn root_dir(&self) -> DirBody {
         Arc::clone(&self.root)
     }
+
+    pub(crate) fn restore_node_times(
+        &self,
+        path: &str,
+        times: NodeTimes,
+    ) -> Result<(), FilesystemError> {
+        match self.resolve(path).ok_or(FilesystemError::NotFound)? {
+            TmpNode::File(body) => body.lock().times = times,
+            TmpNode::Dir(body) => body.lock().times = times,
+        }
+        Ok(())
+    }
 }
 
 impl TmpNode {
@@ -43,8 +111,22 @@ impl TmpNode {
     }
     pub fn size(&self) -> u64 {
         match self {
-            TmpNode::File(body) => body.lock().len() as u64,
+            TmpNode::File(body) => body.lock().data.len() as u64,
             TmpNode::Dir(_) => 0,
+        }
+    }
+
+    fn times(&self) -> NodeTimes {
+        match self {
+            TmpNode::File(body) => body.lock().times,
+            TmpNode::Dir(body) => body.lock().times,
+        }
+    }
+
+    fn touch_changed(&self, now: UnixTimestamp) {
+        match self {
+            TmpNode::File(body) => body.lock().times.changed = now,
+            TmpNode::Dir(body) => body.lock().times.changed = now,
         }
     }
 }
@@ -61,16 +143,14 @@ struct OpenFile {
 pub struct Tmpfs {
     root: DirBody,
     open: Mutex<BTreeMap<u64, OpenFile>>,
-    times: Mutex<BTreeMap<String, (u64, u64)>>,
     next_handle_id: AtomicU64,
 }
 
 impl Tmpfs {
     pub fn new() -> Self {
         Self {
-            root: Arc::new(Mutex::new(BTreeMap::new())),
+            root: new_dir_body(),
             open: Mutex::new(BTreeMap::new()),
-            times: Mutex::new(BTreeMap::new()),
             next_handle_id: AtomicU64::new(1),
         }
     }
@@ -93,7 +173,7 @@ impl Tmpfs {
         for (i, c) in comps.iter().enumerate() {
             let child = {
                 let dir = current.lock();
-                dir.get(*c).cloned()
+                dir.children.get(*c).cloned()
             };
             match child {
                 Some(TmpNode::Dir(d)) => current = d,
@@ -119,7 +199,7 @@ impl Tmpfs {
         for c in &comps_owned[..comps_owned.len() - 1] {
             let child = {
                 let dir = current.lock();
-                dir.get(*c).cloned()
+                dir.children.get(*c).cloned()
             };
             match child {
                 Some(TmpNode::Dir(d)) => current = d,
@@ -178,7 +258,8 @@ impl Filesystem for Tmpfs {
 
         let mut entries = Vec::new();
         let children = dir.lock();
-        for (name, child) in children.iter() {
+        for (name, child) in children.children.iter() {
+            let times = child.times();
             let bytes = name.as_bytes();
             let copy = bytes.len().min(255);
             let mut entry = DirectoryEntry {
@@ -195,9 +276,9 @@ impl Filesystem for Tmpfs {
                     system: false,
                     archive: false,
                 },
-                created: 0,
-                modified: 0,
-                accessed: 0,
+                created: times.changed.seconds,
+                modified: times.modified.seconds,
+                accessed: times.accessed.seconds,
             };
             entry.name[..copy].copy_from_slice(&bytes[..copy]);
             entries.push(entry);
@@ -207,7 +288,7 @@ impl Filesystem for Tmpfs {
 
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError> {
         let node = self.resolve(path).ok_or(FilesystemError::NotFound)?;
-        let (accessed, modified) = self.times.lock().get(path).copied().unwrap_or((0, 0));
+        let times = node.times();
         // Use the last component as the name (or "/" for root).
         let comps = Self::split_path(path);
         let name = comps.last().copied().unwrap_or("/");
@@ -228,12 +309,58 @@ impl Filesystem for Tmpfs {
                 system: false,
                 archive: false,
             },
-            created: 0,
-            modified,
-            accessed,
+            created: times.changed.seconds,
+            modified: times.modified.seconds,
+            accessed: times.accessed.seconds,
         };
         entry.name[..copy].copy_from_slice(&bytes[..copy]);
         Ok(entry)
+    }
+
+    fn unix_metadata(&self, path: &str) -> Result<UnixMetadata, FilesystemError> {
+        let node = self.resolve(path).ok_or(FilesystemError::NotFound)?;
+        let times = node.times();
+        let size = node.size();
+        Ok(UnixMetadata {
+            inode: 0,
+            mode: if node.is_dir() { 0o040755 } else { 0o100644 },
+            uid: 0,
+            gid: 0,
+            links: if node.is_dir() { 2 } else { 1 },
+            size,
+            blocks_512: size.div_ceil(512),
+            block_size: 1,
+            accessed: times.accessed,
+            modified: times.modified,
+            changed: times.changed,
+        })
+    }
+
+    fn handle_metadata(&self, handle: &FileHandle) -> Result<UnixMetadata, FilesystemError> {
+        let body = {
+            let open = self.open.lock();
+            Arc::clone(
+                &open
+                    .get(&handle.inode)
+                    .ok_or(FilesystemError::IoError)?
+                    .body,
+            )
+        };
+        let file = body.lock();
+        let size = file.data.len() as u64;
+        Ok(UnixMetadata {
+            inode: handle.inode,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            links: 1,
+            size,
+            blocks_512: size.div_ceil(512),
+            block_size: 1,
+            accessed: file.times.accessed,
+            modified: file.times.modified,
+            changed: file.times.changed,
+        })
     }
 
     fn open(&self, path: &str, mode: FileMode) -> Result<FileHandle, FilesystemError> {
@@ -247,10 +374,13 @@ impl Filesystem for Tmpfs {
 
         let body = {
             let mut parent_dir = parent.lock();
-            match parent_dir.get(leaf).cloned() {
+            match parent_dir.children.get(leaf).cloned() {
                 Some(TmpNode::File(body)) => {
                     if mode.truncate && mode.write {
-                        body.lock().clear();
+                        let now = current_time();
+                        let mut file = body.lock();
+                        file.data.clear();
+                        file.times.touch_content(now);
                     }
                     body
                 }
@@ -259,14 +389,23 @@ impl Filesystem for Tmpfs {
                     if !mode.create {
                         return Err(FilesystemError::NotFound);
                     }
-                    let body = Arc::new(Mutex::new(Vec::new()));
-                    parent_dir.insert(leaf.to_string(), TmpNode::File(Arc::clone(&body)));
+                    let now = current_time();
+                    let body = new_file_body();
+                    body.lock().times = NodeTimes {
+                        accessed: now,
+                        modified: now,
+                        changed: now,
+                    };
+                    parent_dir
+                        .children
+                        .insert(leaf.to_string(), TmpNode::File(Arc::clone(&body)));
+                    parent_dir.times.touch_namespace(now);
                     body
                 }
             }
         };
 
-        let size = body.lock().len() as u64;
+        let size = body.lock().data.len() as u64;
         let id = self.register_open_file(body, mode);
         Ok(FileHandle {
             inode: id,
@@ -289,16 +428,16 @@ impl Filesystem for Tmpfs {
                 .map(|of| Arc::clone(&of.body))
                 .ok_or(FilesystemError::IoError)?
         };
-        let data = entry.lock();
-        if handle.position >= data.len() as u64 {
+        let file = entry.lock();
+        if handle.position >= file.data.len() as u64 {
             return Ok(0);
         }
         let start = handle.position as usize;
-        let end = (start + buffer.len()).min(data.len());
+        let end = (start + buffer.len()).min(file.data.len());
         let n = end - start;
-        buffer[..n].copy_from_slice(&data[start..end]);
+        buffer[..n].copy_from_slice(&file.data[start..end]);
         handle.position += n as u64;
-        handle.size = data.len() as u64;
+        handle.size = file.data.len() as u64;
         Ok(n)
     }
 
@@ -312,15 +451,19 @@ impl Filesystem for Tmpfs {
             }
             Arc::clone(&of.body)
         };
-        let mut data = entry.lock();
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let mut file = entry.lock();
         let start = handle.position as usize;
         let needed_len = start + buffer.len();
-        if data.len() < needed_len {
-            data.resize(needed_len, 0);
+        if file.data.len() < needed_len {
+            file.data.resize(needed_len, 0);
         }
-        data[start..start + buffer.len()].copy_from_slice(buffer);
+        file.data[start..start + buffer.len()].copy_from_slice(buffer);
+        file.times.touch_content(current_time());
         handle.position = needed_len as u64;
-        handle.size = data.len() as u64;
+        handle.size = file.data.len() as u64;
         Ok(buffer.len())
     }
 
@@ -337,16 +480,36 @@ impl Filesystem for Tmpfs {
     fn set_times(
         &self,
         path: &str,
-        accessed: Option<u64>,
-        modified: Option<u64>,
+        accessed: Option<UnixTimestamp>,
+        modified: Option<UnixTimestamp>,
     ) -> Result<(), FilesystemError> {
-        self.resolve(path).ok_or(FilesystemError::NotFound)?;
-        let mut times = self.times.lock();
-        let current = times.get(path).copied().unwrap_or((0, 0));
-        times.insert(
-            path.to_string(),
-            (accessed.unwrap_or(current.0), modified.unwrap_or(current.1)),
-        );
+        let node = self.resolve(path).ok_or(FilesystemError::NotFound)?;
+        if accessed.is_none() && modified.is_none() {
+            return Ok(());
+        }
+        let changed = current_time();
+        match node {
+            TmpNode::File(body) => {
+                let mut file = body.lock();
+                if let Some(accessed) = accessed {
+                    file.times.accessed = accessed;
+                }
+                if let Some(modified) = modified {
+                    file.times.modified = modified;
+                }
+                file.times.changed = changed;
+            }
+            TmpNode::Dir(body) => {
+                let mut dir = body.lock();
+                if let Some(accessed) = accessed {
+                    dir.times.accessed = accessed;
+                }
+                if let Some(modified) = modified {
+                    dir.times.modified = modified;
+                }
+                dir.times.changed = changed;
+            }
+        }
         Ok(())
     }
 
@@ -358,13 +521,18 @@ impl Filesystem for Tmpfs {
             return Err(FilesystemError::InvalidPath);
         }
         let mut dir = parent.lock();
-        if dir.contains_key(leaf) {
+        if dir.children.contains_key(leaf) {
             return Err(FilesystemError::AlreadyExists);
         }
-        dir.insert(
-            leaf.to_string(),
-            TmpNode::Dir(Arc::new(Mutex::new(BTreeMap::new()))),
-        );
+        let now = current_time();
+        let child = new_dir_body();
+        child.lock().times = NodeTimes {
+            accessed: now,
+            modified: now,
+            changed: now,
+        };
+        dir.children.insert(leaf.to_string(), TmpNode::Dir(child));
+        dir.times.touch_namespace(now);
         Ok(())
     }
 
@@ -373,10 +541,12 @@ impl Filesystem for Tmpfs {
             .resolve_parent(path)
             .ok_or(FilesystemError::InvalidPath)?;
         let mut dir = parent.lock();
-        match dir.get(leaf) {
-            Some(TmpNode::File(_)) => {
-                dir.remove(leaf);
-                self.times.lock().remove(path);
+        match dir.children.get(leaf).cloned() {
+            Some(node @ TmpNode::File(_)) => {
+                let now = current_time();
+                node.touch_changed(now);
+                dir.children.remove(leaf);
+                dir.times.touch_namespace(now);
                 Ok(())
             }
             Some(TmpNode::Dir(_)) => Err(FilesystemError::IsADirectory),
@@ -389,14 +559,17 @@ impl Filesystem for Tmpfs {
             .resolve_parent(path)
             .ok_or(FilesystemError::InvalidPath)?;
         let mut dir = parent.lock();
-        match dir.get(leaf) {
+        match dir.children.get(leaf).cloned() {
             Some(TmpNode::Dir(d)) => {
                 let inner = d.lock();
-                if !inner.is_empty() {
+                if !inner.children.is_empty() {
                     return Err(FilesystemError::NotEmpty);
                 }
                 drop(inner);
-                dir.remove(leaf);
+                let now = current_time();
+                TmpNode::Dir(Arc::clone(&d)).touch_changed(now);
+                dir.children.remove(leaf);
+                dir.times.touch_namespace(now);
                 Ok(())
             }
             Some(TmpNode::File(_)) => Err(FilesystemError::NotADirectory),
@@ -405,6 +578,12 @@ impl Filesystem for Tmpfs {
     }
 
     fn rename(&self, old_path: &str, new_path: &str) -> Result<(), FilesystemError> {
+        if old_path == new_path {
+            return self
+                .resolve(old_path)
+                .map(|_| ())
+                .ok_or(FilesystemError::NotFound);
+        }
         let (src_parent, src_leaf) = self
             .resolve_parent(old_path)
             .ok_or(FilesystemError::InvalidPath)?;
@@ -418,15 +597,18 @@ impl Filesystem for Tmpfs {
         // Same-directory rename: take a single lock to avoid ordering.
         if Arc::ptr_eq(&src_parent, &dst_parent) {
             let mut dir = src_parent.lock();
-            let node = dir.remove(src_leaf).ok_or(FilesystemError::NotFound)?;
+            let node = dir
+                .children
+                .remove(src_leaf)
+                .ok_or(FilesystemError::NotFound)?;
             let node_is_dir = node.is_dir();
-            if let Some(existing) = dir.get(dst_leaf) {
+            if let Some(existing) = dir.children.get(dst_leaf) {
                 // POSIX rename atomically replaces a regular file
                 // destination; reject directory-over-file or
                 // file-over-directory mismatches.
                 if existing.is_dir() != node_is_dir {
                     // Restore and fail.
-                    dir.insert(src_leaf.to_string(), node);
+                    dir.children.insert(src_leaf.to_string(), node);
                     return Err(if node_is_dir {
                         FilesystemError::NotADirectory
                     } else {
@@ -434,11 +616,12 @@ impl Filesystem for Tmpfs {
                     });
                 }
             }
-            dir.insert(dst_leaf.to_string(), node);
-            let mut times = self.times.lock();
-            if let Some(value) = times.remove(old_path) {
-                times.insert(new_path.to_string(), value);
+            let now = current_time();
+            node.touch_changed(now);
+            if let Some(replaced) = dir.children.insert(dst_leaf.to_string(), node) {
+                replaced.touch_changed(now);
             }
+            dir.times.touch_namespace(now);
             return Ok(());
         }
 
@@ -459,9 +642,9 @@ impl Filesystem for Tmpfs {
             &mut BTreeMap<String, TmpNode>,
             &mut BTreeMap<String, TmpNode>,
         ) = if same_as_src {
-            (&mut *a_dir, &mut *b_dir)
+            (&mut a_dir.children, &mut b_dir.children)
         } else {
-            (&mut *b_dir, &mut *a_dir)
+            (&mut b_dir.children, &mut a_dir.children)
         };
 
         let node = src_dir.remove(src_leaf).ok_or(FilesystemError::NotFound)?;
@@ -476,11 +659,13 @@ impl Filesystem for Tmpfs {
                 });
             }
         }
-        dst_dir.insert(dst_leaf.to_string(), node);
-        let mut times = self.times.lock();
-        if let Some(value) = times.remove(old_path) {
-            times.insert(new_path.to_string(), value);
+        let now = current_time();
+        node.touch_changed(now);
+        if let Some(replaced) = dst_dir.insert(dst_leaf.to_string(), node) {
+            replaced.touch_changed(now);
         }
+        a_dir.times.touch_namespace(now);
+        b_dir.times.touch_namespace(now);
         Ok(())
     }
 
@@ -505,8 +690,9 @@ pub fn ftruncate(
         }
         Arc::clone(&of.body)
     };
-    let mut data = entry.lock();
-    data.resize(new_size as usize, 0);
+    let mut file = entry.lock();
+    file.data.resize(new_size as usize, 0);
+    file.times.touch_content(current_time());
     handle.size = new_size;
     Ok(())
 }
@@ -708,16 +894,173 @@ mod tests {
     fn test_tmpfs_set_times_roundtrip_and_omit() {
         let fs = Tmpfs::new();
         open_write_read(&fs, "/dated", b"x");
-        fs.set_times("/dated", Some(123), Some(456))
+        let accessed = UnixTimestamp {
+            seconds: 123,
+            nanoseconds: 120_000_000,
+        };
+        let modified = UnixTimestamp {
+            seconds: 456,
+            nanoseconds: 340_000_000,
+        };
+        fs.set_times("/dated", Some(accessed), Some(modified))
             .expect("set both times");
-        let first = fs.stat("/dated").expect("stat dated");
-        assert_eq!(first.accessed, 123);
-        assert_eq!(first.modified, 456);
+        let first = fs.unix_metadata("/dated").expect("stat dated");
+        assert_eq!(first.accessed, accessed);
+        assert_eq!(first.modified, modified);
 
-        fs.set_times("/dated", None, Some(789)).expect("omit atime");
-        let second = fs.stat("/dated").expect("stat dated again");
-        assert_eq!(second.accessed, 123);
-        assert_eq!(second.modified, 789);
+        fs.set_times(
+            "/dated",
+            None,
+            Some(UnixTimestamp {
+                seconds: 789,
+                nanoseconds: 560_000_000,
+            }),
+        )
+        .expect("omit atime");
+        let second = fs.unix_metadata("/dated").expect("stat dated again");
+        assert_eq!(second.accessed, accessed);
+        assert_eq!(second.modified.seconds, 789);
+        assert_eq!(second.modified.nanoseconds, 560_000_000);
+    }
+
+    fn old_times() -> NodeTimes {
+        NodeTimes {
+            accessed: UnixTimestamp::from_seconds(1),
+            modified: UnixTimestamp::from_seconds(2),
+            changed: UnixTimestamp::from_seconds(3),
+        }
+    }
+
+    fn assert_kernel_time(value: UnixTimestamp) {
+        assert!(
+            value.seconds > 3,
+            "automatic timestamp must replace fixture time"
+        );
+        assert_eq!(
+            value.nanoseconds % 10_000_000,
+            0,
+            "automatic timestamps must expose PIT's 10 ms resolution"
+        );
+    }
+
+    fn test_tmpfs_mutations_update_file_times() {
+        let fs = Tmpfs::new();
+        let mut handle = fs
+            .open(
+                "/mutated",
+                FileMode {
+                    read: true,
+                    write: true,
+                    append: false,
+                    create: true,
+                    truncate: true,
+                },
+            )
+            .expect("create fixture");
+
+        fs.restore_node_times("/mutated", old_times()).unwrap();
+        fs.write(&mut handle, b"x").expect("write");
+        let after_write = fs.unix_metadata("/mutated").unwrap();
+        assert_kernel_time(after_write.modified);
+        assert_kernel_time(after_write.changed);
+
+        fs.restore_node_times("/mutated", old_times()).unwrap();
+        ftruncate(&fs, &mut handle, 1).expect("same-size truncate");
+        let after_truncate = fs.unix_metadata("/mutated").unwrap();
+        assert_kernel_time(after_truncate.modified);
+        assert_kernel_time(after_truncate.changed);
+
+        fs.restore_node_times("/mutated", old_times()).unwrap();
+        assert_eq!(fs.write(&mut handle, b"").expect("empty write"), 0);
+        let after_empty_write = fs.unix_metadata("/mutated").unwrap();
+        assert_eq!(after_empty_write.modified, old_times().modified);
+        assert_eq!(after_empty_write.changed, old_times().changed);
+
+        fs.restore_node_times("/mutated", old_times()).unwrap();
+        let mut truncated = fs
+            .open(
+                "/mutated",
+                FileMode {
+                    read: false,
+                    write: true,
+                    append: false,
+                    create: false,
+                    truncate: true,
+                },
+            )
+            .expect("O_TRUNC open");
+        let after_open_truncate = fs.unix_metadata("/mutated").unwrap();
+        assert_kernel_time(after_open_truncate.modified);
+        assert_kernel_time(after_open_truncate.changed);
+        fs.close(&mut truncated).unwrap();
+        fs.close(&mut handle).unwrap();
+    }
+
+    fn test_tmpfs_namespace_mutations_update_parent_times() {
+        let fs = Tmpfs::new();
+        fs.restore_node_times("/", old_times()).unwrap();
+        let mut child = fs
+            .open(
+                "/child",
+                FileMode {
+                    read: false,
+                    write: true,
+                    append: false,
+                    create: true,
+                    truncate: false,
+                },
+            )
+            .expect("create child");
+        let root_after_create = fs.unix_metadata("/").unwrap();
+        assert_kernel_time(root_after_create.modified);
+        assert_kernel_time(root_after_create.changed);
+
+        fs.restore_node_times("/", old_times()).unwrap();
+        fs.unlink("/child").expect("unlink child");
+        let root_after_unlink = fs.unix_metadata("/").unwrap();
+        assert_kernel_time(root_after_unlink.modified);
+        assert_kernel_time(root_after_unlink.changed);
+        let unlinked = fs.handle_metadata(&child).expect("fstat unlinked child");
+        assert_kernel_time(unlinked.changed);
+        fs.close(&mut child).unwrap();
+
+        fs.restore_node_times("/", old_times()).unwrap();
+        fs.mkdir("/empty").expect("mkdir child");
+        let root_after_mkdir = fs.unix_metadata("/").unwrap();
+        assert_kernel_time(root_after_mkdir.modified);
+        assert_kernel_time(root_after_mkdir.changed);
+        fs.restore_node_times("/", old_times()).unwrap();
+        fs.rmdir("/empty").expect("rmdir child");
+        let root_after_rmdir = fs.unix_metadata("/").unwrap();
+        assert_kernel_time(root_after_rmdir.modified);
+        assert_kernel_time(root_after_rmdir.changed);
+
+        fs.mkdir("/src").unwrap();
+        fs.mkdir("/dst").unwrap();
+        let mut moved = fs
+            .open(
+                "/src/file",
+                FileMode {
+                    read: false,
+                    write: true,
+                    append: false,
+                    create: true,
+                    truncate: false,
+                },
+            )
+            .unwrap();
+        fs.restore_node_times("/src", old_times()).unwrap();
+        fs.restore_node_times("/dst", old_times()).unwrap();
+        fs.restore_node_times("/src/file", old_times()).unwrap();
+        fs.rename("/src/file", "/dst/file")
+            .expect("cross-dir rename");
+        for path in ["/src", "/dst"] {
+            let parent = fs.unix_metadata(path).unwrap();
+            assert_kernel_time(parent.modified);
+            assert_kernel_time(parent.changed);
+        }
+        assert_kernel_time(fs.unix_metadata("/dst/file").unwrap().changed);
+        fs.close(&mut moved).unwrap();
     }
 
     pub fn get_tests() -> &'static [&'static dyn Testable] {
@@ -735,6 +1078,8 @@ mod tests {
             &test_tmpfs_open_directory_returns_isadir,
             &test_tmpfs_ftruncate_extends_and_shrinks,
             &test_tmpfs_set_times_roundtrip_and_omit,
+            &test_tmpfs_mutations_update_file_times,
+            &test_tmpfs_namespace_mutations_update_parent_times,
         ]
     }
 }

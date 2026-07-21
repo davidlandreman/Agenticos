@@ -222,8 +222,12 @@ fn test_archive_and_elf_transform_tools() {
         "foo()"
     );
 
-    crate::fs::vfs::vfs_set_times("/work/bu-symbols.o", Some(123_456), Some(234_567))
-        .expect("set source dates");
+    crate::fs::vfs::vfs_set_times(
+        "/work/bu-symbols.o",
+        Some(crate::fs::filesystem::UnixTimestamp::from_seconds(123_456)),
+        Some(crate::fs::filesystem::UnixTimestamp::from_seconds(234_567)),
+    )
+    .expect("set source dates");
     tool(
         "objcopy",
         &[
@@ -234,8 +238,8 @@ fn test_archive_and_elf_transform_tools() {
     );
     let copied = crate::fs::vfs::vfs_unix_metadata("/work/bu-symbols-copy.o")
         .expect("copied object metadata");
-    assert_eq!(copied.accessed, 123_456);
-    assert_eq!(copied.modified, 234_567);
+    assert_eq!(copied.accessed.seconds, 123_456);
+    assert_eq!(copied.modified.seconds, 234_567);
     let unstripped_size = read_file("/work/bu-symbols-copy.o").len();
     tool("strip", &["--strip-debug", "/work/bu-symbols-copy.o"]);
     assert!(read_file("/work/bu-symbols-copy.o").len() < unstripped_size);

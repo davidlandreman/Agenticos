@@ -460,8 +460,8 @@ pub fn vfs_symlink_metadata(
 
 pub fn vfs_set_times(
     path: &str,
-    accessed: Option<u64>,
-    modified: Option<u64>,
+    accessed: Option<crate::fs::filesystem::UnixTimestamp>,
+    modified: Option<crate::fs::filesystem::UnixTimestamp>,
 ) -> Result<(), FilesystemError> {
     let (filesystem, relative) = resolve_mount(path)?;
     if filesystem.is_read_only() {
