@@ -11,7 +11,8 @@ pub mod text_edit;
 pub use geometry::Rect;
 pub use focus::{FocusManager, WidgetId};
 pub use input::{
-    ControlInput, ControlResponse, KeyInput, Modifiers, MouseButtons, PointerInput, PointerKind,
+    ControlInput, ControlResponse, CursorIcon, KeyInput, Modifiers, MouseButtons, PointerInput,
+    PointerKind,
 };
 pub use scroll::{
     layout_scrollbars, Axis, ScrollState, ScrollbarGeometry, ScrollbarPolicy, ScrollbarsLayout,

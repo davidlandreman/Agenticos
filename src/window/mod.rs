@@ -31,6 +31,7 @@ pub use screen::*;
 pub use types::*;
 
 // Re-export commonly used types
+pub use self::cursor::CursorIcon;
 pub use self::event::{Event, EventResult};
 pub use self::graphics::{GraphicsDevice, WindowBuffer};
 #[allow(unused_imports)]
@@ -203,6 +204,13 @@ pub trait Window: Send {
     /// Set the focus state of this window
     fn set_focus(&mut self, focused: bool) {
         self.base_mut().set_focus(focused);
+    }
+
+    /// Mouse-pointer image preferred at a point in this window's local
+    /// coordinates. The manager asks the deepest hovered window; ordinary
+    /// widgets retain the desktop arrow.
+    fn cursor_icon_at(&self, _point: Point) -> CursorIcon {
+        CursorIcon::Arrow
     }
 
     /// Whether this window wants the compositor to blit it from a cached

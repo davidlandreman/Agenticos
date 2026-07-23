@@ -230,13 +230,18 @@ fn test_clear_and_readback() {
         1
     );
     assert!(virgl.hardware_cursor_needs_image());
-    let cursor = CursorRenderer::hardware_argb_64();
+    let cursor = CursorRenderer::hardware_argb_64(crate::window::CursorIcon::Arrow);
     assert!(virgl
-        .update_hardware_cursor(4, 4, Some(&cursor))
+        .update_hardware_cursor(4, 4, Some(&cursor), 0, 0)
         .expect("VirGL hardware cursor definition failed"));
     assert!(!virgl.hardware_cursor_needs_image());
+    let text_cursor = CursorRenderer::hardware_argb_64(crate::window::CursorIcon::Text);
+    let (hot_x, hot_y) = CursorRenderer::hotspot(crate::window::CursorIcon::Text);
     assert!(virgl
-        .update_hardware_cursor(5, 5, None)
+        .update_hardware_cursor(4, 4, Some(&text_cursor), hot_x, hot_y)
+        .expect("VirGL hardware cursor replacement failed"));
+    assert!(virgl
+        .update_hardware_cursor(5, 5, None, hot_x, hot_y)
         .expect("VirGL hardware cursor move failed"));
     for (index, (expected, actual)) in cpu
         .output()

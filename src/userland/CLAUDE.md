@@ -92,8 +92,9 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   device reads use the kernel cryptographic random broker.
 - `gui.rs` — per-PID window ownership plus the bounded, coalescing GUI event
   queue and process-death teardown.
-- `gui_syscalls.rs` — syscalls 5001-5005 plus 5011: create, copy-present,
-  next-event, destroy, update a window title, and open a selectable event fd.
+- `gui_syscalls.rs` — syscalls 5001-5005, 5011, and 5019: create,
+  copy-present, next-event, destroy, update a window title, open a selectable
+  event fd, and set an owned window's Arrow/Wait/Text mouse pointer.
 - `gui_gl.rs` — validated GL syscalls 5006-5009, per-PID logical-context
   ownership, bounded packet parsing, mailbox publication, and teardown.
 - `etc.rs` — kernel-managed `/etc` namespace: static account/hosts files,
@@ -290,7 +291,7 @@ paths.
 
 ## Ring-3 GUI ABI
 
-The AgenticOS-private range extends syscall 5000 with ten GUI calls:
+The AgenticOS-private range extends syscall 5000 with the following GUI calls:
 
 - 5001 `gui_win_create(width, height, title, title_len, flags)` — flags zero is
   backward-compatible/resizable; `GUI_WINDOW_FIXED_SIZE` requests close-only,
@@ -304,6 +305,10 @@ The AgenticOS-private range extends syscall 5000 with ten GUI calls:
 - 5008 `gui_gl_get_info(context, info, len)`
 - 5009 `gui_gl_context_destroy(context)`
 - 5011 `gui_event_open(O_NONBLOCK | O_CLOEXEC)`
+- 5019 `gui_win_set_cursor(handle, kind)` — ownership-checked window pointer
+  (`0` Arrow, `1` explicit Wait/hourglass, `2` Text/I-beam). Busy state is
+  client-requested; it is never inferred from `WaitingForGuiEvent`, which is
+  the normal idle state for a healthy GUI process.
 
 The ring-3 terminal uses a separate PTY ABI:
 

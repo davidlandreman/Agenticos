@@ -318,9 +318,11 @@ impl RetainedRenderer {
         x: u32,
         y: u32,
         pixels: Option<&[u32]>,
+        hot_x: u32,
+        hot_y: u32,
     ) -> Result<bool, RetainedRendererError> {
         self.engine
-            .update_hardware_cursor(x, y, pixels)
+            .update_hardware_cursor(x, y, pixels, hot_x, hot_y)
             .map_err(|_| RetainedRendererError::Composition)
     }
 

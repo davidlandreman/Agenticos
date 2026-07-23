@@ -1212,10 +1212,11 @@ fn test_retained_cursor_move_presents_old_and_new_without_window_rasterization()
     // Establish retained surfaces and the initial cursor overlay.
     wm.render();
     let old = wm.test_cursor_position();
+    let old_white = Point::new(old.x + 1, old.y + 2);
     assert_eq!(
-        wm.test_retained_output_pixel(old),
+        wm.test_retained_output_pixel(old_white),
         Some((255, 255, 255, 255)),
-        "initial retained cursor hotspot should be white",
+        "initial retained arrow should contain a white fill",
     );
     let new = Point::new(
         if old.x < 400 {
@@ -1234,26 +1235,32 @@ fn test_retained_cursor_move_presents_old_and_new_without_window_rasterization()
     wm.test_render_retained_cursor_at(new);
 
     assert_eq!(
-        wm.test_retained_output_pixel(old),
+        wm.test_retained_output_pixel(old_white),
         Some((10, 10, 10, 255)),
         "old retained cursor hotspot should be restored from the scene",
     );
     assert_eq!(
-        wm.test_retained_output_pixel(new),
+        wm.test_retained_output_pixel(Point::new(new.x + 1, new.y + 2)),
         Some((255, 255, 255, 255)),
-        "new retained cursor hotspot should be white",
+        "new retained arrow should contain a white fill",
     );
 
     let state = state.lock();
     assert_eq!(state.presented_batches.len(), 1);
     let batch = &state.presented_batches[0];
     assert!(
-        batch.contains(&Rect::new(old.x - 1, old.y - 1, 17, 17)),
+        batch.contains(&crate::window::cursor::CursorRenderer::bounds_at(
+            crate::window::CursorIcon::Arrow,
+            old,
+        )),
         "expected old retained cursor footprint in presentation batch, got {:?}",
         batch,
     );
     assert!(
-        batch.contains(&Rect::new(new.x - 1, new.y - 1, 17, 17)),
+        batch.contains(&crate::window::cursor::CursorRenderer::bounds_at(
+            crate::window::CursorIcon::Arrow,
+            new,
+        )),
         "expected new retained cursor footprint in presentation batch, got {:?}",
         batch,
     );
@@ -1276,6 +1283,53 @@ fn test_retained_cursor_move_presents_old_and_new_without_window_rasterization()
         wm.render_stats().texture_bytes_uploaded,
         0,
         "cursor-only CPU frame must not report texture uploads",
+    );
+}
+
+fn test_retained_cursor_icon_change_at_stationary_position_is_cursor_only() {
+    let (mut wm, state) = make_manager(800, 600);
+    build_simple_scene(&mut wm, Rect::new(0, 0, 800, 600), &[]);
+    wm.test_force_retained_renderer();
+    wm.render();
+    let position = wm.test_cursor_position();
+    state.lock().reset();
+
+    wm.test_render_retained_cursor_icon(crate::window::CursorIcon::Text);
+
+    assert_eq!(
+        wm.test_retained_output_pixel(position),
+        Some((255, 255, 255, 255)),
+        "text cursor hotspot should use the white center stroke",
+    );
+    let state = state.lock();
+    let batch = &state.presented_batches[0];
+    let old_bounds = crate::window::cursor::CursorRenderer::bounds_at(
+        crate::window::CursorIcon::Arrow,
+        position,
+    );
+    let new_bounds =
+        crate::window::cursor::CursorRenderer::bounds_at(crate::window::CursorIcon::Text, position);
+    assert!(batch.contains(&old_bounds.union(&new_bounds)));
+    assert_eq!(wm.render_stats().windows_rasterized, 0);
+    assert_eq!(wm.render_stats().surface_pixels_updated, 0);
+}
+
+fn test_kernel_text_input_resolves_text_cursor() {
+    let (mut wm, _) = make_manager(320, 200);
+    let (root, _) = build_simple_scene(&mut wm, Rect::new(0, 0, 320, 200), &[]);
+    let input_id = wm.create_window(Some(root));
+    let mut input =
+        crate::window::windows::TextInput::new_with_id(input_id, Rect::new(20, 30, 120, 24));
+    input.set_parent(Some(root));
+    wm.set_window_impl(input_id, alloc::boxed::Box::new(input));
+
+    assert_eq!(
+        wm.test_cursor_icon_at(Point::new(25, 35)),
+        crate::window::CursorIcon::Text
+    );
+    assert_eq!(
+        wm.test_cursor_icon_at(Point::new(5, 5)),
+        crate::window::CursorIcon::Arrow
     );
 }
 
@@ -1304,5 +1358,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         // and cursor overlay writes.
         &test_render_presents_dirty_region_and_cursor_footprint,
         &test_retained_cursor_move_presents_old_and_new_without_window_rasterization,
+        &test_retained_cursor_icon_change_at_stationary_position_is_cursor_only,
+        &test_kernel_text_input_resolves_text_cursor,
     ]
 }

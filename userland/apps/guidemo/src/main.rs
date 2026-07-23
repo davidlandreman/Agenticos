@@ -184,6 +184,12 @@ impl Demo {
             }
             GUI_EVENT_MOUSE if self.modal.is_none() => {
                 if let Some(ControlInput::Pointer(input)) = decode_control_input(event) {
+                    let cursor = self
+                        .field
+                        .cursor_icon_at(input.x, input.y)
+                        .or_else(|| self.area.cursor_icon_at(input.x, input.y))
+                        .unwrap_or(gui::CursorIcon::Arrow);
+                    let _ = self.window.set_cursor(cursor);
                     if matches!(input.kind, PointerKind::Down) {
                         self.field_focused = self.field.hit(input.x, input.y);
                         self.area_focused = self.area.bounds().contains(input.x, input.y);

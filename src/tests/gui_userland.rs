@@ -498,6 +498,39 @@ fn test_gui_create_destroy_lifecycle() {
     .flatten();
     assert_eq!(actual_title.as_deref(), Some("Host - File Manager"));
 
+    for cursor_kind in 0..=2 {
+        let mut set_cursor = SyscallArgs::default();
+        set_cursor.rdi = handle as u64;
+        set_cursor.rsi = cursor_kind;
+        assert_eq!(
+            crate::userland::gui_syscalls::gui_win_set_cursor_handler(&mut set_cursor),
+            0
+        );
+    }
+    let mut invalid_cursor = SyscallArgs::default();
+    invalid_cursor.rdi = handle as u64;
+    invalid_cursor.rsi = 99;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_win_set_cursor_handler(&mut invalid_cursor),
+        EINVAL
+    );
+    let mut missing_cursor = SyscallArgs::default();
+    missing_cursor.rdi = u32::MAX as u64;
+    missing_cursor.rsi = crate::window::CursorIcon::Arrow as u64;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_win_set_cursor_handler(&mut missing_cursor),
+        ENOENT
+    );
+    let mut actual_cursor = None;
+    let _ = crate::window::with_window_manager(|wm| {
+        wm.with_window_mut(record.surface_id, |window| {
+            actual_cursor = window
+                .as_remote_surface_mut()
+                .map(|surface| surface.cursor_icon());
+        });
+    });
+    assert_eq!(actual_cursor, Some(crate::window::CursorIcon::Text));
+
     let mut destroy = SyscallArgs::default();
     destroy.rdi = handle as u64;
     assert_eq!(

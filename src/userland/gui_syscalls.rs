@@ -1,5 +1,5 @@
-//! AgenticOS ring-3 GUI syscall handlers (5001-5005 and selectable events at
-//! 5011).
+//! AgenticOS ring-3 GUI syscall handlers (5001-5005, selectable events at
+//! 5011, and pointer selection at 5019).
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -347,6 +347,31 @@ pub fn gui_win_set_title_handler(args: &mut SyscallArgs) -> i64 {
     });
     match found {
         Some(true) if updated => 0,
+        _ => EIO,
+    }
+}
+
+/// `(handle, cursor_kind) -> 0 | -errno`.
+///
+/// Cursor kinds are `0=Arrow`, `1=Wait`, and `2=Text`. The handle lookup is
+/// scoped to the calling process, so a client cannot affect another process's
+/// window.
+pub fn gui_win_set_cursor_handler(args: &mut SyscallArgs) -> i64 {
+    let pid = match caller_pid() {
+        Ok(pid) => pid,
+        Err(error) => return error,
+    };
+    let record = match gui::window_record(pid, args.rdi as u32) {
+        Some(record) => record,
+        None => return ENOENT,
+    };
+    let Some(icon) = crate::window::CursorIcon::from_abi(args.rsi as u32) else {
+        return EINVAL;
+    };
+    match crate::window::with_window_manager(|wm| {
+        wm.set_remote_cursor_icon(record.surface_id, icon)
+    }) {
+        Some(Some(_)) => 0,
         _ => EIO,
     }
 }

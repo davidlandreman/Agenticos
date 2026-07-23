@@ -5,7 +5,8 @@
 //! - Cursor overlay with proper background save/restore
 //! - Frame lifecycle (begin_frame/end_frame)
 
-use crate::window::types::Rect;
+use crate::window::cursor::CursorIcon;
+use crate::window::types::{Point, Rect};
 use alloc::vec::Vec;
 
 /// Maximum number of dirty regions to track before forcing full repaint.
@@ -234,7 +235,13 @@ impl<'a> Iterator for DirtyRegionIter<'a> {
 pub struct Compositor {
     /// Dirty region manager
     pub dirty: DirtyRectManager,
-    cursor_position: (usize, usize),
+    cursor: CursorState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorState {
+    pub position: Point,
+    pub icon: CursorIcon,
 }
 
 impl Compositor {
@@ -242,7 +249,10 @@ impl Compositor {
     pub fn new(width: u32, height: u32) -> Self {
         Compositor {
             dirty: DirtyRectManager::new(width, height),
-            cursor_position: (0, 0),
+            cursor: CursorState {
+                position: Point::new(0, 0),
+                icon: CursorIcon::Arrow,
+            },
         }
     }
 
@@ -258,12 +268,16 @@ impl Compositor {
         self.dirty.is_dirty()
     }
 
-    /// Return the last pointer position recorded by the compositor.
-    pub const fn cursor_position(&self) -> (usize, usize) {
-        self.cursor_position
+    /// Return the last pointer position and image recorded by the compositor.
+    #[cfg_attr(
+        not(feature = "test"),
+        expect(dead_code, reason = "cursor test oracle")
+    )]
+    pub const fn cursor_state(&self) -> CursorState {
+        self.cursor
     }
 
-    /// Record that the cursor has moved.
+    /// Record a pointer position or image transition.
     ///
     /// Returns true if the cursor actually moved. Does **not** mark the
     /// old/new cursor footprints dirty: `CursorRenderer` already restores
@@ -274,12 +288,10 @@ impl Compositor {
     /// motion to trigger a wallpaper-blit + child-window-repaint chain and,
     /// after dropping eager parent repaint propagation, left wallpaper
     /// bleeding through clean child windows.
-    pub fn update_cursor(&mut self, new_x: usize, new_y: usize) -> bool {
-        let new_position = (new_x, new_y);
-        if self.cursor_position == new_position {
-            return false;
+    pub fn update_cursor(&mut self, next: CursorState) -> Option<CursorState> {
+        if self.cursor == next {
+            return None;
         }
-        self.cursor_position = new_position;
-        true
+        Some(core::mem::replace(&mut self.cursor, next))
     }
 }

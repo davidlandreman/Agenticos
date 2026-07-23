@@ -55,6 +55,9 @@ pub const GUI_MOUSE_MOVE: u32 = 0;
 pub const GUI_MOUSE_DOWN: u32 = 1;
 pub const GUI_MOUSE_UP: u32 = 2;
 pub const GUI_MOUSE_SCROLL: u32 = 3;
+pub const GUI_CURSOR_ARROW: u32 = 0;
+pub const GUI_CURSOR_WAIT: u32 = 1;
+pub const GUI_CURSOR_TEXT: u32 = 2;
 pub const GL_ABI_MAGIC: u32 = 0x314C_4741;
 pub const GL_ABI_VERSION: u32 = 1;
 pub const GL_DRAW_DEPTH_TEST: u32 = 1 << 0;
@@ -120,6 +123,7 @@ const NR_PTY_SET_WINSIZE: u64 = 5014;
 const NR_GUI_SHELL_REGISTER: u64 = 5015;
 const NR_GUI_SHELL_LIST_WINDOWS: u64 = 5016;
 const NR_GUI_SHELL_WINDOW_ACTION: u64 = 5017;
+const NR_GUI_WIN_SET_CURSOR: u64 = 5019;
 
 /// `pty_open` flag: set FD_CLOEXEC on the returned master descriptor.
 pub const PTY_OPEN_CLOEXEC: u64 = 0x80000;
@@ -594,6 +598,10 @@ pub fn gui_win_set_title(handle: u32, title: &str) -> i64 {
             title.len() as u64,
         )
     }
+}
+
+pub fn gui_win_set_cursor(handle: u32, cursor: u32) -> i64 {
+    unsafe { syscall2(NR_GUI_WIN_SET_CURSOR, handle as u64, cursor as u64) }
 }
 
 fn decode_apply_result(result: i64) -> Result<ApplyResult, i64> {

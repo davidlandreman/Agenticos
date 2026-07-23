@@ -203,6 +203,11 @@ impl Notepad {
     fn handle_mouse(&mut self, event: &runtime::GuiEvent) -> bool {
         let x = event.payload[0] as i32;
         let y = event.payload[1] as i32;
+        let cursor = self
+            .editor
+            .cursor_icon_at(x, y)
+            .unwrap_or(gui::CursorIcon::Arrow);
+        let _ = self.window.set_cursor(cursor);
         if event.payload[3] == GUI_MOUSE_MOVE {
             self.menu.pointer_move(x, y);
         }

@@ -1,6 +1,6 @@
 //! Window Manager - Central coordinator for all windows and screens
 
-use super::cursor::CursorRenderer;
+use super::cursor::{CursorIcon, CursorRenderer};
 use super::renderer::{
     boot_request, boot_strict, invalid_boot_request, select_renderer, RendererKind,
     RendererSelection, RendererState, RetainedRenderer, SurfaceCanvas,
@@ -17,7 +17,7 @@ use crate::drivers::mouse;
 use crate::graphics::composition::{
     timestamp_cycles, ClientGlFrame, ClientGlId, ClientGlInfo, RenderStats,
 };
-use crate::graphics::compositor::Compositor;
+use crate::graphics::compositor::{Compositor, CursorState};
 use crate::graphics::present::{BootFramebufferPresenter, Presenter};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -839,6 +839,23 @@ impl WindowManager {
         Some((id, abs))
     }
 
+    fn cursor_icon_at(&self, point: Point) -> CursorIcon {
+        let hit = if let Some(modal_id) = self.modal_dialog {
+            self.topmost_at(modal_id, point, 0, 0)
+        } else {
+            self.get_active_screen()
+                .and_then(|screen| screen.root_window)
+                .and_then(|root| self.topmost_at(root, point, 0, 0))
+        };
+        let Some((id, bounds)) = hit else {
+            return CursorIcon::Arrow;
+        };
+        self.window_registry
+            .get(&id)
+            .map(|window| window.cursor_icon_at(Point::new(point.x - bounds.x, point.y - bounds.y)))
+            .unwrap_or(CursorIcon::Arrow)
+    }
+
     /// Walk the active screen's tree in render order (depth-first, children
     /// in declaration order — same order `render_window_tree` paints in)
     /// and return each window's id and absolute bounds.
@@ -1076,20 +1093,15 @@ impl WindowManager {
         // Handle window dragging
         self.handle_dragging(mouse_x, mouse_y, buttons);
 
-        // Update the compositor cursor position. Legacy deliberately keeps
+        // Update the compositor cursor state. Legacy deliberately keeps
         // cursor footprints out of repaint damage; retained consumes the
-        // previous position below as composition/presentation-only damage.
-        // Clamp to unsigned coordinates for the shared cursor state.
-        let previous_cursor_position = self.compositor.cursor_position();
-        let mouse_moved = self
-            .compositor
-            .update_cursor(mouse_x.max(0) as usize, mouse_y.max(0) as usize);
-        let previous_cursor_position = mouse_moved.then(|| {
-            Point::new(
-                previous_cursor_position.0.min(i32::MAX as usize) as i32,
-                previous_cursor_position.1.min(i32::MAX as usize) as i32,
-            )
-        });
+        // previous state below as composition/presentation-only damage.
+        let cursor_state = CursorState {
+            position: Point::new(mouse_x, mouse_y),
+            icon: self.cursor_icon_at(Point::new(mouse_x, mouse_y)),
+        };
+        let previous_cursor_state = self.compositor.update_cursor(cursor_state);
+        let cursor_changed = previous_cursor_state.is_some();
 
         // Cascade invalidation across the z-order so that any window in
         // front of a dirty one (and overlapping it) repaints too. Without
@@ -1105,7 +1117,7 @@ impl WindowManager {
         self.mark_dirty_for_invalidated_windows();
 
         // Early exit if nothing needs rendering
-        if !self.compositor.needs_render() && !mouse_moved {
+        if !self.compositor.needs_render() && !cursor_changed {
             // An idle sample is explicitly zero-work. Do not leave the prior
             // active frame's counters visible to diagnostics.
             self.last_render_stats = RenderStats::default();
@@ -1117,7 +1129,7 @@ impl WindowManager {
             let RendererState::Retained(mut retained) = state else {
                 unreachable!()
             };
-            match self.render_retained(&mut retained, mouse_x, mouse_y, previous_cursor_position) {
+            match self.render_retained(&mut retained, cursor_state, previous_cursor_state) {
                 Ok(()) => {
                     self.renderer = RendererState::Retained(retained);
                     self.compositor.end_frame();
@@ -1222,10 +1234,16 @@ impl WindowManager {
         }
 
         // Save background at new cursor position, then draw cursor
-        self.cursor
-            .save_background(mouse_x, mouse_y, &*self.graphics_device);
-        self.cursor
-            .draw(mouse_x, mouse_y, &mut *self.graphics_device);
+        self.cursor.save_background(
+            cursor_state.icon,
+            cursor_state.position,
+            &*self.graphics_device,
+        );
+        self.cursor.draw(
+            cursor_state.icon,
+            cursor_state.position,
+            &mut *self.graphics_device,
+        );
 
         // Presentation damage is broader than repaint damage: moving the
         // cursor restores its old background and draws at its new position
@@ -1245,7 +1263,7 @@ impl WindowManager {
         }
         Self::add_present_region(
             &mut present_regions,
-            CursorRenderer::bounds_at(mouse_x, mouse_y),
+            CursorRenderer::bounds_at(cursor_state.icon, cursor_state.position),
             screen_bounds,
         );
 
@@ -1268,9 +1286,8 @@ impl WindowManager {
     fn render_retained(
         &mut self,
         retained: &mut RetainedRenderer,
-        mouse_x: i32,
-        mouse_y: i32,
-        previous_cursor_position: Option<Point>,
+        cursor_state: CursorState,
+        previous_cursor_state: Option<CursorState>,
     ) -> Result<(), super::renderer::RetainedRendererError> {
         let full_repaint = self.compositor.dirty.needs_full_repaint();
         if full_repaint {
@@ -1281,19 +1298,20 @@ impl WindowManager {
 
         let regions: Vec<Rect> = self.compositor.dirty.dirty_regions().collect();
         let direct_scanout = retained.uses_direct_scanout();
-        if direct_scanout
-            && !full_repaint
-            && regions.is_empty()
-            && previous_cursor_position.is_some()
+        if direct_scanout && !full_repaint && regions.is_empty() && previous_cursor_state.is_some()
         {
             let presentation_started = timestamp_cycles();
-            let cursor_pixels = retained
-                .hardware_cursor_needs_image()
-                .then(CursorRenderer::hardware_argb_64);
+            let icon_changed =
+                previous_cursor_state.is_some_and(|previous| previous.icon != cursor_state.icon);
+            let cursor_pixels = (retained.hardware_cursor_needs_image() || icon_changed)
+                .then(|| CursorRenderer::hardware_argb_64(cursor_state.icon));
+            let (hot_x, hot_y) = CursorRenderer::hotspot(cursor_state.icon);
             retained.update_hardware_cursor(
-                mouse_x.max(0) as u32,
-                mouse_y.max(0) as u32,
+                cursor_state.position.x.max(0) as u32,
+                cursor_state.position.y.max(0) as u32,
                 cursor_pixels.as_deref(),
+                hot_x,
+                hot_y,
             )?;
             self.last_render_stats = RenderStats {
                 frames: 1,
@@ -1335,15 +1353,15 @@ impl WindowManager {
         // these rectangles out of `regions` so cursor-only movement never
         // asks widgets to repaint or rerasterizes their retained surfaces.
         if !direct_scanout {
-            if let Some(previous) = previous_cursor_position {
+            if let Some(previous) = previous_cursor_state {
                 Self::add_present_region(
                     &mut compose_regions,
-                    CursorRenderer::bounds_at(previous.x, previous.y),
+                    CursorRenderer::bounds_at(previous.icon, previous.position),
                     screen_bounds,
                 );
                 Self::add_present_region(
                     &mut compose_regions,
-                    CursorRenderer::bounds_at(mouse_x, mouse_y),
+                    CursorRenderer::bounds_at(cursor_state.icon, cursor_state.position),
                     screen_bounds,
                 );
             }
@@ -1489,19 +1507,24 @@ impl WindowManager {
                 (0, 0),
                 (self.graphics_device.width(), self.graphics_device.height()),
             );
-            self.cursor.draw(mouse_x, mouse_y, &mut canvas);
+            self.cursor
+                .draw(cursor_state.icon, cursor_state.position, &mut canvas);
         }
 
         let presentation_started = timestamp_cycles();
         let presented_by_virtio = if direct_scanout {
             stats.scanout_flushes = retained.present_direct(&compose_regions)?;
-            let cursor_pixels = retained
-                .hardware_cursor_needs_image()
-                .then(CursorRenderer::hardware_argb_64);
+            let icon_changed =
+                previous_cursor_state.is_some_and(|previous| previous.icon != cursor_state.icon);
+            let cursor_pixels = (retained.hardware_cursor_needs_image() || icon_changed)
+                .then(|| CursorRenderer::hardware_argb_64(cursor_state.icon));
+            let (hot_x, hot_y) = CursorRenderer::hotspot(cursor_state.icon);
             if retained.update_hardware_cursor(
-                mouse_x.max(0) as u32,
-                mouse_y.max(0) as u32,
+                cursor_state.position.x.max(0) as u32,
+                cursor_state.position.y.max(0) as u32,
                 cursor_pixels.as_deref(),
+                hot_x,
+                hot_y,
             )? {
                 stats.cursor_updates = 1;
             }
@@ -1908,11 +1931,12 @@ impl WindowManager {
     /// Test-only: return the compositor's current pointer position.
     #[cfg(feature = "test")]
     pub fn test_cursor_position(&self) -> Point {
-        let (x, y) = self.compositor.cursor_position();
-        Point::new(
-            x.min(i32::MAX as usize) as i32,
-            y.min(i32::MAX as usize) as i32,
-        )
+        self.compositor.cursor_state().position
+    }
+
+    #[cfg(feature = "test")]
+    pub fn test_cursor_icon_at(&self, position: Point) -> CursorIcon {
+        self.cursor_icon_at(position)
     }
 
     /// Test-only: read one pixel from the canonical retained output.
@@ -1933,18 +1957,42 @@ impl WindowManager {
     /// Test-only: render a cursor-only retained frame at an injected position.
     #[cfg(feature = "test")]
     pub fn test_render_retained_cursor_at(&mut self, position: Point) {
-        let previous = self.test_cursor_position();
-        assert!(
-            self.compositor
-                .update_cursor(position.x.max(0) as usize, position.y.max(0) as usize),
-            "test cursor position must change"
-        );
+        let current = self.compositor.cursor_state();
+        let next = CursorState {
+            position,
+            icon: current.icon,
+        };
+        let previous = self
+            .compositor
+            .update_cursor(next)
+            .expect("test cursor position must change");
         let state = core::mem::replace(&mut self.renderer, RendererState::Legacy);
         let RendererState::Retained(mut retained) = state else {
             panic!("test requires retained renderer")
         };
-        self.render_retained(&mut retained, position.x, position.y, Some(previous))
+        self.render_retained(&mut retained, next, Some(previous))
             .expect("retained cursor-only frame should render");
+        self.renderer = RendererState::Retained(retained);
+        self.compositor.end_frame();
+    }
+
+    #[cfg(feature = "test")]
+    pub fn test_render_retained_cursor_icon(&mut self, icon: CursorIcon) {
+        let current = self.compositor.cursor_state();
+        let next = CursorState {
+            position: current.position,
+            icon,
+        };
+        let previous = self
+            .compositor
+            .update_cursor(next)
+            .expect("test cursor icon must change");
+        let state = core::mem::replace(&mut self.renderer, RendererState::Legacy);
+        let RendererState::Retained(mut retained) = state else {
+            panic!("test requires retained renderer")
+        };
+        self.render_retained(&mut retained, next, Some(previous))
+            .expect("retained cursor-only icon frame should render");
         self.renderer = RendererState::Retained(retained);
         self.compositor.end_frame();
     }
@@ -2703,6 +2751,19 @@ impl WindowManager {
             self.graphics_device.width() as u32,
             self.graphics_device.height() as u32,
         )
+    }
+
+    /// Set the cursor requested by an owned ring-3 content surface. Returns
+    /// `None` when the ID is missing or is not a remote surface.
+    pub fn set_remote_cursor_icon(
+        &mut self,
+        window_id: WindowId,
+        icon: CursorIcon,
+    ) -> Option<bool> {
+        self.window_registry
+            .get_mut(&window_id)?
+            .as_remote_surface_mut()
+            .map(|surface| surface.set_cursor_icon(icon))
     }
 
     /// Borrow a single window from the registry mutably as a `&mut dyn
