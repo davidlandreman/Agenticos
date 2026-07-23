@@ -361,6 +361,7 @@ pub mod nr {
     pub const GUI_SHELL_LIST_WINDOWS: u64 = 5016;
     pub const GUI_SHELL_WINDOW_ACTION: u64 = 5017;
     pub const GUI_SHELL_SPAWN_TERMINAL: u64 = 5018;
+    pub const GUI_WIN_SET_CURSOR: u64 = 5019;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -502,6 +503,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GUI_NEXT_EVENT => crate::userland::gui_syscalls::gui_next_event_handler(args),
         nr::GUI_WIN_DESTROY => crate::userland::gui_syscalls::gui_win_destroy_handler(args),
         nr::GUI_WIN_SET_TITLE => crate::userland::gui_syscalls::gui_win_set_title_handler(args),
+        nr::GUI_WIN_SET_CURSOR => crate::userland::gui_syscalls::gui_win_set_cursor_handler(args),
         nr::GUI_GL_CONTEXT_CREATE => crate::userland::gui_gl::context_create_handler(args),
         nr::GUI_GL_SUBMIT_FRAME => crate::userland::gui_gl::submit_frame_handler(args),
         nr::GUI_GL_GET_INFO => crate::userland::gui_gl::get_info_handler(args),

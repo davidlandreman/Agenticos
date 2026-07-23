@@ -19,7 +19,7 @@ use gui::file_ui::{
     FilePlace, FileUiColors, IconButton, MountCapabilities as Capabilities, NavIcon, PlaceIcon,
     PlacesSidebar, UiRect,
 };
-use gui::{decode_control_input, Canvas, ControlInput, PointerKind, TextField, Window};
+use gui::{decode_control_input, Canvas, ControlInput, CursorIcon, PointerKind, TextField, Window};
 
 const INITIAL_W: u32 = 920;
 const INITIAL_H: u32 = 580;
@@ -254,34 +254,39 @@ impl FileManager {
     }
 
     fn reload(&mut self) -> Result<(), i64> {
-        let listed = gui::list_dir(&self.current)?;
-        let mut entries = Vec::with_capacity(listed.len());
-        for item in listed {
-            let path = join_path(&self.current, &item.name);
-            entries.push(Entry {
-                kind: classify(&item.name, item.is_dir, item.mode),
-                name: item.name,
-                path,
-                size: item.size,
-                modified: item.modified,
-                mode: item.mode,
-            });
-        }
-        self.entries = entries;
-        self.sort_entries();
-        self.rebuild_visible();
-        self.selected
-            .retain(|path| self.entries.iter().any(|entry| &entry.path == path));
-        self.scroll = self.scroll.min(self.visible.len().saturating_sub(1));
-        self.location.set_text(&self.current);
-        let folder = if self.current == "/" {
-            "/"
-        } else {
-            basename(&self.current)
-        };
-        let _ = self.window.set_title(&format!("{folder} - File Manager"));
-        self.status = item_count(self.visible.len());
-        Ok(())
+        let _ = self.window.set_busy(true);
+        let result = (|| {
+            let listed = gui::list_dir(&self.current)?;
+            let mut entries = Vec::with_capacity(listed.len());
+            for item in listed {
+                let path = join_path(&self.current, &item.name);
+                entries.push(Entry {
+                    kind: classify(&item.name, item.is_dir, item.mode),
+                    name: item.name,
+                    path,
+                    size: item.size,
+                    modified: item.modified,
+                    mode: item.mode,
+                });
+            }
+            self.entries = entries;
+            self.sort_entries();
+            self.rebuild_visible();
+            self.selected
+                .retain(|path| self.entries.iter().any(|entry| &entry.path == path));
+            self.scroll = self.scroll.min(self.visible.len().saturating_sub(1));
+            self.location.set_text(&self.current);
+            let folder = if self.current == "/" {
+                "/"
+            } else {
+                basename(&self.current)
+            };
+            let _ = self.window.set_title(&format!("{folder} - File Manager"));
+            self.status = item_count(self.visible.len());
+            Ok(())
+        })();
+        let _ = self.window.set_busy(false);
+        result
     }
 
     fn sort_entries(&mut self) {
@@ -746,6 +751,14 @@ impl FileManager {
     fn handle_mouse(&mut self, event: &runtime::GuiEvent) {
         let x = event.payload[0] as i32;
         let y = event.payload[1] as i32;
+        let cursor = self
+            .name_editor
+            .as_ref()
+            .and_then(|editor| editor.field.cursor_icon_at(x, y))
+            .or_else(|| self.filter.cursor_icon_at(x, y))
+            .or_else(|| self.location.cursor_icon_at(x, y))
+            .unwrap_or(CursorIcon::Arrow);
+        let _ = self.window.set_cursor(cursor);
         self.sync_browser_scroll();
         if let Some(ControlInput::Pointer(input)) = decode_control_input(event) {
             let response = self.browser_scroll.handle_pointer(input);

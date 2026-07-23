@@ -16,7 +16,9 @@ use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_default_font;
 use crate::window::event::{KeyCode, KeyboardEvent, MouseEventType};
 use crate::window::keyboard::keycode_to_char;
-use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
+use crate::window::{
+    CursorIcon, Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId,
+};
 use alloc::{string::String, vec, vec::Vec};
 
 use super::base::WindowBase;
@@ -455,6 +457,10 @@ impl Window for TextEditor {
 
     fn base_mut(&mut self) -> &mut WindowBase {
         &mut self.base
+    }
+
+    fn cursor_icon_at(&self, _point: Point) -> CursorIcon {
+        CursorIcon::Text
     }
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {

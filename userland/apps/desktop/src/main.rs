@@ -456,9 +456,9 @@ impl RunDialog {
         canvas.draw_text(14, 12, "Type the name of a program or command,", palette.text);
         canvas.draw_text(14, 30, "and AgenticOS will open it for you.", palette.text);
         theme::draw_field(canvas, 14, 52, w - 28, 24, true);
-        let mut line = input.clone();
-        line.push('_');
-        canvas.draw_text(20, 58, &line, palette.field_text);
+        canvas.draw_text(20, 58, &input, palette.field_text);
+        let caret_x = 20 + input.chars().count() as i32 * FONT_CELL_WIDTH;
+        canvas.vertical_line(caret_x, 56, 16, palette.field_text);
         draw_labeled_button(canvas, ok, "OK", ButtonState::Hot);
         draw_labeled_button(canvas, cancel, "Cancel", ButtonState::Normal);
         let _ = self.window.present();
@@ -662,9 +662,21 @@ impl Shell {
     fn handle_run_event(&mut self, event: gui::GuiEvent) {
         match event.kind {
             GUI_EVENT_CLOSE => self.close_run(),
-            GUI_EVENT_MOUSE if event.payload[3] == GUI_MOUSE_DOWN => {
+            GUI_EVENT_MOUSE => {
                 let x = event.payload[0] as i32;
                 let y = event.payload[1] as i32;
+                if let Some(dialog) = self.run.as_mut() {
+                    let field = (14, 52, RUN_W as i32 - 28, 24);
+                    let cursor = if hit_rect(field, x, y) {
+                        gui::CursorIcon::Text
+                    } else {
+                        gui::CursorIcon::Arrow
+                    };
+                    let _ = dialog.window.set_cursor(cursor);
+                }
+                if event.payload[3] != GUI_MOUSE_DOWN {
+                    return;
+                }
                 let (ok, cancel) = run_buttons();
                 if hit_rect(ok, x, y) {
                     self.submit_run();

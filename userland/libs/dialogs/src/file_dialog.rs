@@ -11,8 +11,8 @@ use gui::file_ui::{
     IconButton, NavIcon, PlaceIcon, PlacesSidebar, UiRect,
 };
 use gui::{
-    decode_control_input, theme, Button, ButtonAction, Canvas, ControlInput, PointerKind,
-    TextField, Window,
+    decode_control_input, theme, Button, ButtonAction, Canvas, ControlInput, CursorIcon,
+    PointerKind, TextField, Window,
 };
 
 use crate::DialogStatus;
@@ -1475,6 +1475,15 @@ impl FileDialog {
         let x = event.payload[0] as i32;
         let y = event.payload[1] as i32;
         let action = event.payload[3];
+        let cursor = self
+            .folder_editor
+            .as_ref()
+            .and_then(|editor| editor.cursor_icon_at(x, y))
+            .or_else(|| self.location.cursor_icon_at(x, y))
+            .or_else(|| self.filter.cursor_icon_at(x, y))
+            .or_else(|| self.name.cursor_icon_at(x, y))
+            .unwrap_or(CursorIcon::Arrow);
+        let _ = self.window.set_cursor(cursor);
 
         if self.overwrite.is_some() {
             if action == runtime::GUI_MOUSE_DOWN && event.payload[2] & 1 != 0 {

@@ -610,10 +610,18 @@ impl ControlCenter {
             runtime::GUI_EVENT_KEY if event.payload[3] != 0 && self.modal.is_none() => {
                 self.handle_key(event.payload);
             }
-            runtime::GUI_EVENT_MOUSE
-                if event.payload[3] == runtime::GUI_MOUSE_DOWN && self.modal.is_none() =>
-            {
-                self.handle_click(event.payload[0] as i32, event.payload[1] as i32);
+            runtime::GUI_EVENT_MOUSE if self.modal.is_none() => {
+                let x = event.payload[0] as i32;
+                let y = event.payload[1] as i32;
+                let cursor = self
+                    .search
+                    .cursor_icon_at(x, y)
+                    .unwrap_or(gui::CursorIcon::Arrow);
+                let _ = self.window.set_cursor(cursor);
+                if event.payload[3] != runtime::GUI_MOUSE_DOWN {
+                    return false;
+                }
+                self.handle_click(x, y);
             }
             _ => return false,
         }

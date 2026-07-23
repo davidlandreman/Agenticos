@@ -66,7 +66,10 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   in `docs/plans/2026-07-18-007-feat-futurism-theme-plan.md`.
 - `screen.rs` — virtual screen abstraction (today there is one physical display).
 - `console.rs` — kernel `print!` macro output buffer.
-- `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.
+- `cursor.rs` — typed `Arrow` / `Wait` / `Text` pointer sprites with explicit
+  hotspots, plus `CursorRenderer` legacy background save/restore. The same
+  canonical pixels generate retained CPU overlays and 64×64 VirtIO hardware
+  cursor images.
 - `keyboard.rs` — PS/2 scancode-set-2 → `KeyCode` conversion *for window events* (distinct from the lower-level driver in `src/input/`).
 - `terminal.rs`, `terminal_factory.rs` — terminal-window support; the factory wires terminal windows up to the shell.
 - `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), and `desktop.rs` (background). The kernel `start_menu.rs` and `taskbar.rs` were removed with `guishell`; the taskbar and Start menu now live in the ring-3 shell (`userland/apps/desktop/`), which renders the `assets/icons/start/*.svg` artwork itself.
@@ -129,11 +132,21 @@ There is a single source of truth for z-order: each parent's `children` Vec. `ch
 
 ## Cursor rendering
 
-Owned by this folder, NOT `src/drivers/`. `CursorRenderer` (in `cursor.rs`) owns the 12×12 arrow sprite, saves the framebuffer region under the cursor before drawing, and restores it before the next move. Cursor uses the direct-framebuffer adapter (the double-buffered path is too slow for cursor latency).
+Owned by this folder, NOT `src/drivers/`. `CursorRenderer` (in `cursor.rs`)
+owns conventional outlined Arrow, static hourglass Wait, and I-beam Text
+sprites. Pointer coordinates always name each sprite's explicit hotspot.
+Legacy saves the exact active-sprite framebuffer region before drawing and
+restores it before the next position or icon change. Cursor uses the
+direct-framebuffer adapter (the double-buffered path is too slow for cursor
+latency).
 
 That save/restore behavior applies only to `legacy`. In `retained`, the cursor
 is drawn as the final canonical output overlay after damaged regions have been
-recomposed; it never restores framebuffer background.
+recomposed; it never restores framebuffer background. Direct VirGL scanout
+updates one persistent VirtIO cursor resource in place when the icon/hotspot
+changes and uses move-only commands otherwise. `Window::cursor_icon_at`
+resolves kernel widget hover intent; ring-3 `RemoteSurface` intent is set by
+ownership-checked syscall 5019.
 
 ## Window-manager synchronization
 

@@ -3,7 +3,9 @@
 use super::base::WindowBase;
 use super::text::TextWindow;
 use crate::window::event::KeyCode;
-use crate::window::{keyboard::keycode_to_char, Event, EventResult, GraphicsDevice, Rect, Window};
+use crate::window::{
+    keyboard::keycode_to_char, CursorIcon, Event, EventResult, GraphicsDevice, Point, Rect, Window,
+};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -330,6 +332,10 @@ impl Window for TerminalWindow {
 
     fn base_mut(&mut self) -> &mut WindowBase {
         self.text_window.base_mut()
+    }
+
+    fn cursor_icon_at(&self, _point: Point) -> CursorIcon {
+        CursorIcon::Text
     }
 
     // TextWindow's custom set_bounds reallocates its grid buffer; route

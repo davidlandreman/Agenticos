@@ -265,10 +265,12 @@ impl VirtioGpu {
         x: u32,
         y: u32,
         pixels: &[u32],
+        hot_x: u32,
+        hot_y: u32,
     ) -> Result<CursorResource, GpuError> {
         const SIDE: u32 = 64;
         const PIXELS: usize = (SIDE * SIDE) as usize;
-        if pixels.len() != PIXELS {
+        if pixels.len() != PIXELS || hot_x >= SIDE || hot_y >= SIDE {
             return Err(GpuError::InvalidResource);
         }
         let resource_id = self.next_resource_id;
@@ -315,8 +317,8 @@ impl VirtioGpu {
                 padding: 0,
             },
             resource_id,
-            hot_x: 0,
-            hot_y: 0,
+            hot_x,
+            hot_y,
             padding: 0,
         }) {
             let _ = self.detach_backing(resource_id);
@@ -328,6 +330,56 @@ impl VirtioGpu {
             scanout_id,
             backing,
             live: true,
+        })
+    }
+
+    /// Replace an existing cursor's pixels and hotspot without allocating a
+    /// second GPU resource.
+    pub fn update_cursor_image(
+        &mut self,
+        cursor: &mut CursorResource,
+        x: u32,
+        y: u32,
+        pixels: &[u32],
+        hot_x: u32,
+        hot_y: u32,
+    ) -> Result<(), GpuError> {
+        const SIDE: u32 = 64;
+        const PIXELS: usize = (SIDE * SIDE) as usize;
+        if !cursor.live || pixels.len() != PIXELS || hot_x >= SIDE || hot_y >= SIDE {
+            return Err(GpuError::InvalidResource);
+        }
+        for (bytes, pixel) in cursor
+            .backing
+            .chunks_exact_mut(4)
+            .zip(pixels.iter().copied())
+        {
+            bytes.copy_from_slice(&pixel.to_le_bytes());
+        }
+        self.control.submit_nodata(&TransferToHost2d {
+            header: CtrlHeader::command(CMD_TRANSFER_TO_HOST_2D),
+            rect: GpuRect {
+                x: 0,
+                y: 0,
+                width: SIDE,
+                height: SIDE,
+            },
+            offset: 0,
+            resource_id: cursor.resource_id,
+            padding: 0,
+        })?;
+        self.cursor.submit_nodata(&UpdateCursor {
+            header: CtrlHeader::command(CMD_UPDATE_CURSOR),
+            position: CursorPosition {
+                scanout_id: cursor.scanout_id,
+                x,
+                y,
+                padding: 0,
+            },
+            resource_id: cursor.resource_id,
+            hot_x,
+            hot_y,
+            padding: 0,
         })
     }
 
