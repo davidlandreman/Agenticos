@@ -94,6 +94,7 @@ pub fn realtime_ns() -> u64 {
     wall_clock_ns().unwrap_or_else(monotonic_ns)
 }
 
+#[expect(dead_code, reason = "kernel wall-clock API retained for callers/diagnostics")]
 pub fn utc_now() -> Option<DateTime> {
     let seconds = wall_clock_ns()? / NANOSECONDS_PER_SECOND;
     datetime_from_unix_seconds(seconds)

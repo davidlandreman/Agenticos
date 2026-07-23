@@ -30,11 +30,6 @@ impl ContainerWindow {
         }
     }
 
-    /// Set the background color
-    pub fn set_background_color(&mut self, color: Color) {
-        self.background_color = color;
-        self.base.invalidate();
-    }
 }
 
 impl Window for ContainerWindow {

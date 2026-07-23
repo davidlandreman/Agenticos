@@ -277,8 +277,8 @@ impl TerminalWindow {
 
         // zsh (ring-3) is always the terminal's shell after boot, so
         // every typed line goes into the user stdin queue. Before the
-        // userland subsystem is active (e.g., during boot before
-        // init_guishell_desktop has spawned zsh), input is silently
+        // userland subsystem is active (e.g., during boot before the
+        // desktop shell has spawned zsh), input is silently
         // dropped — the terminal window doesn't actually exist yet in
         // that window so this branch is effectively unreachable in
         // production.

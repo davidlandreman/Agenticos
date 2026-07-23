@@ -115,6 +115,10 @@ impl<T> PreemptionMutex<T> {
     /// This is intended for debug lock-order assertions only. The value can
     /// change immediately after it is observed, so callers must not use it to
     /// make synchronization decisions.
+    #[cfg_attr(
+        not(feature = "test"),
+        expect(dead_code, reason = "debug lock-order assertion helper")
+    )]
     pub fn is_locked(&self) -> bool {
         self.inner.is_locked()
     }

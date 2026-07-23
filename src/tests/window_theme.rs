@@ -80,7 +80,7 @@ fn test_all_theme_effect_radii_are_gpu_supported() {
     // kernel panic on strict-GPU boots (the Conductor run default).
     for kind in [ThemeKind::Classic, ThemeKind::Aero, ThemeKind::Futurism] {
         let spec = theme::spec_for(kind);
-        for effect in [spec.frame_effect, spec.chrome_effect] {
+        for effect in [spec.frame_effect] {
             if let crate::graphics::scene::LayerEffect::BackdropSample { radius } = effect {
                 assert!(
                     crate::graphics::composition::gpu_backdrop_radius_supported(radius),

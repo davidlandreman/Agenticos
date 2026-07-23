@@ -22,9 +22,6 @@ export AGENTICOS_QEMU_BIN="${AGENTICOS_QEMU_BIN:-$qemu_virgl_prefix/bin/qemu-sys
 export AGENTICOS_QEMU_GL="${AGENTICOS_QEMU_GL:-es}"
 export AGENTICOS_THEME="${AGENTICOS_THEME:-futurism}"
 export AGENTICOS_NETWORK="${AGENTICOS_NETWORK:-on}"
-# Run the ring-3 userland desktop shell (DESKTOP.ELF) by default instead of the
-# in-kernel guishell. Override with AGENTICOS_SHELL=ring0 for the legacy shell.
-export AGENTICOS_SHELL="${AGENTICOS_SHELL:-ring3}"
 
 # build.sh's manual-run default is machine-global. Give each Conductor
 # workspace its own RPC socket so parallel QEMUs cannot unlink or replace one
@@ -60,7 +57,6 @@ echo " gpu strict     : $AGENTICOS_GPU_STRICT"
 echo " qemu binary    : $AGENTICOS_QEMU_BIN"
 echo " window theme   : $AGENTICOS_THEME"
 echo " network        : $AGENTICOS_NETWORK"
-echo " desktop shell  : $AGENTICOS_SHELL"
 echo " reserved ports : ${port_lo}-${port_hi} (currently unused; future GDB)"
 echo "=================================================================="
 

@@ -26,6 +26,7 @@ impl WakeEvents {
     /// Input available (keyboard/stdin)
     pub const INPUT: Self = Self(1 << 1);
     /// Window event occurred (mouse click, focus change, etc.)
+    #[expect(dead_code, reason = "legacy event bit retained for task diagnostics")]
     pub const WINDOW_EVENT: Self = Self(1 << 2);
     /// Child process exited
     #[expect(dead_code, reason = "intentional kernel API surface")]

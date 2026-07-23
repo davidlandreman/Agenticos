@@ -9,6 +9,7 @@ mod input;
 mod menu;
 mod scrollbar;
 mod slider;
+pub mod svg;
 mod text_area;
 pub mod theme;
 
@@ -235,6 +236,23 @@ impl Canvas {
         self.horizontal_line(x, y + height.saturating_sub(1) as i32, width, color);
         self.vertical_line(x, y, height, color);
         self.vertical_line(x + width.saturating_sub(1) as i32, y, height, color);
+    }
+
+    /// Composite a tightly packed `width * height` ARGB8888 buffer at
+    /// `(x, y)`. The top byte of each pixel is alpha; the RGB is blended over
+    /// the canvas so transparent icon pixels leave the background untouched.
+    /// Used for SVG-rasterized Start-menu icons (see [`crate::svg`]).
+    pub fn blit_argb(&mut self, x: i32, y: i32, width: u32, height: u32, pixels: &[u32]) {
+        for row in 0..height as i32 {
+            for col in 0..width as i32 {
+                let index = row as usize * width as usize + col as usize;
+                let Some(&argb) = pixels.get(index) else {
+                    return;
+                };
+                let alpha = (argb >> 24) as u8;
+                self.blend_pixel(x + col, y + row, argb & 0x00ff_ffff, alpha);
+            }
+        }
     }
 
     pub fn draw_char(&mut self, x: i32, y: i32, character: char, color: u32) {
