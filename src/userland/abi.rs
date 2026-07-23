@@ -349,6 +349,12 @@ pub mod nr {
     pub const SYSTEM_CONTROL: u64 = 5010;
     pub const GUI_EVENT_OPEN: u64 = 5011;
     pub const CLIPBOARD: u64 = 5012;
+    /// Desktop-shell protocol (`DESKTOP.ELF` only, gated by
+    /// `gui::register_desktop_shell`).
+    pub const GUI_SHELL_REGISTER: u64 = 5013;
+    pub const GUI_SHELL_LIST_WINDOWS: u64 = 5014;
+    pub const GUI_SHELL_WINDOW_ACTION: u64 = 5015;
+    pub const GUI_SHELL_SPAWN_TERMINAL: u64 = 5016;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -496,6 +502,16 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::SYSTEM_CONTROL => crate::system_control::syscall_handler(args),
         nr::GUI_EVENT_OPEN => crate::userland::gui_syscalls::gui_event_open_handler(args),
         nr::CLIPBOARD => crate::clipboard::syscall_handler(args),
+        nr::GUI_SHELL_REGISTER => crate::userland::gui_syscalls::gui_shell_register_handler(args),
+        nr::GUI_SHELL_LIST_WINDOWS => {
+            crate::userland::gui_syscalls::gui_shell_list_windows_handler(args)
+        }
+        nr::GUI_SHELL_WINDOW_ACTION => {
+            crate::userland::gui_syscalls::gui_shell_window_action_handler(args)
+        }
+        nr::GUI_SHELL_SPAWN_TERMINAL => {
+            crate::userland::gui_syscalls::gui_shell_spawn_terminal_handler(args)
+        }
         // Phase B: namespace mutations
         nr::MKDIR => syscalls::mkdir_handler(args),
         nr::MKDIRAT => syscalls::mkdirat_handler(args),

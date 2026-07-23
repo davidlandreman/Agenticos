@@ -240,6 +240,58 @@ pub fn init_guishell() {
     }
 }
 
+/// Create only the GUI screen, desktop-root window, and wallpaper — no kernel
+/// taskbar, Start button, or tray. Used when the ring-3 desktop shell
+/// (`DESKTOP.ELF`) owns the taskbar chrome. The root window is required so
+/// `gui_win_create` (and the ring-3 panel) have a parent to attach to.
+#[cfg_attr(feature = "test", expect(dead_code, reason = "production-only API"))]
+pub fn init_desktop_root_only() {
+    {
+        let state = GUISHELL_STATE.lock();
+        if state.initialized {
+            return;
+        }
+    }
+
+    let wallpaper = crate::system_control::load_configured_wallpaper();
+
+    let desktop_id = with_window_manager(|wm| {
+        let (width, height) = wm.screen_dimensions();
+        let screen_id = wm.create_screen(window::ScreenMode::Gui);
+        wm.switch_screen(screen_id);
+
+        let desktop_id = wm.create_window(None);
+        let desktop_bounds = Rect::new(0, 0, width, height);
+        let desktop_window: Box<dyn window::Window> = match wallpaper {
+            Some(bytes) => Box::new(DesktopWindow::new_with_wallpaper(
+                desktop_id,
+                desktop_bounds,
+                bytes,
+            )),
+            None => Box::new(DesktopWindow::new(desktop_id, desktop_bounds)),
+        };
+        wm.set_window_impl(desktop_id, desktop_window);
+        if let Some(screen) = wm.get_active_screen_mut() {
+            screen.set_root_window(desktop_id);
+        }
+        if let Some(window) = wm.window_registry.get_mut(&desktop_id) {
+            window.invalidate();
+        }
+        wm.force_full_repaint();
+        crate::debug_info!(
+            "GUIShell: desktop root initialized for ring-3 shell (desktop={:?})",
+            desktop_id
+        );
+        desktop_id
+    });
+
+    if let Some(desktop_id) = desktop_id {
+        let mut state = GUISHELL_STATE.lock();
+        state.desktop_id = Some(desktop_id);
+        state.initialized = true;
+    }
+}
+
 /// Show the Start menu
 fn show_start_menu() {
     let (taskbar_id, desktop_id) = {
@@ -450,6 +502,12 @@ fn spawn_gui_user_app_with_args(path: &'static str, name: &'static str, argv: &[
         let message = alloc::format!("Could not start {}: {}", name, error);
         crate::window::dialogs::show_error("Start", &message);
     }
+}
+
+/// Submit the ring-3 desktop shell (`DESKTOP.ELF`). It claims the shell role
+/// via `gui_shell_register` on startup and owns the taskbar/Start menu/tray.
+pub fn spawn_ring3_desktop_shell() {
+    spawn_gui_user_app("/host/DESKTOP.ELF", "desktop");
 }
 
 fn spawn_run_command(command: alloc::string::String) {

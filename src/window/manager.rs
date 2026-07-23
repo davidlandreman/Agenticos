@@ -412,6 +412,15 @@ impl WindowManager {
         if self.pointer_capture == Some(id) {
             self.pointer_capture = None;
         }
+
+        // Removing a window vacates its screen region; the compositor must
+        // recompose so the desktop (or windows beneath it) shows through.
+        // Without this, a window closed via a client-driven path
+        // (`gui_win_destroy`, process-exit `cleanup_process`, or the ring-3
+        // shell's `gui_shell_window_action` close) leaves stale pixels on
+        // screen until an unrelated event forces a repaint. `mark_full_repaint`
+        // is idempotent, so the recursion above coalesces to one repaint.
+        self.compositor.dirty.mark_full_repaint();
     }
 
     // Focus management
@@ -2519,8 +2528,8 @@ impl WindowManager {
                                 }),
                             );
                         } else {
+                            // destroy_window marks the compositor dirty.
                             self.destroy_window(window_id);
-                            self.compositor.dirty.mark_full_repaint();
                         }
                     }
                     HitTestResult::MinimizeButton => {
@@ -2762,6 +2771,63 @@ impl WindowManager {
         }
 
         result
+    }
+
+    /// Frame list for the ring-3 desktop shell's taskbar: `(frame_id, title,
+    /// state)` where state is `0` normal / `1` minimized / `2` maximized.
+    /// Mirrors [`get_frame_windows`](Self::get_frame_windows) but carries
+    /// min/max state and excludes the shell's own panel (`taskbar_id`).
+    pub fn shell_window_list(&self) -> Vec<(WindowId, alloc::string::String, u8)> {
+        use alloc::string::String;
+
+        let mut result = Vec::new();
+        for (&window_id, window) in &self.window_registry {
+            if Some(window_id) == self.taskbar_id {
+                continue;
+            }
+            let Some(title) = window.window_title() else {
+                continue;
+            };
+            let state = window
+                .as_frame_window()
+                .map(|frame| {
+                    if frame.is_minimized() {
+                        1
+                    } else if frame.is_maximized() {
+                        2
+                    } else {
+                        0
+                    }
+                })
+                .unwrap_or(0);
+            result.push((window_id, String::from(title), state));
+        }
+        result
+    }
+
+    /// Apply a taskbar action from the ring-3 desktop shell to a frame it does
+    /// not own. `action`: `0` activate, `1` minimize, `2` maximize/restore
+    /// toggle, `3` restore (activate), `4` close. Returns whether it applied.
+    pub fn shell_window_action(&mut self, frame_id: WindowId, action: u32) -> bool {
+        let is_frame = self
+            .window_registry
+            .get(&frame_id)
+            .and_then(|window| window.as_frame_window())
+            .is_some();
+        if !is_frame {
+            return false;
+        }
+        match action {
+            0 | 3 => self.activate_frame(frame_id),
+            1 => self.minimize_frame(frame_id),
+            2 => self.toggle_maximize_frame(frame_id),
+            4 => {
+                self.destroy_window(frame_id);
+                self.force_full_repaint();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Get the screen dimensions

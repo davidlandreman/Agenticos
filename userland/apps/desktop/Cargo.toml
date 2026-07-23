@@ -1,0 +1,17 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "desktop"
+path = "src/main.rs"
+
+[dependencies]
+runtime = { path = "../../runtime" }
+gui = { path = "../../libs/gui" }
+
+[build-dependencies]
+userland-build-support = { path = "../../build-support" }

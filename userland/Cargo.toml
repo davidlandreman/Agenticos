@@ -27,6 +27,7 @@ members = [
     "apps/glgame",
     "apps/fileman",
     "apps/control",
+    "apps/desktop",
 ]
 
 # Release profile: small, panic-abort, LTO, strip. The output ELF must be
