@@ -156,6 +156,14 @@ pub enum FdSlot {
         handle: Arc<LocalStreamEndpoint>,
         cloexec: bool,
     },
+    /// The master end of a pty, owned by a ring-3 terminal emulator
+    /// (`TERMINAL.ELF`). Reads drain the slave's output; writes push into the
+    /// slave's input. The slave side is reached by the child process through
+    /// its inherited `terminal_id` (the existing sentinel-stdio model).
+    PtyMaster {
+        master: crate::terminal::pty::PtyMaster,
+        cloexec: bool,
+    },
 }
 
 impl FdSlot {
@@ -176,7 +184,8 @@ impl FdSlot {
             | Self::GuiEvents { cloexec, .. }
             | Self::EventFd { cloexec, .. }
             | Self::Epoll { cloexec, .. }
-            | Self::LocalStream { cloexec, .. } => *cloexec,
+            | Self::LocalStream { cloexec, .. }
+            | Self::PtyMaster { cloexec, .. } => *cloexec,
             Self::PipeRead(_, cloexec) | Self::PipeWrite(_, cloexec) => *cloexec,
         }
     }
@@ -199,7 +208,8 @@ impl FdSlot {
             | Self::GuiEvents { cloexec, .. }
             | Self::EventFd { cloexec, .. }
             | Self::Epoll { cloexec, .. }
-            | Self::LocalStream { cloexec, .. } => *cloexec = value,
+            | Self::LocalStream { cloexec, .. }
+            | Self::PtyMaster { cloexec, .. } => *cloexec = value,
             Self::PipeRead(_, cloexec) | Self::PipeWrite(_, cloexec) => *cloexec = value,
         }
     }
@@ -246,6 +256,9 @@ impl FdSlot {
             }
             (Self::LocalStream { handle: left, .. }, Self::LocalStream { handle: right, .. }) => {
                 Arc::ptr_eq(left, right)
+            }
+            (Self::PtyMaster { master: left, .. }, Self::PtyMaster { master: right, .. }) => {
+                left.same_master(right)
             }
             (Self::VirtualBinDir { .. }, Self::VirtualBinDir { .. })
             | (Self::VirtualDevDir { .. }, Self::VirtualDevDir { .. }) => false,

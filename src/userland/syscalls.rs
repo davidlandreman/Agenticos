@@ -210,10 +210,12 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
         Socket(u64),
         EventFd(crate::lib::arc::Arc<crate::userland::eventfd::EventFd>),
         LocalStream(crate::lib::arc::Arc<crate::userland::local_stream::LocalStreamEndpoint>),
+        PtyMaster(crate::terminal::pty::PtyMaster),
     }
     let slot = with_fd_slot(fd);
     let target = match slot {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Target::StdoutErr,
+        Some(FdSlot::PtyMaster { master, .. }) => Target::PtyMaster(master),
         Some(FdSlot::File { handle, .. }) => Target::File(handle),
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
@@ -325,6 +327,33 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
             };
             write_terminal_chunked(ptr, len, &mut emit)
         }
+        Target::PtyMaster(master) => {
+            // The emulator wrote keystrokes to the pty master; run them
+            // through the line discipline, then wake a blocked `read(0)`
+            // and raise any ISIG signal after the pty lock is released.
+            let take = core::cmp::min(len, WRITE_MAX_LEN as u64) as usize;
+            let mut staging = alloc::vec![0u8; take];
+            if let Err(e) = crate::userland::usercopy::copy_from_user(&mut staging, ptr) {
+                return e;
+            }
+            let (result, terminal_id) =
+                master.with(|p| (p.push_slave_input(&staging), p.terminal_id()));
+            if result.wake_reader {
+                crate::userland::lifecycle::wake_ring3_blocked_on_input(Some(terminal_id));
+                // The child may be parked in poll/select on stdin.
+                crate::userland::readiness::notify_changed();
+            }
+            if let Some(sig) = result.signal {
+                crate::userland::lifecycle::raise_signal_on_terminal(terminal_id, sig);
+            }
+            if result.consumed == 0 && take > 0 {
+                // Raw mode with a full slave queue: no progress. The
+                // master fd is non-blocking by construction, so report
+                // EAGAIN instead of a POSIX-invalid zero-length write.
+                return EAGAIN;
+            }
+            result.consumed as i64
+        }
     }
 }
 
@@ -344,11 +373,13 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
         File(crate::lib::arc::Arc<crate::fs::file_handle::File>),
         Socket(u64),
         LocalStream(crate::lib::arc::Arc<crate::userland::local_stream::LocalStreamEndpoint>),
+        PtyMaster(crate::terminal::pty::PtyMaster),
         /// `/dev/null`: validated iovecs count as fully written.
         Sink,
     }
     let target = match with_fd_slot(fd) {
         Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => Target::StdoutErr,
+        Some(FdSlot::PtyMaster { master, .. }) => Target::PtyMaster(master),
         Some(FdSlot::File { handle, .. }) => Target::File(handle),
         Some(FdSlot::Directory { .. })
         | Some(FdSlot::VirtualBinDir { .. })
@@ -483,6 +514,31 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                 }
                 written += n as u64;
                 if (n as u64) < len {
+                    break;
+                }
+            }
+            Target::PtyMaster(master) => {
+                let take = core::cmp::min(len, WRITE_MAX_LEN as u64) as usize;
+                let mut bytes = alloc::vec![0u8; take];
+                if let Err(e) = crate::userland::usercopy::copy_from_user(&mut bytes, base) {
+                    return if written > 0 { written as i64 } else { e };
+                }
+                let (result, terminal_id) =
+                    master.with(|p| (p.push_slave_input(&bytes), p.terminal_id()));
+                if result.wake_reader {
+                    crate::userland::lifecycle::wake_ring3_blocked_on_input(Some(terminal_id));
+                    // The child may be parked in poll/select on stdin.
+                    crate::userland::readiness::notify_changed();
+                }
+                if let Some(sig) = result.signal {
+                    crate::userland::lifecycle::raise_signal_on_terminal(terminal_id, sig);
+                }
+                if result.consumed == 0 && take > 0 && written == 0 {
+                    // Raw mode, full slave queue, nothing written yet.
+                    return EAGAIN;
+                }
+                written += result.consumed as u64;
+                if (result.consumed as u64) < len {
                     break;
                 }
             }
@@ -742,6 +798,27 @@ fn read_fd_once(args: &SyscallArgs, fd: i32, ptr: u64, len: u64) -> i64 {
             crate::userland::local_stream::LocalStreamEndpoint::read(args, &handle, ptr, len)
         }
         Some(FdSlot::Epoll { .. }) => EBADF,
+        Some(FdSlot::PtyMaster { master, .. }) => {
+            // Bounded, non-blocking drain of the slave's output. The emulator
+            // polls the master fd alongside its GUI event fd; an empty queue
+            // reports EAGAIN rather than a spurious EOF. Check emptiness
+            // before allocating so the idle-poll path costs no kernel heap
+            // traffic (the queue may shift between check and drain — the
+            // drain is bounded either way and a short read is fine).
+            let ready = master.output_ready();
+            if ready == 0 {
+                return EAGAIN;
+            }
+            let mut staging = vec![0u8; core::cmp::min(cap as usize, ready)];
+            let n = master.read_output(&mut staging);
+            if n == 0 {
+                return EAGAIN;
+            }
+            if let Err(e) = crate::userland::usercopy::copy_to_user(ptr, &staging[..n]) {
+                return e;
+            }
+            n as i64
+        }
         Some(FdSlot::File { handle, .. }) => {
             // Stage the read inside a kernel buffer so the FAT/block path
             // never sees a user pointer (which could be unmapped, span a
@@ -775,6 +852,11 @@ fn read_stdin_blocking(args: &SyscallArgs, ptr: u64, cap: u64) -> i64 {
             return e;
         }
         return n as i64;
+    }
+    if crate::userland::stdin::take_eof_for_current_process() {
+        // Canonical-mode VEOF (Ctrl-D on an empty line): deliver
+        // end-of-file exactly once instead of blocking.
+        return 0;
     }
 
     // No input is available. Block the user entity in the shared scheduler.
@@ -4272,9 +4354,12 @@ pub fn fstat_handler(args: &mut SyscallArgs) -> i64 {
 
     let slot = with_fd_slot(fd);
     match slot {
-        Some(FdSlot::Stdin) | Some(FdSlot::Stdout) | Some(FdSlot::Stderr) => {
-            // Streams report as character devices with size 0; libc just
-            // wants a successful fstat to decide buffering.
+        Some(FdSlot::Stdin)
+        | Some(FdSlot::Stdout)
+        | Some(FdSlot::Stderr)
+        | Some(FdSlot::PtyMaster { .. }) => {
+            // Streams (and the pty master) report as character devices with
+            // size 0; libc just wants a successful fstat to decide buffering.
             let mut st = LinuxStat::default();
             st.st_mode = 0o020000 | 0o666; // S_IFCHR | rw-rw-rw-
             st.st_blksize = 4096;
@@ -5215,6 +5300,11 @@ pub(crate) fn fd_slot_readiness(slot: &FdSlot) -> Result<FdReady, i64> {
             readable: crate::userland::stdin::queued_len_for_current_process() != 0,
             ..FdReady::default()
         }),
+        FdSlot::PtyMaster { master, .. } => Ok(FdReady {
+            readable: master.output_ready() != 0,
+            writable: true,
+            ..FdReady::default()
+        }),
         FdSlot::Stdout | FdSlot::Stderr => Ok(FdReady {
             writable: true,
             ..FdReady::default()
@@ -6085,6 +6175,7 @@ fn resolve_proc_self_fd(fd: i32) -> Option<String> {
     let slot = with_fd_slot(fd)?;
     Some(match slot {
         FdSlot::Stdin | FdSlot::Stdout | FdSlot::Stderr => String::from("/dev/tty"),
+        FdSlot::PtyMaster { .. } => String::from("/dev/ptmx"),
         FdSlot::File { handle, .. } => handle.path(),
         FdSlot::Directory { handle, .. } => handle.path(),
         FdSlot::PipeRead(_, _) | FdSlot::PipeWrite(_, _) => String::from("pipe:[0]"),

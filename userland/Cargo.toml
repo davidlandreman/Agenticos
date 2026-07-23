@@ -13,6 +13,8 @@ exclude = ["build-support"]
 members = [
     "runtime",
     "libs/gui-core",
+    "libs/vte",
+    "libs/termgrid",
     "libs/gui",
     "libs/gl",
     "libs/dialogs",
@@ -22,6 +24,7 @@ members = [
     "apps/guidemo",
     "apps/notepad",
     "apps/taskmgr",
+    "apps/terminal",
     "apps/calc",
     "apps/painting",
     "apps/glgame",
