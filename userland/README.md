@@ -318,7 +318,11 @@ typed `ControlInput` values produced by `decode_control_input`; applications no
 longer need to decode signed wheel deltas, button bits, or key modifiers from
 raw GUI payload arrays. Controls report `consumed`, `repaint`, and a typed
 action so domain state changes only for actions such as `Changed` or
-`Activated`.
+`Activated`. Tabs, chart surfaces/series, sortable headers, selections, and
+status bars all dispatch through the active Classic/Aero/Futurism finish.
+`TabBar` handles pointer selection, Left/Right/Home/End navigation, and
+wrapping Ctrl+Tab / Ctrl+Shift+Tab switching; plain Tab remains available for
+application focus traversal.
 
 `TextField` is the single-line control with horizontal caret scrolling and
 selection. `TextArea` is the multiline control used by Notepad; it provides

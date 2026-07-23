@@ -96,6 +96,16 @@ pub struct Palette {
     pub scrollbar_pressed: u32,
 }
 
+/// Theme-scoped colors for shared data visualizations.
+pub struct DataVizPalette {
+    pub surface: u32,
+    pub grid: u32,
+    pub primary_line: u32,
+    pub primary_fill: u32,
+    pub secondary_line: u32,
+    pub text: u32,
+}
+
 const CLASSIC_PALETTE: Palette = Palette {
     content_bg: 0xC0C0C0,
     text: 0x000000,
@@ -109,6 +119,15 @@ const CLASSIC_PALETTE: Palette = Palette {
     scrollbar_thumb: 0xC0C0C0,
     scrollbar_hot: 0xD4D0C8,
     scrollbar_pressed: 0xA0A0A0,
+};
+
+const CLASSIC_DATA_VIZ: DataVizPalette = DataVizPalette {
+    surface: 0xFFFFFF,
+    grid: 0xD8D8D8,
+    primary_line: 0x000080,
+    primary_fill: 0xD8E4F3,
+    secondary_line: 0x107C10,
+    text: 0x000000,
 };
 
 const AERO_PALETTE: Palette = Palette {
@@ -126,6 +145,15 @@ const AERO_PALETTE: Palette = Palette {
     scrollbar_pressed: 0x7FB6D8,
 };
 
+const AERO_DATA_VIZ: DataVizPalette = DataVizPalette {
+    surface: 0xFFFFFF,
+    grid: 0xE5E9ED,
+    primary_line: 0x0078D7,
+    primary_fill: 0xCCE4F7,
+    secondary_line: 0x107C10,
+    text: 0x000000,
+};
+
 const FUTURISM_PALETTE: Palette = Palette {
     content_bg: 0xF7F9FC,
     text: 0x1F2937,
@@ -139,6 +167,15 @@ const FUTURISM_PALETTE: Palette = Palette {
     scrollbar_thumb: 0xC3CEDF,
     scrollbar_hot: 0x9EC3F5,
     scrollbar_pressed: 0x7FA9E8,
+};
+
+const FUTURISM_DATA_VIZ: DataVizPalette = DataVizPalette {
+    surface: 0xFFFFFF,
+    grid: 0xE8EDF5,
+    primary_line: 0x3C8CF0,
+    primary_fill: 0xDCE9FC,
+    secondary_line: 0x18864B,
+    text: 0x1F2937,
 };
 
 // Classic (Win98) bevel constants, shared with the kernel classic theme.
@@ -255,6 +292,15 @@ fn load() -> Theme {
 /// The palette for the active theme.
 pub fn palette() -> &'static Palette {
     palette_for(current())
+}
+
+/// Visualization colors for the active theme.
+pub fn data_viz_palette() -> &'static DataVizPalette {
+    match current() {
+        Theme::Classic => &CLASSIC_DATA_VIZ,
+        Theme::Aero => &AERO_DATA_VIZ,
+        Theme::Futurism => &FUTURISM_DATA_VIZ,
+    }
 }
 
 /// Label color for a button in `state`.
@@ -597,6 +643,246 @@ pub fn draw_menu_surface(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32) {
             canvas.fill_rect(x, y, w, h, FUT_MENU_SURFACE);
             canvas.rect(x, y, w, h, FUT_MENU_BORDER);
         }
+    }
+}
+
+/// Paint the full horizontal strip behind a set of tabs.
+pub fn draw_tab_strip(canvas: &mut Canvas, bounds: gui_core::Rect) {
+    canvas.fill_rect(
+        bounds.x,
+        bounds.y,
+        bounds.w,
+        bounds.h,
+        palette().content_bg,
+    );
+    if bounds.h == 0 {
+        return;
+    }
+    let baseline = match finish() {
+        Finish::Bevel98 => BEVEL_SHADOW,
+        Finish::GlassKd4 => AERO_FIELD_BORDER,
+        Finish::SoftRounded => FUT_BORDER,
+    };
+    canvas.horizontal_line(bounds.x, bounds.bottom() - 1, bounds.w, baseline);
+}
+
+/// Paint one tab face. The tab widget owns geometry and text; this helper
+/// owns finish-specific elevation, borders, and selected-page merging.
+pub fn draw_tab(canvas: &mut Canvas, bounds: gui_core::Rect, selected: bool) {
+    if bounds.w == 0 || bounds.h == 0 {
+        return;
+    }
+    match finish() {
+        Finish::Bevel98 => draw_classic_tab(canvas, bounds, selected),
+        Finish::GlassKd4 => draw_aero_tab(canvas, bounds, selected),
+        Finish::SoftRounded => draw_futurism_tab(canvas, bounds, selected),
+    }
+}
+
+fn draw_classic_tab(canvas: &mut Canvas, bounds: gui_core::Rect, selected: bool) {
+    let y_offset = if selected { 0 } else { 2 };
+    let y = bounds.y + y_offset;
+    let h = bounds.h.saturating_sub(y_offset as u32);
+    if h < 2 {
+        return;
+    }
+    canvas.fill_rect(bounds.x, y, bounds.w, h, CLASSIC_FACE);
+    canvas.horizontal_line(bounds.x, y, bounds.w, BEVEL_HIGHLIGHT);
+    canvas.vertical_line(bounds.x, y, h, BEVEL_HIGHLIGHT);
+    if bounds.w > 2 && h > 2 {
+        canvas.horizontal_line(bounds.x + 1, y + 1, bounds.w - 2, BEVEL_LIGHT);
+        canvas.vertical_line(bounds.x + 1, y + 1, h - 1, BEVEL_LIGHT);
+    }
+    if bounds.w > 1 {
+        canvas.vertical_line(bounds.right() - 1, y, h, BEVEL_DARK);
+    }
+    if bounds.w > 2 {
+        canvas.vertical_line(bounds.right() - 2, y + 1, h.saturating_sub(1), BEVEL_SHADOW);
+    }
+    if !selected {
+        canvas.horizontal_line(bounds.x, bounds.bottom() - 1, bounds.w, BEVEL_SHADOW);
+    }
+}
+
+fn draw_aero_tab(canvas: &mut Canvas, bounds: gui_core::Rect, selected: bool) {
+    if !selected {
+        return;
+    }
+    let h = bounds.h as i32;
+    let w = bounds.w as i32;
+    for row in 0..h {
+        let inset = if row == 0 {
+            2
+        } else if row == 1 {
+            1
+        } else {
+            0
+        };
+        canvas.fill_rect(
+            bounds.x + inset,
+            bounds.y + row,
+            (w - inset * 2).max(0) as u32,
+            1,
+            palette().field_bg,
+        );
+    }
+    if bounds.w > 4 {
+        canvas.horizontal_line(bounds.x + 2, bounds.y, bounds.w - 4, AERO_BORDER_HOT);
+        canvas.horizontal_line(bounds.x + 1, bounds.y + 1, bounds.w - 2, AERO_GLOW);
+    }
+    canvas.vertical_line(bounds.x, bounds.y + 2, bounds.h.saturating_sub(2), AERO_FIELD_BORDER);
+    canvas.vertical_line(
+        bounds.right() - 1,
+        bounds.y + 2,
+        bounds.h.saturating_sub(2),
+        AERO_FIELD_BORDER,
+    );
+}
+
+fn draw_futurism_tab(canvas: &mut Canvas, bounds: gui_core::Rect, selected: bool) {
+    if !selected || bounds.h < 8 || bounds.w < 8 {
+        return;
+    }
+    let pill = gui_core::Rect::new(
+        bounds.x + 2,
+        bounds.y + 3,
+        bounds.w.saturating_sub(4),
+        bounds.h.saturating_sub(7),
+    );
+    fill_rounded_rect(
+        canvas,
+        pill.x,
+        pill.y,
+        pill.w,
+        pill.h,
+        palette().selection_bg,
+        aero_corner_inset,
+    );
+    draw_rounded_outline(
+        canvas,
+        pill.x,
+        pill.y,
+        pill.w,
+        pill.h,
+        FUT_SELECTION_BORDER,
+        aero_corner_inset,
+    );
+}
+
+/// Text color for an enabled tab.
+pub fn tab_text(selected: bool) -> u32 {
+    if selected && finish() == Finish::SoftRounded {
+        palette().selection_text
+    } else {
+        palette().text
+    }
+}
+
+/// Paint a clickable column-header cell.
+pub fn draw_column_header(canvas: &mut Canvas, bounds: gui_core::Rect, sorted: bool) {
+    if bounds.w == 0 || bounds.h == 0 {
+        return;
+    }
+    match finish() {
+        Finish::Bevel98 => {
+            draw_classic_button(
+                canvas,
+                bounds.x,
+                bounds.y,
+                bounds.w,
+                bounds.h,
+                ButtonState::Normal,
+            );
+        }
+        Finish::GlassKd4 => {
+            draw_aero_button(
+                canvas,
+                bounds.x,
+                bounds.y,
+                bounds.w,
+                bounds.h,
+                if sorted {
+                    ButtonState::Hot
+                } else {
+                    ButtonState::Normal
+                },
+            );
+        }
+        Finish::SoftRounded => {
+            canvas.fill_rect(
+                bounds.x,
+                bounds.y,
+                bounds.w,
+                bounds.h,
+                if sorted {
+                    palette().selection_bg
+                } else {
+                    palette().content_bg
+                },
+            );
+            canvas.vertical_line(bounds.right() - 1, bounds.y, bounds.h, palette().border);
+            canvas.horizontal_line(bounds.x, bounds.bottom() - 1, bounds.w, palette().border);
+            if sorted && bounds.w > 4 {
+                canvas.horizontal_line(bounds.x + 2, bounds.y, bounds.w - 4, FUT_ACCENT);
+            }
+        }
+    }
+}
+
+/// Paint a status-bar surface; callers add text and sections.
+pub fn draw_status_bar_surface(canvas: &mut Canvas, bounds: gui_core::Rect) {
+    canvas.fill_rect(
+        bounds.x,
+        bounds.y,
+        bounds.w,
+        bounds.h,
+        palette().content_bg,
+    );
+    if bounds.h == 0 {
+        return;
+    }
+    match finish() {
+        Finish::Bevel98 => {
+            canvas.horizontal_line(bounds.x, bounds.y, bounds.w, BEVEL_SHADOW);
+            if bounds.h > 1 {
+                canvas.horizontal_line(bounds.x, bounds.y + 1, bounds.w, BEVEL_HIGHLIGHT);
+            }
+        }
+        Finish::GlassKd4 | Finish::SoftRounded => {
+            canvas.horizontal_line(bounds.x, bounds.y, bounds.w, palette().border);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pixel(canvas: &Canvas, x: u32, y: u32) -> u32 {
+        canvas.pixels()[(y * canvas.width() + x) as usize]
+    }
+
+    #[test]
+    fn tabs_and_visualization_colors_dispatch_by_theme() {
+        let bounds = gui_core::Rect::new(0, 0, 64, 26);
+        let mut canvas = Canvas::new(64, 26);
+
+        set(Theme::Classic);
+        draw_tab_strip(&mut canvas, bounds);
+        draw_tab(&mut canvas, bounds, true);
+        assert_eq!(pixel(&canvas, 8, 0), BEVEL_HIGHLIGHT);
+        assert_eq!(pixel(&canvas, 8, 10), CLASSIC_FACE);
+        assert_ne!(pixel(&canvas, 8, 10), CLASSIC_PALETTE.field_bg);
+        assert_eq!(tab_text(false), CLASSIC_PALETTE.text);
+        assert_eq!(data_viz_palette().primary_line, 0x000080);
+
+        canvas.clear(0);
+        set(Theme::Futurism);
+        draw_tab_strip(&mut canvas, bounds);
+        draw_tab(&mut canvas, bounds, true);
+        assert_eq!(pixel(&canvas, 4, 3), FUT_SELECTION_BORDER);
+        assert_eq!(tab_text(true), FUTURISM_PALETTE.selection_text);
+        assert_eq!(data_viz_palette().primary_line, FUT_ACCENT);
     }
 }
 

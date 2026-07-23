@@ -9,6 +9,7 @@ mod input;
 mod menu;
 mod scrollbar;
 mod slider;
+mod tab_bar;
 pub mod svg;
 mod text_area;
 pub mod theme;
@@ -31,6 +32,7 @@ pub use runtime::{
 };
 pub use scrollbar::{Scrollbar, ScrollbarAction, SCROLLBAR_THICKNESS};
 pub use slider::{Slider, SliderAction};
+pub use tab_bar::{TabBar, TabBarAction};
 pub use text_area::{TextArea, TextAreaAction, TextAreaOptions, WrapMode};
 pub use theme::{ButtonState, Theme};
 
@@ -1376,124 +1378,6 @@ impl ListView {
     }
 }
 
-/// Horizontal tab strip. Plain retained struct in the `MenuBar` idiom:
-/// the host draws it, hit-tests clicks, and owns the active index.
-pub struct TabBar {
-    pub tabs: Vec<String>,
-    pub active: usize,
-    pub x: i32,
-    pub y: i32,
-    pub w: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TabBarAction {
-    Changed(usize),
-}
-
-impl TabBar {
-    pub const HEIGHT: u32 = 26;
-    const PAD: i32 = 12;
-
-    pub fn new(x: i32, y: i32, w: u32, tabs: &[&str]) -> Self {
-        Self {
-            tabs: tabs.iter().map(|t| String::from(*t)).collect(),
-            active: 0,
-            x,
-            y,
-            w,
-        }
-    }
-
-    fn tab_width(label: &str) -> i32 {
-        label.chars().count() as i32 * FONT_CELL_WIDTH + Self::PAD * 2
-    }
-
-    /// Which tab a click at `(x, y)` lands on, if any.
-    pub fn hit(&self, x: i32, y: i32) -> Option<usize> {
-        if y < self.y || y >= self.y + Self::HEIGHT as i32 {
-            return None;
-        }
-        let mut tab_x = self.x;
-        for (i, label) in self.tabs.iter().enumerate() {
-            let tw = Self::tab_width(label);
-            if x >= tab_x && x < tab_x + tw {
-                return Some(i);
-            }
-            tab_x += tw;
-        }
-        None
-    }
-
-    /// Advance to the next tab (Ctrl+Tab idiom); wraps.
-    pub fn cycle(&mut self) {
-        if !self.tabs.is_empty() {
-            self.active = (self.active + 1) % self.tabs.len();
-        }
-    }
-
-    pub fn handle_input(&mut self, input: ControlInput) -> ControlResponse<TabBarAction> {
-        let before = self.active;
-        match input {
-            ControlInput::Pointer(pointer) if matches!(pointer.kind, PointerKind::Down) => {
-                let Some(tab) = self.hit(pointer.x, pointer.y) else {
-                    return ControlResponse::ignored();
-                };
-                self.active = tab;
-            }
-            ControlInput::Key(key) if key.pressed && !self.tabs.is_empty() => match key.key {
-                runtime::KEY_LEFT => self.active = self.active.saturating_sub(1),
-                runtime::KEY_RIGHT => self.active = (self.active + 1).min(self.tabs.len() - 1),
-                runtime::KEY_HOME => self.active = 0,
-                runtime::KEY_END => self.active = self.tabs.len() - 1,
-                _ => return ControlResponse::ignored(),
-            },
-            _ => return ControlResponse::ignored(),
-        }
-        let changed = before != self.active;
-        ControlResponse::consumed(
-            changed,
-            changed.then_some(TabBarAction::Changed(self.active)),
-        )
-    }
-
-    pub fn draw(&self, canvas: &mut Canvas) {
-        let palette = theme::palette();
-        canvas.fill_rect(self.x, self.y, self.w, Self::HEIGHT, palette.content_bg);
-        canvas.horizontal_line(
-            self.x,
-            self.y + Self::HEIGHT as i32 - 1,
-            self.w,
-            palette.border,
-        );
-        let mut tab_x = self.x;
-        for (i, label) in self.tabs.iter().enumerate() {
-            let tw = Self::tab_width(label);
-            let active = i == self.active;
-            if active {
-                // Active tab: raised white panel that merges into the
-                // content area, with an accent line across its top.
-                canvas.fill_rect(tab_x, self.y, tw as u32, Self::HEIGHT, palette.field_bg);
-                canvas.fill_rect(tab_x, self.y, tw as u32, 2, palette.selection_bg);
-                canvas.vertical_line(tab_x, self.y, Self::HEIGHT, palette.border);
-                canvas.vertical_line(tab_x + tw - 1, self.y, Self::HEIGHT, palette.border);
-            }
-            let fg = if active {
-                palette.text
-            } else {
-                palette.disabled_text
-            };
-            canvas.draw_text(
-                tab_x + Self::PAD,
-                self.y + (Self::HEIGHT as i32 - FONT_LINE_HEIGHT) / 2,
-                label,
-                fg,
-            );
-            tab_x += tw;
-        }
-    }
-}
-
 /// One column of a [`ColumnListView`].
 pub struct Column {
     pub title: String,
@@ -1893,6 +1777,16 @@ impl ColumnListView {
         };
         let mut col_x = self.x;
         for (i, column) in self.columns.iter().enumerate() {
+            let available = (self.x + self.w as i32 - col_x).max(0) as u32;
+            let cell_width = column.width.min(available);
+            if cell_width == 0 {
+                break;
+            }
+            theme::draw_column_header(
+                canvas,
+                Rect::new(col_x, self.y, cell_width, Self::HEADER_HEIGHT),
+                i == self.sort_col,
+            );
             let max_chars = ((column.width as i32 - 8) / FONT_CELL_WIDTH).max(1) as usize;
             let mut title: String = column.title.chars().take(max_chars).collect();
             if i == self.sort_col && !title.is_empty() {
@@ -1913,7 +1807,12 @@ impl ColumnListView {
             if col_x >= self.x + self.w as i32 {
                 break;
             }
-            canvas.vertical_line(col_x - 1, self.y, self.h, palette.border);
+            canvas.vertical_line(
+                col_x - 1,
+                self.y + Self::HEADER_HEIGHT as i32,
+                self.h.saturating_sub(Self::HEADER_HEIGHT),
+                palette.border,
+            );
         }
         canvas.horizontal_line(
             self.x,
@@ -1937,7 +1836,18 @@ impl ColumnListView {
                 (palette.field_bg, palette.field_text)
             };
             if bg != palette.field_bg {
-                canvas.fill_rect(self.x, row_y, self.w - gutter as u32, Self::ROW_HEIGHT, bg);
+                let selection_width = self.w.saturating_sub(gutter as u32);
+                if selected {
+                    theme::draw_selection(
+                        canvas,
+                        self.x,
+                        row_y,
+                        selection_width,
+                        Self::ROW_HEIGHT,
+                    );
+                } else {
+                    canvas.fill_rect(self.x, row_y, selection_width, Self::ROW_HEIGHT, bg);
+                }
             }
             let mut cell_x = self.x;
             for (i, column) in self.columns.iter().enumerate() {
@@ -2034,15 +1944,20 @@ impl TimeSeriesGraph {
     }
 
     pub fn draw(&self, canvas: &mut Canvas, title: &str, value_label: &str) {
-        canvas.fill_rect(self.x, self.y, self.w, self.h, COLOR_WHITE);
-        let plot_x = self.x + 1;
-        let plot_y = self.y + 1;
-        let plot_w = self.w.saturating_sub(2) as i32;
-        let plot_h = self.h.saturating_sub(2) as i32;
+        let colors = theme::data_viz_palette();
+        canvas.fill_rect(self.x, self.y, self.w, self.h, colors.surface);
+        if self.w < 5 || self.h < 5 {
+            theme::draw_field_border(canvas, self.x, self.y, self.w, self.h, false);
+            return;
+        }
+        let plot_x = self.x + 2;
+        let plot_y = self.y + 2;
+        let plot_w = self.w.saturating_sub(4) as i32;
+        let plot_h = self.h.saturating_sub(4) as i32;
         // Gridlines at 25/50/75 %.
         for q in 1..4 {
             let gy = plot_y + plot_h * q / 4;
-            canvas.horizontal_line(plot_x, gy, plot_w as u32, 0xEAEAEA);
+            canvas.horizontal_line(plot_x, gy, plot_w as u32, colors.grid);
         }
         let max = self.y_max();
         let scale = |v: f32| -> i32 {
@@ -2076,10 +1991,10 @@ impl TimeSeriesGraph {
                         plot_x + col,
                         top + 1,
                         (bottom - top) as u32,
-                        COLOR_ACCENT_FILL,
+                        colors.primary_fill,
                     );
                 }
-                canvas.pixel(plot_x + col, top, COLOR_HIGHLIGHT);
+                canvas.pixel(plot_x + col, top, colors.primary_line);
                 if let Some(prev) = sample_at(&self.a, col - 1) {
                     // Join vertical gaps between adjacent columns so
                     // steep changes stay a connected line.
@@ -2094,7 +2009,7 @@ impl TimeSeriesGraph {
                             plot_x + col,
                             lo + 1,
                             (hi - lo - 1) as u32,
-                            COLOR_HIGHLIGHT,
+                            colors.primary_line,
                         );
                     }
                 }
@@ -2104,7 +2019,7 @@ impl TimeSeriesGraph {
         for col in 0..plot_w {
             if let Some(v) = sample_at(&self.b, col) {
                 let top = scale(v);
-                canvas.pixel(plot_x + col, top, COLOR_ACCENT2);
+                canvas.pixel(plot_x + col, top, colors.secondary_line);
                 if let Some(prev) = sample_at(&self.b, col - 1) {
                     let prev_top = scale(prev);
                     let (lo, hi) = if prev_top < top {
@@ -2117,20 +2032,20 @@ impl TimeSeriesGraph {
                             plot_x + col,
                             lo + 1,
                             (hi - lo - 1) as u32,
-                            COLOR_ACCENT2,
+                            colors.secondary_line,
                         );
                     }
                 }
             }
         }
-        canvas.rect(self.x, self.y, self.w, self.h, COLOR_BORDER);
-        canvas.draw_text(self.x + 6, self.y + 5, title, COLOR_TEXT);
+        theme::draw_field_border(canvas, self.x, self.y, self.w, self.h, false);
+        canvas.draw_text(self.x + 6, self.y + 5, title, colors.text);
         let label_w = value_label.chars().count() as i32 * FONT_CELL_WIDTH;
         canvas.draw_text(
             self.x + self.w as i32 - label_w - 6,
             self.y + 5,
             value_label,
-            COLOR_TEXT,
+            colors.text,
         );
     }
 }

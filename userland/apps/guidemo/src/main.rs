@@ -9,8 +9,9 @@ use dialogs::{
     Buttons, ColorPicker, DialogStatus, FileDialog, MessageBox, MessageChoice, Modal, ModalOutcome,
 };
 use gui::{
-    decode_control_input, theme, Button, ButtonState, ControlInput, ListView, PointerKind, Rect,
-    Slider, TextArea, TextAreaOptions, TextField, Window, GUI_EVENT_CLOSE, GUI_EVENT_KEY,
+    decode_control_input, theme, Button, ButtonState, Column, ColumnListView, ColumnRow,
+    ControlInput, ListView, PointerKind, Rect, Slider, StatusBar, TabBar, TextArea,
+    TextAreaOptions, TextField, TimeSeriesGraph, Window, GUI_EVENT_CLOSE, GUI_EVENT_KEY,
     GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
 };
 
@@ -23,7 +24,8 @@ enum ModalPurpose {
 }
 
 /// Reference client: renders every toolkit widget in every state under the
-/// active theme (Classic/Aero from `/etc/theme`), plus the common dialogs.
+/// active theme (Classic/Aero/Futurism from `/etc/theme`), plus the common
+/// dialogs.
 struct Demo {
     window: Window,
     swatch: u32,
@@ -33,6 +35,10 @@ struct Demo {
     list: ListView,
     area: TextArea,
     slider: Slider,
+    tabs: TabBar,
+    columns: ColumnListView,
+    graph: TimeSeriesGraph,
+    status: StatusBar,
     buttons: [Button; 4],
     modal: Option<Modal>,
     purpose: ModalPurpose,
@@ -47,7 +53,7 @@ const BUTTON_STATES: [ButtonState; 4] = [
 
 impl Demo {
     fn new() -> Result<Self, i64> {
-        let window = Window::new(700, 520, "Ring-3 GUI Demo")?;
+        let window = Window::new(900, 680, "Ring-3 GUI Demo")?;
         let mut list = ListView::new(16, 240, 220, 120);
         list.set_rows(
             (1..=12)
@@ -55,6 +61,31 @@ impl Demo {
                 .collect::<Vec<_>>(),
         );
         list.selected = Some(1);
+        let mut columns = ColumnListView::new(
+            690,
+            250,
+            190,
+            170,
+            alloc::vec![Column::new("Name", 110), Column::numeric("Value", 80)],
+        );
+        columns.sort_col = 1;
+        columns.sort_desc = true;
+        columns.set_rows(alloc::vec![
+            ColumnRow::new(1, alloc::vec!["Alpha".into(), "42".into()]),
+            ColumnRow::new(2, alloc::vec!["Beta".into(), "17".into()]),
+            ColumnRow::new(3, alloc::vec!["Gamma".into(), "81".into()]),
+            ColumnRow::new(4, alloc::vec!["Delta".into(), "23".into()]),
+        ]);
+        columns.selected_key = Some(3);
+        let mut graph = TimeSeriesGraph::new(690, 440, 190, 170, 24, Some(100.0));
+        for sample in 0..24 {
+            graph.push(
+                ((sample * 13 + 17) % 90 + 5) as f32,
+                Some(((sample * 7 + 31) % 70 + 8) as f32),
+            );
+        }
+        let mut status = StatusBar::new(Rect::new(0, 658, 900, 22));
+        status.set_text("Shared StatusBar - switch themes while this window remains open");
         let mut demo = Self {
             window,
             swatch: 0x203050,
@@ -70,6 +101,10 @@ impl Demo {
                 area
             },
             slider: Slider::new(360, 250, 220, 18, 0, 255, 96),
+            tabs: TabBar::new(480, 60, 400, &["Overview", "Details", "History"]),
+            columns,
+            graph,
+            status,
             buttons: [
                 Button::new("Normal", 16, 60, 100, 28),
                 Button::new("Default", 128, 60, 100, 28),
@@ -136,9 +171,16 @@ impl Demo {
             canvas.fill_rect(260, 240, 64, 40, swatch);
             canvas.rect(260, 240, 64, 40, palette.border);
             canvas.draw_text(590, 252, "Slider", palette.text);
+            canvas.draw_text(690, 232, "Column list:", palette.text);
+            canvas.draw_text(690, 422, "Time-series graph:", palette.text);
         }
         self.slider.draw(self.window.canvas_mut(), false);
         self.area.draw(self.window.canvas_mut(), self.area_focused);
+        self.tabs.draw(self.window.canvas_mut());
+        self.columns.draw(self.window.canvas_mut());
+        self.graph
+            .draw(self.window.canvas_mut(), "CPU / network", "latest");
+        self.status.draw(self.window.canvas_mut());
         let _ = self.window.present();
     }
 
@@ -146,6 +188,13 @@ impl Demo {
         match event.kind {
             GUI_EVENT_CLOSE => return true,
             GUI_EVENT_KEY if event.payload[3] != 0 && self.modal.is_none() => {
+                if let Some(input @ ControlInput::Key(key)) = decode_control_input(event) {
+                    if key.key == runtime::KEY_TAB && key.modifiers.ctrl {
+                        self.tabs.handle_input(input);
+                        self.render();
+                        return false;
+                    }
+                }
                 let character = char::from_u32(event.payload[1]).unwrap_or('\0');
                 match character.to_ascii_lowercase() {
                     'c' if !self.field_focused && !self.area_focused => {
@@ -198,13 +247,19 @@ impl Demo {
                         .handle_input(ControlInput::Pointer(input), self.field_focused);
                     self.area
                         .handle_input(ControlInput::Pointer(input), self.area_focused);
+                    self.tabs.handle_input(ControlInput::Pointer(input));
                     self.list.handle_pointer(input);
+                    self.columns.handle_pointer(input);
                     self.slider.handle_pointer(input);
                     self.render();
                 }
             }
             GUI_EVENT_RESIZE => {
                 self.window.resize(event.payload[0], event.payload[1]);
+                let width = self.window.canvas().width();
+                let height = self.window.canvas().height();
+                self.status.bounds = Rect::new(0, height.saturating_sub(22) as i32, width, 22);
+                self.tabs.w = width.saturating_sub(self.tabs.x.max(0) as u32);
                 self.render();
             }
             _ => {}
