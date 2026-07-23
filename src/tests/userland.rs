@@ -770,6 +770,33 @@ fn test_dispatch_getrlimit_returns_infinity() {
     crate::userland::abi::clear_user_va_bounds();
 }
 
+/// `sched_getaffinity(0)` exposes every online CPU in a Linux cpu_set_t and
+/// returns the kernel mask width, allowing threaded tools to size I/O pools.
+fn test_dispatch_sched_getaffinity_reports_online_cpus() {
+    let mut set = [0xffu8; 128];
+    let ptr = set.as_mut_ptr() as u64;
+    crate::userland::abi::set_user_va_bounds(crate::userland::abi::UserVaBounds {
+        start: ptr,
+        end: ptr + set.len() as u64,
+    });
+    let mut args = SyscallArgs::default();
+    args.rax = crate::userland::abi::nr::SCHED_GETAFFINITY;
+    args.rdi = 0;
+    args.rsi = set.len() as u64;
+    args.rdx = ptr;
+    assert_eq!(syscall_dispatch(&mut args), 8);
+    crate::userland::abi::clear_user_va_bounds();
+
+    let cpu_count = crate::arch::x86_64::smp::online_cpu_count().min(64);
+    let expected = if cpu_count == 64 {
+        u64::MAX
+    } else {
+        (1u64 << cpu_count) - 1
+    };
+    assert_eq!(u64::from_ne_bytes(set[..8].try_into().unwrap()), expected);
+    assert!(set[8..].iter().all(|byte| *byte == 0));
+}
+
 /// `prlimit64(0, RLIMIT_STACK, NULL, &old)` writes RLIM_INFINITY into
 /// the old buffer; with NULL old it just returns 0.
 fn test_dispatch_prlimit64_old_value_writes_infinity() {
@@ -6411,6 +6438,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_readlink_proc_self_fd_overflow_rejected,
         &test_dispatch_readlink_other_returns_enoent,
         &test_dispatch_getrlimit_returns_infinity,
+        &test_dispatch_sched_getaffinity_reports_online_cpus,
         &test_dispatch_prlimit64_old_value_writes_infinity,
         &test_dispatch_prlimit64_null_old_returns_zero,
         &test_dispatch_getrusage_self_zero_fills_and_rejects_unknown_who,

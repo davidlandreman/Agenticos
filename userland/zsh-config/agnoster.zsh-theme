@@ -176,24 +176,47 @@ prompt_git_relative() {
   fi;
 }
 
+# Resolve the repository control directory without launching another Git
+# process after `git status` has already established that this is a worktree.
+# Linked worktrees store an absolute or worktree-relative `gitdir:` pointer in
+# a .git file; ordinary repositories use a .git directory.
+agenticos_git_dir() {
+  local dir=$PWD marker pointer
+  while true; do
+    marker=$dir/.git
+    if [[ -d $marker ]]; then
+      REPLY=$marker
+      return 0
+    fi
+    if [[ -f $marker ]]; then
+      IFS= read -r pointer < $marker || return 1
+      if [[ $pointer == 'gitdir: '* ]]; then
+        REPLY=${pointer#gitdir: }
+        [[ $REPLY == /* ]] || REPLY=$dir/$REPLY
+        return 0
+      fi
+      return 1
+    fi
+    [[ $dir == / ]] && return 1
+    dir=${dir:h}
+  done
+}
+
 # Git: branch/detached head, dirty status
 prompt_git() {
   # AgenticOS: stay silent unless the git builtin is on PATH (GIT.ELF).
   (( $+commands[git] )) || return
-  if [[ "$(command git config --get oh-my-zsh.hide-status 2>/dev/null)" = 1 ]]; then
-    return
-  fi
   local PL_BRANCH_CHAR
   () {
     local LC_ALL="" LC_CTYPE="en_US.UTF-8"
     PL_BRANCH_CHAR=$'\ue0a0'         # 
   }
-  local ref dirty mode repo_path
+  local ref dirty mode repo_path branch_line branch_info branch_name
   # AgenticOS: staged/unstaged flags and marker, computed inline below.
   local git_status staged unstaged git_marker
 
-   if [[ "$(command git rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ]]; then
-    repo_path=$(command git rev-parse --git-dir 2>/dev/null)
+  if git_status=$(command git status --porcelain=v1 --branch 2>/dev/null); then
+    agenticos_git_dir && repo_path=$REPLY
     # AgenticOS: derive dirty state and the staged/unstaged markers from a
     # single `git status --porcelain` pass. Upstream agnoster relies on
     # oh-my-zsh's parse_git_dirty (not shipped here) for the dirty color and on
@@ -203,19 +226,32 @@ prompt_git() {
     # segment still renders the green/yellow background plus ± / ✚ markers.
     # Dirty (color) counts untracked files; the markers count tracked staged
     # (✚) and unstaged (±) changes only, matching the original semantics.
-    git_status=$(command git status --porcelain 2>/dev/null)
     dirty=''; staged=''; unstaged=''
-    if [[ -n $git_status ]]; then
+    local -a status_lines
+    status_lines=("${(@f)git_status}")
+    branch_line=$status_lines[1]
+    if (( ${#status_lines} > 1 )); then
       dirty=1
       local line
-      for line in "${(@f)git_status}"; do
+      for line in "${status_lines[@]:1}"; do
         [[ ${line[1]} != ' ' && ${line[1]} != '?' ]] && staged=1
         [[ ${line[2]} != ' ' && ${line[2]} != '?' ]] && unstaged=1
       done
     fi
-    ref=$(command git symbolic-ref HEAD 2> /dev/null) || \
-    ref="◈ $(command git describe --exact-match --tags HEAD 2> /dev/null)" || \
-    ref="➦ $(command git rev-parse --short HEAD 2> /dev/null)"
+
+    # `--branch` reports branch and ahead/behind in the status header, so the
+    # prompt does not need symbolic-ref plus two complete `git log` walks.
+    branch_info=${branch_line#\#\# }
+    branch_info=${branch_info#No commits yet on }
+    branch_info=${branch_info#Initial commit on }
+    if [[ $branch_info == 'HEAD (no branch)'* ]]; then
+      ref="◈ $(command git describe --exact-match --tags HEAD 2> /dev/null)" || \
+      ref="➦ $(command git rev-parse --short HEAD 2> /dev/null)"
+    else
+      branch_name=${branch_info%%...*}
+      branch_name=${branch_name%% *}
+      ref="refs/heads/$branch_name"
+    fi
     if [[ -n $dirty ]]; then
       prompt_segment "$AGNOSTER_GIT_DIRTY_BG" "$AGNOSTER_GIT_DIRTY_FG"
     else
@@ -223,24 +259,23 @@ prompt_git() {
     fi
 
     if [[ $AGNOSTER_GIT_BRANCH_STATUS == 'true' ]]; then
-      local ahead behind
-      ahead=$(command git log --oneline @{upstream}.. 2>/dev/null)
-      behind=$(command git log --oneline ..@{upstream} 2>/dev/null)
-      if [[ -n "$ahead" ]] && [[ -n "$behind" ]]; then
+      if [[ $branch_info == *'[ahead '* && $branch_info == *'behind '* ]]; then
         PL_BRANCH_CHAR=$'\u21c5'
-      elif [[ -n "$ahead" ]]; then
+      elif [[ $branch_info == *'[ahead '* ]]; then
         PL_BRANCH_CHAR=$'\u21b1'
-      elif [[ -n "$behind" ]]; then
+      elif [[ $branch_info == *'[behind '* ]]; then
         PL_BRANCH_CHAR=$'\u21b0'
       fi
     fi
 
-    if [[ -e "${repo_path}/BISECT_LOG" ]]; then
-      mode=" <B>"
-    elif [[ -e "${repo_path}/MERGE_HEAD" ]]; then
-      mode=" >M<"
-    elif [[ -e "${repo_path}/rebase" || -e "${repo_path}/rebase-apply" || -e "${repo_path}/rebase-merge" || -e "${repo_path}/../.dotest" ]]; then
-      mode=" >R>"
+    if [[ -n $repo_path ]]; then
+      if [[ -e "${repo_path}/BISECT_LOG" ]]; then
+        mode=" <B>"
+      elif [[ -e "${repo_path}/MERGE_HEAD" ]]; then
+        mode=" >M<"
+      elif [[ -e "${repo_path}/rebase" || -e "${repo_path}/rebase-apply" || -e "${repo_path}/rebase-merge" || -e "${repo_path}/../.dotest" ]]; then
+        mode=" >R>"
+      fi
     fi
 
     # AgenticOS: assemble vcs_info's ' %u%c' equivalent (unstaged ±, staged ✚).

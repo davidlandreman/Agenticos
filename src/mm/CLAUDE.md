@@ -76,6 +76,15 @@ A kernel heap fault demand-maps one page. A ring-3 fault first resolves COW,
 then checks VMA protection, then pages in anonymous/heap/stack/private-file
 backing. Addresses outside VMAs are fatal to that user process.
 
+Lazy file population deliberately happens outside the memory-mapper lock and
+can overlap between pthreads sharing one address space. Publication is
+first-writer-wins: a later task that finds the leaf already present releases
+its uncommitted private frame, flushes the local translation, and succeeds.
+Treating that race as `EFAULT` kills otherwise-correct threaded programs.
+The post-I/O check compares the target VMA's exact identity and semantics;
+changes to unrelated VMAs (notably other pthread stacks) do not invalidate a
+completed page-in.
+
 ### Ring-3 stack-grow path
 
 A ring-3 page fault (CPL=3) is routed through `lifecycle::try_grow_user_stack` *before* the standard cleanup path. If the fault address falls inside the active process's grow window (`stack_max_growth_floor ≤ addr < stack_bottom`) and the per-process growth budget allows, the handler maps one fresh page R+W, lowers `stack_bottom` and `stack_mapped_bottom`, widens `validate_user_slice`'s bounds via `set_user_va_bounds`, and returns so the CPU retries the instruction. Everything else (overflow, budget exhaustion, lock contention, map failure, fault outside the window) falls through to `cleanup_user_process` with vector 14 / SIGSEGV.

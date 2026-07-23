@@ -502,7 +502,7 @@ pub fn handle_interrupt(irq: u8) {
     for (token, waiter) in waking[..wake_count].iter().flatten().copied() {
         match waiter {
             Waiter::Bootstrap => {}
-            Waiter::Kernel(pid) => crate::process::queue_kernel_io_wake(pid),
+            Waiter::Kernel(pid) => crate::process::queue_kernel_io_wake(pid, token),
             Waiter::RingThree(pid) => crate::userland::lifecycle::queue_ring3_io_wake(pid, token),
         }
     }

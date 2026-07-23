@@ -97,6 +97,253 @@ fn test_p9_fixture_visible() {
     assert_eq!(metadata.mode & 0o170000, 0o100000, "regular file mode");
 }
 
+/// Exercise the production wait path rather than the boot/test-runner `hlt`
+/// fallback: a spawned kernel thread must park and resume for each 9p RPC.
+fn test_p9_wakes_kernel_thread() {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    static PROGRESS: AtomicU8 = AtomicU8::new(0);
+
+    if !share_available_or_skip("wakes_kernel_thread") {
+        return;
+    }
+    STATE.store(0, Ordering::Release);
+    PROGRESS.store(0, Ordering::Release);
+    let pid =
+        crate::process::spawn_process(alloc::string::String::from("p9-io-test"), None, || {
+            PROGRESS.store(1, Ordering::Release);
+            let file = File::open_read("/shared/fixture.txt").expect("open 9p from kernel thread");
+            PROGRESS.store(2, Ordering::Release);
+            let content = file.read_to_string().expect("read 9p from kernel thread");
+            PROGRESS.store(3, Ordering::Release);
+            assert_eq!(content, FIXTURE_CONTENT);
+            drop(file);
+            PROGRESS.store(4, Ordering::Release);
+            STATE.store(1, Ordering::Release);
+        });
+
+    let deadline = crate::arch::x86_64::interrupts::get_timer_ticks().saturating_add(500);
+    while STATE.load(Ordering::Acquire) == 0 {
+        let _ = crate::process::drain_kernel_io_wakes();
+        crate::process::try_run_scheduled_processes();
+        if crate::arch::x86_64::interrupts::get_timer_ticks() >= deadline {
+            let scheduler = crate::process::scheduler::SCHEDULER.lock();
+            crate::debug_error!(
+                "9p wake timeout: pid={} progress={} entity={:?} current={:?} ready={} pending_wakes={}",
+                pid,
+                PROGRESS.load(Ordering::Acquire),
+                scheduler.entity_diagnostics_for_test(
+                    crate::process::entity::EntityId::KernelThread(pid)
+                ),
+                scheduler.current_entity(),
+                scheduler.ready_entity_count(),
+                crate::process::pending_kernel_io_wakes_for_test(),
+            );
+            panic!("kernel thread did not resume from VirtIO 9p completion");
+        }
+        x86_64::instructions::hlt();
+    }
+}
+
+/// Git preloads its index from several workers. Each worker can enter the 9p
+/// backend while another is asleep in an RPC, so client serialization must
+/// park contenders rather than spin in ring 0 behind the sleeping owner.
+fn test_p9_concurrent_callers_park() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+    static STARTED: AtomicUsize = AtomicUsize::new(0);
+
+    if !share_available_or_skip("concurrent_callers_park") {
+        return;
+    }
+    const CALLERS: usize = 4;
+    DONE.store(0, Ordering::Release);
+    STARTED.store(0, Ordering::Release);
+    for _ in 0..CALLERS {
+        crate::process::spawn_process(
+            alloc::string::String::from("p9-concurrent-test"),
+            None,
+            || {
+                STARTED.fetch_add(1, Ordering::AcqRel);
+                let file = File::open_read("/shared/fixture.txt")
+                    .expect("concurrent open from kernel thread");
+                let content = file
+                    .read_to_string()
+                    .expect("concurrent read from kernel thread");
+                assert_eq!(content, FIXTURE_CONTENT);
+                drop(file);
+                DONE.fetch_add(1, Ordering::AcqRel);
+            },
+        );
+    }
+
+    let deadline = crate::arch::x86_64::interrupts::get_timer_ticks().saturating_add(500);
+    while DONE.load(Ordering::Acquire) != CALLERS {
+        let _ = crate::process::drain_kernel_io_wakes();
+        crate::process::try_run_scheduled_processes();
+        if crate::arch::x86_64::interrupts::get_timer_ticks() >= deadline {
+            panic!(
+                "concurrent 9p callers stalled: started={} done={}",
+                STARTED.load(Ordering::Acquire),
+                DONE.load(Ordering::Acquire)
+            );
+        }
+        x86_64::instructions::hlt();
+    }
+}
+
+/// Ring-3 reproduction for the zsh/Git freeze: several forked BusyBox workers
+/// hit `/shared` together on one process home's CPU.
+fn test_p9_ring3_concurrent_callers_park() {
+    if !share_available_or_skip("ring3_concurrent_callers_park") {
+        return;
+    }
+    let path = crate::userland::bin_namespace::BB_HOST_PATH;
+    assert!(
+        crate::fs::exists(path),
+        "mandatory fixture missing: {}",
+        path
+    );
+    let command = "cat /shared/fixture.txt >/dev/null & \
+                   cat /shared/fixture.txt >/dev/null & \
+                   cat /shared/fixture.txt >/dev/null & \
+                   cat /shared/fixture.txt >/dev/null & wait";
+    let result = crate::userland::launcher::launch_user_binary(
+        path,
+        &["sh", "-c", command],
+        &crate::userland::process_service::DEFAULT_USER_ENV,
+    );
+    crate::userland::abi::clear_user_va_bounds();
+    let (kind, code) = result.unwrap_or_else(|error| panic!("BusyBox launch failed: {}", error));
+    assert!(
+        matches!(kind, crate::userland::lifecycle::ExitKind::Cooperative),
+        "BusyBox concurrent 9p workers exited via {:?} ({})",
+        kind,
+        code
+    );
+    assert_eq!(code, 0, "BusyBox concurrent 9p workers failed");
+}
+
+/// Git mmaps regular-file input and drops the mapping during munmap. The VMA
+/// owns an `Arc<File>`, whose last drop sends Tclunk and sleeps on 9p I/O; it
+/// must therefore be destroyed only after PROCESS_TABLE has been unlocked.
+fn test_p9_git_file_mmap_unmap() {
+    if !share_available_or_skip("git_file_mmap_unmap") {
+        return;
+    }
+    let path = crate::userland::bin_namespace::GIT_HOST_PATH;
+    assert!(
+        crate::fs::exists(path),
+        "mandatory fixture missing: {}",
+        path
+    );
+    let previous_trace = crate::userland::abi::is_trace_mode();
+    crate::userland::abi::set_trace_mode(true);
+    let result = crate::userland::launcher::launch_user_binary(
+        path,
+        &["git", "hash-object", "/shared/fixture.txt"],
+        &crate::userland::process_service::DEFAULT_USER_ENV,
+    );
+    crate::userland::abi::set_trace_mode(previous_trace);
+    crate::userland::abi::clear_user_va_bounds();
+    let (kind, code) = result.unwrap_or_else(|error| panic!("git hash-object failed: {}", error));
+    assert!(
+        matches!(kind, crate::userland::lifecycle::ExitKind::Cooperative),
+        "git hash-object exited via {:?} ({})",
+        kind,
+        code
+    );
+    assert_eq!(code, 0, "git hash-object failed");
+}
+
+/// Opt-in real-share reproducer used with
+/// `AGENTICOS_TEST_SHARED_DIR=~/.agenticos/shared`. The hermetic test share
+/// has no `make` checkout, so ordinary runs self-skip this workload.
+fn test_p9_real_make_git_status() {
+    if !crate::fs::exists("/shared/make/.git") {
+        debug_info!("  [skip] real_make_git_status: /shared/make/.git absent");
+        return;
+    }
+    let path = crate::userland::bin_namespace::GIT_HOST_PATH;
+    // Exercise a cold and warm status. Attributes remain fresh on both; the
+    // second pass verifies that reusable path fids remove walk/clunk traffic.
+    // A completion path accidentally deferred to the 100 Hz PIT takes roughly
+    // 40 seconds here, so keep the reproducer bounded below that regression.
+    let previous_timeout = crate::process::set_inline_ring3_test_timeout_ticks(3_000);
+    let previous_trace = crate::userland::abi::is_trace_mode();
+    crate::userland::abi::set_trace_mode(true);
+    for pass in 0..2 {
+        let start_ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
+        let start_requests = crate::drivers::virtio::p9::request_count();
+        let start_types =
+            [110u8, 24, 120, 40, 12, 116].map(crate::drivers::virtio::p9::request_type_count);
+        let result = crate::userland::launcher::launch_user_binary(
+            path,
+            &["git", "-C", "/shared/make", "status", "--porcelain=v1"],
+            &crate::userland::process_service::DEFAULT_USER_ENV,
+        );
+        crate::userland::abi::clear_user_va_bounds();
+        let elapsed_ticks = crate::arch::x86_64::interrupts::get_timer_ticks() - start_ticks;
+        let requests = crate::drivers::virtio::p9::request_count() - start_requests;
+        let request_types =
+            [110u8, 24, 120, 40, 12, 116].map(crate::drivers::virtio::p9::request_type_count);
+        let request_types =
+            core::array::from_fn::<_, 6, _>(|index| request_types[index] - start_types[index]);
+        let (kind, code) =
+            result.unwrap_or_else(|error| panic!("git status launch failed: {}", error));
+        debug_info!(
+            "  real_make_git_status pass={} outcome: {:?} ({}) ticks={} p9_rpcs={} max_inflight={} walk/getattr/clunk/readdir/open/read={:?}",
+            pass + 1,
+            kind,
+            code,
+            elapsed_ticks,
+            requests,
+            crate::drivers::virtio::p9::max_requests_in_flight(),
+            request_types
+        );
+        assert!(
+            matches!(kind, crate::userland::lifecycle::ExitKind::Cooperative),
+            "git status exited via {:?} ({})",
+            kind,
+            code
+        );
+        assert_eq!(code, 0, "git status failed");
+    }
+
+    // Exercise the actual interactive prompt path as well as Git directly.
+    // It must render the real branch/status segment; the old `/shared`
+    // approximation skipped status and displayed an `≈` marker instead.
+    let start_ticks = crate::arch::x86_64::interrupts::get_timer_ticks();
+    let start_requests = crate::drivers::virtio::p9::request_count();
+    let zsh_path = crate::userland::process_service::ZSH_HOST_PATH;
+    let prompt_command = r#"cd /shared/make; build_prompt; [[ "$PROMPT" == *$'\ue0a0'* ]] || exit 42; [[ "$PROMPT" != *'≈'* ]] || exit 43"#;
+    let result = crate::userland::launcher::launch_user_binary(
+        zsh_path,
+        &["zsh", "+m", "-ic", prompt_command],
+        &crate::userland::process_service::DEFAULT_USER_ENV,
+    );
+    crate::userland::abi::clear_user_va_bounds();
+    let elapsed_ticks = crate::arch::x86_64::interrupts::get_timer_ticks() - start_ticks;
+    let requests = crate::drivers::virtio::p9::request_count() - start_requests;
+    let (kind, code) = result.unwrap_or_else(|error| panic!("zsh prompt launch failed: {}", error));
+    debug_info!(
+        "  real_make_git_prompt outcome: {:?} ({}) ticks={} p9_rpcs={}",
+        kind,
+        code,
+        elapsed_ticks,
+        requests
+    );
+    assert!(
+        matches!(kind, crate::userland::lifecycle::ExitKind::Cooperative),
+        "zsh prompt exited via {:?} ({})",
+        kind,
+        code
+    );
+    assert_eq!(code, 0, "zsh prompt did not render real Git status");
+    crate::userland::abi::set_trace_mode(previous_trace);
+    crate::process::set_inline_ring3_test_timeout_ticks(previous_timeout);
+}
+
 fn test_p9_create_write_read_back() {
     if !share_available_or_skip("create_write_read_back") {
         return;
@@ -288,6 +535,11 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_p9_codec_rejects_truncation,
         &test_p9_shared_mounted,
         &test_p9_fixture_visible,
+        &test_p9_wakes_kernel_thread,
+        &test_p9_concurrent_callers_park,
+        &test_p9_ring3_concurrent_callers_park,
+        &test_p9_git_file_mmap_unmap,
+        &test_p9_real_make_git_status,
         &test_p9_create_write_read_back,
         &test_p9_truncate_and_append,
         &test_p9_large_file_multi_chunk,

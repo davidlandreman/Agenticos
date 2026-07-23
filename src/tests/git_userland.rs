@@ -84,6 +84,7 @@ fn test_git_version_and_system_identity() {
     git_ok(&["git", "version"]);
     git_ok(&["git", "config", "--system", "user.name"]);
     git_ok(&["git", "config", "--system", "user.email"]);
+    git_ok(&["git", "config", "--system", "core.preloadIndex"]);
 }
 
 /// Full local porcelain round trip on the overlay `/work` scratch:

@@ -743,10 +743,7 @@ fn test_retry_dropped_signal_wakes_skips_block_io() {
     let _g = PreemptTestGuard::new();
     insert_synthetic(9341);
     with_process(9341, |p| p.signal_state.raise(SIGKILL));
-    mark_ring3_blocked(
-        9341,
-        Ring3BlockReason::WaitingForBlockIo { token: 0xABCD },
-    );
+    mark_ring3_blocked(9341, Ring3BlockReason::WaitingForBlockIo { token: 0xABCD });
 
     let _ = retry_dropped_signal_wakes();
 

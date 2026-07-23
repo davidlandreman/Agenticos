@@ -1,22 +1,28 @@
 //! `Filesystem` backend over the 9P2000.L client — the `/shared` mount.
 //!
-//! Every operation is a fresh RPC against the host; there is deliberately no
-//! guest-side caching, so concurrently running instances observe each
-//! other's writes with plain reads. `FileHandle::inode` carries the open
-//! fid. Symlinks are resolved client-side (bounded depth) because the QEMU
-//! server hands back the symlink node itself on walk.
+//! Four independently tagged client lanes overlap requests from Git's index
+//! workers. Walked path fids are retained, but attributes are never cached:
+//! every stat still sends Tgetattr to observe host-side changes. Open
+//! sequential reads use one bounded read-ahead window per lane.
+//! `FileHandle::inode` carries both the lane and open fid. Symlinks are
+//! resolved client-side (bounded depth) because the QEMU server hands back
+//! the symlink node itself on walk.
 
 use crate::drivers::virtio::p9::P9Transport;
 use crate::fs::filesystem::{
     DirectoryEntry, DirectoryIterator, FileAttributes, FileHandle, FileMode, FileType, Filesystem,
     FilesystemError, FilesystemStats, UnixMetadata, UnixTimestamp,
 };
-use crate::fs::p9::client::{P9Client, MAX_SYMLINK_DEPTH, ROOT_FID};
+use crate::fs::p9::client::{P9Client, MAX_SYMLINK_DEPTH};
 use crate::fs::p9::protocol::{open_flags, setattr_valid, P9Stat, AT_REMOVEDIR};
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use crate::arch::x86_64::interrupt_guard::InterruptMutex;
 
 /// Mode bits for files/directories the guest creates. The host-side QEMU
 /// process applies its umask; guest chmod is already a validated no-op.
@@ -28,19 +34,271 @@ const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 const DT_LNK: u8 = 10;
 
+/// Match the default four-vCPU guest and Git's parallel index preload while
+/// staying comfortably below the virtqueue descriptor budget for 64 KiB I/O.
+const CLIENT_LANES: usize = 4;
+
+#[derive(Clone, Copy)]
+enum ClientWaiter {
+    Kernel(crate::process::ProcessId),
+    RingThree(u32),
+}
+
+#[derive(Clone, Copy)]
+struct QueuedClientWaiter {
+    token: u64,
+    waiter: ClientWaiter,
+}
+
+struct ClientGate {
+    locked: bool,
+    waiters: VecDeque<QueuedClientWaiter>,
+    granted: Option<u64>,
+}
+
+/// Scheduler-aware mutex for one tagged 9p client lane.
+///
+/// A normal spin mutex cannot be held across an interrupt-driven RPC: once
+/// the owner sleeps, another Git worker on the same CPU can spin in ring 0 and
+/// prevent the owner from ever resuming. Contenders queue here and park on an
+/// exact token; unlock transfers ownership FIFO before waking one waiter.
+struct P9ClientLock {
+    gate: InterruptMutex<ClientGate>,
+    client: UnsafeCell<P9Client>,
+}
+
+// SAFETY: `gate.locked` grants unique mutable access to `client`; every guard
+// releases or transfers that ownership in Drop.
+unsafe impl Sync for P9ClientLock {}
+
+struct P9ClientGuard<'a> {
+    lock: &'a P9ClientLock,
+}
+
+static NEXT_CLIENT_WAIT_TOKEN: AtomicU64 = AtomicU64::new(3 << 62);
+const P9_CLIENT_LOCK_DIAGNOSTIC_DEVICE: usize = u16::MAX as usize - 0x100;
+
+impl P9ClientLock {
+    fn new(client: P9Client) -> Self {
+        Self {
+            gate: InterruptMutex::new(ClientGate {
+                locked: false,
+                waiters: VecDeque::new(),
+                granted: None,
+            }),
+            client: UnsafeCell::new(client),
+        }
+    }
+
+    fn lock(&self) -> P9ClientGuard<'_> {
+        loop {
+            let waiter = {
+                let mut gate = self.gate.lock();
+                if !gate.locked {
+                    assert!(gate.granted.is_none(), "9p client has an orphaned handoff");
+                    gate.locked = true;
+                    return P9ClientGuard { lock: self };
+                }
+
+                let waiter = if let Some(pid) = crate::userland::lifecycle::current_user_pid() {
+                    Some(ClientWaiter::RingThree(pid))
+                } else {
+                    crate::process::current_io_waiter().map(ClientWaiter::Kernel)
+                };
+                let Some(waiter) = waiter else {
+                    drop(gate);
+                    let interrupts_enabled = x86_64::instructions::interrupts::are_enabled();
+                    x86_64::instructions::interrupts::enable_and_hlt();
+                    if !interrupts_enabled {
+                        x86_64::instructions::interrupts::disable();
+                    }
+                    continue;
+                };
+
+                let token = NEXT_CLIENT_WAIT_TOKEN.fetch_add(1, Ordering::Relaxed);
+                gate.waiters.push_back(QueuedClientWaiter { token, waiter });
+                if let ClientWaiter::RingThree(pid) = waiter {
+                    crate::diagnostics::shadow::io::submitted(
+                        token,
+                        crate::diagnostics::shadow::pager::current_generation(),
+                        pid,
+                        P9_CLIENT_LOCK_DIAGNOSTIC_DEVICE,
+                        0,
+                        0,
+                    );
+                }
+                QueuedClientWaiter { token, waiter }
+            };
+
+            match waiter.waiter {
+                ClientWaiter::RingThree(_) => {
+                    crate::userland::switch::block_current_ring3_on_io(waiter.token);
+                    let granted = self.take_grant(waiter.token);
+                    assert!(granted, "9p client woke without lock handoff");
+                    crate::diagnostics::shadow::io::consumed(waiter.token);
+                }
+                ClientWaiter::Kernel(_) => {
+                    let mut consumed_grant = false;
+                    let parked = crate::process::park_current_if(
+                        crate::process::pcb::BlockReason::WaitingForBlockIo(waiter.token),
+                        || {
+                            consumed_grant = self.take_grant(waiter.token);
+                            !consumed_grant
+                        },
+                    );
+                    if parked {
+                        consumed_grant = self.take_grant(waiter.token);
+                    }
+                    assert!(consumed_grant, "9p client woke without lock handoff");
+                }
+            }
+            return P9ClientGuard { lock: self };
+        }
+    }
+
+    fn take_grant(&self, token: u64) -> bool {
+        let mut gate = self.gate.lock();
+        if gate.granted == Some(token) {
+            gate.granted = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn unlock(&self) {
+        let next = {
+            let mut gate = self.gate.lock();
+            assert!(gate.locked, "unbalanced 9p client unlock");
+            assert!(gate.granted.is_none(), "9p client handoff not consumed");
+            match gate.waiters.pop_front() {
+                Some(waiter) => {
+                    gate.granted = Some(waiter.token);
+                    Some(waiter)
+                }
+                None => {
+                    gate.locked = false;
+                    None
+                }
+            }
+        };
+
+        let Some(next) = next else { return };
+        match next.waiter {
+            ClientWaiter::RingThree(pid) => {
+                crate::diagnostics::shadow::io::completed(next.token, 0, 0);
+                crate::userland::lifecycle::queue_ring3_io_wake(pid, next.token);
+            }
+            ClientWaiter::Kernel(pid) => {
+                let entity = crate::process::entity::EntityId::KernelThread(pid);
+                let cpu = {
+                    let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
+                    scheduler.wake(pid);
+                    scheduler.cpu_affinity(entity)
+                };
+                if let Some(cpu) = cpu {
+                    crate::arch::x86_64::smp::notify_cpu(cpu);
+                }
+            }
+        }
+    }
+}
+
+impl core::ops::Deref for P9ClientGuard<'_> {
+    type Target = P9Client;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: this guard owns the client gate until Drop.
+        unsafe { &*self.lock.client.get() }
+    }
+}
+
+impl core::ops::DerefMut for P9ClientGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: the gate admits only one guard at a time.
+        unsafe { &mut *self.lock.client.get() }
+    }
+}
+
+impl Drop for P9ClientGuard<'_> {
+    fn drop(&mut self) {
+        self.lock.unlock();
+    }
+}
+
 pub struct P9Filesystem {
-    state: Mutex<P9Client>,
+    clients: Vec<P9ClientLock>,
+    next_client: AtomicUsize,
 }
 
 impl P9Filesystem {
     /// Run the version/attach handshake and wrap the client for mounting.
     pub fn new(transport: P9Transport) -> Result<Self, FilesystemError> {
-        let mut client = P9Client::new(transport);
+        let mut client = P9Client::new(transport.clone());
         client.handshake()?;
+        let msize = client.negotiated_msize();
+        let mut clients = Vec::with_capacity(CLIENT_LANES);
+        clients.push(P9ClientLock::new(client));
+        for lane in 1..CLIENT_LANES {
+            clients.push(P9ClientLock::new(P9Client::attach_lane(
+                transport.clone(),
+                msize,
+                lane as u16,
+            )?));
+        }
         Ok(Self {
-            state: Mutex::new(client),
+            clients,
+            next_client: AtomicUsize::new(0),
         })
     }
+
+    fn lock_any(&self) -> (usize, P9ClientGuard<'_>) {
+        let lane = self.next_client.fetch_add(1, Ordering::Relaxed) % self.clients.len();
+        (lane, self.clients[lane].lock())
+    }
+
+    fn lock_path(&self, path: &str) -> P9ClientGuard<'_> {
+        // Stable FNV-1a assignment keeps one reusable fid per path while
+        // distributing Git's independent index entries across all lanes.
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in path.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.clients[hash as usize % self.clients.len()].lock()
+    }
+
+    fn invalidate_path_caches(&self, path: &str) {
+        for client in &self.clients {
+            client.lock().invalidate_path(path);
+        }
+    }
+
+    fn lock_handle(&self, handle: &FileHandle) -> Result<P9ClientGuard<'_>, FilesystemError> {
+        let lane = (handle.inode >> 32) as usize;
+        self.clients
+            .get(lane)
+            .map(P9ClientLock::lock)
+            .ok_or(FilesystemError::InvalidPath)
+    }
+}
+
+fn encode_handle_fid(lane: usize, fid: u32) -> u64 {
+    ((lane as u64) << 32) | u64::from(fid)
+}
+
+fn decode_handle_fid(handle: &FileHandle) -> u32 {
+    handle.inode as u32
+}
+
+fn stat_path_resolved(client: &mut P9Client, path: &str) -> Result<P9Stat, FilesystemError> {
+    let stat = client.getattr_path_cached(path)?;
+    if !stat.qid.is_symlink() {
+        return Ok(stat);
+    }
+    let (fid, stat) = walk_resolved(client, path, MAX_SYMLINK_DEPTH)?;
+    clunk_quiet(client, fid);
+    Ok(stat)
 }
 
 /// Split a mount-relative path ("a/b/c", "/a", "/") into parent and leaf.
@@ -247,8 +505,9 @@ impl Filesystem for P9Filesystem {
     }
 
     fn stats(&self) -> Result<FilesystemStats, FilesystemError> {
-        let mut client = self.state.lock();
-        let statfs = client.statfs(ROOT_FID)?;
+        let (_, mut client) = self.lock_any();
+        let root_fid = client.root_fid();
+        let statfs = client.statfs(root_fid)?;
         Ok(FilesystemStats {
             total_blocks: statfs.blocks,
             free_blocks: statfs.bfree,
@@ -264,7 +523,7 @@ impl Filesystem for P9Filesystem {
     }
 
     fn enumerate_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FilesystemError> {
-        let mut client = self.state.lock();
+        let (_, mut client) = self.lock_any();
         let (dirfid, stat) = walk_resolved(&mut client, path, MAX_SYMLINK_DEPTH)?;
         if !stat.qid.is_dir() {
             clunk_quiet(&mut client, dirfid);
@@ -324,10 +583,52 @@ impl Filesystem for P9Filesystem {
         Ok(entries)
     }
 
+    fn enumerate_dir_names(&self, path: &str) -> Result<Vec<DirectoryEntry>, FilesystemError> {
+        let (_, mut client) = self.lock_any();
+        let (dirfid, stat) = walk_resolved(&mut client, path, MAX_SYMLINK_DEPTH)?;
+        if !stat.qid.is_dir() {
+            clunk_quiet(&mut client, dirfid);
+            return Err(FilesystemError::NotADirectory);
+        }
+        let read_fid = match client.walk(dirfid, &[]) {
+            Ok(fid) => fid,
+            Err(error) => {
+                clunk_quiet(&mut client, dirfid);
+                return Err(error);
+            }
+        };
+        let listing: Result<Vec<DirectoryEntry>, FilesystemError> = (|| {
+            client.lopen(read_fid, open_flags::O_RDONLY | open_flags::O_DIRECTORY)?;
+            let mut entries = Vec::new();
+            let mut offset = 0u64;
+            loop {
+                let batch = client.readdir(read_fid, offset)?;
+                let Some(last) = batch.last() else {
+                    return Ok(entries);
+                };
+                offset = last.offset;
+                entries.extend(
+                    batch
+                        .into_iter()
+                        .filter(|entry| entry.name != "." && entry.name != "..")
+                        .map(|entry| {
+                            entry_from_parts(
+                                &entry.name,
+                                file_type_from_dtype(entry.type_byte),
+                                None,
+                            )
+                        }),
+                );
+            }
+        })();
+        clunk_quiet(&mut client, read_fid);
+        clunk_quiet(&mut client, dirfid);
+        listing
+    }
+
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError> {
-        let mut client = self.state.lock();
-        let (fid, stat) = walk_resolved(&mut client, path, MAX_SYMLINK_DEPTH)?;
-        clunk_quiet(&mut client, fid);
+        let mut client = self.lock_path(path);
+        let stat = stat_path_resolved(&mut client, path)?;
         Ok(entry_from_parts(
             leaf_name(path),
             file_type_from_mode(stat.mode),
@@ -336,28 +637,26 @@ impl Filesystem for P9Filesystem {
     }
 
     fn unix_metadata(&self, path: &str) -> Result<UnixMetadata, FilesystemError> {
-        let mut client = self.state.lock();
-        let (fid, stat) = walk_resolved(&mut client, path, MAX_SYMLINK_DEPTH)?;
-        clunk_quiet(&mut client, fid);
+        let mut client = self.lock_path(path);
+        let stat = stat_path_resolved(&mut client, path)?;
         Ok(metadata_from_stat(&stat))
     }
 
     fn symlink_metadata(&self, path: &str) -> Result<UnixMetadata, FilesystemError> {
-        let mut client = self.state.lock();
-        let (fid, stat) = walk_nofollow(&mut client, path)?;
-        clunk_quiet(&mut client, fid);
+        let mut client = self.lock_path(path);
+        let stat = client.getattr_path_cached(path)?;
         Ok(metadata_from_stat(&stat))
     }
 
     fn handle_metadata(&self, handle: &FileHandle) -> Result<UnixMetadata, FilesystemError> {
-        let mut client = self.state.lock();
-        let stat = client.getattr(handle.inode as u32)?;
+        let mut client = self.lock_handle(handle)?;
+        let stat = client.getattr(decode_handle_fid(handle))?;
         Ok(metadata_from_stat(&stat))
     }
 
     fn open(&self, path: &str, mode: FileMode) -> Result<FileHandle, FilesystemError> {
-        let mut client = self.state.lock();
-        match open_existing(&mut client, path, mode) {
+        let (lane, mut client) = self.lock_any();
+        let result = match open_existing(&mut client, path, mode) {
             Err(FilesystemError::NotFound) if mode.create => {
                 match create_new(&mut client, path, mode) {
                     // Lost a create race against another instance: the file
@@ -367,20 +666,28 @@ impl Filesystem for P9Filesystem {
                 }
             }
             other => other,
+        };
+        drop(client);
+        if mode.create && result.is_ok() {
+            self.invalidate_path_caches(path);
         }
+        result.map(|mut handle| {
+            handle.inode = encode_handle_fid(lane, handle.inode as u32);
+            handle
+        })
     }
 
     fn close(&self, handle: &mut FileHandle) -> Result<(), FilesystemError> {
-        let mut client = self.state.lock();
-        client.clunk(handle.inode as u32)
+        let mut client = self.lock_handle(handle)?;
+        client.clunk(decode_handle_fid(handle))
     }
 
     fn read(&self, handle: &mut FileHandle, buffer: &mut [u8]) -> Result<usize, FilesystemError> {
         if !handle.mode.read {
             return Err(FilesystemError::PermissionDenied);
         }
-        let mut client = self.state.lock();
-        let fid = handle.inode as u32;
+        let mut client = self.lock_handle(handle)?;
+        let fid = decode_handle_fid(handle);
         let mut done = 0usize;
         while done < buffer.len() {
             let read = client.read(fid, handle.position, &mut buffer[done..])?;
@@ -398,8 +705,8 @@ impl Filesystem for P9Filesystem {
         if !handle.mode.write {
             return Err(FilesystemError::PermissionDenied);
         }
-        let mut client = self.state.lock();
-        let fid = handle.inode as u32;
+        let mut client = self.lock_handle(handle)?;
+        let fid = decode_handle_fid(handle);
         // Append re-reads the live size so concurrent appenders from other
         // instances interleave instead of overwriting.
         let position = if handle.mode.append {
@@ -431,9 +738,9 @@ impl Filesystem for P9Filesystem {
         if !handle.mode.write {
             return Err(FilesystemError::PermissionDenied);
         }
-        let mut client = self.state.lock();
+        let mut client = self.lock_handle(handle)?;
         client.setattr(
-            handle.inode as u32,
+            decode_handle_fid(handle),
             setattr_valid::SIZE,
             size,
             UnixTimestamp::ZERO,
@@ -452,7 +759,7 @@ impl Filesystem for P9Filesystem {
         if accessed.is_none() && modified.is_none() {
             return Ok(());
         }
-        let mut client = self.state.lock();
+        let (_, mut client) = self.lock_any();
         let (fid, _stat) = walk_resolved(&mut client, path, MAX_SYMLINK_DEPTH)?;
         let mut valid = 0u32;
         if accessed.is_some() {
@@ -473,12 +780,12 @@ impl Filesystem for P9Filesystem {
     }
 
     fn sync_handle(&self, handle: &FileHandle, data_only: bool) -> Result<(), FilesystemError> {
-        let mut client = self.state.lock();
-        client.fsync(handle.inode as u32, data_only)
+        let mut client = self.lock_handle(handle)?;
+        client.fsync(decode_handle_fid(handle), data_only)
     }
 
     fn link(&self, old_path: &str, new_path: &str) -> Result<(), FilesystemError> {
-        let mut client = self.state.lock();
+        let (_, mut client) = self.lock_any();
         let fid = client.walk_path(old_path)?;
         let (parent, leaf) = match split_parent_leaf(new_path) {
             Ok(parts) => parts,
@@ -497,20 +804,28 @@ impl Filesystem for P9Filesystem {
         let result = client.link(dfid, fid, leaf);
         clunk_quiet(&mut client, dfid);
         clunk_quiet(&mut client, fid);
+        drop(client);
+        if result.is_ok() {
+            self.invalidate_path_caches(new_path);
+        }
         result
     }
 
     fn symlink(&self, target: &str, link_path: &str) -> Result<(), FilesystemError> {
-        let mut client = self.state.lock();
+        let (_, mut client) = self.lock_any();
         let (parent, leaf) = split_parent_leaf(link_path)?;
         let dfid = client.walk_path(parent)?;
         let result = client.symlink(dfid, leaf, target);
         clunk_quiet(&mut client, dfid);
+        drop(client);
+        if result.is_ok() {
+            self.invalidate_path_caches(link_path);
+        }
         result
     }
 
     fn read_link(&self, path: &str) -> Result<Vec<u8>, FilesystemError> {
-        let mut client = self.state.lock();
+        let (_, mut client) = self.lock_any();
         let fid = client.walk_path(path)?;
         let result = client.readlink(fid);
         clunk_quiet(&mut client, fid);
@@ -518,34 +833,46 @@ impl Filesystem for P9Filesystem {
     }
 
     fn mkdir(&self, path: &str) -> Result<(), FilesystemError> {
-        let mut client = self.state.lock();
+        let (_, mut client) = self.lock_any();
         let (parent, leaf) = split_parent_leaf(path)?;
         let dfid = client.walk_path(parent)?;
         let result = client.mkdir(dfid, leaf, CREATE_DIR_MODE);
         clunk_quiet(&mut client, dfid);
+        drop(client);
+        if result.is_ok() {
+            self.invalidate_path_caches(path);
+        }
         result
     }
 
     fn unlink(&self, path: &str) -> Result<(), FilesystemError> {
-        let mut client = self.state.lock();
+        let (_, mut client) = self.lock_any();
         let (parent, leaf) = split_parent_leaf(path)?;
         let dfid = client.walk_path(parent)?;
         let result = client.unlinkat(dfid, leaf, 0);
         clunk_quiet(&mut client, dfid);
+        drop(client);
+        if result.is_ok() {
+            self.invalidate_path_caches(path);
+        }
         result
     }
 
     fn rmdir(&self, path: &str) -> Result<(), FilesystemError> {
-        let mut client = self.state.lock();
+        let (_, mut client) = self.lock_any();
         let (parent, leaf) = split_parent_leaf(path)?;
         let dfid = client.walk_path(parent)?;
         let result = client.unlinkat(dfid, leaf, AT_REMOVEDIR);
         clunk_quiet(&mut client, dfid);
+        drop(client);
+        if result.is_ok() {
+            self.invalidate_path_caches(path);
+        }
         result
     }
 
     fn rename(&self, old_path: &str, new_path: &str) -> Result<(), FilesystemError> {
-        let mut client = self.state.lock();
+        let (_, mut client) = self.lock_any();
         let (old_parent, old_leaf) = split_parent_leaf(old_path)?;
         let (new_parent, new_leaf) = split_parent_leaf(new_path)?;
         let old_dfid = client.walk_path(old_parent)?;
@@ -559,6 +886,11 @@ impl Filesystem for P9Filesystem {
         let result = client.renameat(old_dfid, old_leaf, new_dfid, new_leaf);
         clunk_quiet(&mut client, new_dfid);
         clunk_quiet(&mut client, old_dfid);
+        drop(client);
+        if result.is_ok() {
+            self.invalidate_path_caches(old_path);
+            self.invalidate_path_caches(new_path);
+        }
         result
     }
 

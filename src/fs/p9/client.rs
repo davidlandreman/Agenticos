@@ -11,13 +11,18 @@ use crate::fs::filesystem::FilesystemError;
 use crate::fs::filesystem::UnixTimestamp;
 use crate::fs::p9::protocol::{
     map_errno, msg, P9Dirent, P9Stat, Qid, WireReader, WireWriter, GETATTR_BASIC, MAX_WELEM, NOFID,
-    NOTAG, TAG,
+    NOTAG,
 };
+use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
 pub const ROOT_FID: u32 = 0;
+
+/// Keep each concurrently attached client lane in a disjoint fid namespace.
+const FID_LANE_STRIDE: u32 = 1 << 24;
 
 /// msize requested from the server; the negotiated value may be lower.
 const REQUEST_MSIZE: u32 = 64 * 1024;
@@ -29,6 +34,10 @@ const IO_HEADER_RESERVE: u32 = 32;
 /// 9P message header: size[4] type[1] tag[2].
 const HEADER_LEN: usize = 7;
 
+/// Bound reusable path fids so a mount cannot grow kernel memory without
+/// limit. Metadata itself is never cached; every hit still sends Tgetattr.
+const MAX_PATH_FIDS: usize = 16 * 1024;
+
 /// Bound on symlink-target resolution recursion in the backend.
 pub const MAX_SYMLINK_DEPTH: u8 = 8;
 
@@ -36,8 +45,14 @@ pub struct P9Client {
     transport: P9Transport,
     msize: u32,
     response: Vec<u8>,
+    root_fid: u32,
+    tag: u16,
     next_fid: u32,
     free_fids: Vec<u32>,
+    path_fids: BTreeMap<String, u32>,
+    read_ahead_fid: u32,
+    read_ahead_offset: u64,
+    read_ahead: Vec<u8>,
     poisoned: bool,
 }
 
@@ -55,10 +70,45 @@ impl P9Client {
             transport,
             msize: REQUEST_MSIZE,
             response: vec![0u8; 8192],
+            root_fid: ROOT_FID,
+            tag: 1,
             next_fid: ROOT_FID + 1,
             free_fids: Vec::new(),
+            path_fids: BTreeMap::new(),
+            read_ahead_fid: NOFID,
+            read_ahead_offset: 0,
+            read_ahead: Vec::new(),
             poisoned: false,
         }
+    }
+
+    /// Attach another independently tagged lane after the primary lane has
+    /// negotiated the connection version. Tversion is connection-wide and
+    /// must not be repeated because it invalidates every existing fid.
+    pub fn attach_lane(
+        transport: P9Transport,
+        msize: u32,
+        lane: u16,
+    ) -> Result<Self, FilesystemError> {
+        let root_fid = u32::from(lane)
+            .checked_mul(FID_LANE_STRIDE)
+            .ok_or(FilesystemError::IoError)?;
+        let mut client = Self {
+            transport,
+            msize,
+            response: vec![0u8; msize as usize],
+            root_fid,
+            tag: lane.checked_add(1).ok_or(FilesystemError::IoError)?,
+            next_fid: root_fid + 1,
+            free_fids: Vec::new(),
+            path_fids: BTreeMap::new(),
+            read_ahead_fid: NOFID,
+            read_ahead_offset: 0,
+            read_ahead: Vec::with_capacity(msize.saturating_sub(IO_HEADER_RESERVE) as usize),
+            poisoned: false,
+        };
+        client.attach()?;
+        Ok(client)
     }
 
     /// Version + attach. Must succeed exactly once before any other op.
@@ -77,17 +127,30 @@ impl P9Client {
         }
         self.msize = server_msize.min(REQUEST_MSIZE);
         self.response = vec![0u8; self.msize as usize];
+        self.read_ahead = Vec::with_capacity(self.io_unit());
 
-        let mut writer = WireWriter::request(msg::TATTACH, TAG);
+        self.attach()
+    }
+
+    fn attach(&mut self) -> Result<(), FilesystemError> {
+        let mut writer = WireWriter::request(msg::TATTACH, self.tag);
         writer
-            .u32(ROOT_FID)
+            .u32(self.root_fid)
             .u32(NOFID)
             .string("root")
             .string("")
             .u32(0);
-        let end = self.rpc(writer.finish(), msg::RATTACH, TAG)?;
+        let end = self.rpc(writer.finish(), msg::RATTACH, self.tag)?;
         WireReader::new(&self.response[HEADER_LEN..end]).qid()?;
         Ok(())
+    }
+
+    pub fn negotiated_msize(&self) -> u32 {
+        self.msize
+    }
+
+    pub fn root_fid(&self) -> u32 {
+        self.root_fid
     }
 
     /// Largest read/write/readdir payload that fits the negotiated msize.
@@ -98,13 +161,13 @@ impl P9Client {
     fn alloc_fid(&mut self) -> u32 {
         self.free_fids.pop().unwrap_or_else(|| {
             let fid = self.next_fid;
-            self.next_fid = self.next_fid.wrapping_add(1).max(ROOT_FID + 1);
+            self.next_fid = self.next_fid.wrapping_add(1).max(self.root_fid + 1);
             fid
         })
     }
 
     fn release_fid(&mut self, fid: u32) {
-        if fid != ROOT_FID {
+        if fid != self.root_fid {
             self.free_fids.push(fid);
         }
     }
@@ -167,12 +230,12 @@ impl P9Client {
             if chunk.is_empty() && walked_any {
                 break;
             }
-            let mut writer = WireWriter::request(msg::TWALK, TAG);
+            let mut writer = WireWriter::request(msg::TWALK, self.tag);
             writer.u32(source).u32(newfid).u16(chunk.len() as u16);
             for name in chunk {
                 writer.string(name);
             }
-            let end = match self.rpc(writer.finish(), msg::RWALK, TAG) {
+            let end = match self.rpc(writer.finish(), msg::RWALK, self.tag) {
                 Ok(end) => end,
                 Err(error) => {
                     // A failed Twalk never creates newfid; a failed later
@@ -212,13 +275,17 @@ impl P9Client {
             .split('/')
             .filter(|component| !component.is_empty() && *component != ".")
             .collect();
-        self.walk(ROOT_FID, &names)
+        self.walk(self.root_fid, &names)
     }
 
     pub fn clunk(&mut self, fid: u32) -> Result<(), FilesystemError> {
-        let mut writer = WireWriter::request(msg::TCLUNK, TAG);
+        if self.read_ahead_fid == fid {
+            self.read_ahead_fid = NOFID;
+            self.read_ahead.clear();
+        }
+        let mut writer = WireWriter::request(msg::TCLUNK, self.tag);
         writer.u32(fid);
-        let result = self.rpc(writer.finish(), msg::RCLUNK, TAG).map(|_| ());
+        let result = self.rpc(writer.finish(), msg::RCLUNK, self.tag).map(|_| ());
         // The fid number is retired locally even if the server errored; a
         // stale server-side fid surfaces as a later walk error, never as
         // silent reuse of live state.
@@ -227,12 +294,59 @@ impl P9Client {
     }
 
     pub fn getattr(&mut self, fid: u32) -> Result<P9Stat, FilesystemError> {
-        let mut writer = WireWriter::request(msg::TGETATTR, TAG);
+        let mut writer = WireWriter::request(msg::TGETATTR, self.tag);
         writer.u32(fid).u64(GETATTR_BASIC);
-        let end = self.rpc(writer.finish(), msg::RGETATTR, TAG)?;
+        let end = self.rpc(writer.finish(), msg::RGETATTR, self.tag)?;
         let mut reader = WireReader::new(&self.response[HEADER_LEN..end]);
         let _valid = reader.u64()?;
         reader.rgetattr_body()
+    }
+
+    /// Get fresh attributes for a path while retaining its walked fid for
+    /// later calls. A cached fid removes Twalk/Tclunk traffic only; Tgetattr
+    /// always reaches the server, preserving live size/time/status checks.
+    pub fn getattr_path_cached(&mut self, path: &str) -> Result<P9Stat, FilesystemError> {
+        if let Some(fid) = self.path_fids.get(path).copied() {
+            match self.getattr(fid) {
+                Ok(stat) => return Ok(stat),
+                Err(_) => {
+                    self.path_fids.remove(path);
+                    let _ = self.clunk(fid);
+                }
+            }
+        }
+
+        let fid = self.walk_path(path)?;
+        let stat = match self.getattr(fid) {
+            Ok(stat) => stat,
+            Err(error) => {
+                let _ = self.clunk(fid);
+                return Err(error);
+            }
+        };
+        if self.path_fids.len() < MAX_PATH_FIDS {
+            self.path_fids.insert(path.to_string(), fid);
+        } else {
+            let _ = self.clunk(fid);
+        }
+        Ok(stat)
+    }
+
+    /// Drop reusable fids for a mutated path and its descendants. Callers
+    /// invoke this on every lane after an in-guest namespace mutation.
+    pub fn invalidate_path(&mut self, path: &str) {
+        let descendant_prefix = alloc::format!("{}/", path.trim_end_matches('/'));
+        let stale: Vec<String> = self
+            .path_fids
+            .keys()
+            .filter(|cached| *cached == path || cached.starts_with(&descendant_prefix))
+            .cloned()
+            .collect();
+        for key in stale {
+            if let Some(fid) = self.path_fids.remove(&key) {
+                let _ = self.clunk(fid);
+            }
+        }
     }
 
     /// Tsetattr limited to the fields the kernel mutates: size, atime, mtime.
@@ -244,7 +358,7 @@ impl P9Client {
         atime: UnixTimestamp,
         mtime: UnixTimestamp,
     ) -> Result<(), FilesystemError> {
-        let mut writer = WireWriter::request(msg::TSETATTR, TAG);
+        let mut writer = WireWriter::request(msg::TSETATTR, self.tag);
         writer
             .u32(fid)
             .u32(valid)
@@ -256,13 +370,14 @@ impl P9Client {
             .u64(atime.nanoseconds as u64)
             .u64(mtime.seconds)
             .u64(mtime.nanoseconds as u64);
-        self.rpc(writer.finish(), msg::RSETATTR, TAG).map(|_| ())
+        self.rpc(writer.finish(), msg::RSETATTR, self.tag)
+            .map(|_| ())
     }
 
     pub fn lopen(&mut self, fid: u32, flags: u32) -> Result<Qid, FilesystemError> {
-        let mut writer = WireWriter::request(msg::TLOPEN, TAG);
+        let mut writer = WireWriter::request(msg::TLOPEN, self.tag);
         writer.u32(fid).u32(flags);
-        let end = self.rpc(writer.finish(), msg::RLOPEN, TAG)?;
+        let end = self.rpc(writer.finish(), msg::RLOPEN, self.tag)?;
         WireReader::new(&self.response[HEADER_LEN..end]).qid()
     }
 
@@ -275,9 +390,9 @@ impl P9Client {
         flags: u32,
         mode: u32,
     ) -> Result<Qid, FilesystemError> {
-        let mut writer = WireWriter::request(msg::TLCREATE, TAG);
+        let mut writer = WireWriter::request(msg::TLCREATE, self.tag);
         writer.u32(dfid).string(name).u32(flags).u32(mode).u32(0);
-        let end = self.rpc(writer.finish(), msg::RLCREATE, TAG)?;
+        let end = self.rpc(writer.finish(), msg::RLCREATE, self.tag)?;
         WireReader::new(&self.response[HEADER_LEN..end]).qid()
     }
 
@@ -287,27 +402,52 @@ impl P9Client {
         offset: u64,
         out: &mut [u8],
     ) -> Result<usize, FilesystemError> {
-        let count = out.len().min(self.io_unit()) as u32;
-        let mut writer = WireWriter::request(msg::TREAD, TAG);
+        if out.is_empty() {
+            return Ok(0);
+        }
+        let cached_end = self
+            .read_ahead_offset
+            .saturating_add(self.read_ahead.len() as u64);
+        if self.read_ahead_fid == fid && offset >= self.read_ahead_offset && offset < cached_end {
+            let start = (offset - self.read_ahead_offset) as usize;
+            let count = out.len().min(self.read_ahead.len() - start);
+            out[..count].copy_from_slice(&self.read_ahead[start..start + count]);
+            return Ok(count);
+        }
+
+        // Guest libc and Git commonly issue 4 KiB reads. Fetch one negotiated
+        // 9p window and serve subsequent sequential reads from it, reducing
+        // VM exits without caching metadata or retaining data after close.
+        let count = self.io_unit() as u32;
+        let mut writer = WireWriter::request(msg::TREAD, self.tag);
         writer.u32(fid).u64(offset).u32(count);
-        let end = self.rpc(writer.finish(), msg::RREAD, TAG)?;
+        let end = self.rpc(writer.finish(), msg::RREAD, self.tag)?;
         let mut reader = WireReader::new(&self.response[HEADER_LEN..end]);
         let returned = reader.u32()? as usize;
         let data = reader.take(returned)?;
-        if returned > out.len() {
+        if returned > self.io_unit() {
             self.poison();
             return Err(FilesystemError::IoError);
         }
-        out[..returned].copy_from_slice(data);
-        Ok(returned)
+        self.read_ahead.clear();
+        self.read_ahead.extend_from_slice(data);
+        self.read_ahead_fid = fid;
+        self.read_ahead_offset = offset;
+        let copied = out.len().min(returned);
+        out[..copied].copy_from_slice(&self.read_ahead[..copied]);
+        Ok(copied)
     }
 
     pub fn write(&mut self, fid: u32, offset: u64, data: &[u8]) -> Result<usize, FilesystemError> {
+        if self.read_ahead_fid == fid {
+            self.read_ahead_fid = NOFID;
+            self.read_ahead.clear();
+        }
         let count = data.len().min(self.io_unit());
-        let mut writer = WireWriter::request(msg::TWRITE, TAG);
+        let mut writer = WireWriter::request(msg::TWRITE, self.tag);
         writer.u32(fid).u64(offset).u32(count as u32);
         writer.bytes(&data[..count]);
-        let end = self.rpc(writer.finish(), msg::RWRITE, TAG)?;
+        let end = self.rpc(writer.finish(), msg::RWRITE, self.tag)?;
         let written = WireReader::new(&self.response[HEADER_LEN..end]).u32()? as usize;
         if written > count {
             self.poison();
@@ -319,9 +459,9 @@ impl P9Client {
     /// One Rreaddir page. An empty result means end-of-directory.
     pub fn readdir(&mut self, fid: u32, offset: u64) -> Result<Vec<P9Dirent>, FilesystemError> {
         let count = self.io_unit() as u32;
-        let mut writer = WireWriter::request(msg::TREADDIR, TAG);
+        let mut writer = WireWriter::request(msg::TREADDIR, self.tag);
         writer.u32(fid).u64(offset).u32(count);
-        let end = self.rpc(writer.finish(), msg::RREADDIR, TAG)?;
+        let end = self.rpc(writer.finish(), msg::RREADDIR, self.tag)?;
         let mut reader = WireReader::new(&self.response[HEADER_LEN..end]);
         let data_len = reader.u32()? as usize;
         let mut data = WireReader::new(reader.take(data_len)?);
@@ -333,15 +473,16 @@ impl P9Client {
     }
 
     pub fn mkdir(&mut self, dfid: u32, name: &str, mode: u32) -> Result<(), FilesystemError> {
-        let mut writer = WireWriter::request(msg::TMKDIR, TAG);
+        let mut writer = WireWriter::request(msg::TMKDIR, self.tag);
         writer.u32(dfid).string(name).u32(mode).u32(0);
-        self.rpc(writer.finish(), msg::RMKDIR, TAG).map(|_| ())
+        self.rpc(writer.finish(), msg::RMKDIR, self.tag).map(|_| ())
     }
 
     pub fn unlinkat(&mut self, dfid: u32, name: &str, flags: u32) -> Result<(), FilesystemError> {
-        let mut writer = WireWriter::request(msg::TUNLINKAT, TAG);
+        let mut writer = WireWriter::request(msg::TUNLINKAT, self.tag);
         writer.u32(dfid).string(name).u32(flags);
-        self.rpc(writer.finish(), msg::RUNLINKAT, TAG).map(|_| ())
+        self.rpc(writer.finish(), msg::RUNLINKAT, self.tag)
+            .map(|_| ())
     }
 
     pub fn renameat(
@@ -351,44 +492,46 @@ impl P9Client {
         new_dfid: u32,
         new_name: &str,
     ) -> Result<(), FilesystemError> {
-        let mut writer = WireWriter::request(msg::TRENAMEAT, TAG);
+        let mut writer = WireWriter::request(msg::TRENAMEAT, self.tag);
         writer
             .u32(old_dfid)
             .string(old_name)
             .u32(new_dfid)
             .string(new_name);
-        self.rpc(writer.finish(), msg::RRENAMEAT, TAG).map(|_| ())
+        self.rpc(writer.finish(), msg::RRENAMEAT, self.tag)
+            .map(|_| ())
     }
 
     pub fn symlink(&mut self, dfid: u32, name: &str, target: &str) -> Result<(), FilesystemError> {
-        let mut writer = WireWriter::request(msg::TSYMLINK, TAG);
+        let mut writer = WireWriter::request(msg::TSYMLINK, self.tag);
         writer.u32(dfid).string(name).string(target).u32(0);
-        self.rpc(writer.finish(), msg::RSYMLINK, TAG).map(|_| ())
+        self.rpc(writer.finish(), msg::RSYMLINK, self.tag)
+            .map(|_| ())
     }
 
     pub fn readlink(&mut self, fid: u32) -> Result<String, FilesystemError> {
-        let mut writer = WireWriter::request(msg::TREADLINK, TAG);
+        let mut writer = WireWriter::request(msg::TREADLINK, self.tag);
         writer.u32(fid);
-        let end = self.rpc(writer.finish(), msg::RREADLINK, TAG)?;
+        let end = self.rpc(writer.finish(), msg::RREADLINK, self.tag)?;
         WireReader::new(&self.response[HEADER_LEN..end]).string()
     }
 
     pub fn link(&mut self, dfid: u32, fid: u32, name: &str) -> Result<(), FilesystemError> {
-        let mut writer = WireWriter::request(msg::TLINK, TAG);
+        let mut writer = WireWriter::request(msg::TLINK, self.tag);
         writer.u32(dfid).u32(fid).string(name);
-        self.rpc(writer.finish(), msg::RLINK, TAG).map(|_| ())
+        self.rpc(writer.finish(), msg::RLINK, self.tag).map(|_| ())
     }
 
     pub fn fsync(&mut self, fid: u32, data_only: bool) -> Result<(), FilesystemError> {
-        let mut writer = WireWriter::request(msg::TFSYNC, TAG);
+        let mut writer = WireWriter::request(msg::TFSYNC, self.tag);
         writer.u32(fid).u32(u32::from(data_only));
-        self.rpc(writer.finish(), msg::RFSYNC, TAG).map(|_| ())
+        self.rpc(writer.finish(), msg::RFSYNC, self.tag).map(|_| ())
     }
 
     pub fn statfs(&mut self, fid: u32) -> Result<Statfs, FilesystemError> {
-        let mut writer = WireWriter::request(msg::TSTATFS, TAG);
+        let mut writer = WireWriter::request(msg::TSTATFS, self.tag);
         writer.u32(fid);
-        let end = self.rpc(writer.finish(), msg::RSTATFS, TAG)?;
+        let end = self.rpc(writer.finish(), msg::RSTATFS, self.tag)?;
         let mut reader = WireReader::new(&self.response[HEADER_LEN..end]);
         let _fs_type = reader.u32()?;
         let bsize = reader.u32()?;

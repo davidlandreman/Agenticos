@@ -309,8 +309,18 @@ impl VmaSet {
     /// Remove every intersection with `[start, end)`, splitting retained
     /// prefix/suffix pieces. Holes are intentionally tolerated.
     pub fn remove(&mut self, start: u64, end: u64) -> Result<(), VmError> {
+        self.remove_deferred(start, end).map(|_| ())
+    }
+
+    /// Remove a range while returning ownership of the intersecting VMAs.
+    ///
+    /// File-backed VMA destruction can close the last filesystem handle and
+    /// therefore sleep on I/O. Process-table callers must keep the returned
+    /// values alive until after releasing that table's lock.
+    pub fn remove_deferred(&mut self, start: u64, end: u64) -> Result<Vec<Vma>, VmError> {
         validate_range(start, end)?;
         let mut rebuilt = Vec::with_capacity(self.entries.len() + 1);
+        let mut removed = Vec::new();
         for vma in self.entries.drain(..) {
             if vma.end <= start || vma.start >= end {
                 rebuilt.push(vma);
@@ -324,9 +334,10 @@ impl VmaSet {
             if vma.end > end {
                 rebuilt.push(vma.split_right(end));
             }
+            removed.push(vma);
         }
         self.entries = rebuilt;
-        Ok(())
+        Ok(removed)
     }
 
     pub fn protect(&mut self, start: u64, end: u64, prot: VmProt) -> Result<(), VmError> {

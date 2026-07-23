@@ -59,7 +59,8 @@ same pinned libcurl/OpenSSL profile and trust store. All in-process porcelain
 works — init, add, commit, branch, checkout, merge, log, diff, status,
 cat-file, rev-parse, config. The kernel seeds `/etc/gitconfig` (root identity,
 `init.defaultBranch=main`, `safe.directory=*`, `core.fileMode=false`,
-`core.pager=cat`, `gc.auto=0`, `maintenance.auto=false`); repos belong on
+`core.pager=cat`, `core.preloadIndex=true`, `gc.auto=0`,
+`maintenance.auto=false`); repos belong on
 `/work` or `/data`. Local and HTTP(S) pack-protocol transports work; ssh and
 `git://` remain out of scope. Bringing git up fixed several real kernel bugs:
 the missing `/dev/null`, a signal-frame red-zone clobber in `deliver_signal`
@@ -185,7 +186,7 @@ These are cross-cutting (not subsystem-local). Subsystem-specific known issues l
 
 ### Current Limitations
 1. **Coarse SMP scalability** — Up to eight CPUs share one scheduler/run queue and coarse subsystem locks. Per-CPU queues, work stealing, MSI/MSI-X, and distributed device IRQs are deferred.
-2. **Three namespaces with different persistence semantics.** `/` is `overlay(tmpfs, boot-FAT)` — RAM upper, FAT lower. `/data` is a persistent ext2 VirtIO block disk supporting normal Unix directory/link metadata. `/host` is vvfat (read-only). Overlay writes to `/` survive reboot via the BusyBox `sync` applet (calls `sync(2)` → overlay-state.{0,1} on `/data`). `/work` is provisioned on the overlay at every boot as the conventional scratch/compiler-output directory; `/root` is also provisioned because the default user environment sets `HOME=/root` and applications such as Links store configuration there. Ring-3 processes start with cwd `/host`, which is read-only. An explicitly supplied old FAT image can be mounted read-only at `/legacy-data` for migration. `/shared` is a worktree-independent host directory (default `~/.agenticos/shared`, override `AGENTICOS_SHARED_DIR`, disable `AGENTICOS_SHARED=off`) exported over virtio-9p and served by an in-kernel 9P2000.L client with no guest-side caching; multiple concurrently running instances may mount and write it simultaneously because the host kernel owns the real filesystem, and force-stopping QEMU can never leave it dirty or read-only.
+2. **Three namespaces with different persistence semantics.** `/` is `overlay(tmpfs, boot-FAT)` — RAM upper, FAT lower. `/data` is a persistent ext2 VirtIO block disk supporting normal Unix directory/link metadata. `/host` is vvfat (read-only). Overlay writes to `/` survive reboot via the BusyBox `sync` applet (calls `sync(2)` → overlay-state.{0,1} on `/data`). `/work` is provisioned on the overlay at every boot as the conventional scratch/compiler-output directory; `/root` is also provisioned because the default user environment sets `HOME=/root` and applications such as Links store configuration there. Ring-3 processes start with cwd `/host`, which is read-only. An explicitly supplied old FAT image can be mounted read-only at `/legacy-data` for migration. `/shared` is a worktree-independent host directory (default `~/.agenticos/shared`, override `AGENTICOS_SHARED_DIR`, disable `AGENTICOS_SHARED=off`) exported over virtio-9p and served by a four-lane in-kernel 9P2000.L client. It retains reusable path fids and open-handle read-ahead windows but not attributes: every stat reaches the host, so multiple concurrently running instances still observe metadata changes. The host kernel owns the real filesystem, and force-stopping QEMU can never leave it dirty or read-only.
 3. **Limited Test Coverage** — Many subsystems lack comprehensive tests.
 4. **Global State** — Heavy use of `static mut` and `lazy_static`.
 5. **Constant Window Repainting** — `TextWindow` repaints unnecessarily in some paths.

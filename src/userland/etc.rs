@@ -41,7 +41,8 @@ const GITCONFIG_PATH: &str = "/etc/gitconfig";
 /// dubious-ownership refusals; `fileMode = false` because the overlay's
 /// FAT lower layer cannot persist the executable bit; `pager = cat`
 /// keeps scripted output sane (interactive users can opt back into
-/// `less` per-repo or via ~/.gitconfig).
+/// `less` per-repo or via ~/.gitconfig). Parallel index preload is
+/// particularly important for the high-latency `/shared` 9p mount.
 const GITCONFIG_CONTENT: &[u8] = b"[user]\n\
 \tname = root\n\
 \temail = root@agenticos.local\n\
@@ -52,6 +53,7 @@ const GITCONFIG_CONTENT: &[u8] = b"[user]\n\
 [core]\n\
 \tfileMode = false\n\
 \tpager = cat\n\
+\tpreloadIndex = true\n\
 [gc]\n\
 \tauto = 0\n\
 [maintenance]\n\

@@ -63,7 +63,7 @@ pub fn ensure_user_page(address: u64, write: bool) -> Result<(), i64> {
             )
         })
         .flatten();
-    let outcome = ensure_user_page_inner(page, write, l4, vma_generation, &vma, pager);
+    let outcome = ensure_user_page_inner(page, write, l4, &vma, pager);
     let (reason, requested, actual) = match outcome {
         Ok((requested, actual)) => (PageInTerminalReason::PresentCommitted, requested, actual),
         Err(failure) => (failure.reason, failure.requested, failure.actual),
@@ -90,7 +90,6 @@ fn ensure_user_page_inner(
     page: u64,
     write: bool,
     l4: x86_64::structures::paging::PhysFrame,
-    vma_generation: u64,
     vma: &Vma,
     pager: Option<crate::diagnostics::shadow::pager::Handle>,
 ) -> Result<(usize, usize), PageInFailure> {
@@ -221,13 +220,16 @@ fn ensure_user_page_inner(
     }
 
     // Blocking I/O dropped every VM lock. Confirm the process still owns the
-    // same L4 and semantically identical VMA before publishing the leaf.
+    // same L4 and semantically identical target VMA before publishing the
+    // leaf. Do not require the address space's global VMA generation to stay
+    // unchanged: pthread creation legitimately mmaps unrelated stacks while
+    // this read sleeps. Exact target bounds/protection/backing plus the stable
+    // anonymous mapping identity reject destructive changes to this VMA.
     let unchanged = crate::userland::lifecycle::with_current_group(|process| {
         let Some(space) = process.address_space.as_ref() else {
             return false;
         };
         space.l4_frame() == l4
-            && space.vma_generation() == vma_generation
             && space
                 .vmas()
                 .find(page)
@@ -262,6 +264,26 @@ fn ensure_user_page_inner(
             if let Some(handle) = pager {
                 crate::diagnostics::shadow::pager::commit(handle);
             }
+            Ok((requested, actual))
+        }
+        Some(Err(PageInTerminalReason::LeafCollision)) => {
+            // Another CLONE_VM task can fault on this page while our backing
+            // read sleeps. Whichever task publishes first owns the leaf; the
+            // others discard their identical private frames and retry through
+            // the now-present mapping. A collision is therefore successful
+            // demand paging, not EFAULT. Keep the losing page-in transaction
+            // explicitly aborted so its transient frame is never represented
+            // as the committed leaf in crash diagnostics.
+            release_private(frame);
+            if let Some(handle) = pager {
+                crate::diagnostics::shadow::pager::abort(
+                    handle,
+                    PageInTerminalReason::LeafCollision as u16,
+                    requested,
+                    actual,
+                );
+            }
+            x86_64::instructions::tlb::flush(VirtAddr::new(page));
             Ok((requested, actual))
         }
         Some(Err(reason)) => {

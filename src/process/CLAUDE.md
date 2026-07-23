@@ -65,6 +65,20 @@ CPU on its first pthread clone and all members receive scheduler affinity to
 that CPU. Dequeue skips ineligible entities without losing their queue order;
 targeted reschedule IPIs wake the home CPU.
 
+**Deferred device-wake rule:** PCI handlers only publish bounded lock-free
+wake records. Every scheduler-driving context (BSP main loop, AP idle loop,
+and the synchronous QEMU launcher) must drain those records before selecting
+work and again across its STI+HLT commit. Producers kick CPUs whose published
+state is idle. Falling back to the 100 Hz PIT adds up to 10 ms to every RPC;
+Git metadata walks over uncached 9p turn that into tens of seconds. Kernel
+I/O wake records retain both PID and request token until the PCB publishes the
+matching `WaitingForBlockIo`; consuming an early record loses the wake.
+
+Synchronous QEMU launchers are woken by `dispatch_after_user_exit`, which
+publishes the exit wake and selects the post-exit entity under one scheduler
+lock. Waking from `stop_task` is too early: another CPU can observe unset exit
+metadata or reclaim the exiting process's still-active kernel stack.
+
 ## What's NOT wired up
 
 - **No isolation between kernel threads.** All kernel code shares one address space (ring 0). Ring-3 processes have their own L4 (USER-bit-protected user half + shared kernel half) — see the userland subsystem at `src/userland/`.

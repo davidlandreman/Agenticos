@@ -197,6 +197,25 @@ pub unsafe fn dispatch_after_user_stop() -> ! {
     }
 }
 
+/// Publish the compatibility launcher's exit wake and select the next entity
+/// in one scheduler transaction. This keeps another CPU from resuming the
+/// launcher and reclaiming the stopped process's kernel stack before this CPU
+/// has committed to a different stack.
+pub unsafe fn dispatch_after_user_exit(pid: u32) -> ! {
+    let next = {
+        let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
+        scheduler.wake_threads_waiting_for_ring3_exit(pid);
+        scheduler.schedule_entity()
+    };
+    match next {
+        Some(crate::process::entity::EntityId::UserProcess(pid)) => resume_ring3(pid),
+        Some(crate::process::entity::EntityId::KernelThread(pid)) => {
+            crate::arch::x86_64::context_switch::resume_kernel_thread(pid)
+        }
+        None => yield_to_kernel_main_loop(),
+    }
+}
+
 /// Snapshot the trap-frame GPRs + CPU state into `p.saved_user_state`,
 /// `p.fs_base`, and `p.fpu_state`.
 ///

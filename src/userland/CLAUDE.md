@@ -18,9 +18,17 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   page-table subtree, and the authoritative VMA set. Drop performs targeted
   teardown even when another CR3 is active.
 - `vm.rs` — sorted non-overlapping VMAs, split/merge/protect/remove, and
-  reusable top-down gap search.
+  reusable top-down gap search. Process-table mutation paths use
+  `remove_deferred` so a last file-backed VMA can close only after the table
+  lock is released; `/shared` close may sleep on an interrupt-driven Tclunk.
 - `usercopy.rs` — VMA-aware reads/writes that page in lazy buffers and
-  resolve COW before kernel writes.
+  resolve COW before kernel writes. File-backed page-in drops VM locks while
+  doing I/O; if CLONE_VM peers populate the same page concurrently, the first
+  leaf wins and later publishers release their private frames and retry the
+  shared mapping instead of converting the benign collision into `EFAULT`.
+  Publication revalidates the exact target VMA rather than its address space's
+  global VMA generation, because pthread stack mmaps may change unrelated VMAs
+  while the backing read sleeps.
 - `kernel_stack.rs` — per-process 64 KiB kernel stack. TSS.rsp0 +
   GSBASE-stored SYSCALL rsp top are pointed at this when the process
   is current.
@@ -250,6 +258,12 @@ unlocking. This is load-bearing for pipe EOF/EPIPE wakes. `execve` uses
 endpoint, so their final `Drop` can acquire the process table. Ordinary
 `dup`/`dup2`/`F_DUPFD` clear the new descriptor's `FD_CLOEXEC` bit;
 `F_DUPFD_CLOEXEC` sets it.
+
+File-backed VMA destruction follows the same two-phase rule. `munmap` and
+fixed-address `mmap` remove/split VMAs under `PROCESS_TABLE`, unmap stale
+hardware leaves after unlocking, and only then drop the displaced VMA owners.
+Dropping the final `/shared` `Arc<File>` sends a 9p Tclunk and parks the ring-3
+continuation, which must be able to reacquire `PROCESS_TABLE`.
 
 Blocking pipe reads and writes use the descriptor-readiness sequence as a
 check-to-park handshake: sample before inspecting the pipe, publish the block

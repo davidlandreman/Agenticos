@@ -14,9 +14,9 @@
 # gitexecdir=/bin (so git spawns /bin/git-remote-https through the
 # virtual bin namespace), sysconfdir=/etc (system config is the
 # kernel-managed /etc/gitconfig). Perl/python/tcl porcelain, gettext,
-# expat (legacy dumb-HTTP WebDAV push), iconv, pthreads (pack/delta
-# parallelism only; pthread groups pin to one CPU today), and unix
-# sockets (credential-cache) are all compiled out.
+# expat (legacy dumb-HTTP WebDAV push), iconv, and unix sockets
+# (credential-cache) are compiled out. Pthreads stay enabled so Git can
+# overlap index preload I/O on high-latency filesystems such as virtio-9p.
 
 MUSL_CC      ?= x86_64-linux-musl-gcc
 MUSL_AR      ?= $(patsubst %-gcc,%-ar,$(MUSL_CC))
@@ -44,6 +44,7 @@ CURL_TARBALL   := $(TARBALLS_DIR)/curl-$(CURL_VERSION).tar.gz
 ZLIB_TARBALL   := $(TARBALLS_DIR)/zlib-$(ZLIB_VERSION).tar.gz
 OPENSSL_TARBALL := $(TARBALLS_DIR)/openssl-$(OPENSSL_VERSION).tar.gz
 GIT_SRC        := $(OUT_DIR)/git-$(GIT_VERSION)
+GIT_PATCHES    := patches/0001-lower-preload-thread-cost-for-9p.patch
 CURL_SRC       := $(OUT_DIR)/curl-$(CURL_VERSION)
 ZLIB_SRC       := $(OUT_DIR)/zlib-$(ZLIB_VERSION)
 OPENSSL_SRC    := $(OUT_DIR)/openssl-$(OPENSSL_VERSION)
@@ -78,7 +79,7 @@ GIT_MAKE_VARS := \
 	DEFAULT_PAGER=less DEFAULT_EDITOR=vi \
 	NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease \
 	NO_PYTHON=YesPlease NO_EXPAT=YesPlease NO_ICONV=YesPlease \
-	NO_OPENSSL=YesPlease NO_PTHREADS=YesPlease \
+	NO_OPENSSL=YesPlease \
 	NO_UNIX_SOCKETS=YesPlease NO_IPV6=YesPlease \
 	NO_REGEX=NeedsStartEnd \
 	NO_INSTALL_HARDLINKS=YesPlease SKIP_DASHED_BUILT_INS=YesPlease \
@@ -191,9 +192,10 @@ $(LIBCURL_LIB): Makefile $(CURL_TARBALL) $(ZLIB_LIB) $(OPENSSL_STAMP)
 	$(MAKE) -C $(CURL_SRC)/include install >/dev/null
 	@test -f $(LIBCURL_LIB)
 
-$(GIT_BUILT): Makefile $(GIT_TARBALL) $(ZLIB_LIB) $(LIBCURL_LIB)
+$(GIT_BUILT): Makefile $(GIT_TARBALL) $(ZLIB_LIB) $(LIBCURL_LIB) $(GIT_PATCHES)
 	rm -rf $(GIT_SRC)
 	tar xzf $(GIT_TARBALL) -C $(OUT_DIR)
+	@for patch_file in $(GIT_PATCHES); do patch -d $(GIT_SRC) -p1 < $$patch_file; done
 	@echo "🔨 Building git-$(GIT_VERSION) (static, musl)..."
 	$(MAKE) -C $(GIT_SRC) -j$(NPROC) $(GIT_MAKE_VARS) git git-remote-http
 	@test -f $(GIT_HELPER_BUILT)
