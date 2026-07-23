@@ -10,17 +10,15 @@ set -euo pipefail
 # Conductor sets CONDUCTOR_WORKSPACE_PATH; honor it but tolerate manual runs.
 cd "${CONDUCTOR_WORKSPACE_PATH:-$(git rev-parse --show-toplevel)}"
 
-# Exercise the qualified VirGL compositor with Futurism window chrome. The
-# pinned macOS QEMU bottle has no user-network backend; build.sh detects that
-# and bridges the guest NIC to a stock QEMU's slirp over a unix stream socket,
-# so networking stays on by default. Explicit caller values still override all
-# of these defaults.
-qemu_virgl_prefix="${AGENTICOS_QEMU_VIRGL_PREFIX:-$(brew --cellar qemu)/1.0.27}"
-export AGENTICOS_COMPOSITOR="${AGENTICOS_COMPOSITOR:-gpu}"
-export AGENTICOS_GPU_STRICT="${AGENTICOS_GPU_STRICT:-1}"
-export AGENTICOS_QEMU_BIN="${AGENTICOS_QEMU_BIN:-$qemu_virgl_prefix/bin/qemu-system-x86_64}"
-export AGENTICOS_QEMU_GL="${AGENTICOS_QEMU_GL:-es}"
-export AGENTICOS_THEME="${AGENTICOS_THEME:-futurism}"
+# Run against stock QEMU: no VirGL/GPU requirement, CPU-only 2D compositor,
+# and Classic window chrome. This picks the plain `qemu-system-x86_64` on PATH
+# (not the pinned VirGL bottle), uses the `retained` CPU compositor over a 2D
+# `virtio-vga` device that any stock QEMU provides, and never demands a GL
+# frontend. Explicit caller values still override all of these defaults.
+export AGENTICOS_COMPOSITOR="${AGENTICOS_COMPOSITOR:-retained}"
+export AGENTICOS_GPU_STRICT="${AGENTICOS_GPU_STRICT:-0}"
+export AGENTICOS_QEMU_BIN="${AGENTICOS_QEMU_BIN:-$(command -v qemu-system-x86_64 || true)}"
+export AGENTICOS_THEME="${AGENTICOS_THEME:-classic}"
 export AGENTICOS_NETWORK="${AGENTICOS_NETWORK:-on}"
 
 # build.sh's manual-run default is machine-global. Give each Conductor
