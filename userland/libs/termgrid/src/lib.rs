@@ -3,14 +3,12 @@
 //! Paints a [`vte::Screen`] viewport into a caller-owned little-endian
 //! XRGB8888 buffer, honoring per-cell foreground/background color
 //! (`ColorSpec` resolved through `vte::colors`), the `REVERSE`/`UNDERLINE`
-//! attributes, and the block caret. This mirrors the kernel `TextWindow` paint
-//! path but runs in ring-3 and writes the surface the app hands to
-//! `gui_win_present`.
+//! attributes, and the block caret. It runs in ring 3 and writes the surface
+//! the app hands to `gui_win_present`.
 //!
 //! The `ColorSpec::Default` background is rendered with the caller-supplied
 //! `default_bg` word so the app can substitute the active theme's translucent
-//! content-well color, exactly like `sync_text_window_from_screen`'s
-//! `bg_is_default` bit in the kernel.
+//! content-well color.
 
 #![no_std]
 
@@ -23,7 +21,7 @@ pub use font::TermFont;
 use vte::screen::attrs;
 use vte::{Screen, ColorSpec};
 
-/// Default JetBrains Mono size the kernel terminal renders at.
+/// Default JetBrains Mono size used by the ring-3 terminal.
 pub const DEFAULT_FONT_PX: u16 = 16;
 
 /// Parameters for one full grid repaint.

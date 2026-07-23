@@ -145,7 +145,11 @@ pub fn gui_win_create_handler(args: &mut SyscallArgs) -> i64 {
                     screen_width,
                 )
             } else {
-                ((position & 0xFFFF_FFFF) as u32 as i32, (position >> 32) as u32 as i32, width)
+                (
+                    (position & 0xFFFF_FFFF) as u32 as i32,
+                    (position >> 32) as u32 as i32,
+                    width,
+                )
             };
             let surface_id = wm.create_window(Some(desktop_id));
             let bounds = Rect::new(x, y, surface_width, height);
@@ -445,23 +449,5 @@ pub fn gui_shell_window_action_handler(args: &mut SyscallArgs) -> i64 {
         Some(true) => 0,
         Some(false) => ENOENT,
         None => EIO,
-    }
-}
-
-/// `() -> frame_id | -errno`. Create a terminal window bound to a fresh ring-3
-/// zsh (the kernel keeps ownership of the PTY/VT service). Returns the new
-/// frame's window id. Desktop-shell only.
-pub fn gui_shell_spawn_terminal_handler(args: &mut SyscallArgs) -> i64 {
-    let _ = args;
-    let pid = match caller_pid() {
-        Ok(pid) => pid,
-        Err(error) => return error,
-    };
-    if !gui::is_desktop_shell(pid) {
-        return crate::userland::abi::EPERM;
-    }
-    match crate::window::terminal_factory::spawn_terminal_with_shell() {
-        Ok(instance) => instance.frame_id.0 as i64,
-        Err(_) => EIO,
     }
 }

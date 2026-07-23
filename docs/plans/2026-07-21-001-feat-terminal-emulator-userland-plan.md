@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: implemented
 date: 2026-07-21
 ---
 
@@ -7,9 +7,9 @@ date: 2026-07-21
 
 ## Implementation status (2026-07-21)
 
-A complete, compiling, non-destructive vertical slice has landed — the new
-`TERMINAL.ELF` **coexists** with the existing kernel terminal (U6 deletion
-deferred), so this is additive.
+A complete, compiling terminal migration has landed. The new
+`TERMINAL.ELF` is the sole interactive terminal; the follow-up deletion plan
+`2026-07-22-002-refactor-remove-kernel-terminal-emulator-plan.md` completed U6.
 
 - **U1 — `userland/libs/vte`** (emulator port): `vte`, `screen`, `caret`,
   `colors` (RGB swap), `config`, plus new `color` + `input` modules. Compiles
@@ -49,10 +49,11 @@ CR→LF via ICRNL) on the emulator's master-write path, while the in-kernel
 `TerminalWindow` and DSR/DA replies stay on a raw path
 (`push_slave_raw`/`PtyMaster::push_input`). Covered by three new pty tests.
 
-**Not yet done:** **U6** kernel-emulator deletion (deferred, the new app
-coexists); live resize (fixed 80×24 — `Screen` has no resize); ISIG generation
-(Ctrl-C etc.); DSR replies written to the master while in canonical mode would
-be line-buffered (rare edge case). See D4/D6 and Risks.
+**U6 complete (2026-07-22):** the kernel emulator/window factory and desktop
+spawn syscall were deleted, and the Start menu now executes
+`/host/TERMINAL.ELF`. Live resize remains deferred (fixed 80×24 — `Screen` has
+no resize); DSR replies written to the master while in canonical mode would be
+line-buffered (rare edge case). See D4/D6 and Risks.
 
 ---
 

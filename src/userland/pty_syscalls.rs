@@ -32,8 +32,16 @@ const DEFAULT_COLS: u16 = 80;
 /// `flags` accepts `O_CLOEXEC`.
 pub fn pty_open_handler(args: &mut SyscallArgs) -> i64 {
     let handle = args.rdi as u32;
-    let rows = if args.rsi == 0 { DEFAULT_ROWS } else { args.rsi as u16 };
-    let cols = if args.rdx == 0 { DEFAULT_COLS } else { args.rdx as u16 };
+    let rows = if args.rsi == 0 {
+        DEFAULT_ROWS
+    } else {
+        args.rsi as u16
+    };
+    let cols = if args.rdx == 0 {
+        DEFAULT_COLS
+    } else {
+        args.rdx as u16
+    };
     let flags = args.r10;
     if flags & !O_CLOEXEC != 0 {
         return EINVAL;
@@ -77,12 +85,11 @@ pub fn pty_set_winsize_handler(args: &mut SyscallArgs) -> i64 {
         return EINVAL;
     }
 
-    let master = crate::userland::lifecycle::with_active_user(|process| {
-        match process.fd_table.get(fd) {
+    let master =
+        crate::userland::lifecycle::with_active_user(|process| match process.fd_table.get(fd) {
             Some(FdSlot::PtyMaster { master, .. }) => Some(master.clone()),
             _ => None,
-        }
-    });
+        });
     let Some(master) = master else {
         return EBADF;
     };

@@ -155,11 +155,11 @@ fn write_file_chunked(
     written as i64
 }
 
-/// Copy `len` bytes from user `ptr` and hand them to `emit` as text, in
-/// staging-buffer chunks with multi-byte UTF-8 sequences kept intact
-/// across chunk seams. Returns bytes consumed or a negative errno when
-/// nothing was emitted.
-fn write_terminal_chunked(ptr: u64, len: u64, emit: &mut dyn FnMut(&str)) -> i64 {
+/// Copy `len` stdout/stderr bytes from user `ptr` to the issuing process's pty
+/// slave. The pty path is byte-preserving; the framebuffer fallback used by
+/// processes without a terminal remains text-oriented and keeps UTF-8
+/// sequences intact across staging-buffer seams.
+fn write_terminal_chunked(ptr: u64, len: u64, terminal_id: Option<crate::window::WindowId>) -> i64 {
     let mut staging = alloc::vec![0u8; core::cmp::min(len as usize, WRITE_MAX_LEN)];
     let mut written: u64 = 0;
     while written < len {
@@ -168,6 +168,19 @@ fn write_terminal_chunked(ptr: u64, len: u64, emit: &mut dyn FnMut(&str)) -> i64
         if let Err(e) = crate::userland::usercopy::copy_from_user(buf, ptr + written) {
             return if written > 0 { written as i64 } else { e };
         }
+
+        if let Some(terminal_id) = terminal_id {
+            let Some(consumed) = crate::terminal::pty::write_slave_for_terminal(terminal_id, buf)
+            else {
+                return if written > 0 { written as i64 } else { EIO };
+            };
+            written += consumed as u64;
+            if consumed < want {
+                break;
+            }
+            continue;
+        }
+
         let take = if written + want as u64 == len {
             // Final chunk: emit everything, seams are no longer a concern.
             want
@@ -182,7 +195,7 @@ fn write_terminal_chunked(ptr: u64, len: u64, emit: &mut dyn FnMut(&str)) -> i64
         // swallow writes that mix valid text with binary data (e.g.
         // cat'ing a partially-binary file).
         let text = alloc::string::String::from_utf8_lossy(&buf[..take]);
-        emit(&text);
+        crate::print!("{}", text);
         written += take as u64;
     }
     written as i64
@@ -315,17 +328,10 @@ pub fn write_handler(args: &mut SyscallArgs) -> i64 {
             crate::userland::local_stream::LocalStreamEndpoint::write(args, &handle, ptr, len)
         }
         Target::StdoutErr => {
-            // U8/bugfix: route to THIS process's terminal_id, not the
-            // global CURRENT_OUTPUT_TERMINAL. With multiple ring-3
-            // processes (one per terminal), the global is wrong —
-            // last-launcher wins, so zsh1's writes would land in
-            // terminal 2's window.
+            // Route to THIS process's terminal_id. The pty slave is the
+            // byte-preserving source of output consumed by TERMINAL.ELF.
             let dest_terminal = crate::userland::lifecycle::with_current_group(|p| p.terminal_id);
-            let mut emit = |s: &str| match dest_terminal {
-                Some(tid) => crate::window::terminal::write_to_terminal_id(tid, s),
-                None => crate::print!("{}", s),
-            };
-            write_terminal_chunked(ptr, len, &mut emit)
+            write_terminal_chunked(ptr, len, dest_terminal)
         }
         Target::PtyMaster(master) => {
             // The emulator wrote keystrokes to the pty master; run them
@@ -452,11 +458,7 @@ pub fn writev_handler(args: &mut SyscallArgs) -> i64 {
                 written += len;
             }
             Target::StdoutErr => {
-                let mut emit = |s: &str| match dest_terminal {
-                    Some(tid) => crate::window::terminal::write_to_terminal_id(tid, s),
-                    None => crate::print!("{}", s),
-                };
-                let n = write_terminal_chunked(base, len, &mut emit);
+                let n = write_terminal_chunked(base, len, dest_terminal);
                 if n < 0 {
                     return if written > 0 { written as i64 } else { n };
                 }
@@ -594,10 +596,9 @@ const READ_MAX_LEN: usize = 4096;
 /// `read(fd: i32, buf: *mut u8, count: usize) -> isize`
 ///
 /// Routes through the FD table:
-/// - **stdin (slot 0)**: blocks until the per-process stdin queue
-///   (populated by the focused `TerminalWindow` on Enter) has at least
-///   one byte, then copies as many as fit. Blocking uses `sti; hlt`
-///   so the keyboard ISR + main loop can populate the queue.
+/// - **stdin (slot 0)**: blocks until the process's pty slave has input
+///   written by its ring-3 emulator's master fd, then copies as many bytes as
+///   fit.
 /// - **stdout/stderr (slots 1/2)**: `-EBADF` (write-only).
 /// - **opened file**: stages bytes through a kernel buffer (capped at
 ///   `READ_MAX_LEN`) and copies to the user pointer; advances the
@@ -3778,14 +3779,20 @@ pub fn sendfile_handler(args: &mut SyscallArgs) -> i64 {
             break;
         }
         let written = match &out {
-            Out::StdoutErr => {
-                let s = alloc::string::String::from_utf8_lossy(&buf[..n]);
-                match dest_terminal {
-                    Some(tid) => crate::window::terminal::write_to_terminal_id(tid, &s),
-                    None => crate::print!("{}", s),
+            Out::StdoutErr => match dest_terminal {
+                Some(tid) => match crate::terminal::pty::write_slave_for_terminal(tid, &buf[..n]) {
+                    Some(written) => written,
+                    None => {
+                        error = Some(EIO);
+                        0
+                    }
+                },
+                None => {
+                    let s = alloc::string::String::from_utf8_lossy(&buf[..n]);
+                    crate::print!("{}", s);
+                    n
                 }
-                n
-            }
+            },
             Out::File(handle) => match handle.write(&buf[..n]) {
                 Ok(w) => w,
                 Err(ref e) => {

@@ -1,6 +1,6 @@
 use crate::arch::x86_64::syscall::SyscallArgs;
 use crate::graphics::composition::{ClientGlDraw, ClientGlVertex, CLIENT_GL_DRAW_DEPTH_TEST};
-use crate::userland::abi::{UserVaBounds, EAGAIN, EFAULT, EINVAL, ENOENT};
+use crate::userland::abi::{UserVaBounds, EAGAIN, EFAULT, EINVAL, ENOENT, ENOSYS};
 use crate::userland::fdtable::{FdSlot, FdTable, GuiEventHandle};
 use crate::userland::gui::{
     self, GuiEvent, GuiWindowRecord, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_QUEUE_CAPACITY,
@@ -335,18 +335,28 @@ fn test_gui_cleanup_releases_pid_state() {
     gui::reset_for_test();
     let pid = 44;
     let handle = gui::allocate_handle(pid).expect("handle");
+    let surface_id = WindowId::new();
     gui::register_window(
         pid,
         handle,
         GuiWindowRecord {
             frame_id: WindowId::new(),
-            surface_id: WindowId::new(),
+            surface_id,
         },
     )
     .expect("register");
+    let _master = crate::terminal::pty::install_for_terminal(surface_id, 24, 80);
+    assert!(crate::terminal::pty::is_active_for_terminal(surface_id));
     assert_eq!(gui::window_count_for_test(pid), 1);
     gui::cleanup_process(pid);
     assert_eq!(gui::window_count_for_test(pid), 0);
+    assert!(!crate::terminal::pty::is_active_for_terminal(surface_id));
+}
+
+fn test_retired_terminal_spawn_syscall_is_enosys() {
+    let mut args = SyscallArgs::default();
+    args.rax = 5018;
+    assert_eq!(crate::userland::abi::syscall_dispatch(&mut args), ENOSYS);
 }
 
 fn test_gui_next_event_nonblocking_and_bad_pointer() {
@@ -631,11 +641,6 @@ fn test_shell_syscalls_require_registration() {
         crate::userland::gui_syscalls::gui_shell_window_action_handler(&mut action),
         EPERM
     );
-    let mut terminal = SyscallArgs::default();
-    assert_eq!(
-        crate::userland::gui_syscalls::gui_shell_spawn_terminal_handler(&mut terminal),
-        EPERM
-    );
     gui::reset_for_test();
 }
 
@@ -757,6 +762,7 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_theme_broadcast_targets_gui_owners_and_coalesces,
         &test_settings_broadcast_targets_gui_owners_and_coalesces,
         &test_gui_cleanup_releases_pid_state,
+        &test_retired_terminal_spawn_syscall_is_enosys,
         &test_gui_next_event_nonblocking_and_bad_pointer,
         &test_gui_syscall_argument_errors,
         &test_gui_create_destroy_lifecycle,

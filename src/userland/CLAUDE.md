@@ -42,8 +42,7 @@ preemptive timer ISR, kernel `Process` PCB) lives next door in
   wait/wake/requeue profile, relative wait deadlines, signal interruption,
   and timer-backed timeout completion.
 - `process_service.rs` — persistent kernel launch/reap worker, bounded
-  non-blocking request queue, explicit terminal launch context, cancellation,
-  and completion delivery.
+  non-blocking request queue, owned launch context, and completion delivery.
 - `launcher.rs` — serialized CR3-sensitive ELF preparation. Production uses
   the unstarted prepare/commit split; the blocking wrapper is test compatibility.
 - `mod.rs` — process setup/initial-stack construction and
@@ -311,21 +310,30 @@ The AgenticOS-private range extends syscall 5000 with the following GUI calls:
   client-requested; it is never inferred from `WaitingForGuiEvent`, which is
   the normal idle state for a healthy GUI process.
 
+The ring-3 terminal uses a separate PTY ABI:
+
+- 5013 `pty_open(window, rows, cols, flags)` — install a PTY keyed to an owned
+  GUI surface, bind the caller's `terminal_id`, and return a selectable
+  `PtyMaster` fd
+- 5014 `pty_set_winsize(master_fd, rows, cols)` — update winsize and raise
+  SIGWINCH on processes bound to that PTY
+
 The **desktop-shell protocol** extends this for the one blessed ring-3 shell
-(`DESKTOP.ELF`). All four require the caller to be the process registered via
-5013 (else `-EPERM`); the role is released automatically on process exit
+(`DESKTOP.ELF`). All three require the caller to be the process registered via
+5015 (else `-EPERM`); the role is released automatically on process exit
 (`gui::clear_desktop_shell_if` in `cleanup_process`):
 
-- 5013 `gui_shell_register(flags)` — claim the singleton shell role (`flags`
+- 5015 `gui_shell_register(flags)` — claim the singleton shell role (`flags`
   reserved; `-EEXIST` if another live shell holds it)
-- 5014 `gui_shell_list_windows(buf, len)` — snapshot top-level frames as
+- 5016 `gui_shell_list_windows(buf, len)` — snapshot top-level frames as
   fixed 80-byte `ShellWindowRecord {id, state, reserved, title[64]}` (state
   `0` normal / `1` minimized / `2` maximized); returns the count written
-- 5015 `gui_shell_window_action(frame_id, action)` — act on a frame the shell
+- 5017 `gui_shell_window_action(frame_id, action)` — act on a frame the shell
   does not own (`0` activate, `1` minimize, `2` maximize toggle, `3` restore,
   `4` close)
-- 5016 `gui_shell_spawn_terminal()` — create a kernel terminal window + PTY
-  bound to a fresh zsh; returns the new frame id
+
+Terminal creation is not a privileged shell syscall:
+`DESKTOP.ELF` forks and execs `/host/TERMINAL.ELF` like every other app.
 
 `gui_win_create` (5001) also gains shell-only flags: `GUI_WINDOW_UNDECORATED`
 (a bare, caller-positioned surface — the position is packed into arg 6/`r9` as
@@ -371,8 +379,10 @@ cannot starve the compositor or network worker when zsh polls for a child.
 
 ## Launch flow today
 
-1. Start, Run, or Terminal constructs an owned `LaunchSpec` and calls
+1. Kernel boot constructs an owned `LaunchSpec` for `DESKTOP.ELF` and calls
    `process_service::submit`, receiving a `LaunchId` before a PID exists.
+   Once running, the desktop launches Start/Run/Terminal children through
+   ordinary ring-3 `fork`/`execve`.
 2. The persistent `process-service` kernel thread drains the bounded queue and
    calls `launcher::prepare_user_binary_unstarted`. ELF bytes are read through
    asynchronous VirtIO block I/O before `BINARY_SETUP_MUTEX` serializes the
@@ -381,9 +391,8 @@ cannot starve the compositor or network worker when zsh polls for a child.
    covers the interval where the new CR3 is active, and setup restores the
    permanent kernel CR3 before publishing the process to another CPU.
 3. Setup installs a complete but unschedulable Process. The service publishes
-   the LaunchId→PID record, checks cancellation, then marks the user entity
-   Ready. Explicit `terminal_id`, cwd, argv, and env replace wrapper-thread
-   inference.
+   the LaunchId→PID record and then marks the user entity Ready. Owned cwd,
+   argv, env, and optional `terminal_id` replace wrapper-thread inference.
 4. Ring 3 runs on the unified scheduler. On exit it records status, destroys
    GUI ownership, unregisters its entity, marks process-service work pending,
    and dispatches away without dropping its live kernel stack. Every
@@ -457,14 +466,14 @@ Unit status:
   ...)`. Child's `Process` slot stays in PROCESS_TABLE after exit (its
   kernel_stack is what the exit path was executing on); the parent's
   `wait4` reap path calls `remove_process` to free it.
-- U10 — Compositor as a scheduled kernel thread. **Done.** Input
-  processing + terminal output + `render_frame` moved out of the
-  kernel main loop into `src/window/compositor.rs::run`, spawned at
+- U10 — Compositor as a scheduled kernel thread. **Done.** Input processing
+  and `render_frame` moved out of the kernel main loop into
+  `src/window/compositor.rs::run`, spawned at
   boot via `process::spawn_process("compositor", None, run)`. The
   kernel main loop is now pure scheduler housekeeping + `hlt`. A
   busy ring-3 process no longer freezes the desktop — U5's timer ISR
   splits ring-3 slices and the kernel-thread scheduler round-robins
-  the compositor in alongside terminal launchers. VirtIO DMA storage
+  the compositor alongside user processes. VirtIO DMA storage
   allows input and rendering to continue throughout binary loading.
 - U9 — Signal/page-fault audit for cross-process correctness. **Done.**
   Audit confirmed: `maybe_deliver_signal` / `deliver_signal` /

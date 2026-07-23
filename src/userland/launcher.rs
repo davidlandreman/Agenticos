@@ -1,7 +1,5 @@
-//! Generic user-binary launcher — extracted from `src/commands/run/mod.rs`
-//! so the same code path can launch zsh as the default terminal shell
-//! (`src/window/terminal_factory.rs`) without depending on the
-//! soon-to-be-deleted `run` shell command.
+//! Generic user-binary launcher shared by the persistent process service and
+//! synchronous QEMU test fixtures.
 //!
 //! See `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`.
 //!

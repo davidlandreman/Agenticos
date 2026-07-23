@@ -226,12 +226,7 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("virtio_gpu_protocol", virtio_gpu_protocol::get_tests),
     ("virgl_integration", virgl_integration::get_tests),
     ("filter", filter::get_tests),
-    ("terminal", crate::terminal::get_tests),
-    ("vte", crate::terminal::vte::get_tests),
-    ("screen", crate::terminal::screen::get_tests),
-    ("caret", crate::terminal::caret::get_tests),
     ("pty", crate::terminal::pty::get_tests),
-    ("keys", crate::terminal::keys::get_tests),
     // Keep diagnostics last so its final assertion observes every preceding
     // production transition in a full or multi-module filtered run.
     ("diagnostics", diagnostics::get_tests),

@@ -12,7 +12,6 @@ use crate::arch::x86_64::preemption_guard::PreemptionMutex;
 
 pub mod adapters;
 pub mod compositor;
-pub mod console;
 pub mod cursor;
 pub mod dialogs;
 pub mod event;
@@ -22,8 +21,6 @@ pub mod manager;
 pub mod renderer;
 pub mod screen;
 pub mod selection;
-pub mod terminal;
-pub mod terminal_factory;
 pub mod theme;
 pub mod types;
 pub mod windows;
@@ -47,10 +44,8 @@ pub use self::types::{Point, Rect, ScreenId, WindowId};
 // The former PALETTE_* constants were replaced by the theme-dispatched
 // control palette in `theme::controls` (`controls::palette()`), which
 // reconciles default widget colors per the boot-selected Classic/Aero
-// theme. Intentionally NOT covered by that palette (kept distinct on
-// purpose):
+// theme. Intentionally NOT covered by that palette:
 // - DesktopWindow background (deep blue identity color).
-// - TextWindow / TerminalWindow (dark grey background, light text).
 // =====================================================================
 
 /// Core window trait that all visual elements implement.
@@ -81,10 +76,9 @@ pub trait Window: Send {
     /// backing-store blit overwrites those pixels and the window is
     /// expected to repaint over them).
     ///
-    /// Internal dirty-tracking (e.g. `TextWindow::dirty_cells`) is allowed
-    /// only as a *performance hint* to choose between full and incremental
-    /// paint paths — never as an excuse to skip work the compositor has
-    /// already decided is needed.
+    /// Internal dirty-tracking is allowed only as a *performance hint* to
+    /// choose between full and incremental paint paths — never as an excuse
+    /// to skip work the compositor has already decided is needed.
     fn paint(&mut self, device: &mut dyn GraphicsDevice);
 
     /// Whether this window needs [`Window::paint_overlay`] after its
@@ -109,6 +103,7 @@ pub trait Window: Send {
     }
 
     /// Get the unique identifier for this window
+    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "widget test API"))]
     fn id(&self) -> WindowId {
         self.base().id()
     }
@@ -254,25 +249,6 @@ pub trait Window: Send {
         None
     }
 
-    /// Per-frame preparation hook called once per window by the
-    /// compositor *before* it consults dirty state for the frame.
-    ///
-    /// Use this to drain any external buffers whose contents must be
-    /// reflected in the window's internal dirty tracking before the
-    /// compositor decides what to paint. The canonical example is
-    /// `TerminalWindow`, whose pending shell output lives in a
-    /// per-terminal buffer until `process_terminal_output` writes it
-    /// into the underlying `TextWindow`'s grid (which is what
-    /// populates `dirty_cells`). If the drain runs only inside
-    /// `paint()`, the compositor will already have computed
-    /// `dirty_rect_hint()` against an empty `dirty_cells`, fall back
-    /// to the full bounds, and blit the desktop's wallpaper across
-    /// the whole terminal — leaving older lines as wallpaper after
-    /// the incremental paint redraws only the freshly-typed cells.
-    ///
-    /// Default: no-op.
-    fn prepare_for_render(&mut self) {}
-
     /// Optional narrower invalidation rect (in window-local coordinates,
     /// origin = window's top-left).
     ///
@@ -283,12 +259,10 @@ pub trait Window: Send {
     /// (and any other lower-z window's repaint) confined to just the area
     /// that actually changed.
     ///
-    /// Use this when the window has fine-grained internal dirty tracking
-    /// (e.g. `TextWindow`'s per-cell `dirty_cells`) and the `paint()`
-    /// implementation can repaint correctly within the narrowed clip.
-    /// Returning `None` (the default) makes the compositor fall back to
-    /// the full bounds — the safe choice for any window without
-    /// sub-bounds dirty tracking.
+    /// Use this when the window has fine-grained internal dirty tracking and
+    /// the `paint()` implementation can repaint correctly within the narrowed
+    /// clip. Returning `None` (the default) makes the compositor fall back to
+    /// the full bounds.
     fn dirty_rect_hint(&self) -> Option<Rect> {
         None
     }
@@ -304,11 +278,6 @@ pub trait Window: Send {
         None
     }
 
-    /// Take a title update intended for this window's enclosing frame.
-    fn take_pending_frame_title(&mut self) -> Option<alloc::string::String> {
-        None
-    }
-
     /// Typed accessor used by the ring-3 title syscall.
     fn as_frame_window_mut(&mut self) -> Option<&mut windows::frame::FrameWindow> {
         None
@@ -317,14 +286,6 @@ pub trait Window: Send {
     /// Typed accessor used by the system-control service for live wallpaper
     /// replacement.
     fn as_desktop_window_mut(&mut self) -> Option<&mut windows::desktop::DesktopWindow> {
-        None
-    }
-
-    /// Grid dimensions if this window renders a text grid.
-    /// Returns `Some((rows, cols))` for `TextWindow`/`TerminalWindow`,
-    /// `None` otherwise. The terminal factory uses this to size the
-    /// pty's `Winsize` from the actual on-screen grid.
-    fn grid_size(&self) -> Option<(u16, u16)> {
         None
     }
 
@@ -481,29 +442,6 @@ pub fn load_default_wallpaper() -> Option<Vec<u8>> {
         );
         None
     })
-}
-
-/// Process any pending terminal output.
-///
-/// This checks for console output and invalidates the terminal window if needed.
-/// The actual text writing happens during paint, with suppress_invalidation set
-/// to prevent re-invalidation loops.
-pub fn process_terminal_output() {
-    // Only process if there's actually output to process
-    if !crate::window::console::has_output() {
-        return;
-    }
-
-    // Get the global terminal window ID and invalidate it
-    if let Some(terminal_id) = terminal::get_terminal_window() {
-        with_window_manager(|wm| {
-            if let Some(window) = wm.window_registry.get_mut(&terminal_id) {
-                // Just invalidate - the terminal will process console output during paint
-                // with suppress_invalidation set, preventing the re-invalidation loop
-                window.invalidate();
-            }
-        });
-    }
 }
 
 /// Render a single frame

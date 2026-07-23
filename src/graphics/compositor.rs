@@ -285,11 +285,9 @@ impl Compositor {
     /// new position every frame, so the windows underneath the cursor do
     /// not need to repaint to keep their pixels intact. Marking the
     /// cursor's footprint dirty was a regression — it caused every mouse
-    /// motion to trigger a wallpaper-blit + child-window-repaint chain
-    /// (`TextWindow: Drew 228 non-space characters` perpetually) and, after
-    /// dropping the eager `parent_was_repainted` propagation, left
-    /// wallpaper bleeding through child windows that early-return when
-    /// their own content hasn't changed.
+    /// motion to trigger a wallpaper-blit + child-window-repaint chain and,
+    /// after dropping eager parent repaint propagation, left wallpaper
+    /// bleeding through clean child windows.
     pub fn update_cursor(&mut self, next: CursorState) -> Option<CursorState> {
         if self.cursor == next {
             return None;

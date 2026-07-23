@@ -1,17 +1,8 @@
 //! PTY pair — pseudo-terminal master/slave for ring-3 processes.
 //!
-//! Replaces three previously-independent surfaces:
-//!
-//! - `userland::stdin` (per-WindowId byte queues feeding the slave's
-//!   `read(0)`).
-//! - `window::terminal`'s per-WindowId output buffers (slave's
-//!   `write(1/2)` queueing into `String`s for the compositor to drain).
-//! - `userland::tty`'s global `static TERMIOS` and 80×24 hardcoded
-//!   `Winsize`.
-//!
-//! One [`PtyInner`] now owns all of those: a `slave_queue` for input,
-//! a `master_queue` for output, a per-pty `Termios`, and a `Winsize`
-//! that the [`PtyMaster`] updates when the host grid changes.
+//! [`PtyInner`] owns the slave input queue, master output queue, per-pty
+//! [`Termios`], and [`Winsize`]. The ring-3 `TERMINAL.ELF` holds the master as
+//! an fd; zsh and its children resolve the slave through `Process.terminal_id`.
 //!
 //! A pty pair is registered per `WindowId`. Processes find their pty
 //! through their existing `Process.terminal_id` field — the model is
@@ -23,9 +14,7 @@
 //! Line discipline lives here. [`PtyInner::push_slave_input`] applies
 //! canonical-mode editing (echo, VERASE/VKILL erase, a `MAX_CANON` line
 //! cap), VEOF end-of-file delivery, and ISIG signal generation for the
-//! ring-3 emulator's master-fd writes. The in-kernel `TerminalWindow`
-//! instead uses the raw [`PtyMaster::push_input`] path and does its own
-//! ICANON/ECHO editing.
+//! ring-3 emulator's master-fd writes.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -33,8 +22,6 @@ use spin::Mutex;
 
 use crate::lib::arc::Arc;
 use crate::window::WindowId;
-
-use super::config;
 
 // ---------------------------------------------------------------------
 // Termios / Winsize
@@ -46,6 +33,8 @@ use super::config;
 // stay byte-compatible with what zsh and BusyBox expect.
 
 pub const NCCS: usize = 19;
+pub const DEFAULT_ROWS: u16 = 24;
+pub const DEFAULT_COLS: u16 = 80;
 
 // c_iflag bits
 pub const ICRNL: u32 = 0o000400;
@@ -187,8 +176,8 @@ pub struct PtyInner {
     /// returns 0 — POSIX end-of-file.
     pending_eof: bool,
 
-    /// `WindowId` of the hosting terminal window. Held for the
-    /// SIGWINCH-on-resize path and for waker keys.
+    /// `WindowId` of the ring-3 terminal's GUI surface. Held for
+    /// SIGWINCH delivery and process-waker keys.
     terminal_id: WindowId,
 }
 
@@ -206,9 +195,8 @@ impl PtyInner {
     }
 
     /// Push raw bytes directly onto the slave's input queue, bypassing line
-    /// discipline. Used by the in-kernel `TerminalWindow`, which does its own
-    /// ICANON/ECHO handling and injects its program-generated replies
-    /// (DSR/DA) here. A ring-3 emulator has no raw path: its replies go
+    /// discipline. Retained for low-level PTY tests and legacy test fixtures.
+    /// A ring-3 emulator has no raw path: its replies go
     /// through `write(master_fd)` → `push_slave_input` and traverse the
     /// slave's line discipline, exactly as on Linux (realistic queriers put
     /// the tty in raw mode first, where the two paths coincide).
@@ -264,7 +252,11 @@ impl PtyInner {
             if isig && raw != 0 && (raw == cc[VINTR] || raw == cc[VQUIT]) {
                 self.canon_line.clear();
                 if echo {
-                    let caret: &[u8] = if raw == cc[VINTR] { b"^C\r\n" } else { b"^\\\r\n" };
+                    let caret: &[u8] = if raw == cc[VINTR] {
+                        b"^C\r\n"
+                    } else {
+                        b"^\\\r\n"
+                    };
                     self.echo(caret);
                 }
                 result.signal = Some(if raw == cc[VINTR] {
@@ -386,9 +378,7 @@ impl PtyInner {
     }
 
     /// Drain up to `dst.len()` bytes the slave wrote into `dst`. Used by a
-    /// ring-3 emulator's bounded `read(master_fd)` (unlike `drain_master_output`
-    /// which drains the whole queue for the in-kernel compositor). Returns the
-    /// number copied.
+    /// ring-3 emulator's bounded `read(master_fd)`. Returns the number copied.
     pub fn read_master_output(&mut self, dst: &mut [u8]) -> usize {
         let n = core::cmp::min(dst.len(), self.master_queue.len());
         for slot in dst.iter_mut().take(n) {
@@ -397,9 +387,8 @@ impl PtyInner {
         n
     }
 
-    /// Drain all bytes the slave wrote — the compositor calls this
-    /// once per frame and feeds the result into the Vte parser. Returns
-    /// an empty `Vec` when there's nothing to drain.
+    /// Test helper that drains all bytes the slave wrote.
+    #[cfg(feature = "test")]
     pub fn drain_master_output(&mut self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.master_queue.len());
         while let Some(b) = self.master_queue.pop_front() {
@@ -413,8 +402,8 @@ impl PtyInner {
 // Master / Slave handles
 // ---------------------------------------------------------------------
 
-/// The master end. Held by the host (TerminalWindow). All operations
-/// require briefly locking the inner mutex.
+/// The master end. Exposed to `TERMINAL.ELF` through `FdSlot::PtyMaster`.
+/// All operations require briefly locking the inner mutex.
 #[derive(Clone)]
 pub struct PtyMaster {
     inner: Arc<Mutex<PtyInner>>,
@@ -430,10 +419,8 @@ impl PtyMaster {
     }
 
     /// Push input bytes straight to the slave's read queue, bypassing line
-    /// discipline — the in-kernel `TerminalWindow`'s path (it does its own
-    /// ICANON/ECHO editing and injects its DSR/DA replies here). Returns
-    /// true if any bytes were enqueued (the caller wakes blocked readers).
-    /// The ring-3 emulator's master-fd write path instead calls
+    /// discipline. This is a legacy/test helper. The ring-3 emulator's
+    /// master-fd write path calls
     /// `push_slave_input`, which applies kernel line discipline to
     /// everything it carries — keystrokes and emulator-generated replies
     /// alike, matching Linux master-write semantics.
@@ -443,6 +430,7 @@ impl PtyMaster {
     }
 
     /// Drain pending slave→master output. Cheap when empty.
+    #[cfg(feature = "test")]
     pub fn drain_output(&self) -> Vec<u8> {
         self.with(|p| p.drain_master_output())
     }
@@ -580,17 +568,6 @@ pub fn is_active_for_terminal(terminal_id: WindowId) -> bool {
     REGISTRY.lock().contains_key(&Some(terminal_id))
 }
 
-/// Look up the master for a known terminal. Returns `None` when no pty
-/// is registered for that id.
-pub fn master_for_terminal(terminal_id: WindowId) -> Option<PtyMaster> {
-    REGISTRY
-        .lock()
-        .get(&Some(terminal_id))
-        .map(|inner| PtyMaster {
-            inner: inner.clone(),
-        })
-}
-
 /// Look up the slave handle for a terminal id. Same Arc as the master.
 pub fn slave_for_terminal(terminal_id: WindowId) -> Option<PtySlave> {
     REGISTRY
@@ -599,6 +576,16 @@ pub fn slave_for_terminal(terminal_id: WindowId) -> Option<PtySlave> {
         .map(|inner| PtySlave {
             inner: inner.clone(),
         })
+}
+
+/// Write process output to the slave side of `terminal_id`'s pty.
+///
+/// This is the byte-preserving stdout/stderr route used by the Linux syscall
+/// layer. `None` means the process carries a stale/unbound terminal id;
+/// `Some(n)` reports the source bytes consumed (which may be short at the
+/// bounded output-queue cap).
+pub fn write_slave_for_terminal(terminal_id: WindowId, bytes: &[u8]) -> Option<usize> {
+    slave_for_terminal(terminal_id).map(|slave| slave.write(bytes))
 }
 
 /// Install the `None`-keyed legacy queue, used by tests and by ring-3
@@ -611,8 +598,8 @@ pub fn install_legacy() {
             // ever fire on, since input only flows through a real
             // terminal).
             crate::window::WindowId(0),
-            config::DEFAULT_ROWS,
-            config::DEFAULT_COLS,
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
         )))
     });
 }
@@ -726,7 +713,11 @@ mod tests {
         m.with(|p| p.push_slave_input(b"s\r"));
         let mut buf = [0u8; 16];
         let n = s.read(&mut buf);
-        assert_eq!(&buf[..n], b"ls\n", "erased char is not in the delivered line");
+        assert_eq!(
+            &buf[..n],
+            b"ls\n",
+            "erased char is not in the delivered line"
+        );
         clear_for_terminal(id);
     }
 
@@ -796,7 +787,10 @@ mod tests {
         let _ = m.drain_output();
         // ^U erases all four chars, echoing a rubout per char.
         m.with(|p| p.push_slave_input(b"\x15"));
-        assert_eq!(&m.drain_output()[..], b"\x08 \x08\x08 \x08\x08 \x08\x08 \x08");
+        assert_eq!(
+            &m.drain_output()[..],
+            b"\x08 \x08\x08 \x08\x08 \x08\x08 \x08"
+        );
         m.with(|p| p.push_slave_input(b"ok\n"));
         let mut buf = [0u8; 16];
         let n = s.read(&mut buf);

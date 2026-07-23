@@ -1,11 +1,18 @@
 # `src/window/` — Window System
 
-Hierarchical GUI window management with parent-child coordinate transformations, event routing through the window tree, configurable double buffering, and hardware-cursor mouse support. The kernel boots into a GUI desktop (blue background) with a windowed terminal.
+Hierarchical GUI window management with parent-child coordinate
+transformations, event routing through the window tree, configurable double
+buffering, hardware-cursor mouse support, and copy-blit surfaces owned by
+ring-3 applications.
 
 ## Key files
 
-- `mod.rs` — window-system init and global functions (`render_frame`, `process_terminal_output`, `process_event`).
-- `compositor.rs` — U10 compositor kernel thread. Spawned at boot from `src/kernel.rs`; its loop polls input + processes terminal output + calls `render_frame` then `yield_current`. Storage uses interrupt-driven VirtIO DMA, so input and rendering continue during binary loads.
+- `mod.rs` — window-system init and global functions (`render_frame`,
+  `process_event`).
+- `compositor.rs` — compositor kernel thread. Spawned at boot from
+  `src/kernel.rs`; its loop polls input and calls `render_frame`. Storage uses
+  interrupt-driven VirtIO DMA, so input and rendering continue during binary
+  loads.
 - `types.rs` — core types: `WindowId`, `ScreenId`, `Rect`, `Point`, `ColorDepth`.
 - `event.rs` — keyboard, mouse, and window events.
 - `graphics.rs` — `GraphicsDevice` trait that abstracts rendering targets.
@@ -71,8 +78,10 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   canonical pixels generate retained CPU overlays and 64×64 VirtIO hardware
   cursor images.
 - `keyboard.rs` — PS/2 scancode-set-2 → `KeyCode` conversion *for window events* (distinct from the lower-level driver in `src/input/`).
-- `terminal.rs`, `terminal_factory.rs` — terminal-window support; the factory wires terminal windows up to the shell.
-- `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), and `desktop.rs` (background). The kernel `start_menu.rs` and `taskbar.rs` were removed with `guishell`; the taskbar and Start menu now live in the ring-3 shell (`userland/apps/desktop/`), which renders the `assets/icons/start/*.svg` artwork itself.
+- `windows/` — concrete window implementations: `base.rs` (parent-child
+  tracking), `container.rs`, `frame.rs` (title bar + borders), `desktop.rs`
+  (background), ordinary widgets, and `remote_surface.rs` for ring-3 clients.
+  The interactive terminal, taskbar, and Start menu are ring-3 applications.
 - `windows/remote_surface.rs` — server-decorated client surface for ring-3
   apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
   events to the owning PID's GUI queue. Its enclosing frame title can be
@@ -88,8 +97,6 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 |---|---|---|
 | `DesktopWindow` | Full-screen background | Owns optional live-replaceable BMP wallpaper bytes and blits them through `GraphicsDevice::draw_image_scaled`. Falls back to solid blue (RGB `0, 50, 100`) when no wallpaper is provided or parsing fails — boot must succeed in either branch. |
 | `FrameWindow` | Title bar + borders | Theme-painted caption controls; resizable frames minimize to the taskbar and maximize/restore within the desktop work area, while fixed frames remain close-only. Uses `WindowBase`. |
-| `TextWindow` | Grid-based text rendering | Cell size derived from the terminal TTF (`get_terminal_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. The default `#202020` well is opaque in Classic/Legacy and alpha-232 frosted glass in Aero/Futurism; explicit ANSI cell backgrounds stay opaque. |
-| `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
 | `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer or one attached VirGL client texture; close requests are delivered to the client. |
 
@@ -116,11 +123,17 @@ and any initial windows are owned by the ring-3 shell (`DESKTOP.ELF`).
   normal/maximized placement and returns focus to its content. See
   `src/commands/CLAUDE.md`.
 
-## TerminalWindow ↔ terminal subsystem
+## Ring-3 terminal boundary
 
-Since the ANSI/VT overhaul (docs/plans/2026-05-24-001-...), `TerminalWindow` owns a `terminal::vte::Vte` parser + `terminal::screen::Screen` and the `TextWindow` is just a renderer. On every `prepare_for_render`, TerminalWindow drains the pty master's output queue, feeds bytes through `Vte → Screen`, pushes DSR replies back into the slave's input, and copies the Screen's visible viewport down to TextWindow via `set_cell`, preserving whether each background is `ColorSpec::Default`. That semantic bit lets only the default well use the active theme's translucent material; explicit ANSI backgrounds, including indexed black, remain opaque. Local echoes (canonical-mode typing) go through the parser too — single source of truth.
+The window system sees the terminal only as a `RemoteSurface` owned by
+`TERMINAL.ELF`. Keystrokes and close/focus events use the ordinary GUI event
+queue; the app presents its rendered XRGB8888 cell surface through
+`gui_win_present`. VT parsing, scrollback, caret state, key encoding, and font
+rasterization are entirely outside the kernel window tree.
 
-PTY lookup goes through `terminal::pty::master_for_terminal(WindowId)` / `slave_for_terminal(WindowId)`. `userland::stdin` and `userland::tty` are now shims over `terminal::pty`.
+The kernel PTY service remains under `src/terminal/pty.rs`. `pty_open` keys a
+PTY to the terminal app's owned content-surface `WindowId`, and GUI cleanup
+releases that PTY when the surface owner exits.
 
 ## Coordinate transformation
 
@@ -191,4 +204,5 @@ runtime fallback to legacy activates Classic before repainting.
 - Typed input events come from `src/input/` — see `src/input/CLAUDE.md`.
 - Mouse hardware (PS/2, VirtIO tablet) lives in `src/drivers/` — see `src/drivers/CLAUDE.md`.
 - Detailed architecture: `docs/window_system_design.md`.
-- Shell ↔ terminal-window integration: `docs/shell_window_integration.md`.
+- Ring-3 terminal migration:
+  `docs/plans/2026-07-21-001-feat-terminal-emulator-userland-plan.md`.

@@ -798,58 +798,6 @@ fn test_unexpired_nanosleep_stays_blocked() {
     remove_process(9331);
 }
 
-/// Closing a terminal window must tear down the whole ring-3 tree bound
-/// to that terminal — the shell plus everything it forked (they all
-/// inherit the parent's `terminal_id` across `fork`). Processes on a
-/// different terminal, or on no terminal, must be left untouched.
-///
-/// Regression for the orphaned-process bug: closing a terminal running
-/// `zsh -> ping` used to leave `ping` (and `zsh`) running forever.
-fn test_kill_ring3_processes_on_terminal_removes_whole_tree() {
-    use crate::userland::lifecycle::{
-        kill_ring3_processes_on_terminal, remove_process, with_process,
-    };
-    use crate::window::WindowId;
-    let _g = PreemptTestGuard::new();
-
-    let victim_term = WindowId(0x00C0_FFEE);
-    let other_term = WindowId(0x00BA_DBED);
-
-    // "zsh" (9400) plus two forked children on the victim terminal, and
-    // one unrelated process on a different terminal as a control.
-    insert_synthetic(9400);
-    insert_synthetic(9401);
-    insert_synthetic(9402);
-    insert_synthetic(9403);
-    with_process(9400, |p| p.terminal_id = Some(victim_term));
-    with_process(9401, |p| p.terminal_id = Some(victim_term));
-    with_process(9402, |p| p.terminal_id = Some(victim_term));
-    with_process(9403, |p| p.terminal_id = Some(other_term));
-
-    kill_ring3_processes_on_terminal(victim_term);
-
-    // The entire victim tree is gone…
-    assert!(
-        with_process(9400, |_| ()).is_none(),
-        "shell must be removed on terminal close"
-    );
-    assert!(
-        with_process(9401, |_| ()).is_none(),
-        "forked child #1 must be removed on terminal close"
-    );
-    assert!(
-        with_process(9402, |_| ()).is_none(),
-        "forked child #2 must be removed on terminal close"
-    );
-    // …and the unrelated terminal's process is untouched.
-    assert!(
-        with_process(9403, |_| ()).is_some(),
-        "process on a different terminal must survive"
-    );
-
-    remove_process(9403);
-}
-
 pub fn get_tests() -> &'static [&'static dyn Testable] {
     &[
         &test_save_ring3_copies_every_gpr,
@@ -871,6 +819,5 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_retry_dropped_signal_wakes_skips_block_io,
         &test_expired_nanosleep_wakes_blocked_process,
         &test_unexpired_nanosleep_stays_blocked,
-        &test_kill_ring3_processes_on_terminal_removes_whole_tree,
     ]
 }

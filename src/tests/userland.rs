@@ -1008,6 +1008,44 @@ fn test_write_handler_valid_slice() {
     clear_streams_after_dispatcher_test();
 }
 
+/// Stdout bound to a pty reaches the master byte-for-byte. Invalid UTF-8 must
+/// not pass through the old lossy window-text adapter.
+fn test_write_stdout_to_pty_is_byte_preserving() {
+    install_streams_for_dispatcher_test();
+    let payload = [0x1b, b'[', b'3', b'1', b'm', 0xff, 0x00, 0x80];
+    let ptr = payload.as_ptr() as u64;
+    abi::set_user_va_bounds(UserVaBounds {
+        start: ptr,
+        end: ptr + payload.len() as u64,
+    });
+
+    let terminal_id = crate::window::WindowId::new();
+    let master = crate::terminal::pty::install_for_terminal(terminal_id, 24, 80);
+    let prior_terminal = crate::userland::lifecycle::with_active_user(|process| {
+        let prior = process.terminal_id;
+        process.terminal_id = Some(terminal_id);
+        prior
+    });
+
+    let mut args = SyscallArgs::default();
+    args.rax = nr::WRITE;
+    args.rdi = 1;
+    args.rsi = ptr;
+    args.rdx = payload.len() as u64;
+    assert_eq!(syscall_dispatch(&mut args), payload.len() as i64);
+
+    let mut received = [0u8; 16];
+    let count = master.read_output(&mut received);
+    assert_eq!(&received[..count], &payload);
+
+    crate::userland::lifecycle::with_active_user(|process| {
+        process.terminal_id = prior_terminal;
+    });
+    crate::terminal::pty::clear_for_terminal(terminal_id);
+    abi::clear_user_va_bounds();
+    clear_streams_after_dispatcher_test();
+}
+
 /// `write(99, ptr, len)` to an unsupported fd returns `-EBADF` without
 /// touching the buffer.
 fn test_write_handler_rejects_unknown_fd() {
@@ -2208,8 +2246,7 @@ fn test_user_stdin_install_push_pop() {
     assert!(!crate::userland::stdin::is_active());
 }
 
-/// `push_bytes` while no user is active is a silent no-op — the producer
-/// (TerminalWindow) never has to gate the call itself.
+/// Legacy test-fixture input while no user is active is a silent no-op.
 fn test_user_stdin_push_when_inactive_is_noop() {
     crate::userland::stdin::clear();
     crate::userland::stdin::push_bytes(b"dropped");
@@ -2235,8 +2272,9 @@ fn test_dispatch_read_returns_queued_bytes() {
         p.terminal_id = Some(terminal_id);
         prior
     });
-    crate::userland::stdin::install_for_terminal(terminal_id);
-    crate::userland::stdin::push_bytes_for_terminal(terminal_id, b"echo me\n");
+    let master = crate::terminal::pty::install_for_terminal(terminal_id, 24, 80);
+    let pushed = master.with(|pty| pty.push_slave_input(b"echo me\n"));
+    assert!(pushed.wake_reader);
 
     let mut args = SyscallArgs::default();
     args.rax = nr::READ;
@@ -2247,7 +2285,7 @@ fn test_dispatch_read_returns_queued_bytes() {
     assert_eq!(ret, 8, "expected 8 bytes (\"echo me\\n\")");
     assert_eq!(&buf[..8], b"echo me\n");
 
-    crate::userland::stdin::clear_for_terminal(terminal_id);
+    crate::terminal::pty::clear_for_terminal(terminal_id);
     crate::userland::lifecycle::with_active_user(|p| p.terminal_id = prior_terminal);
     abi::clear_user_va_bounds();
     clear_streams_after_dispatcher_test();
@@ -6445,6 +6483,7 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_dispatch_setitimer_real_arms_queries_and_validates,
         &test_dispatch_nanosleep_validation_and_synthetic_return,
         &test_write_handler_valid_slice,
+        &test_write_stdout_to_pty_is_byte_preserving,
         &test_write_handler_rejects_unknown_fd,
         &test_write_handler_rejects_kernel_pointer,
         &test_write_handler_rejects_span_past_bounds,

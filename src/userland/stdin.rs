@@ -2,10 +2,9 @@
 //! [`crate::terminal::pty`].
 //!
 //! The data formerly stored here (per-WindowId `VecDeque<u8>`) now lives
-//! inside [`crate::terminal::pty::PtyInner::slave_queue`]. This module
-//! keeps the original API as a stable surface so existing call sites in
-//! `syscalls.rs`, `window::windows::terminal`, and `window::terminal`
-//! don't need to change in lockstep.
+//! inside [`crate::terminal::pty::PtyInner::slave_queue`]. Production reads
+//! resolve the current process's slave; the remaining unkeyed API is a test
+//! fixture.
 //!
 //! Lookup model matches the previous design: the pty registry is keyed
 //! by `Option<WindowId>` (the `None` slot reserved for tests / boot-time
@@ -13,39 +12,6 @@
 //! `Process.terminal_id`.
 
 use crate::terminal::pty;
-use crate::window::WindowId;
-
-// ---------- per-terminal API (production) ----------
-
-pub fn install_for_terminal(terminal_id: WindowId) {
-    pty::install_for_terminal(
-        terminal_id,
-        crate::terminal::config::DEFAULT_ROWS,
-        crate::terminal::config::DEFAULT_COLS,
-    );
-}
-
-#[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
-pub fn clear_for_terminal(terminal_id: WindowId) {
-    pty::clear_for_terminal(terminal_id);
-}
-
-pub fn is_active_for_terminal(terminal_id: WindowId) -> bool {
-    pty::is_active_for_terminal(terminal_id)
-}
-
-/// Append bytes to `terminal_id`'s slave queue and wake any ring-3
-/// process blocked in `read(0)` bound to that terminal. Silently drops
-/// bytes when no pty exists or the queue is full.
-pub fn push_bytes_for_terminal(terminal_id: WindowId, bytes: &[u8]) {
-    let Some(master) = pty::master_for_terminal(terminal_id) else {
-        return;
-    };
-    let pushed = master.push_input(bytes);
-    if pushed {
-        crate::userland::lifecycle::wake_ring3_blocked_on_input(Some(terminal_id));
-    }
-}
 
 pub fn is_active_for_current_process() -> bool {
     current_slave().is_some()
@@ -65,7 +31,9 @@ pub fn queued_len_for_current_process() -> usize {
 /// Consume a pending canonical-mode EOF (VEOF typed on an empty line).
 /// True exactly once per EOF; the caller's `read(0)` returns 0.
 pub fn take_eof_for_current_process() -> bool {
-    current_slave().map(|slave| slave.take_eof()).unwrap_or(false)
+    current_slave()
+        .map(|slave| slave.take_eof())
+        .unwrap_or(false)
 }
 
 fn current_slave() -> Option<pty::PtySlave> {
