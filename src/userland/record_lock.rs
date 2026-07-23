@@ -84,11 +84,17 @@ pub struct Conflict {
     pub owner: u32,
 }
 
-static LOCKS: InterruptMutex<BTreeMap<String, Vec<LockRecord>>> = InterruptMutex::new(BTreeMap::new());
+static LOCKS: InterruptMutex<BTreeMap<String, Vec<LockRecord>>> =
+    InterruptMutex::new(BTreeMap::new());
 
 /// First record owned by a *different* TGID that overlaps `range` with an
 /// incompatible kind. `None` means the requested lock is grantable.
-fn first_conflict(records: &[LockRecord], range: LockRange, kind: LockKind, owner: u32) -> Option<Conflict> {
+fn first_conflict(
+    records: &[LockRecord],
+    range: LockRange,
+    kind: LockKind,
+    owner: u32,
+) -> Option<Conflict> {
     records
         .iter()
         .find(|record| {
@@ -144,7 +150,11 @@ fn clear_owner_range(records: &mut Vec<LockRecord>, range: LockRange, owner: u32
 /// Records from different owners (compatible read locks) legitimately overlap
 /// and are never merged.
 fn coalesce(records: &mut Vec<LockRecord>) {
-    records.sort_by(|a, b| a.owner.cmp(&b.owner).then(a.range.start.cmp(&b.range.start)));
+    records.sort_by(|a, b| {
+        a.owner
+            .cmp(&b.owner)
+            .then(a.range.start.cmp(&b.range.start))
+    });
     let mut merged: Vec<LockRecord> = Vec::with_capacity(records.len());
     for record in records.drain(..) {
         if let Some(last) = merged.last_mut() {

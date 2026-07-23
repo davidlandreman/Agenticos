@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use super::{latch, ViolationRecord};
 
 pub const PAGER_001: u32 = 0x0300_0001;
+#[allow(dead_code, reason = "stable retired invariant identifier")]
 pub const PAGER_002: u32 = 0x0300_0002;
 pub const PAGER_004: u32 = 0x0300_0004;
 pub const DIAG_CAPACITY_PAGER: u32 = 0x0f00_0002;
@@ -178,21 +179,9 @@ pub fn begin(pid: u32, l4: u64, vma_generation: u64, page: u64) -> Option<Handle
         }
         slot.sequence.fetch_add(1, Ordering::Release);
         slot.key.store(generation, Ordering::Release);
-        if let Some(other) = SLOTS.iter().find(|other| {
-            !core::ptr::eq(*other, slot)
-                && other.key.load(Ordering::Acquire) != 0
-                && other.key.load(Ordering::Acquire) != CLAIMED
-                && !other.terminal.load(Ordering::Acquire)
-                && other.l4_key.load(Ordering::Relaxed) == l4
-                && other.page_key.load(Ordering::Relaxed) == page
-        }) {
-            report(
-                PAGER_002,
-                unsafe { *slot.transaction.get() },
-                generation,
-                other.key.load(Ordering::Acquire),
-            );
-        }
+        // CLONE_VM peers may fault on the same lazy page while its backing
+        // I/O is asleep. Both transactions are valid until publication; the
+        // first leaf wins and the other transaction aborts its private frame.
         CURRENT_GENERATION[crate::arch::x86_64::percpu::cpu_id()]
             .store(generation, Ordering::Release);
         return Some(Handle {

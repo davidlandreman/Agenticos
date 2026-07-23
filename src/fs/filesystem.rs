@@ -208,6 +208,17 @@ pub trait Filesystem: Sync {
         Ok(entries)
     }
 
+    /// Enumerate the names and file types needed by directory stream APIs.
+    /// Backends whose native readdir already carries those fields can avoid
+    /// fetching full metadata for every entry. The default preserves the
+    /// ordinary full-enumeration behavior.
+    fn enumerate_dir_names(
+        &self,
+        path: &str,
+    ) -> Result<alloc::vec::Vec<DirectoryEntry>, FilesystemError> {
+        self.enumerate_dir(path)
+    }
+
     /// Get file/directory metadata
     fn stat(&self, path: &str) -> Result<DirectoryEntry, FilesystemError>;
 

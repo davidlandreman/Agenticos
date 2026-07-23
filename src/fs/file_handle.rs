@@ -443,15 +443,34 @@ impl Directory {
     /// the path or if the underlying filesystem reports the directory does
     /// not exist. A successfully opened directory may still have zero
     /// entries (e.g. an empty FAT directory).
+    #[cfg_attr(
+        not(feature = "test"),
+        expect(dead_code, reason = "full-metadata kernel directory API")
+    )]
     pub fn open(path: &str) -> FileResult<Arc<Directory>> {
+        Self::open_impl(path, false)
+    }
+
+    /// Open a directory for a names/types-only stream such as getdents64.
+    pub fn open_names(path: &str) -> FileResult<Arc<Directory>> {
+        Self::open_impl(path, true)
+    }
+
+    fn open_impl(path: &str, names_only: bool) -> FileResult<Arc<Directory>> {
         let (filesystem, rel_path) = crate::fs::vfs::get_vfs()
             .find_filesystem(path)
             .ok_or(FileError::NotFound)?;
 
-        // Try the optimized enumerate_dir first; on failure, fall back to
-        // the iterator API. If both report the path is unknown, propagate
-        // NotFound rather than silently returning an empty directory.
-        let entries = match filesystem.enumerate_dir(rel_path) {
+        // Directory streams only expose names and types. Let remote
+        // filesystems avoid fetching size/timestamps for every entry; tools
+        // such as `ls -l` and Git request metadata separately when needed.
+        // If enumeration fails, fall back to the iterator API.
+        let enumerated = if names_only {
+            filesystem.enumerate_dir_names(rel_path)
+        } else {
+            filesystem.enumerate_dir(rel_path)
+        };
+        let entries = match enumerated {
             Ok(es) => es,
             Err(_) => match crate::fs::vfs::vfs_read_dir(path) {
                 Ok(mut dir_iter) => {

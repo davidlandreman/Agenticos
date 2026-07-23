@@ -866,61 +866,62 @@ pub fn mmap_handler(args: &mut SyscallArgs) -> i64 {
     // range and its resident leaves must be torn down after the VMA
     // mutation (same split-then-unmap ordering as munmap).
     use x86_64::structures::paging::{PhysFrame, Size4KiB};
-    let (result, fixed_l4): (i64, Option<PhysFrame<Size4KiB>>) =
-        crate::userland::lifecycle::with_current_group(|process| {
-            let Some(space) = process.address_space.as_mut() else {
-                return (ENOMEM, None);
+    let (result, fixed_l4, removed_vmas): (
+        i64,
+        Option<PhysFrame<Size4KiB>>,
+        alloc::vec::Vec<crate::userland::vm::Vma>,
+    ) = crate::userland::lifecycle::with_current_group(|process| {
+        let Some(space) = process.address_space.as_mut() else {
+            return (ENOMEM, None, alloc::vec::Vec::new());
+        };
+        let stack_floor = space
+            .vmas()
+            .as_slice()
+            .iter()
+            .find_map(|vma| matches!(vma.backing, VmaBacking::Stack { .. }).then_some(vma.start))
+            .unwrap_or(crate::mm::paging::USER_STACK_TOP);
+        let hinted_end = addr_hint.checked_add(len);
+        let (addr, replaced_l4, removed_vmas) = if fixed {
+            // MAP_FIXED: place at exactly addr_hint, evicting any
+            // VMAs already there (Linux semantics). Removing the
+            // range first also splits partial overlaps.
+            let Some(end) = hinted_end else {
+                return (EINVAL, None, alloc::vec::Vec::new());
             };
-            let stack_floor = space
+            let l4 = space.l4_frame();
+            let Ok(removed) = space.vmas_mut().remove_deferred(addr_hint, end) else {
+                return (EINVAL, None, alloc::vec::Vec::new());
+            };
+            (addr_hint, Some(l4), removed)
+        } else if addr_hint & 0xfff == 0
+            && hinted_end.is_some_and(|end| space.vmas().is_free(addr_hint, end))
+        {
+            (addr_hint, None, alloc::vec::Vec::new())
+        } else {
+            match space
                 .vmas()
-                .as_slice()
-                .iter()
-                .find_map(|vma| {
-                    matches!(vma.backing, VmaBacking::Stack { .. }).then_some(vma.start)
-                })
-                .unwrap_or(crate::mm::paging::USER_STACK_TOP);
-            let hinted_end = addr_hint.checked_add(len);
-            let (addr, replaced_l4) = if fixed {
-                // MAP_FIXED: place at exactly addr_hint, evicting any
-                // VMAs already there (Linux semantics). Removing the
-                // range first also splits partial overlaps.
-                let Some(end) = hinted_end else {
-                    return (EINVAL, None);
-                };
-                let l4 = space.l4_frame();
-                if space.vmas_mut().remove(addr_hint, end).is_err() {
-                    return (EINVAL, None);
-                }
-                (addr_hint, Some(l4))
-            } else if addr_hint & 0xfff == 0
-                && hinted_end.is_some_and(|end| space.vmas().is_free(addr_hint, end))
+                .find_gap_top_down(len, stack_floor.saturating_sub(1024 * 1024))
             {
-                (addr_hint, None)
-            } else {
-                match space
-                    .vmas()
-                    .find_gap_top_down(len, stack_floor.saturating_sub(1024 * 1024))
-                {
-                    Ok(address) => (address, None),
-                    Err(_) => return (ENOMEM, None),
-                }
-            };
-            let backing = match file {
-                Some(ref handle) => VmaBacking::FilePrivate {
-                    file: handle.clone(),
-                    file_offset: offset,
-                    file_size: handle.size(),
-                },
-                None => VmaBacking::Anonymous,
-            };
-            let Ok(vma) = Vma::new(addr, addr + len, vm_prot, backing) else {
-                return (ENOMEM, None);
-            };
-            if space.vmas_mut().insert(vma).is_err() {
-                return (ENOMEM, None);
+                Ok(address) => (address, None, alloc::vec::Vec::new()),
+                Err(_) => return (ENOMEM, None, alloc::vec::Vec::new()),
             }
-            (addr as i64, replaced_l4)
-        });
+        };
+        let backing = match file {
+            Some(ref handle) => VmaBacking::FilePrivate {
+                file: handle.clone(),
+                file_offset: offset,
+                file_size: handle.size(),
+            },
+            None => VmaBacking::Anonymous,
+        };
+        let Ok(vma) = Vma::new(addr, addr + len, vm_prot, backing) else {
+            return (ENOMEM, None, removed_vmas);
+        };
+        if space.vmas_mut().insert(vma).is_err() {
+            return (ENOMEM, None, removed_vmas);
+        }
+        (addr as i64, replaced_l4, removed_vmas)
+    });
 
     // Drop stale hardware leaves under a replaced MAP_FIXED range so the
     // fresh mapping (often PROT_NONE) faults in cleanly instead of
@@ -937,6 +938,7 @@ pub fn mmap_handler(args: &mut SyscallArgs) -> i64 {
             }
         });
     }
+    drop(removed_vmas);
     result
 }
 
@@ -954,16 +956,14 @@ pub fn munmap_handler(args: &mut SyscallArgs) -> i64 {
         Some(end) => end,
         None => return EINVAL,
     };
-    let l4 = crate::userland::lifecycle::with_current_group(|process| {
+    let removed = crate::userland::lifecycle::with_current_group(|process| {
         let Some(space) = process.address_space.as_mut() else {
             return None;
         };
-        if space.vmas_mut().remove(addr, end).is_err() {
-            return None;
-        }
-        Some(space.l4_frame())
+        let removed = space.vmas_mut().remove_deferred(addr, end).ok()?;
+        Some((space.l4_frame(), removed))
     });
-    let Some(l4) = l4 else {
+    let Some((l4, removed_vmas)) = removed else {
         return EINVAL;
     };
     crate::mm::memory::with_memory_mapper(|mapper| {
@@ -975,6 +975,7 @@ pub fn munmap_handler(args: &mut SyscallArgs) -> i64 {
             page += 0x1000;
         }
     });
+    drop(removed_vmas);
     0
 }
 
@@ -3019,7 +3020,7 @@ fn open_common(dirfd: i32, path_ptr: u64, flags: u32) -> i64 {
             return EEXIST;
         }
         if m.file_type == FileType::Directory {
-            let dir = match crate::fs::file_handle::Directory::open(&path) {
+            let dir = match crate::fs::file_handle::Directory::open_names(&path) {
                 Ok(d) => d,
                 Err(ref e) => return map_file_err(e),
             };
@@ -4079,9 +4080,7 @@ fn fcntl_lock(args: &SyscallArgs, fd: i32, cmd: i32, arg: u64) -> i64 {
                 let observed = crate::userland::readiness::sequence();
                 match record_lock::set(&key, range, kind, owner) {
                     Ok(()) => 0,
-                    Err(conflict) if conflict.owner == u32::MAX => {
-                        crate::userland::abi::ENOLCK
-                    }
+                    Err(conflict) if conflict.owner == u32::MAX => crate::userland::abi::ENOLCK,
                     Err(_) => {
                         // Synthetic dispatch (tests, sentinel PID 0) cannot
                         // yield — report the contention rather than hang.
@@ -5631,6 +5630,42 @@ pub fn sched_yield_handler(args: &mut SyscallArgs) -> i64 {
         return 0;
     }
     unsafe { crate::userland::switch::yield_current_ring3(args) }
+}
+
+/// `sched_getaffinity(pid, cpusetsize, mask)` for the system-wide online CPU
+/// set. Thread groups are currently pinned to one home CPU for execution, but
+/// Linux reports the CPUs a task may be scheduled on; all online CPUs are
+/// eligible at process creation and Git uses this result to size its I/O
+/// preload pool.
+pub fn sched_getaffinity_handler(args: &mut SyscallArgs) -> i64 {
+    const KERNEL_MASK_BYTES: usize = core::mem::size_of::<u64>();
+    const MAX_CPUSET_BYTES: usize = 4096;
+
+    let pid = args.rdi as i32;
+    if pid < 0 {
+        return ESRCH;
+    }
+    // The current workload queries pid 0. Do not claim knowledge of an
+    // arbitrary foreign PID's affinity until setaffinity exists.
+    if pid != 0 {
+        return ESRCH;
+    }
+    let cpusetsize = match usize::try_from(args.rsi) {
+        Ok(size) if (KERNEL_MASK_BYTES..=MAX_CPUSET_BYTES).contains(&size) => size,
+        _ => return EINVAL,
+    };
+    let cpu_count = crate::arch::x86_64::smp::online_cpu_count().min(u64::BITS as usize);
+    let mask = if cpu_count == u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1u64 << cpu_count) - 1
+    };
+    let mut bytes = vec![0u8; cpusetsize];
+    bytes[..KERNEL_MASK_BYTES].copy_from_slice(&mask.to_ne_bytes());
+    match crate::userland::usercopy::copy_to_user(args.rdx, &bytes) {
+        Ok(()) => KERNEL_MASK_BYTES as i64,
+        Err(error) => error,
+    }
 }
 
 #[repr(C)]

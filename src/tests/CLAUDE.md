@@ -44,8 +44,12 @@ This folder holds in-kernel test modules that run under QEMU when the kernel is 
 - `p9.rs` — 9P2000.L codec round-trips plus booted `/shared` coverage against
   the per-run host temp share `test.sh` attaches (fixture read, create/write/
   read-back, truncate+append, 256 KiB multi-chunk, enumerate with real sizes,
-  rename, symlink resolution, error paths). Self-skips only when no virtio-9p
-  device is attached; with the device present a broken mount is a hard failure.
+  rename, symlink resolution, error paths, a spawned kernel-thread ISR-wake
+  round trip, and concurrent kernel/ring-3 callers across the scheduler-aware
+  client lanes). An opt-in real-share reproducer runs cold/warm Git status plus
+  the actual Agnoster prompt against `/shared/make`. Device tests self-skip only
+  when no virtio-9p device is attached; with the device present a broken mount
+  is a hard failure.
 
 ## Adding a test
 

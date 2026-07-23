@@ -34,15 +34,19 @@ Build details that are load-bearing:
   namespace rewrite loads `GITRHTTP.ELF`. `sysconfdir=/etc` points the
   system config at the kernel-managed `/etc/gitconfig`.
 - Compiled out: perl/python/tcl porcelain, gettext, iconv, expat (only
-  legacy dumb-HTTP WebDAV push needs it), pthreads (pack/delta
-  parallelism only — pthread groups pin to one CPU today), unix sockets
-  (credential-cache), and IPv6. `git://` daemon URLs are out of scope;
+  legacy dumb-HTTP WebDAV push needs it), unix sockets (credential-cache),
+  and IPv6. Pthreads are enabled so index preload can overlap 9p metadata
+  I/O; pthread groups remain pinned to one guest CPU. `git://` daemon URLs are out of scope;
   ssh remotes fail cleanly (no ssh client exists).
+- `patches/0001-lower-preload-thread-cost-for-9p.patch` lowers Git's index
+  preload floor from 500 to 64 entries per worker. Host round-trip latency
+  makes parallel `lstat` worthwhile for ordinary `/shared` repositories that
+  upstream would consider too small to thread.
 
 The kernel seeds `/etc/gitconfig` at boot (`src/userland/etc.rs`) with a
 deterministic root identity, `init.defaultBranch=main`,
 `safe.directory=*`, `core.fileMode=false` (FAT lower layer has no exec
-bit), and `core.pager=cat`. Repos belong on `/work` (scratch) or `/data`
+bit), `core.pager=cat`, and `core.preloadIndex=true`. Repos belong on `/work` (scratch) or `/data`
 (persistent ext2); cwd starts at the read-only `/host`.
 
 Inside a terminal:

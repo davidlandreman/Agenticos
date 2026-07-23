@@ -20,12 +20,16 @@ is on PATH, and in-process prompt assembly from a `precmd` hook. The last
 change avoids forking a zsh child for every prompt redraw while preserving
 Agnoster's segments and colors.
 
-The git segment computes its dirty color and staged/unstaged markers from a
-single `git status --porcelain` pass rather than oh-my-zsh's `parse_git_dirty`
-(never vendored) and zsh's `vcs_info` (its git backend hits a guest-specific
-parse error). The rendering is unchanged: green for a clean tree, yellow when
-dirty (untracked files included), and `± ` / `✚` markers for tracked unstaged
-and staged changes.
+The git segment computes its branch/upstream state, dirty color, and
+staged/unstaged markers from a single `git status --porcelain=v1 --branch`
+pass rather than oh-my-zsh's `parse_git_dirty` (never vendored) and zsh's
+`vcs_info` (its git backend hits a guest-specific parse error). The status
+header also replaces separate symbolic-ref and ahead/behind history walks;
+zsh builtins locate the `.git` control directory for merge/rebase markers, so
+the normal branch path launches only the one Git status process.
+The rendering is unchanged: green for a clean tree, yellow when dirty
+(untracked files included), and `± ` / `✚` markers for tracked unstaged and
+staged changes.
 
 User overrides belong in `/root/.zshrc`. Zsh sources that file after the
 global config; running `sync` persists it through the writable overlay.

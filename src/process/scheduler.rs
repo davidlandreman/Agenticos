@@ -767,6 +767,28 @@ impl Scheduler {
         self.wake_with_contract(pid, None);
     }
 
+    /// Wake an exact asynchronous-I/O waiter. Returns false while the
+    /// completion is early and the caller has not published its Blocked
+    /// state yet, so the IRQ-side wake record remains queued for retry.
+    pub fn wake_block_io(&mut self, pid: ProcessId, token: u64) -> bool {
+        let Some(pcb) = self.processes.get(&pid) else {
+            return true;
+        };
+        if pcb.state == ProcessState::Terminated {
+            return true;
+        }
+        match (pcb.state, pcb.block_reason) {
+            (ProcessState::Blocked, Some(BlockReason::WaitingForBlockIo(awaited)))
+                if awaited == token =>
+            {
+                self.wake(pid);
+                true
+            }
+            (ProcessState::Blocked, Some(BlockReason::WaitingForBlockIo(_))) => true,
+            _ => false,
+        }
+    }
+
     pub fn wake_with_contract(&mut self, pid: ProcessId, contract: Option<LatencyContract>) {
         if let Some(pcb) = self.processes.get_mut(&pid) {
             if pcb.state == ProcessState::Blocked {

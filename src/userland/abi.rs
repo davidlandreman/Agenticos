@@ -254,6 +254,7 @@ pub mod nr {
     pub const ARCH_PRCTL: u64 = 158;
     pub const GETTID: u64 = 186;
     pub const FUTEX: u64 = 202;
+    pub const SCHED_GETAFFINITY: u64 = 204;
     pub const GETUID: u64 = 102;
     pub const GETGID: u64 = 104;
     pub const GETEUID: u64 = 107;
@@ -429,6 +430,7 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::SET_ROBUST_LIST => syscalls::set_robust_list_handler(args),
         nr::GETTID => syscalls::gettid_handler(args),
         nr::SCHED_YIELD => syscalls::sched_yield_handler(args),
+        nr::SCHED_GETAFFINITY => syscalls::sched_getaffinity_handler(args),
         nr::SIGALTSTACK => syscalls::sigaltstack_handler(args),
         nr::MEMBARRIER => syscalls::membarrier_handler(args),
         nr::FUTEX => crate::userland::futex::handler(args),

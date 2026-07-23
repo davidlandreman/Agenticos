@@ -181,6 +181,7 @@ pub fn enable_pci_irq(irq: u8) -> bool {
 
 fn handle_pci_irq(irq: u8) {
     crate::drivers::virtio::block::handle_interrupt(irq);
+    crate::drivers::virtio::p9::handle_interrupt(irq);
     eoi(PIC_1_OFFSET + irq);
 }
 
@@ -500,6 +501,28 @@ extern "x86-interrupt" fn page_fault_handler(
                         | crate::mm::paging::CowOutcome::OutOfFrames => {}
                     }
                 }
+            }
+        }
+        // Another task in the same CLONE_VM group may have populated this
+        // demand page after the CPU raised a non-present fault but before we
+        // acquired the process/mapper locks. If the shared page tables now
+        // contain a leaf, discard the local stale translation and retry.
+        // This is the narrow same-address-space counterpart to a future
+        // cross-CPU user TLB shootdown and is required by pthread startup.
+        if !error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION) {
+            let l4 = crate::userland::lifecycle::with_current_group(|process| {
+                process.address_space.as_ref().map(|space| space.l4_frame())
+            });
+            let leaf_became_present = l4.is_some_and(|l4| {
+                crate::mm::memory::with_memory_mapper(|mapper| {
+                    mapper.leaf_info(l4, accessed_addr).is_some()
+                })
+                .unwrap_or(false)
+            });
+            if leaf_became_present {
+                x86_64::instructions::tlb::flush(accessed_addr);
+                trace_exit(crate::diagnostics::trace::InterruptOutcome::RecoveredPageIn);
+                return;
             }
         }
         let has_address_space = crate::userland::lifecycle::with_current_group(|process| {

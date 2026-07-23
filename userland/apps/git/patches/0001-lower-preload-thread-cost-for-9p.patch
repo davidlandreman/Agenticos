@@ -1,0 +1,23 @@
+diff --git a/preload-index.c b/preload-index.c
+index 63d4c659ba..f10131f61f 100644
+--- a/preload-index.c
++++ b/preload-index.c
+@@ -21,13 +21,13 @@
+ #include "config.h"
+ 
+ /*
+- * Mostly randomly chosen maximum thread counts: we
+- * cap the parallelism to 20 threads, and we want
+- * to have at least 500 lstat's per thread for it to
+- * be worth starting a thread.
++ * AgenticOS: virtio-9p lstat latency is dominated by host round trips, so
++ * overlapping I/O pays off for much smaller indexes than it does on a local
++ * Linux filesystem. Keep upstream's maximum but lower the per-worker floor
++ * enough for ordinary shared worktrees to use the guest's four request lanes.
+  */
+ #define MAX_PARALLEL (20)
+-#define THREAD_COST (500)
++#define THREAD_COST (64)
+ 
+ struct progress_data {
+ 	unsigned long n;

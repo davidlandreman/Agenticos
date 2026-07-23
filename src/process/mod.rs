@@ -17,8 +17,23 @@ use alloc::boxed::Box;
 use alloc::string::String;
 
 const IO_WAKE_SLOTS: usize = 64;
-static PENDING_IO_WAKES: [core::sync::atomic::AtomicU32; IO_WAKE_SLOTS] =
-    [const { core::sync::atomic::AtomicU32::new(0) }; IO_WAKE_SLOTS];
+
+struct KernelIoWakeSlot {
+    pid: core::sync::atomic::AtomicU32,
+    token: core::sync::atomic::AtomicU64,
+}
+
+impl KernelIoWakeSlot {
+    const fn empty() -> Self {
+        Self {
+            pid: core::sync::atomic::AtomicU32::new(0),
+            token: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+static PENDING_IO_WAKES: [KernelIoWakeSlot; IO_WAKE_SLOTS] =
+    [const { KernelIoWakeSlot::empty() }; IO_WAKE_SLOTS];
 
 /// Check if we're currently running a spawned process
 pub fn is_in_spawned_process() -> bool {
@@ -52,13 +67,19 @@ pub fn current_io_waiter() -> Option<ProcessId> {
 
 /// Queue an IRQ-originated wake without taking the scheduler's non-IRQ-safe
 /// spin lock. The timer and main-loop housekeeping drain this bounded array.
-pub fn queue_kernel_io_wake(pid: ProcessId) {
+pub fn queue_kernel_io_wake(pid: ProcessId, token: u64) {
     use core::sync::atomic::Ordering;
     for slot in &PENDING_IO_WAKES {
         if slot
+            .pid
             .compare_exchange(0, pid, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
+            slot.token.store(token, Ordering::Release);
+            // The target may have blocked on an AP whose local timer is the
+            // only other interrupt source. Kick idle CPUs so their ordinary
+            // (non-ISR) idle loop can drain this queue promptly.
+            crate::arch::x86_64::smp::notify_work();
             return;
         }
     }
@@ -70,11 +91,14 @@ pub fn drain_kernel_io_wakes() -> bool {
     let mut woke = if let Some(mut scheduler) = scheduler::SCHEDULER.try_lock() {
         let mut woke = false;
         for slot in &PENDING_IO_WAKES {
-            let pid = slot.swap(0, Ordering::AcqRel);
-            if pid != 0 {
-                scheduler.wake(pid);
-                woke = true;
+            let pid = slot.pid.load(Ordering::Acquire);
+            let token = slot.token.load(Ordering::Acquire);
+            if pid == 0 || token == 0 || !scheduler.wake_block_io(pid, token) {
+                continue;
             }
+            slot.token.store(0, Ordering::Release);
+            slot.pid.store(0, Ordering::Release);
+            woke = true;
         }
         woke
     } else {
@@ -91,7 +115,7 @@ pub fn pending_kernel_io_wakes_for_test() -> usize {
     use core::sync::atomic::Ordering;
     PENDING_IO_WAKES
         .iter()
-        .filter(|slot| slot.load(Ordering::Acquire) != 0)
+        .filter(|slot| slot.pid.load(Ordering::Acquire) != 0)
         .count()
 }
 
@@ -501,6 +525,11 @@ fn drive_inline_ring3_until_exit(awaited_pid: u32) {
         // the caller waits. Drive the same bounded one-pass poll here; it
         // wakes blocked ring-3 socket syscalls after dropping the net lock.
         crate::net::poll_once();
+
+        // Device IRQ handlers only publish bounded wake records. Consume
+        // them here before selecting work so synchronous test launchers do
+        // not impose one 100 Hz PIT interval on every block request.
+        let _ = crate::process::drain_kernel_io_wakes();
 
         if let Some(next) = pop_next_ring3() {
             unsafe {

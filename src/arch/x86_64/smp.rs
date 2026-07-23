@@ -321,23 +321,33 @@ fn idle_loop() -> ! {
             continue;
         }
 
+        // PCI IRQs are routed to the BSP. Their handlers publish bounded I/O
+        // wake records and kick halted APs; consume those records here in
+        // normal context before selecting from the shared run queue.
+        let _ = crate::process::drain_kernel_io_wakes();
         crate::process::try_run_scheduled_processes();
 
         x86_64::instructions::interrupts::disable();
-        if crate::process::scheduler::SCHEDULER
-            .lock()
-            .ready_entity_count()
-            != 0
-        {
+        let io_woke = crate::process::drain_kernel_io_wakes();
+        let scheduler_ready = crate::process::scheduler::SCHEDULER
+            .try_lock()
+            .map(|scheduler| scheduler.ready_entity_count() != 0)
+            .unwrap_or(true);
+        if io_woke || scheduler_ready {
             x86_64::instructions::interrupts::enable();
             continue;
         }
+
+        // Close the enqueue-vs-HLT race: publish idle, then check both the
+        // wake queue and scheduler once more before atomically enabling
+        // interrupts and halting.
         super::percpu::set_idle_interruptible(true);
-        if crate::process::scheduler::SCHEDULER
-            .lock()
-            .ready_entity_count()
-            != 0
-        {
+        let io_woke = crate::process::drain_kernel_io_wakes();
+        let scheduler_ready = crate::process::scheduler::SCHEDULER
+            .try_lock()
+            .map(|scheduler| scheduler.ready_entity_count() != 0)
+            .unwrap_or(true);
+        if io_woke || scheduler_ready {
             super::percpu::set_idle_interruptible(false);
             x86_64::instructions::interrupts::enable();
             continue;

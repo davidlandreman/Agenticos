@@ -11,8 +11,9 @@ use alloc::vec::Vec;
 pub const NOTAG: u16 = 0xFFFF;
 pub const NOFID: u32 = u32::MAX;
 
-/// The single tag used for all non-version requests. Requests are strictly
-/// serialized behind the client lock, so tag multiplexing buys nothing.
+/// Representative ordinary tag used by the wire-codec tests. Production
+/// client lanes assign distinct tags so requests can be multiplexed.
+#[cfg(feature = "test")]
 pub const TAG: u16 = 1;
 
 /// 9P2000.L message types.

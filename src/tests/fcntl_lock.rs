@@ -112,10 +112,7 @@ fn test_fcntl_getlk_reports_conflict() {
     assert_eq!(
         record_lock::set(
             path,
-            LockRange {
-                start: 5,
-                end: 15,
-            },
+            LockRange { start: 5, end: 15 },
             LockKind::Write,
             OTHER,
         ),

@@ -1029,6 +1029,10 @@ pub fn queue_ring3_io_wake(pid: u32, token: u64) {
         {
             slot.token.store(token, Ordering::Release);
             crate::diagnostics::shadow::io::queue_wake(token, pid);
+            // The request may be affinity-pinned to an AP that is halted in
+            // its scheduler idle loop. Wake idle CPUs without taking either
+            // scheduler lock; the normal-context loop drains this record.
+            crate::arch::x86_64::smp::notify_work();
             return;
         }
     }
@@ -1829,8 +1833,7 @@ pub fn retry_dropped_signal_wakes() -> bool {
             if matches!(reason, Ring3BlockReason::WaitingForBlockIo { .. }) {
                 continue;
             }
-            if g
-                .by_pid
+            if g.by_pid
                 .get(pid)
                 .is_some_and(|p| p.signal_state.has_actionable_pending())
             {
@@ -2863,7 +2866,6 @@ fn stop_task(tid: u32) {
     crate::process::timer::cancel_entity(entity);
     let mut scheduler = crate::process::scheduler::SCHEDULER.lock();
     scheduler.unregister_entity(entity);
-    scheduler.wake_threads_waiting_for_ring3_exit(tid);
 }
 
 /// Close every fd the exiting group holds, releasing pipe/socket/eventfd
@@ -2935,7 +2937,8 @@ pub fn cooperative_thread_exit(code: i64) -> ! {
     let tgid = task_tgid(tid).unwrap_or(tid);
     clear_tid_and_wake(tid, tgid);
     stop_task(tid);
-    if group_live_member_count(tgid) == 0 {
+    let group_finished = group_live_member_count(tgid) == 0;
+    if group_finished {
         with_group(tgid, unmap_user_stack);
         finish_group(tgid, code);
     } else {
@@ -2945,7 +2948,13 @@ pub fn cooperative_thread_exit(code: i64) -> ! {
     crate::diagnostics::shadow::cpu::begin_kernel(None);
     set_current_user_pid(None);
     crate::diagnostics::shadow::cpu::clear_current_pid();
-    unsafe { crate::userland::switch::dispatch_after_user_stop() }
+    unsafe {
+        if group_finished {
+            crate::userland::switch::dispatch_after_user_exit(tgid)
+        } else {
+            crate::userland::switch::dispatch_after_user_stop()
+        }
+    }
 }
 
 /// Linux `exit_group`: stop every schedulable task sharing the address space,
@@ -2964,7 +2973,7 @@ pub fn cooperative_group_exit(code: i64) -> ! {
     crate::diagnostics::shadow::cpu::begin_kernel(None);
     set_current_user_pid(None);
     crate::diagnostics::shadow::cpu::clear_current_pid();
-    unsafe { crate::userland::switch::dispatch_after_user_stop() }
+    unsafe { crate::userland::switch::dispatch_after_user_exit(tgid) }
 }
 
 fn record_exit(kind: ExitKind, code: i64) {
@@ -2999,11 +3008,11 @@ fn long_jump_to_run_or_halt() -> ! {
         crate::userland::gui::cleanup_process(pid);
         let entity = crate::process::entity::EntityId::UserProcess(pid);
         crate::process::timer::cancel_entity(entity);
-        // Unregister the stopped entity, retain the test-compatibility waiter
-        // wake, and publish durable reaper work for production launches.
+        // Unregister the stopped entity and publish durable reaper work for
+        // production launches. The compatibility waiter wake is committed
+        // atomically with the post-exit scheduler selection below.
         let mut sched = crate::process::scheduler::SCHEDULER.lock();
         sched.unregister_entity(entity);
-        sched.wake_threads_waiting_for_ring3_exit(pid);
         drop(sched);
         crate::userland::process_service::notify_process_exit(pid);
         // Clear current_user_pid — we're no longer running this
@@ -3015,5 +3024,10 @@ fn long_jump_to_run_or_halt() -> ! {
         crate::diagnostics::shadow::cpu::clear_current_pid();
     }
 
-    unsafe { crate::userland::switch::dispatch_after_user_stop() }
+    unsafe {
+        match exiting_pid {
+            Some(pid) => crate::userland::switch::dispatch_after_user_exit(pid),
+            None => crate::userland::switch::dispatch_after_user_stop(),
+        }
+    }
 }
