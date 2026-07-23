@@ -287,14 +287,7 @@ impl StatusBar {
 
     pub fn draw(&self, canvas: &mut Canvas) {
         let palette = theme::palette();
-        canvas.fill_rect(
-            self.bounds.x,
-            self.bounds.y,
-            self.bounds.w,
-            self.bounds.h,
-            palette.content_bg,
-        );
-        canvas.horizontal_line(self.bounds.x, self.bounds.y, self.bounds.w, palette.border);
+        theme::draw_status_bar_surface(canvas, self.bounds);
         canvas.draw_text(
             self.bounds.x + 6,
             self.bounds.y + (self.bounds.h as i32 - FONT_LINE_HEIGHT) / 2,

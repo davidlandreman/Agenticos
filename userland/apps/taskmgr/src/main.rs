@@ -20,8 +20,7 @@ use alloc::vec::Vec;
 use dialogs::{DialogStatus, MessageBox, MessageChoice};
 use gui::{
     decode_control_input, Button, Column, ColumnListEvent, ColumnListView, ColumnRow, ControlInput,
-    PointerKind, TabBar, TimeSeriesGraph, Window, COLOR_ACCENT2, COLOR_BORDER, COLOR_HIGHLIGHT,
-    COLOR_PANEL, COLOR_TEXT, COLOR_TEXT_DIM, COLOR_WHITE, GUI_EVENT_CLOSE, GUI_EVENT_KEY,
+    KeyInput, Rect, StatusBar, TabBar, TimeSeriesGraph, Window, GUI_EVENT_CLOSE, GUI_EVENT_KEY,
     GUI_EVENT_MOUSE, GUI_EVENT_RESIZE,
 };
 use runtime::GuiEvent;
@@ -63,6 +62,7 @@ struct TaskMgr {
     mem_graph: TimeSeriesGraph,
     net_graph: TimeSeriesGraph,
     socket_list: ColumnListView,
+    status: StatusBar,
     modal: Option<(MessageBox, ModalPurpose)>,
     prev: Option<Snapshot>,
     snap: Snapshot,
@@ -164,6 +164,7 @@ impl TaskMgr {
             mem_graph: TimeSeriesGraph::new(0, 0, 10, 10, 120, None),
             net_graph: TimeSeriesGraph::new(0, 0, 10, 10, 120, None),
             socket_list: ColumnListView::new(0, 0, 10, 10, socket_columns),
+            status: StatusBar::new(Rect::new(0, 0, 640, STATUS_H)),
             modal: None,
             prev: None,
             snap: Snapshot::default(),
@@ -191,6 +192,7 @@ impl TaskMgr {
         let content_h = h.saturating_sub(TabBar::HEIGHT + STATUS_H);
 
         self.tabs.w = w;
+        self.status.bounds = Rect::new(0, h.saturating_sub(STATUS_H) as i32, w, STATUS_H);
 
         // Processes tab: list + action row.
         let action_h = 36;
@@ -463,13 +465,16 @@ impl TaskMgr {
         self.dirty = true;
     }
 
-    fn handle_key(&mut self, payload: [u32; 6]) {
-        let key = payload[0];
-        match key {
-            runtime::KEY_TAB => {
-                self.tabs.cycle();
-                self.dirty = true;
+    fn handle_key(&mut self, input: KeyInput) {
+        if input.key == runtime::KEY_TAB {
+            let response = self.tabs.handle_input(ControlInput::Key(input));
+            if response.consumed {
+                self.dirty |= response.repaint;
             }
+            return;
+        }
+        let key = input.key;
+        match key {
             runtime::KEY_DELETE if self.tabs.active == TAB_PROCESSES => {
                 self.request_end_task();
             }
@@ -495,14 +500,10 @@ impl TaskMgr {
         let Some(ControlInput::Pointer(input)) = decode_control_input(event) else {
             return;
         };
-        if matches!(input.kind, PointerKind::Down) {
-            if let Some(tab) = self.tabs.hit(input.x, input.y) {
-                if tab != self.tabs.active {
-                    self.tabs.active = tab;
-                    self.dirty = true;
-                }
-                return;
-            }
+        let tab_response = self.tabs.handle_input(ControlInput::Pointer(input));
+        if tab_response.consumed {
+            self.dirty |= tab_response.repaint;
+            return;
         }
         if self.tabs.active == TAB_PROCESSES {
             let enabled = self
@@ -564,7 +565,9 @@ impl TaskMgr {
                 self.dirty = true;
             }
             GUI_EVENT_KEY if event.payload[3] != 0 && self.modal.is_none() => {
-                self.handle_key(event.payload);
+                if let Some(ControlInput::Key(input)) = decode_control_input(&event) {
+                    self.handle_key(input);
+                }
             }
             GUI_EVENT_MOUSE if self.modal.is_none() => {
                 self.handle_mouse(&event);
@@ -580,8 +583,6 @@ impl TaskMgr {
     fn render(&mut self) {
         // Snapshot everything the canvas closure needs (borrow split).
         let active = self.tabs.active;
-        let canvas_h = self.window.canvas().height();
-        let canvas_w = self.window.canvas().width();
         let status = format!(
             "Processes: {}   CPU: {}%   Mem: {}%   Up: {}",
             self.snap.procs.len(),
@@ -593,9 +594,12 @@ impl TaskMgr {
             },
             fmt_uptime(self.snap.uptime_ticks),
         );
+        self.status.set_text(&status);
+        let palette = gui::theme::palette();
+        let data_viz = gui::theme::data_viz_palette();
 
         let canvas = self.window.canvas_mut();
-        canvas.clear(COLOR_WHITE);
+        canvas.clear(palette.content_bg);
         match active {
             TAB_PROCESSES => {
                 self.proc_list.draw(canvas);
@@ -611,7 +615,7 @@ impl TaskMgr {
                         self.proc_list.x,
                         self.end_task.y + 8,
                         "Select a process to end it",
-                        COLOR_TEXT_DIM,
+                        palette.disabled_text,
                     );
                 }
             }
@@ -654,7 +658,7 @@ impl TaskMgr {
                     ),
                 ];
                 for (i, line) in lines.iter().enumerate() {
-                    canvas.draw_text(16, tiles_y + i as i32 * 14, line, COLOR_TEXT);
+                    canvas.draw_text(16, tiles_y + i as i32 * 14, line, palette.text);
                 }
             }
             TAB_NETWORK => {
@@ -666,8 +670,8 @@ impl TaskMgr {
                 self.net_graph.draw(canvas, "Throughput (KB/s)", &label);
                 let totals_y = self.net_graph.y + self.net_graph.h as i32 + 8;
                 // Series legend + since-boot totals.
-                canvas.fill_rect(16, totals_y + 2, 8, 8, COLOR_HIGHLIGHT);
-                canvas.fill_rect(90, totals_y + 2, 8, 8, COLOR_ACCENT2);
+                canvas.fill_rect(16, totals_y + 2, 8, 8, data_viz.primary_line);
+                canvas.fill_rect(90, totals_y + 2, 8, 8, data_viz.secondary_line);
                 let totals = format!(
                     "RX        TX        total {} in / {} out ({} / {} packets)",
                     fmt_kb(self.snap.rx_bytes / 1024),
@@ -675,17 +679,13 @@ impl TaskMgr {
                     self.snap.rx_packets,
                     self.snap.tx_packets,
                 );
-                canvas.draw_text(28, totals_y + 2, &totals, COLOR_TEXT);
+                canvas.draw_text(28, totals_y + 2, &totals, palette.text);
                 self.socket_list.draw(canvas);
             }
             _ => {}
         }
         self.tabs.draw(canvas);
-        // Status strip.
-        let strip_y = canvas_h as i32 - STATUS_H as i32;
-        canvas.fill_rect(0, strip_y, canvas_w, STATUS_H, COLOR_PANEL);
-        canvas.horizontal_line(0, strip_y, canvas_w, COLOR_BORDER);
-        canvas.draw_text(8, strip_y + 7, &status, COLOR_TEXT);
+        self.status.draw(canvas);
         let _ = self.window.present();
         self.dirty = false;
     }
