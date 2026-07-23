@@ -1,16 +1,17 @@
-//! Small, allocation-backed SVG rasterizer for OS artwork.
+//! Small, allocation-backed SVG rasterizer for ring-3 artwork.
 //!
-//! This intentionally implements the compact subset useful for icons rather
-//! than the full browser SVG/CSS model: `viewBox`, `rect`, `circle`, `ellipse`,
-//! `line`, `polygon`, `polyline`, and straight-line `path` commands
-//! (`M/m`, `L/l`, `H/h`, `V/v`, `Z/z`). Shapes support `fill`, `stroke`, and
-//! `stroke-width`. Unsupported elements are ignored, so artwork can degrade
-//! safely instead of making the desktop fail to paint.
+//! This is the userland twin of the kernel's `src/graphics/images/svg.rs`: the
+//! same compact subset useful for icons (`viewBox`, `rect`, `circle`,
+//! `ellipse`, `line`, `polygon`, `polyline`, and straight-line `path` commands
+//! `M/m`, `L/l`, `H/h`, `V/v`, `Z/z`, with `fill`/`stroke`/`stroke-width`).
+//! Unsupported elements are ignored so artwork degrades safely.
+//!
+//! Unlike the kernel version it has no `Image` trait or framebuffer coupling:
+//! [`SvgIcon::parse`] retains the parsed shapes and [`SvgIcon::rasterize`]
+//! renders directly into a tightly packed ARGB8888 buffer (alpha in the top
+//! byte, `0` = transparent) that [`crate::Canvas::blit_argb`] can composite.
 
 use alloc::vec::Vec;
-
-use super::image::{Image, ImageFormat, PixelFormat};
-use crate::graphics::color::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvgError {
@@ -18,6 +19,28 @@ pub enum SvgError {
     MissingRoot,
     InvalidDimensions,
     InvalidViewBox,
+}
+
+/// Opaque RGB color parsed from an SVG paint. Rasterized pixels are emitted as
+/// fully opaque ARGB; unpainted pixels stay transparent.
+#[derive(Debug, Clone, Copy)]
+struct Color {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+impl Color {
+    const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+    const BLACK: Color = Color::new(0, 0, 0);
+    const WHITE: Color = Color::new(255, 255, 255);
+
+    /// Fully opaque ARGB8888 (`0xFF_RRGGBB`).
+    fn to_argb(self) -> u32 {
+        0xFF00_0000 | ((self.r as u32) << 16) | ((self.g as u32) << 8) | self.b as u32
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -168,13 +191,8 @@ impl Shape {
     }
 }
 
-/// Parsed SVG that retains the original bytes and rasterizes directly at the
-/// destination size requested by `GraphicsDevice::draw_image_scaled`.
-pub struct SvgImage<'a> {
-    #[expect(dead_code, reason = "retained for Image::get_pixel_data")]
-    data: &'a [u8],
-    width: usize,
-    height: usize,
+/// Parsed SVG icon that rasterizes directly at a requested destination size.
+pub struct SvgIcon {
     view_x: f32,
     view_y: f32,
     view_width: f32,
@@ -182,8 +200,8 @@ pub struct SvgImage<'a> {
     shapes: Vec<Shape>,
 }
 
-impl<'a> SvgImage<'a> {
-    pub fn from_bytes(data: &'a [u8]) -> Result<Self, SvgError> {
+impl SvgIcon {
+    pub fn parse(data: &[u8]) -> Result<Self, SvgError> {
         let document = core::str::from_utf8(data).map_err(|_| SvgError::InvalidUtf8)?;
         let root_start = document.find("<svg").ok_or(SvgError::MissingRoot)?;
         let root_end = document[root_start..]
@@ -207,11 +225,6 @@ impl<'a> SvgImage<'a> {
         if view_width <= 0.0 || view_height <= 0.0 {
             return Err(SvgError::InvalidViewBox);
         }
-        let width = libm::ceilf(parsed_width.unwrap_or(view_width)) as usize;
-        let height = libm::ceilf(parsed_height.unwrap_or(view_height)) as usize;
-        if width == 0 || height == 0 {
-            return Err(SvgError::InvalidDimensions);
-        }
 
         let mut shapes = Vec::new();
         let mut cursor = root_end;
@@ -234,9 +247,6 @@ impl<'a> SvgImage<'a> {
         }
 
         Ok(Self {
-            data,
-            width,
-            height,
             view_x,
             view_y,
             view_width,
@@ -245,63 +255,34 @@ impl<'a> SvgImage<'a> {
         })
     }
 
-    fn sample_at_size(
-        &self,
-        x: usize,
-        y: usize,
-        target_width: usize,
-        target_height: usize,
-    ) -> Option<Color> {
-        if x >= target_width || y >= target_height || target_width == 0 || target_height == 0 {
-            return None;
+    /// Rasterize into a tightly packed `target_width * target_height` ARGB8888
+    /// buffer. Painted pixels are fully opaque (`0xFF_RRGGBB`); untouched
+    /// pixels are transparent (`0`).
+    pub fn rasterize(&self, target_width: u32, target_height: u32) -> Vec<u32> {
+        let w = target_width as usize;
+        let h = target_height as usize;
+        let mut pixels = alloc::vec![0u32; w * h];
+        if w == 0 || h == 0 {
+            return pixels;
         }
-        let point = Point {
-            x: self.view_x + (x as f32 + 0.5) * self.view_width / target_width as f32,
-            y: self.view_y + (y as f32 + 0.5) * self.view_height / target_height as f32,
-        };
-        let mut color = None;
-        for shape in &self.shapes {
-            if let Some(sample) = shape.sample(point) {
-                color = Some(sample);
+        for y in 0..h {
+            for x in 0..w {
+                let point = Point {
+                    x: self.view_x + (x as f32 + 0.5) * self.view_width / target_width as f32,
+                    y: self.view_y + (y as f32 + 0.5) * self.view_height / target_height as f32,
+                };
+                let mut color = None;
+                for shape in &self.shapes {
+                    if let Some(sample) = shape.sample(point) {
+                        color = Some(sample);
+                    }
+                }
+                if let Some(color) = color {
+                    pixels[y * w + x] = color.to_argb();
+                }
             }
         }
-        color
-    }
-}
-
-impl Image for SvgImage<'_> {
-    fn width(&self) -> usize {
-        self.width
-    }
-
-    fn height(&self) -> usize {
-        self.height
-    }
-
-    fn format(&self) -> ImageFormat {
-        ImageFormat::Svg
-    }
-
-    fn pixel_format(&self) -> PixelFormat {
-        PixelFormat::Rgba8888
-    }
-
-    fn get_pixel(&self, x: usize, y: usize) -> Option<Color> {
-        self.sample_at_size(x, y, self.width, self.height)
-    }
-
-    fn get_scaled_pixel(
-        &self,
-        x: usize,
-        y: usize,
-        target_width: usize,
-        target_height: usize,
-    ) -> Option<Color> {
-        self.sample_at_size(x, y, target_width, target_height)
-    }
-
-    fn get_pixel_data(&self) -> &[u8] {
-        self.data
+        pixels
     }
 }
 

@@ -1,18 +1,20 @@
-# `src/commands/` — Kernel-side GUI policy and legacy app
+# `src/commands/` — Kernel-side desktop host and GUI launch table
 
-This directory contains `guishell`, the desktop/taskbar policy layer, plus
-the (empty today) GUI launch table. Every GUI application has migrated to
-the ring-3 platform: Settings, File Manager, Notepad, Calc, Painting, GL Arena, and
-the Task Manager (`userland/apps/taskmgr/`, replacing the kernel-side
-`tasks` app — see
-`docs/plans/2026-07-18-003-feat-ring3-task-manager-and-procfs-plan.md`) all
-live under `userland/apps/`.
+This directory contains `desktop`, the thin kernel host for the ring-3 desktop
+shell, plus the (empty today) GUI launch table. Every GUI application, and the
+desktop shell itself, now runs in ring 3: Settings, File Manager, Notepad,
+Calc, Painting, GL Arena, the Task Manager (`userland/apps/taskmgr/`, replacing
+the kernel-side `tasks` app — see
+`docs/plans/2026-07-18-003-feat-ring3-task-manager-and-procfs-plan.md`), and the
+desktop shell (`userland/apps/desktop/`) all live under `userland/apps/`.
 
-`guishell` also owns taskbar policy. Each frame retains a task button while
-minimized; task-button activation delegates to
-`WindowManager::activate_frame`, which restores visibility, raises the frame,
-and focuses its first focusable descendant without duplicating placement state
-inside `GUIShellState`.
+The legacy in-kernel `guishell` (taskbar/Start-menu policy, `GUIShellState`,
+the kernel Start menu/taskbar/Run dialog windows, and the kernel SVG icon
+rasterizer that only it used) was **removed** once the ring-3 shell became the
+only shell — see
+`docs/plans/2026-07-22-001-feat-ring3-svg-icons-and-guishell-removal-plan.md`.
+Task-button activation is delegated to `WindowManager::activate_frame` (invoked
+by the ring-3 shell through `gui_shell_window_action`).
 
 `gui_launch_table` retains the `GLAUNCH.ELF` / syscall-5000 dispatch
 skeleton for a future workload that genuinely needs ring 0; its match arms
@@ -22,16 +24,13 @@ directly to staged ELFs under `/host` (`/bin/taskmgr` and the legacy alias
 `/bin/tasks` both resolve to `/host/TASKMGR.ELF`; `explorer` is the
 compatibility name for `FILEMAN.ELF`).
 
-## Ring-3 desktop shell (`AGENTICOS_SHELL=ring3`)
+## Ring-3 desktop shell
 
-The **ring-3 `DESKTOP.ELF`** (`userland/apps/desktop/`) is now the default
-desktop shell; the in-kernel `guishell` is the legacy fallback. Selected at boot
-by `opt/agenticos/shell` fw_cfg (`AGENTICOS_SHELL=ring0|ring3`, default `ring3`),
-read in `src/kernel.rs` (`ring3_desktop_shell_requested` — anything but the
-literal `ring0` selects the ring-3 shell). In ring-3 mode the kernel calls
-`guishell::init_desktop_root_only` (screen + desktop-root wallpaper only — no
-kernel taskbar chrome) and `guishell::spawn_ring3_desktop_shell`
-(`/host/DESKTOP.ELF`) instead of `init_guishell` + `spawn_guishell_process`.
+The **ring-3 `DESKTOP.ELF`** (`userland/apps/desktop/`) is the only desktop
+shell. At boot `src/kernel.rs` unconditionally calls
+`commands::desktop::init_desktop_root_only` (create the GUI screen +
+desktop-root wallpaper window — no kernel taskbar chrome) and
+`commands::desktop::spawn_ring3_desktop_shell` (`/host/DESKTOP.ELF`).
 
 `DESKTOP.ELF` drives the compositor purely through the **desktop-shell protocol
 syscalls** (5013–5016) plus the `GUI_WINDOW_PANEL`/`GUI_WINDOW_UNDECORATED`
@@ -43,27 +42,34 @@ the active Classic/Aero/Futurism theme through the ring-3
 `taskbar_text`, `draw_menu_surface`, `draw_field`) — full parity for the solid
 Classic/Aero bars; Futurism uses a solid dark tint approximation because an
 opaque ring-3 surface cannot receive the compositor's frosted backdrop blur.
-The Start menu mirrors the kernel `start_menu.rs`: a vertical `AgenticOS`
-banner, a Programs fly-out, per-row icons (procedural, in
-`userland/apps/desktop/src/icons.rs` — ring-3 has no SVG rasterizer), a disabled
-Documents placeholder, and a submenu arrow. The root menu and the Programs
-fly-out are **two independent windows** (the fly-out has its own height and is
-created with the shell-only `GUI_WINDOW_NO_FOCUS` flag so it does not dismiss
-the focused root popup); both bottom-align to the taskbar, so opening Programs
-never resizes or moves the primary menu. The Run prompt is a decorated `Run` window with the same two
-prompt lines, a themed field, and OK/Cancel buttons.
-See `docs/plans/2026-07-21-001-feat-ring3-desktop-shell-plan.md`. `guishell` is
-still present as the `ring0` fallback pending its eventual deletion.
+The Start menu has a vertical `AgenticOS` banner, a Programs fly-out, per-row
+icons, a disabled Documents placeholder, and a submenu arrow. The row icons are
+the shared SVG artwork under `assets/icons/start/*.svg`, `include_bytes!`-baked
+into `DESKTOP.ELF` and rasterized at runtime by the userland SVG rasterizer
+(`userland/libs/gui::svg`) and blitted with `Canvas::blit_argb` — the ring-3
+twin of the kernel rasterizer that the removed kernel Start menu used. The root
+menu and the Programs fly-out are **two independent windows** (the fly-out has
+its own height and is created with the shell-only `GUI_WINDOW_NO_FOCUS` flag so
+it does not dismiss the focused root popup); both bottom-align to the taskbar,
+so opening Programs never resizes or moves the primary menu. The Run prompt is a
+decorated `Run` window with two prompt lines, a themed field, and OK/Cancel
+buttons.
+See `docs/plans/2026-07-21-001-feat-ring3-desktop-shell-plan.md` and
+`docs/plans/2026-07-22-001-feat-ring3-svg-icons-and-guishell-removal-plan.md`.
 
 ## Desktop launch paths
 
-- Start → Programs contains Terminal, File Manager, Notepad, Painting,
-  Calc, GL Arena, and Task Manager. Standalone apps use
-  `userland::process_service::submit`, which queues an owned launch request
-  for the persistent process service and returns immediately.
-- Start → Run opens the kernel-owned non-blocking Run dialog. Submitted text is
-  passed unchanged as the single command argument to `/host/ZSH.ELF -c`, using
-  the same `/bin:/host` PATH as interactive terminals.
+Launch policy lives in the ring-3 shell (`userland/apps/desktop/`), not the
+kernel. The kernel side only provides the process/terminal services the shell
+calls into.
+
+- Start → Programs contains Terminal, File Manager, Web Browser, Notepad,
+  Painting, Calc, GL Arena, and Task Manager. The shell launches standalone
+  apps with ordinary ring-3 `fork` + `execve`; Terminal uses the
+  `gui_shell_spawn_terminal` syscall.
+- Start → Run opens the shell's own ring-3 Run window. Submitted text is passed
+  unchanged as the single command argument to `/host/ZSH.ELF -c`, using the same
+  `/bin:/host` PATH as interactive terminals.
 - Start → Settings launches `/host/CONTROL.ELF`; Documents remains a disabled
   placeholder. Start → Shut Down
   reports that clean shutdown is not implemented; it does not use QEMU's test

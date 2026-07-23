@@ -80,6 +80,10 @@ impl LaunchSpec {
         self
     }
 
+    #[cfg_attr(
+        not(feature = "test"),
+        expect(dead_code, reason = "LaunchSpec builder retained for launchers/tests")
+    )]
     pub fn with_cwd(mut self, cwd: &str) -> Self {
         self.cwd = String::from(cwd);
         self

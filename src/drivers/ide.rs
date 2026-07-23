@@ -529,7 +529,7 @@ impl IdeController {
 
         // Disable preemption for the IDE PIO transaction. PIO requires the
         // CPU to poll the data port immediately when DRQ becomes set; if the
-        // scheduler preempts us mid-read (e.g., to GUIShell during interactive
+        // scheduler preempts us mid-read (e.g., to the compositor during interactive
         // boot), the DRQ window slips and `wait_drq` times out. The transfer
         // is small and bounded (one sector batch, ≤ 64 KiB) so holding the
         // CPU for it is acceptable. Drops on every exit path including
@@ -643,7 +643,7 @@ impl IdeController {
 
         // Disable preemption for the IDE PIO transaction. PIO requires the
         // CPU to poll the data port immediately when DRQ becomes set; if the
-        // scheduler preempts us mid-read (e.g., to GUIShell during interactive
+        // scheduler preempts us mid-read (e.g., to the compositor during interactive
         // boot), the DRQ window slips and `wait_drq` times out. The transfer
         // is small and bounded (one sector batch, ≤ 64 KiB) so holding the
         // CPU for it is acceptable. Drops on every exit path including

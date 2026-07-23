@@ -49,7 +49,6 @@ const TASK_BTN_GAP: i32 = 4;
 const CLOCK_REALTIME: i32 = 0;
 const MAX_TASK_WINDOWS: usize = 32;
 const ZSH_PATH: &str = "/host/ZSH.ELF";
-const ICON_ACCENT: u32 = 0x3C8CF0;
 
 // Start-menu geometry, mirroring the kernel `start_menu.rs`.
 const BANNER_W: i32 = 28;
@@ -407,14 +406,7 @@ fn paint_column(
         }
 
         let icon_top = item_y + (row_h - icon_size) / 2;
-        let (icon_fg, icon_accent) = if disabled {
-            (palette.disabled_text, palette.disabled_text)
-        } else if highlighted {
-            (palette.selection_text, palette.selection_text)
-        } else {
-            (palette.text, ICON_ACCENT)
-        };
-        icons::draw(canvas, icon, icon_left, icon_top, icon_size, icon_fg, icon_accent);
+        icons::draw(canvas, icon, icon_left, icon_top, icon_size);
 
         let text_y = item_y + (row_h - FONT_LINE_HEIGHT) / 2;
         let color = if disabled {

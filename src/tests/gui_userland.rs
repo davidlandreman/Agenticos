@@ -412,8 +412,7 @@ fn test_gui_syscall_argument_errors() {
 
 fn test_gui_create_destroy_lifecycle() {
     gui::reset_for_test();
-    // Test boot initializes the window manager but deliberately skips the
-    // GUIShell desktop. Install a minimal root for the syscall lifecycle and
+    // Test boot initializes the window manager but deliberately skips the    // desktop shell. Install a minimal root for the syscall lifecycle and
     // remove it afterward so the global manager returns to its prior state.
     let temporary_root = crate::window::with_window_manager(|wm| {
         if wm
@@ -611,7 +610,7 @@ fn test_shell_window_list_and_action() {
     gui::reset_for_test();
     let pid = crate::userland::gui_syscalls::TEST_GUI_CALLER_PID;
 
-    // Install a temporary desktop root (test boot skips the GUIShell desktop).
+    // Install a temporary desktop root (test boot skips the desktop shell).
     let temporary_root = crate::window::with_window_manager(|wm| {
         if wm
             .get_active_screen()

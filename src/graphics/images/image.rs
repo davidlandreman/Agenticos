@@ -25,10 +25,7 @@ pub enum PixelFormat {
 pub trait Image {
     fn width(&self) -> usize;
     fn height(&self) -> usize;
-    #[cfg_attr(
-        not(feature = "test"),
-        expect(dead_code, reason = "intentional kernel API surface")
-    )]
+    #[expect(dead_code, reason = "intentional kernel API surface")]
     fn format(&self) -> ImageFormat;
     #[expect(dead_code, reason = "intentional kernel API surface")]
     fn pixel_format(&self) -> PixelFormat;

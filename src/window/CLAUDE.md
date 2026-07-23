@@ -46,13 +46,15 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   (`controls::palette()`) plus a `ControlStyle` whose `ControlFinish`
   (`Bevel98` / `GlassKd4` / `SoftRounded`) drives the drawing helpers
   (`draw_button`, `draw_field`, `draw_raised_panel`, `draw_selection`,
-  `draw_menu_surface`, and the chrome helpers `draw_taskbar_surface` /
-  `draw_tray_well` / `draw_task_button` / `taskbar_text`). Every widget in
-  `windows/` delegates its surface rendering there — Classic gets Win98
-  bevels and navy selection, Aero rounded gradient buttons and `#CBE8F6`
-  selection, Futurism flat white rounded buttons, `#3C8CF0` accent, rounded
-  `#DCE9FC` selection pills, and frosted translucent taskbar/start-menu
-  surfaces (`theme::chrome_effect()`). The resolved theme is published to
+  `draw_menu_surface`, and `draw_task_button`, still used by the `Button`
+  widget's taskbar style). The kernel taskbar/tray/Start-menu chrome helpers
+  (`draw_taskbar_surface` / `draw_tray_well` / `taskbar_text` / the
+  `theme::chrome_effect()` accessor) were removed with the kernel `guishell`;
+  the ring-3 shell carries its own copies in `userland/libs/gui::theme`. Every
+  widget in `windows/` delegates its surface rendering here — Classic gets
+  Win98 bevels and navy selection, Aero rounded gradient buttons and `#CBE8F6`
+  selection, Futurism flat white rounded buttons, `#3C8CF0` accent, and rounded
+  `#DCE9FC` selection pills. The resolved theme is published to
   ring-3 as `/etc/theme` (see `src/userland/etc.rs::publish_theme`), which
   `userland/libs/gui`'s `theme` module mirrors (unknown tokens degrade to
   Classic). Runtime changes from `CONTROL.ELF` retheme every frame, preserve
@@ -67,7 +69,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 - `cursor.rs` — `CursorRenderer`. Background save/restore and the 12×12 arrow sprite.
 - `keyboard.rs` — PS/2 scancode-set-2 → `KeyCode` conversion *for window events* (distinct from the lower-level driver in `src/input/`).
 - `terminal.rs`, `terminal_factory.rs` — terminal-window support; the factory wires terminal windows up to the shell.
-- `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), `desktop.rs` (background), `start_menu.rs` (classic root menu plus Programs fly-out in one active popup, with ordinary SVG assets under `assets/icons/start/`), and `taskbar.rs` (task-button geometry plus the minute-updated UTC tray).
+- `windows/` — concrete window implementations: `base.rs` (parent-child tracking), `container.rs`, `text.rs` (grid-based text), `terminal.rs` (interactive), `frame.rs` (title bar + borders), and `desktop.rs` (background). The kernel `start_menu.rs` and `taskbar.rs` were removed with `guishell`; the taskbar and Start menu now live in the ring-3 shell (`userland/apps/desktop/`), which renders the `assets/icons/start/*.svg` artwork itself.
 - `windows/remote_surface.rs` — server-decorated client surface for ring-3
   apps. It owns the copied XRGB8888 buffer and forwards input/resize/close/focus
   events to the owning PID's GUI queue. Its enclosing frame title can be
@@ -75,7 +77,7 @@ Hierarchical GUI window management with parent-child coordinate transformations,
   may instead own a logical GL client ID whose front texture is inserted as an
   external retained layer clipped to the content well.
 - `adapters/` — `GraphicsDevice` implementations: `direct_framebuffer.rs` (fast, used for cursor) and `double_buffered.rs` (smooth).
-- `dialogs/` — kernel dialog-window scaffolding, including the non-blocking Run dialog. Run keeps input state outside the manager registry and launches submitted text through zsh `-c`.
+- `dialogs/` — kernel dialog-window scaffolding: `message_box` (info/warning/error). The kernel Run dialog was removed with `guishell`; the ring-3 shell owns its own Run window.
 
 ## Window types
 
@@ -86,26 +88,30 @@ Hierarchical GUI window management with parent-child coordinate transformations,
 | `TextWindow` | Grid-based text rendering | Cell size derived from the terminal TTF (`get_terminal_font().cell_width()` × `line_height()`). Tracks dirty cells for incremental updates. The default `#202020` well is opaque in Classic/Legacy and alpha-232 frosted glass in Aero/Futurism; explicit ANSI cell backgrounds stay opaque. |
 | `TerminalWindow` | Interactive terminal | Wraps `TextWindow`, adds input handling, command history, cursor. |
 | `ContainerWindow` | Generic parent | For grouping children. |
-| `StartMenuWindow` | GUIShell Start popup | Theme-aware popup panels, selection-colored rotated `AgenticOS` banner, typed disabled/separator/action rows, SVG-backed root/program icons, and an in-window Programs fly-out so outside-click dismissal still tracks one popup. |
-| `TaskbarTrayWindow` | Right-side notification tray | Theme-aware tray well (recessed bevel Classic, flat border Aero, translucent rounded well Futurism) with `HH:MM UTC` and `YYYY-MM-DD`; compares the RTC-backed epoch minute in `prepare_for_render` and invalidates only at minute boundaries. |
 | `RemoteSurface` | Ring-3 client pixels | Kernel-owned copy-blit buffer or one attached VirGL client texture; close requests are delivered to the client. |
+
+The Start menu and taskbar/tray are no longer kernel windows — the ring-3 shell
+(`userland/apps/desktop/`) draws them as undecorated/panel `RemoteSurface`s.
 
 All windows derive from `WindowBase` for consistent parent-child tracking.
 
 ## Default desktop layout
 
-Boot lands in GUI mode:
+Boot lands in GUI mode. The kernel stands up only the desktop root
+(`commands::desktop::init_desktop_root_only`); the taskbar, Start menu, tray,
+and any initial windows are owned by the ring-3 shell (`DESKTOP.ELF`).
 
-- `DesktopWindow` (full-screen). Reads `/WALLPAPR.BMP` from the FAT root via `window::load_default_wallpaper` during `init_guishell`; on success, the BMP is stretched to the full screen via `GraphicsDevice::draw_image_scaled`. Missing or malformed wallpaper degrades to the legacy solid-blue fill — never panics.
-- `FrameWindow` titled "Terminal" at `(100, 50)`, 800×600 (or smaller if the screen is smaller). After command submission, its title shows `Terminal - ` followed by the first 40 characters of the command.
-- `TerminalWindow` inside the frame.
-- Bottom taskbar with a Start button, dynamically-sized frame buttons, and a
-  recessed right-side UTC date/time tray. Start opens the classic menu;
-  Programs launches the six pinned apps (including GL Arena), Run opens a modal command field, and
-  Shut Down is an explicit safe placeholder until a clean power-off path
-  exists. Task-button layout reserves the tray span and never overlaps it.
-  Minimized frames keep their task button; activating it restores the frame in
-  its retained normal/maximized placement and returns focus to its content.
+- `DesktopWindow` (full-screen). Loads the configured wallpaper BMP via
+  `system_control::load_configured_wallpaper` when the desktop root is created;
+  on success, the BMP is stretched to the full screen via
+  `GraphicsDevice::draw_image_scaled`. Missing or malformed wallpaper degrades
+  to the solid-blue fill — never panics.
+- The ring-3 shell docks a bottom taskbar panel (Start button, frame buttons,
+  UTC date/time tray) and opens frames on demand. Minimized frames keep their
+  task button; activating it (via `gui_shell_window_action` →
+  `WindowManager::activate_frame`) restores the frame in its retained
+  normal/maximized placement and returns focus to its content. See
+  `src/commands/CLAUDE.md`.
 
 ## TerminalWindow ↔ terminal subsystem
 

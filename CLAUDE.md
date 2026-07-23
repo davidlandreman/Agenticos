@@ -147,7 +147,7 @@ The project follows a modular monolithic kernel design with clear separation of 
 Each entry below points to the folder's own `CLAUDE.md`, which carries the detailed context for that subsystem. Folder files load on demand when Claude reads files in that directory.
 
 - `src/arch/` — Architecture-specific code (x86_64 IDT, interrupts). No folder file yet — currently thin.
-- `src/commands/` — `guishell` plus the (empty today) GUI launch table. File Manager, Calc, Notepad, Painting, GL Arena, and the Task Manager are ring-3 ELFs under `userland/apps/`. See [`src/commands/CLAUDE.md`](src/commands/CLAUDE.md).
+- `src/commands/` — `desktop` (thin kernel host that stands up the desktop-root window and launches the ring-3 `DESKTOP.ELF` shell) plus the (empty today) GUI launch table. The desktop shell, File Manager, Calc, Notepad, Painting, GL Arena, and the Task Manager are all ring-3 ELFs under `userland/apps/`; the legacy in-kernel `guishell` was removed. See [`src/commands/CLAUDE.md`](src/commands/CLAUDE.md).
 - `src/drivers/` — Hardware drivers (PCI, PS/2, VirtIO including block storage, framebuffer display). See [`src/drivers/CLAUDE.md`](src/drivers/CLAUDE.md).
 - `src/fs/` — VFS with ext2, FAT12/16/32, tmpfs, overlay, and `Arc`-based handles. See [`src/fs/CLAUDE.md`](src/fs/CLAUDE.md).
 - `src/graphics/` — Drawing primitives, text rendering, image loading, compositor. See [`src/graphics/CLAUDE.md`](src/graphics/CLAUDE.md).

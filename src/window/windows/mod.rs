@@ -25,9 +25,7 @@ pub mod remote_surface;
 #[allow(dead_code)]
 pub mod scroll_view;
 pub mod splitter;
-pub mod start_menu;
 pub mod status_bar;
-pub mod taskbar;
 pub mod terminal;
 pub mod text;
 #[allow(dead_code)]
@@ -56,13 +54,11 @@ pub use scroll_view::ScrollView;
 #[allow(unused_imports)]
 pub use splitter::{Splitter, SplitterOrientation};
 #[allow(unused_imports)]
-pub use start_menu::{StartMenuAction, StartMenuItem, StartMenuWindow};
-#[allow(unused_imports)]
 pub use status_bar::StatusBar;
-pub use taskbar::{TaskbarTrayWindow, TaskbarWindow};
 pub use terminal::TerminalWindow;
 #[allow(unused_imports)]
 pub use text_editor::TextEditor;
+#[allow(unused_imports)]
 pub use text_input::TextInput;
 #[allow(unused_imports)]
 pub use toolbar::Toolbar;

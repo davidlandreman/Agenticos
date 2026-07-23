@@ -217,8 +217,6 @@ pub struct ThemeSpec {
     pub metrics: FrameMetrics,
     /// Compositor effect for frame-window layers.
     pub frame_effect: LayerEffect,
-    /// Compositor effect for desktop chrome (taskbar, start menu).
-    pub chrome_effect: LayerEffect,
     /// Default background material for terminal content wells.
     pub terminal_well: TerminalWellMaterial,
     draw_frame: fn(&FrameChrome<'_>, &mut dyn GraphicsDevice),
@@ -234,7 +232,6 @@ const CLASSIC_SPEC: ThemeSpec = ThemeSpec {
     fallback_reason: "",
     metrics: CLASSIC_METRICS,
     frame_effect: LayerEffect::None,
-    chrome_effect: LayerEffect::None,
     terminal_well: CLASSIC_TERMINAL_WELL,
     draw_frame: classic::draw,
     draw_frame_overlay: None,
@@ -248,7 +245,6 @@ const AERO_SPEC: ThemeSpec = ThemeSpec {
     frame_effect: LayerEffect::BackdropSample {
         radius: AERO_BACKDROP_RADIUS,
     },
-    chrome_effect: LayerEffect::None,
     terminal_well: MODERN_TERMINAL_WELL,
     draw_frame: aero::draw,
     draw_frame_overlay: None,
@@ -260,9 +256,6 @@ const FUTURISM_SPEC: ThemeSpec = ThemeSpec {
     fallback_reason: "Futurism requires a retained compositor",
     metrics: FUTURISM_METRICS,
     frame_effect: LayerEffect::BackdropSample {
-        radius: FUTURISM_BACKDROP_RADIUS,
-    },
-    chrome_effect: LayerEffect::BackdropSample {
         radius: FUTURISM_BACKDROP_RADIUS,
     },
     terminal_well: MODERN_TERMINAL_WELL,
@@ -397,12 +390,6 @@ pub const fn frame_effect_for(kind: ThemeKind) -> LayerEffect {
 
 pub fn frame_effect() -> LayerEffect {
     frame_effect_for(active())
-}
-
-/// Compositor effect for desktop chrome (taskbar, start menu) under the
-/// active theme.
-pub fn chrome_effect() -> LayerEffect {
-    active_spec().chrome_effect
 }
 
 pub const fn terminal_well_for(kind: ThemeKind) -> TerminalWellMaterial {

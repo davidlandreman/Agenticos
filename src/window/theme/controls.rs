@@ -75,8 +75,6 @@ pub struct ControlStyle {
     pub finish: ControlFinish,
     /// Pressed controls shift their label down-right by 1px (Classic).
     pub pressed_label_shift: bool,
-    /// Separators draw a second highlight line below the divider (Classic).
-    pub separator_highlight: bool,
     /// Border drawn around selection highlights.
     pub selection_border: Option<Color>,
     /// Selection fills get quantized rounded corners.
@@ -128,7 +126,6 @@ const FUTURISM_PALETTE: ControlPalette = ControlPalette {
 const CLASSIC_STYLE: ControlStyle = ControlStyle {
     finish: ControlFinish::Bevel98,
     pressed_label_shift: true,
-    separator_highlight: true,
     selection_border: None,
     rounded_selection: false,
 };
@@ -136,7 +133,6 @@ const CLASSIC_STYLE: ControlStyle = ControlStyle {
 const AERO_STYLE: ControlStyle = ControlStyle {
     finish: ControlFinish::GlassKd4,
     pressed_label_shift: false,
-    separator_highlight: false,
     selection_border: Some(Color::new(38, 160, 218)), // #26A0DA
     rounded_selection: false,
 };
@@ -144,7 +140,6 @@ const AERO_STYLE: ControlStyle = ControlStyle {
 const FUTURISM_STYLE: ControlStyle = ControlStyle {
     finish: ControlFinish::SoftRounded,
     pressed_label_shift: false,
-    separator_highlight: false,
     selection_border: Some(FUT_SELECTION_BORDER),
     rounded_selection: true,
 };
@@ -228,9 +223,6 @@ const FUT_PANEL: Color = Color::new(238, 242, 249); // #EEF2F9
 const FUT_PANEL_EDGE: Color = Color::new(217, 225, 236); // #D9E1EC
 const FUT_MENU_BORDER: Color = Color::new(201, 210, 228); // #C9D2E4
 const FUT_SELECTION_BORDER: Color = Color::new(143, 183, 242); // #8FB7F2
-/// Frosted taskbar tint (over the backdrop blur).
-const FUT_TASKBAR_TINT: Color = Color::new(26, 36, 64); // #1A2440
-const FUT_TASKBAR_TINT_ALPHA: u8 = 150;
 
 /// Corner inset (pixels skipped from each side) for a given distance from the
 /// top/bottom edge, quantizing a radius-3 rounded corner.
@@ -587,25 +579,6 @@ pub fn draw_raised_panel(device: &mut dyn GraphicsDevice, rect: Rect) {
     }
 }
 
-/// Paint a recessed panel such as a status well. Classic keeps the Win98
-/// sunken edge; Aero and Futurism use flat borders.
-pub fn draw_recessed_panel(device: &mut dyn GraphicsDevice, rect: Rect) {
-    let palette = palette();
-    device.fill_rect(rect.x, rect.y, rect.width, rect.height, palette.content_bg);
-    match style().finish {
-        ControlFinish::Bevel98 => {
-            draw_bevel_rings(
-                device,
-                rect,
-                &[(classic::BEVEL_SHADOW, classic::BEVEL_HIGHLIGHT)],
-            );
-        }
-        ControlFinish::GlassKd4 | ControlFinish::SoftRounded => {
-            outline(device, rect, palette.border)
-        }
-    }
-}
-
 /// Paint a popup-menu surface: themed background plus popup border (Classic:
 /// raised two-ring bevel; Aero: flat 1px border; Futurism: frosted
 /// translucent white over the chrome backdrop blur).
@@ -641,15 +614,6 @@ pub fn draw_menu_surface(device: &mut dyn GraphicsDevice, rect: Rect) {
     }
 }
 
-/// Paint a menu separator using the active theme's divider treatment.
-pub fn draw_menu_separator(device: &mut dyn GraphicsDevice, x: i32, y: i32, width: u32) {
-    let palette = palette();
-    device.fill_rect(x, y, width, 1, palette.border);
-    if style().separator_highlight {
-        device.fill_rect(x, y + 1, width, 1, classic::BEVEL_HIGHLIGHT);
-    }
-}
-
 /// Paint a selection / hover highlight band.
 pub fn draw_selection(device: &mut dyn GraphicsDevice, rect: Rect) {
     let palette = palette();
@@ -676,45 +640,6 @@ pub fn draw_selection(device: &mut dyn GraphicsDevice, rect: Rect) {
 // ---------------------------------------------------------------------
 // Desktop chrome (taskbar strip, tray well, task buttons)
 // ---------------------------------------------------------------------
-
-/// Paint the taskbar strip. Classic/Aero delegate to the raised panel;
-/// Futurism paints a frosted translucent bar over the chrome backdrop blur.
-pub fn draw_taskbar_surface(device: &mut dyn GraphicsDevice, rect: Rect) {
-    match style().finish {
-        ControlFinish::SoftRounded => {
-            device.fill_rect_argb(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                FUT_TASKBAR_TINT,
-                FUT_TASKBAR_TINT_ALPHA,
-            );
-            device.fill_rect_argb(rect.x, rect.y, rect.width, 1, Color::WHITE, 56);
-        }
-        _ => draw_raised_panel(device, rect),
-    }
-}
-
-/// Paint the tray notification well. Classic/Aero delegate to the recessed
-/// panel; Futurism uses a translucent rounded-feeling well on the frosted bar.
-pub fn draw_tray_well(device: &mut dyn GraphicsDevice, rect: Rect) {
-    match style().finish {
-        ControlFinish::SoftRounded => {
-            device.fill_rect_argb(rect.x, rect.y, rect.width, rect.height, Color::WHITE, 30);
-            argb_outline(device, rect, Color::WHITE, 56);
-        }
-        _ => draw_recessed_panel(device, rect),
-    }
-}
-
-/// Text color for taskbar-hosted chrome (tray clock, task-button labels).
-pub fn taskbar_text() -> Color {
-    match style().finish {
-        ControlFinish::SoftRounded => Color::WHITE,
-        _ => palette().text,
-    }
-}
 
 /// Paint a taskbar-hosted button (Start, task buttons). Classic/Aero use the
 /// ordinary button surface; Futurism paints translucent rounded pills whose

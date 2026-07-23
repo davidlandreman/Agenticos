@@ -86,13 +86,7 @@ pub mod smp;
 #[cfg(feature = "test")]
 pub mod splitter_tests;
 #[cfg(feature = "test")]
-pub mod start_menu_tests;
-#[cfg(feature = "test")]
 pub mod surface_alpha;
-#[cfg(feature = "test")]
-pub mod svg_image;
-#[cfg(feature = "test")]
-pub mod taskbar_tests;
 #[cfg(feature = "test")]
 pub mod tcc;
 #[cfg(feature = "test")]
@@ -205,8 +199,6 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("list_migration", list_migration_tests::get_tests),
     ("tree_view", tree_view_tests::get_tests),
     ("splitter", splitter_tests::get_tests),
-    ("start_menu", start_menu_tests::get_tests),
-    ("taskbar", taskbar_tests::get_tests),
     ("time", time::get_tests),
     ("toolbar_status", toolbar_status_tests::get_tests),
     ("path_bar", path_bar_tests::get_tests),
@@ -221,7 +213,6 @@ static MODULES: &[(&str, GetTestsFn)] = &[
     ("window_buffer", window_buffer::get_tests),
     ("desktop_backing_store", desktop_backing_store::get_tests),
     ("surface_alpha", surface_alpha::get_tests),
-    ("svg_image", svg_image::get_tests),
     ("retained_scene", retained_scene::get_tests),
     ("scheduler", scheduler::get_tests),
     ("smp", smp::get_tests),

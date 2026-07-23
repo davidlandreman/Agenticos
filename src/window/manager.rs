@@ -684,13 +684,6 @@ impl WindowManager {
                 self.route_keyboard_event(kb_event);
             }
             Event::Mouse(mouse_event) => {
-                // Signal GUIShell for window events (clicks might need processing)
-                if matches!(
-                    mouse_event.event_type,
-                    crate::window::event::MouseEventType::ButtonDown
-                ) {
-                    crate::commands::guishell::signal_guishell();
-                }
                 self.route_mouse_event(mouse_event);
             }
             _ => {
@@ -2681,13 +2674,6 @@ impl WindowManager {
 
     // Menu Management
 
-    /// Set the active popup menu
-    pub fn set_active_menu(&mut self, menu_id: Option<WindowId>) {
-        self.active_menu = menu_id;
-    }
-
-    /// Get the active popup menu
-
     /// Close the active menu if one is open
     pub fn close_active_menu(&mut self) {
         if let Some(menu_id) = self.active_menu.take() {
@@ -2751,32 +2737,10 @@ impl WindowManager {
         false
     }
 
-    /// Get all frame windows with their titles
-    /// Returns a list of (frame_id, title) pairs
-    /// Only returns windows that have a title (i.e., FrameWindows)
-    pub fn get_frame_windows(&self) -> Vec<(WindowId, alloc::string::String)> {
-        use alloc::string::String;
-
-        let mut result = Vec::new();
-
-        for (&window_id, window) in &self.window_registry {
-            // Only include windows that have a title (FrameWindows)
-            if let Some(title) = window.window_title() {
-                // Skip the taskbar
-                if Some(window_id) == self.taskbar_id {
-                    continue;
-                }
-                result.push((window_id, String::from(title)));
-            }
-        }
-
-        result
-    }
-
     /// Frame list for the ring-3 desktop shell's taskbar: `(frame_id, title,
     /// state)` where state is `0` normal / `1` minimized / `2` maximized.
-    /// Mirrors [`get_frame_windows`](Self::get_frame_windows) but carries
-    /// min/max state and excludes the shell's own panel (`taskbar_id`).
+    /// Returns titled frames, carrying min/max state and excluding the shell's
+    /// own panel (`taskbar_id`).
     pub fn shell_window_list(&self) -> Vec<(WindowId, alloc::string::String, u8)> {
         use alloc::string::String;
 

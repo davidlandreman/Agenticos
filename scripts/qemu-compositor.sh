@@ -11,7 +11,6 @@ agenticos_configure_qemu() {
     local virtio_2d=${AGENTICOS_QEMU_2D:-auto}
     local gl_mode=${AGENTICOS_QEMU_GL:-es}
     local render_stats=${AGENTICOS_RENDER_STATS:-0}
-    local shell=${AGENTICOS_SHELL:-ring3}
     local device_help display_help host_os preflight_script
     local macos_gpu_preflight_passed=0
 
@@ -27,7 +26,6 @@ agenticos_configure_qemu() {
     case "$virtio_2d" in auto|on|off) ;; *) echo "AGENTICOS_QEMU_2D must be auto, on, or off" >&2; return 2 ;; esac
     case "$gl_mode" in es|core) ;; *) echo "AGENTICOS_QEMU_GL must be es or core" >&2; return 2 ;; esac
     case "$render_stats" in 0|1) ;; *) echo "AGENTICOS_RENDER_STATS must be 0 or 1" >&2; return 2 ;; esac
-    case "$shell" in ring0|ring3) ;; *) echo "AGENTICOS_SHELL must be ring0 or ring3" >&2; return 2 ;; esac
 
     host_os=$(uname -s)
     preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/qemu-virgl-preflight.sh"
@@ -52,7 +50,6 @@ agenticos_configure_qemu() {
         -fw_cfg "name=opt/agenticos/gpu_strict,string=$strict"
         -fw_cfg "name=opt/agenticos/theme,string=$theme"
         -fw_cfg "name=opt/agenticos/render_stats,string=$render_stats"
-        -fw_cfg "name=opt/agenticos/shell,string=$shell"
     )
 
     local has_gl_device=0
