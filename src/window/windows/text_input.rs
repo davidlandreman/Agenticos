@@ -5,7 +5,9 @@ use crate::graphics::fonts::core_font::get_default_font;
 use crate::window::event::{KeyCode, MouseEventType};
 use crate::window::keyboard::keycode_to_char;
 use crate::window::theme::controls;
-use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window, WindowId};
+use crate::window::{
+    CursorIcon, Event, EventResult, GraphicsDevice, Point, Rect, Window, WindowId,
+};
 use alloc::boxed::Box;
 use alloc::string::String;
 
@@ -153,6 +155,10 @@ impl Window for TextInput {
 
     fn base_mut(&mut self) -> &mut WindowBase {
         &mut self.base
+    }
+
+    fn cursor_icon_at(&self, _point: Point) -> CursorIcon {
+        CursorIcon::Text
     }
 
     fn paint(&mut self, device: &mut dyn GraphicsDevice) {

@@ -3,7 +3,7 @@
 use super::base::WindowBase;
 use crate::graphics::color::Color;
 use crate::graphics::fonts::core_font::get_terminal_font;
-use crate::window::{Event, EventResult, GraphicsDevice, Rect, Window};
+use crate::window::{CursorIcon, Event, EventResult, GraphicsDevice, Point, Rect, Window};
 use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
 
@@ -313,6 +313,10 @@ impl Window for TextWindow {
 
     fn base_mut(&mut self) -> &mut WindowBase {
         &mut self.base
+    }
+
+    fn cursor_icon_at(&self, _point: Point) -> CursorIcon {
+        CursorIcon::Text
     }
 
     // Custom override: TextWindow recomputes its grid dimensions and

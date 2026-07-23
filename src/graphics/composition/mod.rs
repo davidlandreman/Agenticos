@@ -194,6 +194,8 @@ pub trait CompositionEngine: Send {
         _x: u32,
         _y: u32,
         _pixels: Option<&[u32]>,
+        _hot_x: u32,
+        _hot_y: u32,
     ) -> Result<bool, CompositionError> {
         Ok(false)
     }

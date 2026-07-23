@@ -1,6 +1,6 @@
 use gui_core::{
-    layout_scrollbars, Axis, ControlInput, ControlResponse, KeyInput, PointerInput, PointerKind,
-    Rect, ScrollbarPolicy, TextEdit,
+    layout_scrollbars, Axis, ControlInput, ControlResponse, CursorIcon, KeyInput, PointerInput,
+    PointerKind, Rect, ScrollbarPolicy, TextEdit,
 };
 
 use crate::{theme, Canvas, Scrollbar, FONT_CELL_WIDTH, FONT_LINE_HEIGHT, SCROLLBAR_THICKNESS};
@@ -125,6 +125,18 @@ impl TextArea {
 
     pub fn bounds(&self) -> Rect {
         self.bounds
+    }
+
+    pub fn cursor_icon_at(&mut self, x: i32, y: i32) -> Option<CursorIcon> {
+        if !self.bounds.contains(x, y) {
+            return None;
+        }
+        let layout = self.sync_layout();
+        Some(if layout.viewport.contains(x, y) {
+            CursorIcon::Text
+        } else {
+            CursorIcon::Arrow
+        })
     }
 
     pub fn set_scrollbar_policies(

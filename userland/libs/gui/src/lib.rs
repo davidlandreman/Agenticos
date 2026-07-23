@@ -18,8 +18,8 @@ use alloc::vec::Vec;
 
 pub use controls::{CheckBox, ProgressBar, RadioButton, StatusBar, ToggleAction, Toolbar};
 pub use gui_core::{
-    Axis, ControlInput, ControlResponse, KeyInput, Modifiers, MouseButtons, PointerInput,
-    PointerKind, Rect, ScrollState, ScrollbarPolicy, TextEdit,
+    Axis, ControlInput, ControlResponse, CursorIcon, KeyInput, Modifiers, MouseButtons,
+    PointerInput, PointerKind, Rect, ScrollState, ScrollbarPolicy, TextEdit,
 };
 pub use input::decode_control_input;
 pub use menu::{MenuEntry, MenuEntryFlags, MenuPopup, MenuPopupAction};
@@ -304,6 +304,9 @@ impl Canvas {
 pub struct Window {
     handle: u32,
     canvas: Canvas,
+    hover_cursor: CursorIcon,
+    effective_cursor: CursorIcon,
+    busy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +343,9 @@ impl Window {
         Ok(Self {
             handle: result as u32,
             canvas: Canvas::new(width, height),
+            hover_cursor: CursorIcon::Arrow,
+            effective_cursor: CursorIcon::Arrow,
+            busy: false,
         })
     }
 
@@ -347,14 +353,16 @@ impl Window {
     /// Desktop-shell only. `width` should be the screen width; the kernel docks
     /// the panel and reserves work area above it.
     pub fn new_panel(width: u32, height: u32) -> Result<Self, i64> {
-        let result =
-            runtime::gui_win_create_at(width, height, "", runtime::GUI_WINDOW_PANEL, 0, 0);
+        let result = runtime::gui_win_create_at(width, height, "", runtime::GUI_WINDOW_PANEL, 0, 0);
         if result < 0 {
             return Err(result);
         }
         Ok(Self {
             handle: result as u32,
             canvas: Canvas::new(width, height),
+            hover_cursor: CursorIcon::Arrow,
+            effective_cursor: CursorIcon::Arrow,
+            busy: false,
         })
     }
 
@@ -392,6 +400,9 @@ impl Window {
         Ok(Self {
             handle: result as u32,
             canvas: Canvas::new(width, height),
+            hover_cursor: CursorIcon::Arrow,
+            effective_cursor: CursorIcon::Arrow,
+            busy: false,
         })
     }
 
@@ -430,6 +441,42 @@ impl Window {
         } else {
             Ok(())
         }
+    }
+
+    /// Set the hover cursor for this client surface. While busy, the request is
+    /// remembered and restored when busy mode is cleared.
+    pub fn set_cursor(&mut self, cursor: CursorIcon) -> Result<(), i64> {
+        self.hover_cursor = cursor;
+        self.apply_cursor()
+    }
+
+    /// Show or clear the explicit wait cursor for this window. GUI event waits
+    /// never enable this automatically.
+    pub fn set_busy(&mut self, busy: bool) -> Result<(), i64> {
+        self.busy = busy;
+        self.apply_cursor()
+    }
+
+    fn apply_cursor(&mut self) -> Result<(), i64> {
+        let next = if self.busy {
+            CursorIcon::Wait
+        } else {
+            self.hover_cursor
+        };
+        if next == self.effective_cursor {
+            return Ok(());
+        }
+        let abi = match next {
+            CursorIcon::Arrow => runtime::GUI_CURSOR_ARROW,
+            CursorIcon::Wait => runtime::GUI_CURSOR_WAIT,
+            CursorIcon::Text => runtime::GUI_CURSOR_TEXT,
+        };
+        let result = runtime::gui_win_set_cursor(self.handle, abi);
+        if result < 0 {
+            return Err(result);
+        }
+        self.effective_cursor = next;
+        Ok(())
     }
 
     pub fn destroy(&mut self) {
@@ -847,6 +894,10 @@ impl TextField {
 
     pub fn hit(&self, x: i32, y: i32) -> bool {
         x >= self.x && x < self.x + self.w as i32 && y >= self.y && y < self.y + self.h as i32
+    }
+
+    pub fn cursor_icon_at(&self, x: i32, y: i32) -> Option<CursorIcon> {
+        self.hit(x, y).then_some(CursorIcon::Text)
     }
 
     /// Place the caret nearest the pixel column of `x` (window coordinates).

@@ -1474,15 +1474,21 @@ impl CompositionEngine for VirglCompositionEngine {
         x: u32,
         y: u32,
         pixels: Option<&[u32]>,
+        hot_x: u32,
+        hot_y: u32,
     ) -> Result<bool, CompositionError> {
         let scanout_id = self.scanout_id;
         let Some(mut gpu) = self.gpu.take() else {
             return Err(CompositionError::GpuFailure);
         };
-        let result = if let Some(cursor) = self.cursor.as_ref() {
-            gpu.move_cursor(cursor, x, y)
+        let result = if let Some(cursor) = self.cursor.as_mut() {
+            if let Some(pixels) = pixels {
+                gpu.update_cursor_image(cursor, x, y, pixels, hot_x, hot_y)
+            } else {
+                gpu.move_cursor(cursor, x, y)
+            }
         } else if let Some(pixels) = pixels {
-            match gpu.create_cursor(scanout_id, x, y, pixels) {
+            match gpu.create_cursor(scanout_id, x, y, pixels, hot_x, hot_y) {
                 Ok(cursor) => {
                     self.cursor = Some(cursor);
                     Ok(())

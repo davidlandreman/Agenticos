@@ -6,7 +6,7 @@ use crate::graphics::color::Color;
 use crate::graphics::composition::ClientGlId;
 use crate::userland::gui;
 use crate::window::event::{Event, EventResult, FocusEvent, ResizeEvent};
-use crate::window::{GraphicsDevice, Rect, Window, WindowBuffer, WindowId};
+use crate::window::{CursorIcon, GraphicsDevice, Point, Rect, Window, WindowBuffer, WindowId};
 
 use super::base::WindowBase;
 
@@ -16,6 +16,7 @@ pub struct RemoteSurface {
     handle: u32,
     buffer: WindowBuffer,
     gl_client: Option<ClientGlId>,
+    cursor_icon: CursorIcon,
 }
 
 impl RemoteSurface {
@@ -34,7 +35,21 @@ impl RemoteSurface {
                 4,
             ),
             gl_client: None,
+            cursor_icon: CursorIcon::Arrow,
         }
+    }
+
+    pub fn set_cursor_icon(&mut self, icon: CursorIcon) -> bool {
+        if self.cursor_icon == icon {
+            return false;
+        }
+        self.cursor_icon = icon;
+        true
+    }
+
+    #[cfg(feature = "test")]
+    pub const fn cursor_icon(&self) -> CursorIcon {
+        self.cursor_icon
     }
 
     pub fn attach_gl_client(&mut self, id: ClientGlId) -> bool {
@@ -113,6 +128,10 @@ impl Window for RemoteSurface {
     fn handle_event(&mut self, event: Event) -> EventResult {
         self.emit(event);
         EventResult::Handled
+    }
+
+    fn cursor_icon_at(&self, _point: Point) -> CursorIcon {
+        self.cursor_icon
     }
 
     fn can_focus(&self) -> bool {

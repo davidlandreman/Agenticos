@@ -29,6 +29,15 @@ pub enum PointerKind {
     Cancel,
 }
 
+/// Mouse-pointer image requested by a control at the current hover point.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CursorIcon {
+    #[default]
+    Arrow,
+    Wait,
+    Text,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PointerInput {
     pub x: i32,
