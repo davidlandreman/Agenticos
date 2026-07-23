@@ -14,6 +14,18 @@ pub const GUI_NONBLOCK: u64 = 1;
 pub const GUI_PIXEL_FORMAT_XRGB8888: u32 = 1;
 /// Create a close-only frame whose borders cannot be resized.
 pub const GUI_WINDOW_FIXED_SIZE: u64 = 1 << 0;
+/// Create a bare, caller-positioned client surface with no title bar or
+/// borders (used for shell chrome such as the Start menu and Run prompt).
+/// Restricted to the registered desktop shell.
+pub const GUI_WINDOW_UNDECORATED: u64 = 1 << 1;
+/// Create a bottom-docked, full-width panel surface that reserves desktop
+/// work area (the taskbar strut). Implies [`GUI_WINDOW_UNDECORATED`] and is
+/// restricted to the registered desktop shell.
+pub const GUI_WINDOW_PANEL: u64 = 1 << 2;
+/// Do not give the new surface input focus on creation. Only valid together
+/// with [`GUI_WINDOW_UNDECORATED`]; used for shell chrome (e.g. a Start-menu
+/// fly-out) that must appear without stealing focus from its parent popup.
+pub const GUI_WINDOW_NO_FOCUS: u64 = 1 << 3;
 
 pub const GUI_EVENT_KEY: u32 = 1;
 pub const GUI_EVENT_MOUSE: u32 = 2;
@@ -45,6 +57,38 @@ pub struct GuiWindowRecord {
     pub surface_id: WindowId,
 }
 
+/// Bytes reserved for a title in a [`ShellWindowRecord`] (NUL-padded UTF-8).
+pub const SHELL_WINDOW_TITLE_BYTES: usize = 64;
+
+/// One top-level frame reported to the ring-3 desktop shell by
+/// `gui_shell_list_windows` (syscall 5014). Fixed 80-byte layout, mirrored by
+/// `userland/libs/gui`. `state`: `0` normal, `1` minimized, `2` maximized.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ShellWindowRecord {
+    pub id: u64,
+    pub state: u32,
+    pub reserved: u32,
+    pub title: [u8; SHELL_WINDOW_TITLE_BYTES],
+}
+
+const _: [(); 80] = [(); core::mem::size_of::<ShellWindowRecord>()];
+
+impl ShellWindowRecord {
+    pub fn new(id: u64, state: u32, title: &str) -> Self {
+        let mut bytes = [0u8; SHELL_WINDOW_TITLE_BYTES];
+        let source = title.as_bytes();
+        let copy = source.len().min(SHELL_WINDOW_TITLE_BYTES - 1);
+        bytes[..copy].copy_from_slice(&source[..copy]);
+        Self {
+            id,
+            state,
+            reserved: 0,
+            title: bytes,
+        }
+    }
+}
+
 struct GuiProcessState {
     next_handle: u32,
     windows: BTreeMap<u32, GuiWindowRecord>,
@@ -63,6 +107,40 @@ impl GuiProcessState {
 
 static GUI_STATES: InterruptMutex<BTreeMap<u32, GuiProcessState>> =
     InterruptMutex::new(BTreeMap::new());
+
+/// PID of the one blessed ring-3 desktop shell (`DESKTOP.ELF`). Only this
+/// process may create panel/undecorated chrome surfaces and use the
+/// `gui_shell_*` syscalls. Cleared automatically when the process exits.
+static DESKTOP_SHELL_PID: InterruptMutex<Option<u32>> = InterruptMutex::new(None);
+
+/// Claim the desktop-shell role for `pid`. Idempotent for the current holder;
+/// `-EEXIST` if a different live shell already holds it.
+pub fn register_desktop_shell(pid: u32) -> Result<(), i64> {
+    if pid == KERNEL_PID {
+        return Err(crate::userland::abi::EPERM);
+    }
+    let mut holder = DESKTOP_SHELL_PID.lock();
+    match *holder {
+        Some(existing) if existing != pid => Err(crate::userland::abi::EEXIST),
+        _ => {
+            *holder = Some(pid);
+            Ok(())
+        }
+    }
+}
+
+/// Whether `pid` is the currently-registered desktop shell.
+pub fn is_desktop_shell(pid: u32) -> bool {
+    *DESKTOP_SHELL_PID.lock() == Some(pid)
+}
+
+/// Release the desktop-shell role if `pid` currently holds it.
+pub fn clear_desktop_shell_if(pid: u32) {
+    let mut holder = DESKTOP_SHELL_PID.lock();
+    if *holder == Some(pid) {
+        *holder = None;
+    }
+}
 
 /// Owned `(pid, window_count, queued_events)` rows for
 /// `/proc/agenticos/gui`. One short critical section; no per-window
@@ -237,6 +315,7 @@ pub fn has_events(pid: u32) -> bool {
 /// Drain GUI state before taking the window-manager lock, keeping lock order
 /// one-way even when cleanup follows a fault.
 pub fn cleanup_process(pid: u32) {
+    clear_desktop_shell_if(pid);
     crate::userland::gui_gl::cleanup_process(pid);
     let records: Vec<GuiWindowRecord> = GUI_STATES
         .lock()
@@ -247,10 +326,27 @@ pub fn cleanup_process(pid: u32) {
         return;
     }
     let _ = crate::window::with_window_manager(|wm| {
-        for record in records {
+        for record in &records {
             wm.destroy_window(record.frame_id);
         }
     });
+    for record in records {
+        release_window_pty(record.surface_id);
+    }
+}
+
+/// A destroyed ring-3 window may carry a pty (`pty_open` keys one on the
+/// window's content-well `WindowId`). Drop the registry entry and wake any
+/// process blocked in `read(0)` on it: with the pty gone, their read
+/// returns 0 (EOF), so an attached shell exits instead of parking forever
+/// — including when the emulator crashed without killing its child.
+/// No-op for windows without a pty.
+pub fn release_window_pty(surface_id: WindowId) {
+    if !crate::terminal::pty::is_active_for_terminal(surface_id) {
+        return;
+    }
+    crate::terminal::pty::clear_for_terminal(surface_id);
+    crate::userland::lifecycle::wake_ring3_blocked_on_input(Some(surface_id));
 }
 
 pub fn encode_window_event(handle: u32, event: &Event) -> Option<GuiEvent> {
@@ -576,6 +672,7 @@ fn key_char(key: KeyCode, shift: bool) -> char {
 #[cfg(feature = "test")]
 pub fn reset_for_test() {
     GUI_STATES.lock().clear();
+    *DESKTOP_SHELL_PID.lock() = None;
     super::gui_gl::reset_for_test();
 }
 

@@ -1,0 +1,14 @@
+[package]
+name = "vte"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "vte"
+
+# The terminal emulator core, ported verbatim from the kernel's `src/terminal/`
+# (vte parser, screen grid, scrollback, caret, palette, key encoding). Pure
+# `core` + `alloc` — no external dependencies. The kernel `graphics::Color` and
+# `window::event` couplings are replaced by the crate-local `color`/`input`
+# modules.

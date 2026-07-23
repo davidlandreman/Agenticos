@@ -306,6 +306,30 @@ The AgenticOS-private range extends syscall 5000 with ten GUI calls:
 - 5009 `gui_gl_context_destroy(context)`
 - 5011 `gui_event_open(O_NONBLOCK | O_CLOEXEC)`
 
+The **desktop-shell protocol** extends this for the one blessed ring-3 shell
+(`DESKTOP.ELF`). All four require the caller to be the process registered via
+5013 (else `-EPERM`); the role is released automatically on process exit
+(`gui::clear_desktop_shell_if` in `cleanup_process`):
+
+- 5013 `gui_shell_register(flags)` — claim the singleton shell role (`flags`
+  reserved; `-EEXIST` if another live shell holds it)
+- 5014 `gui_shell_list_windows(buf, len)` — snapshot top-level frames as
+  fixed 80-byte `ShellWindowRecord {id, state, reserved, title[64]}` (state
+  `0` normal / `1` minimized / `2` maximized); returns the count written
+- 5015 `gui_shell_window_action(frame_id, action)` — act on a frame the shell
+  does not own (`0` activate, `1` minimize, `2` maximize toggle, `3` restore,
+  `4` close)
+- 5016 `gui_shell_spawn_terminal()` — create a kernel terminal window + PTY
+  bound to a fresh zsh; returns the new frame id
+
+`gui_win_create` (5001) also gains shell-only flags: `GUI_WINDOW_UNDECORATED`
+(a bare, caller-positioned surface — the position is packed into arg 6/`r9` as
+two `i32`s), `GUI_WINDOW_PANEL` (a bottom-docked, full-width surface that
+reserves the desktop work-area strut), and `GUI_WINDOW_NO_FOCUS` (skip focusing
+the new surface; only valid with `UNDECORATED`, used for a Start-menu fly-out
+that must not dismiss its focused parent popup). Only the registered shell may
+set them.
+
 Private syscall 5010 is the versioned `system_control` command surface used by
 `CONTROL.ELF` to query renderer/display/personalization state and to apply
 persistent theme or wallpaper changes. Preferences live at

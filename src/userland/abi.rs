@@ -350,6 +350,17 @@ pub mod nr {
     pub const SYSTEM_CONTROL: u64 = 5010;
     pub const GUI_EVENT_OPEN: u64 = 5011;
     pub const CLIPBOARD: u64 = 5012;
+    /// Open the master end of a pty for the caller's GUI window
+    /// (`TERMINAL.ELF`). Returns a `FdSlot::PtyMaster` descriptor.
+    pub const PTY_OPEN: u64 = 5013;
+    /// Update a pty master's winsize and raise SIGWINCH on the child.
+    pub const PTY_SET_WINSIZE: u64 = 5014;
+    /// Desktop-shell protocol (`DESKTOP.ELF` only, gated by
+    /// `gui::register_desktop_shell`).
+    pub const GUI_SHELL_REGISTER: u64 = 5015;
+    pub const GUI_SHELL_LIST_WINDOWS: u64 = 5016;
+    pub const GUI_SHELL_WINDOW_ACTION: u64 = 5017;
+    pub const GUI_SHELL_SPAWN_TERMINAL: u64 = 5018;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -497,7 +508,19 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GUI_GL_CONTEXT_DESTROY => crate::userland::gui_gl::context_destroy_handler(args),
         nr::SYSTEM_CONTROL => crate::system_control::syscall_handler(args),
         nr::GUI_EVENT_OPEN => crate::userland::gui_syscalls::gui_event_open_handler(args),
+        nr::PTY_OPEN => crate::userland::pty_syscalls::pty_open_handler(args),
+        nr::PTY_SET_WINSIZE => crate::userland::pty_syscalls::pty_set_winsize_handler(args),
         nr::CLIPBOARD => crate::clipboard::syscall_handler(args),
+        nr::GUI_SHELL_REGISTER => crate::userland::gui_syscalls::gui_shell_register_handler(args),
+        nr::GUI_SHELL_LIST_WINDOWS => {
+            crate::userland::gui_syscalls::gui_shell_list_windows_handler(args)
+        }
+        nr::GUI_SHELL_WINDOW_ACTION => {
+            crate::userland::gui_syscalls::gui_shell_window_action_handler(args)
+        }
+        nr::GUI_SHELL_SPAWN_TERMINAL => {
+            crate::userland::gui_syscalls::gui_shell_spawn_terminal_handler(args)
+        }
         // Phase B: namespace mutations
         nr::MKDIR => syscalls::mkdir_handler(args),
         nr::MKDIRAT => syscalls::mkdirat_handler(args),

@@ -7,11 +7,13 @@ app_row guilaunch        apps/guilaunch         cargo GLAUNCH.ELF  built-every-r
 app_row guidemo          apps/guidemo           cargo GUIDEMO.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/guidemo          -
 app_row notepad          apps/notepad           cargo NOTEPAD.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/notepad          -
 app_row taskmgr          apps/taskmgr           cargo TASKMGR.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/taskmgr          -
+app_row terminal         apps/terminal          cargo TERMINAL.ELF built-every-run rust-nightly target/x86_64-unknown-none/release/terminal         -
 app_row calc             apps/calc              cargo CALC.ELF     built-every-run rust-nightly target/x86_64-unknown-none/release/calc             -
 app_row glgame           apps/glgame            cargo GLGAME.ELF   built-every-run rust-nightly target/x86_64-unknown-none/release/glgame           -
 app_row painting         apps/painting          cargo PAINTING.ELF built-every-run rust-nightly target/x86_64-unknown-none/release/painting         -
 app_row fileman          apps/fileman           cargo FILEMAN.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/fileman          -
 app_row control          apps/control           cargo CONTROL.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/control          -
+app_row desktop          apps/desktop           cargo DESKTOP.ELF  built-every-run rust-nightly target/x86_64-unknown-none/release/desktop          -
 app_row hello-cpp        apps/hello-cpp         make  HELLOCPP.ELF built-every-run musl-cxx      apps/hello-cpp/build/hello-cpp                    -
 app_row zsh              apps/zsh               make  ZSH.ELF      prebuilt-managed musl-cc     apps/zsh/build/zsh                                prebuilt/ZSH.ELF
 app_row busybox          apps/busybox           make  BB.ELF       prebuilt-managed musl-cc     apps/busybox/build/busybox                        prebuilt/BB.ELF

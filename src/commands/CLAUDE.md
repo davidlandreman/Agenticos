@@ -22,6 +22,39 @@ directly to staged ELFs under `/host` (`/bin/taskmgr` and the legacy alias
 `/bin/tasks` both resolve to `/host/TASKMGR.ELF`; `explorer` is the
 compatibility name for `FILEMAN.ELF`).
 
+## Ring-3 desktop shell (`AGENTICOS_SHELL=ring3`)
+
+The **ring-3 `DESKTOP.ELF`** (`userland/apps/desktop/`) is now the default
+desktop shell; the in-kernel `guishell` is the legacy fallback. Selected at boot
+by `opt/agenticos/shell` fw_cfg (`AGENTICOS_SHELL=ring0|ring3`, default `ring3`),
+read in `src/kernel.rs` (`ring3_desktop_shell_requested` — anything but the
+literal `ring0` selects the ring-3 shell). In ring-3 mode the kernel calls
+`guishell::init_desktop_root_only` (screen + desktop-root wallpaper only — no
+kernel taskbar chrome) and `guishell::spawn_ring3_desktop_shell`
+(`/host/DESKTOP.ELF`) instead of `init_guishell` + `spawn_guishell_process`.
+
+`DESKTOP.ELF` drives the compositor purely through the **desktop-shell protocol
+syscalls** (5013–5016) plus the `GUI_WINDOW_PANEL`/`GUI_WINDOW_UNDECORATED`
+chrome flags, and launches apps with ordinary `fork`+`execve` (Terminal uses
+`gui_shell_spawn_terminal`). The kernel keeps the compositor, desktop-root
+wallpaper, and terminal/PTY service. Its taskbar/Start menu/Run prompt follow
+the active Classic/Aero/Futurism theme through the ring-3
+`userland/libs/gui::theme` helpers (`draw_taskbar_surface`, `draw_task_button`,
+`taskbar_text`, `draw_menu_surface`, `draw_field`) — full parity for the solid
+Classic/Aero bars; Futurism uses a solid dark tint approximation because an
+opaque ring-3 surface cannot receive the compositor's frosted backdrop blur.
+The Start menu mirrors the kernel `start_menu.rs`: a vertical `AgenticOS`
+banner, a Programs fly-out, per-row icons (procedural, in
+`userland/apps/desktop/src/icons.rs` — ring-3 has no SVG rasterizer), a disabled
+Documents placeholder, and a submenu arrow. The root menu and the Programs
+fly-out are **two independent windows** (the fly-out has its own height and is
+created with the shell-only `GUI_WINDOW_NO_FOCUS` flag so it does not dismiss
+the focused root popup); both bottom-align to the taskbar, so opening Programs
+never resizes or moves the primary menu. The Run prompt is a decorated `Run` window with the same two
+prompt lines, a themed field, and OK/Cancel buttons.
+See `docs/plans/2026-07-21-001-feat-ring3-desktop-shell-plan.md`. `guishell` is
+still present as the `ring0` fallback pending its eventual deletion.
+
 ## Desktop launch paths
 
 - Start → Programs contains Terminal, File Manager, Notepad, Painting,

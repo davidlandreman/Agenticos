@@ -71,21 +71,41 @@ pub fn gui_event_open_handler(args: &mut SyscallArgs) -> i64 {
         .map_or(EMFILE, i64::from)
 }
 
-/// `(width, height, title_ptr, title_len, flags) -> handle | -errno`.
+/// `(width, height, title_ptr, title_len, flags, position) -> handle | -errno`.
+///
+/// `flags` may combine [`GUI_WINDOW_FIXED_SIZE`](gui::GUI_WINDOW_FIXED_SIZE)
+/// with the shell-only chrome flags
+/// [`GUI_WINDOW_UNDECORATED`](gui::GUI_WINDOW_UNDECORATED) /
+/// [`GUI_WINDOW_PANEL`](gui::GUI_WINDOW_PANEL). For a plain undecorated
+/// surface, `position` (arg 6, `r9`) packs a top-left `(x, y)` as two `i32`s
+/// (x in the low 32 bits, y in the high 32). Panels ignore `position` and dock
+/// to the bottom of the screen spanning the full width.
 pub fn gui_win_create_handler(args: &mut SyscallArgs) -> i64 {
     let _abi_contract = (gui::GUI_ABI_VERSION, gui::GUI_PIXEL_FORMAT_XRGB8888);
     let width = args.rdi as u32;
     let height = args.rsi as u32;
     let title_len = args.r10 as usize;
     let flags = args.r8;
+    let position = args.r9;
+    const ALLOWED_FLAGS: u64 = gui::GUI_WINDOW_FIXED_SIZE
+        | gui::GUI_WINDOW_UNDECORATED
+        | gui::GUI_WINDOW_PANEL
+        | gui::GUI_WINDOW_NO_FOCUS;
+    let panel = flags & gui::GUI_WINDOW_PANEL != 0;
+    // A panel is a specialized undecorated surface.
+    let undecorated = panel || flags & gui::GUI_WINDOW_UNDECORATED != 0;
+    let no_focus = flags & gui::GUI_WINDOW_NO_FOCUS != 0;
     if width == 0
         || height == 0
         || width > MAX_SURFACE_DIMENSION
         || height > MAX_SURFACE_DIMENSION
-        || (flags & gui::GUI_WINDOW_FIXED_SIZE == 0
+        || (!undecorated
+            && flags & gui::GUI_WINDOW_FIXED_SIZE == 0
             && width < crate::window::theme::minimum_resizable_client_width())
         || title_len > MAX_TITLE_BYTES
-        || flags & !gui::GUI_WINDOW_FIXED_SIZE != 0
+        || flags & !ALLOWED_FLAGS != 0
+        // NO_FOCUS is only meaningful for undecorated chrome.
+        || (no_focus && !undecorated)
     {
         return EINVAL;
     }
@@ -97,6 +117,11 @@ pub fn gui_win_create_handler(args: &mut SyscallArgs) -> i64 {
         Ok(pid) => pid,
         Err(error) => return error,
     };
+    // Chrome surfaces (undecorated/panel) are privileged: only the registered
+    // desktop shell may create them.
+    if undecorated && !gui::is_desktop_shell(pid) {
+        return crate::userland::abi::EPERM;
+    }
     let handle = match gui::allocate_handle(pid) {
         Ok(handle) => handle,
         Err(error) => return error,
@@ -108,6 +133,40 @@ pub fn gui_win_create_handler(args: &mut SyscallArgs) -> i64 {
             .and_then(|screen| screen.root_window)
             .ok_or(EIO)?;
         let (screen_width, screen_height) = wm.screen_dimensions();
+
+        if undecorated {
+            // Bare RemoteSurface parented directly to the desktop root — no
+            // frame chrome. Panels dock full-width to the bottom; other
+            // undecorated surfaces honor the caller-supplied position.
+            let (x, y, surface_width) = if panel {
+                (
+                    0,
+                    (screen_height.saturating_sub(height)) as i32,
+                    screen_width,
+                )
+            } else {
+                ((position & 0xFFFF_FFFF) as u32 as i32, (position >> 32) as u32 as i32, width)
+            };
+            let surface_id = wm.create_window(Some(desktop_id));
+            let bounds = Rect::new(x, y, surface_width, height);
+            let mut surface = Box::new(RemoteSurface::new(surface_id, bounds, pid, handle));
+            surface.set_parent(Some(desktop_id));
+            wm.set_window_impl(surface_id, surface);
+            if let Some(desktop) = wm.window_registry.get_mut(&desktop_id) {
+                desktop.add_child(surface_id);
+            }
+            wm.bring_to_front(surface_id);
+            if panel {
+                // Reserve the work-area strut and keep app frames above it.
+                wm.set_taskbar_id(Some(surface_id));
+            }
+            // Undecorated chrome has no distinct frame; reuse the surface id.
+            return Ok(GuiWindowRecord {
+                frame_id: surface_id,
+                surface_id,
+            });
+        }
+
         let metrics = crate::window::theme::metrics();
         let frame_width = width
             .checked_add(metrics.border_width.saturating_mul(2))
@@ -149,7 +208,11 @@ pub fn gui_win_create_handler(args: &mut SyscallArgs) -> i64 {
         let _ = crate::window::with_window_manager(|wm| wm.destroy_window(record.frame_id));
         return error;
     }
-    let _ = crate::window::with_window_manager(|wm| wm.focus_window(record.surface_id));
+    // Panels never take focus; NO_FOCUS chrome (e.g. a Start-menu fly-out)
+    // must not steal focus from its parent popup.
+    if !panel && !no_focus {
+        let _ = crate::window::with_window_manager(|wm| wm.focus_window(record.surface_id));
+    }
     handle as i64
 }
 
@@ -247,10 +310,12 @@ pub fn gui_win_destroy_handler(args: &mut SyscallArgs) -> i64 {
         Some(record) => record,
         None => return ENOENT,
     };
-    match crate::window::with_window_manager(|wm| wm.destroy_window(record.frame_id)) {
+    let result = match crate::window::with_window_manager(|wm| wm.destroy_window(record.frame_id)) {
         Some(()) => 0,
         None => EIO,
-    }
+    };
+    gui::release_window_pty(record.surface_id);
+    result
 }
 
 /// `(handle, title_ptr, title_len) -> 0 | -errno`.
@@ -279,5 +344,99 @@ pub fn gui_win_set_title_handler(args: &mut SyscallArgs) -> i64 {
     match found {
         Some(true) if updated => 0,
         _ => EIO,
+    }
+}
+
+/// `(flags) -> 0 | -errno`. Claim the singleton desktop-shell role for the
+/// calling process. `flags` is reserved and must be zero. Idempotent for the
+/// current holder; `-EEXIST` if a different live shell already holds it. The
+/// role is released automatically when the process exits.
+pub fn gui_shell_register_handler(args: &mut SyscallArgs) -> i64 {
+    if args.rdi != 0 {
+        return EINVAL;
+    }
+    let pid = match caller_pid() {
+        Ok(pid) => pid,
+        Err(error) => return error,
+    };
+    match gui::register_desktop_shell(pid) {
+        Ok(()) => 0,
+        Err(error) => error,
+    }
+}
+
+/// `(buf_ptr, buf_len_bytes) -> record_count | -errno`. Snapshot the current
+/// top-level frames as [`gui::ShellWindowRecord`]s into the caller's buffer,
+/// returning the number written (capped at buffer capacity). Desktop-shell
+/// only.
+pub fn gui_shell_list_windows_handler(args: &mut SyscallArgs) -> i64 {
+    let pid = match caller_pid() {
+        Ok(pid) => pid,
+        Err(error) => return error,
+    };
+    if !gui::is_desktop_shell(pid) {
+        return crate::userland::abi::EPERM;
+    }
+    let record_size = core::mem::size_of::<gui::ShellWindowRecord>();
+    let capacity = (args.rsi as usize) / record_size;
+    if capacity == 0 {
+        return 0;
+    }
+
+    let list = crate::window::with_window_manager(|wm| wm.shell_window_list()).unwrap_or_default();
+    let count = list.len().min(capacity);
+
+    let mut bytes = alloc::vec::Vec::with_capacity(count * record_size);
+    for (id, title, state) in list.iter().take(count) {
+        let record = gui::ShellWindowRecord::new(id.0 as u64, u32::from(*state), title);
+        let raw = unsafe {
+            core::slice::from_raw_parts(
+                (&record as *const gui::ShellWindowRecord) as *const u8,
+                record_size,
+            )
+        };
+        bytes.extend_from_slice(raw);
+    }
+    if crate::userland::usercopy::copy_to_user(args.rdi, &bytes).is_err() {
+        return EFAULT;
+    }
+    count as i64
+}
+
+/// `(frame_id, action) -> 0 | -errno`. Apply a taskbar action to a frame the
+/// shell does not own. `action`: `0` activate, `1` minimize, `2`
+/// maximize/restore toggle, `3` restore, `4` close. Desktop-shell only.
+pub fn gui_shell_window_action_handler(args: &mut SyscallArgs) -> i64 {
+    let pid = match caller_pid() {
+        Ok(pid) => pid,
+        Err(error) => return error,
+    };
+    if !gui::is_desktop_shell(pid) {
+        return crate::userland::abi::EPERM;
+    }
+    let frame_id = crate::window::WindowId(args.rdi as usize);
+    let action = args.rsi as u32;
+    match crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, action)) {
+        Some(true) => 0,
+        Some(false) => ENOENT,
+        None => EIO,
+    }
+}
+
+/// `() -> frame_id | -errno`. Create a terminal window bound to a fresh ring-3
+/// zsh (the kernel keeps ownership of the PTY/VT service). Returns the new
+/// frame's window id. Desktop-shell only.
+pub fn gui_shell_spawn_terminal_handler(args: &mut SyscallArgs) -> i64 {
+    let _ = args;
+    let pid = match caller_pid() {
+        Ok(pid) => pid,
+        Err(error) => return error,
+    };
+    if !gui::is_desktop_shell(pid) {
+        return crate::userland::abi::EPERM;
+    }
+    match crate::window::terminal_factory::spawn_terminal_with_shell() {
+        Ok(instance) => instance.frame_id.0 as i64,
+        Err(_) => EIO,
     }
 }

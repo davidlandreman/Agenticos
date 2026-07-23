@@ -1,0 +1,19 @@
+[package]
+name = "termgrid"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "termgrid"
+
+# Cell renderer for the ring-3 terminal: rasterizes the bundled JetBrains Mono
+# TTF at terminal size and paints a `vte::Screen` viewport into an XRGB8888
+# buffer with full per-cell color, reverse/underline, and caret. Mirrors the
+# kernel `TextWindow` paint path, reusing the same font asset and crates.
+
+[dependencies]
+vte = { path = "../vte" }
+ab_glyph_rasterizer = { version = "0.1", default-features = false, features = ["libm"] }
+libm = "0.2"
+ttf-parser = { version = "0.25", default-features = false, features = ["no-std-float"] }

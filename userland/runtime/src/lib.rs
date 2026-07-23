@@ -35,6 +35,15 @@ pub const GUI_ABI_VERSION: u32 = 1;
 pub const GUI_PIXEL_FORMAT_XRGB8888: u32 = 1;
 pub const GUI_NONBLOCK: u64 = 1;
 pub const GUI_WINDOW_FIXED_SIZE: u64 = 1 << 0;
+/// Bare, caller-positioned surface with no title bar or borders. Desktop-shell
+/// only (`gui_shell_register`).
+pub const GUI_WINDOW_UNDECORATED: u64 = 1 << 1;
+/// Bottom-docked, full-width panel that reserves desktop work area. Implies
+/// [`GUI_WINDOW_UNDECORATED`]; desktop-shell only.
+pub const GUI_WINDOW_PANEL: u64 = 1 << 2;
+/// Do not focus the new surface on creation (only valid with
+/// [`GUI_WINDOW_UNDECORATED`]); for chrome that must not steal focus.
+pub const GUI_WINDOW_NO_FOCUS: u64 = 1 << 3;
 pub const GUI_EVENT_KEY: u32 = 1;
 pub const GUI_EVENT_MOUSE: u32 = 2;
 pub const GUI_EVENT_RESIZE: u32 = 3;
@@ -106,6 +115,44 @@ const NR_GUI_GL_CONTEXT_DESTROY: u64 = 5009;
 const NR_SYSTEM_CONTROL: u64 = 5010;
 const NR_GUI_EVENT_OPEN: u64 = 5011;
 const NR_CLIPBOARD: u64 = 5012;
+const NR_PTY_OPEN: u64 = 5013;
+const NR_PTY_SET_WINSIZE: u64 = 5014;
+const NR_GUI_SHELL_REGISTER: u64 = 5015;
+const NR_GUI_SHELL_LIST_WINDOWS: u64 = 5016;
+const NR_GUI_SHELL_WINDOW_ACTION: u64 = 5017;
+const NR_GUI_SHELL_SPAWN_TERMINAL: u64 = 5018;
+
+/// `pty_open` flag: set FD_CLOEXEC on the returned master descriptor.
+pub const PTY_OPEN_CLOEXEC: u64 = 0x80000;
+
+/// Taskbar action codes for [`gui_shell_window_action`].
+pub const SHELL_WINDOW_ACTIVATE: u32 = 0;
+pub const SHELL_WINDOW_MINIMIZE: u32 = 1;
+pub const SHELL_WINDOW_MAXIMIZE: u32 = 2;
+pub const SHELL_WINDOW_RESTORE: u32 = 3;
+pub const SHELL_WINDOW_CLOSE: u32 = 4;
+
+/// One top-level frame reported by [`gui_shell_list_windows`]. Fixed 80-byte
+/// layout mirroring the kernel `ShellWindowRecord`. `state`: `0` normal, `1`
+/// minimized, `2` maximized.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ShellWindowRecord {
+    pub id: u64,
+    pub state: u32,
+    pub reserved: u32,
+    pub title: [u8; 64],
+}
+
+const _: [(); 80] = [(); core::mem::size_of::<ShellWindowRecord>()];
+
+impl ShellWindowRecord {
+    /// The NUL-terminated title as a `&str` (best-effort UTF-8).
+    pub fn title_str(&self) -> &str {
+        let end = self.title.iter().position(|&b| b == 0).unwrap_or(64);
+        core::str::from_utf8(&self.title[..end]).unwrap_or("")
+    }
+}
 
 pub const CLIPBOARD_COPY: u64 = 1;
 pub const CLIPBOARD_PASTE: u64 = 2;
@@ -214,6 +261,17 @@ unsafe fn syscall5(number: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
     core::arch::asm!(
         "syscall", inlateout("rax") number => result,
         in("rdi") a1, in("rsi") a2, in("rdx") a3, in("r10") a4, in("r8") a5,
+        out("rcx") _, out("r11") _, options(nostack)
+    );
+    result
+}
+
+#[inline]
+unsafe fn syscall6(number: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+    let result: i64;
+    core::arch::asm!(
+        "syscall", inlateout("rax") number => result,
+        in("rdi") a1, in("rsi") a2, in("rdx") a3, in("r10") a4, in("r8") a5, in("r9") a6,
         out("rcx") _, out("r11") _, options(nostack)
     );
     result
@@ -431,16 +489,54 @@ pub struct GuiEvent {
 const _: [(); 32] = [(); core::mem::size_of::<GuiEvent>()];
 
 pub fn gui_win_create(width: u32, height: u32, title: &str, flags: u64) -> i64 {
+    gui_win_create_at(width, height, title, flags, 0, 0)
+}
+
+/// Create a window, supplying a top-left position used only by undecorated
+/// (non-panel) surfaces. Panels ignore the position and dock to the bottom.
+pub fn gui_win_create_at(width: u32, height: u32, title: &str, flags: u64, x: i32, y: i32) -> i64 {
+    let position = (x as u32 as u64) | ((y as u32 as u64) << 32);
     unsafe {
-        syscall5(
+        syscall6(
             NR_GUI_WIN_CREATE,
             width as u64,
             height as u64,
             title.as_ptr() as u64,
             title.len() as u64,
             flags,
+            position,
         )
     }
+}
+
+/// Claim the singleton desktop-shell role (see `GUI_WINDOW_PANEL`). `flags`
+/// reserved (pass 0).
+pub fn gui_shell_register(flags: u64) -> i64 {
+    unsafe { syscall1(NR_GUI_SHELL_REGISTER, flags) }
+}
+
+/// Fill `records` with the current top-level frames; returns the count written
+/// or a negative errno. Desktop-shell only.
+pub fn gui_shell_list_windows(records: &mut [ShellWindowRecord]) -> i64 {
+    unsafe {
+        syscall2(
+            NR_GUI_SHELL_LIST_WINDOWS,
+            records.as_mut_ptr() as u64,
+            core::mem::size_of_val(records) as u64,
+        )
+    }
+}
+
+/// Apply a taskbar action (see `SHELL_WINDOW_*`) to a frame the shell does not
+/// own. Desktop-shell only.
+pub fn gui_shell_window_action(frame_id: u64, action: u32) -> i64 {
+    unsafe { syscall2(NR_GUI_SHELL_WINDOW_ACTION, frame_id, action as u64) }
+}
+
+/// Create a terminal window bound to a fresh zsh; returns its frame id or a
+/// negative errno. Desktop-shell only.
+pub fn gui_shell_spawn_terminal() -> i64 {
+    unsafe { syscall0(NR_GUI_SHELL_SPAWN_TERMINAL) }
 }
 
 pub fn gui_win_present(handle: u32, pixels: &[u32], width: u32, height: u32) -> i64 {
@@ -470,6 +566,26 @@ pub fn gui_next_event(event: &mut GuiEvent, flags: u64) -> i64 {
 /// Open a poll/select-compatible descriptor for the process GUI queue.
 pub fn gui_event_open(flags: u64) -> i64 {
     unsafe { syscall1(NR_GUI_EVENT_OPEN, flags) }
+}
+
+/// Open the pty master for a GUI window the caller owns. Binds the caller's
+/// `terminal_id` to the window so a subsequently-`fork`ed child inherits the
+/// slave. Returns the master fd, or `-errno`.
+pub fn pty_open(window_handle: u32, rows: u16, cols: u16, flags: u64) -> i64 {
+    unsafe {
+        syscall4(
+            NR_PTY_OPEN,
+            window_handle as u64,
+            rows as u64,
+            cols as u64,
+            flags,
+        )
+    }
+}
+
+/// Update a pty master's winsize (and raise SIGWINCH on the child).
+pub fn pty_set_winsize(fd: i32, rows: u16, cols: u16) -> i64 {
+    unsafe { syscall3(NR_PTY_SET_WINSIZE, fd as u64, rows as u64, cols as u64) }
 }
 
 pub fn gui_win_destroy(handle: u32) -> i64 {

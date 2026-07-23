@@ -600,6 +600,105 @@ pub fn draw_menu_surface(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Desktop chrome (taskbar strip, task buttons, tray text)
+// ---------------------------------------------------------------------
+//
+// Ring-3 mirror of the kernel's `controls::draw_taskbar_surface` /
+// `draw_task_button` / `taskbar_text`, used by `DESKTOP.ELF`. The kernel's
+// Futurism bar is a frosted translucent tint over a backdrop blur; an opaque
+// ring-3 panel surface cannot blur, so Futurism is approximated with a solid
+// dark tint and lighter pills. Classic/Aero (solid raised panels) reach full
+// parity.
+
+// Classic raised-panel bevels for the taskbar strip.
+const CLASSIC_TASKBAR: u32 = 0xC0C0C0;
+const AERO_TASKBAR: u32 = 0xF0F0F0;
+// Solid approximation of Futurism's #1A2440 @ alpha-150 frosted bar.
+const FUT_TASKBAR_SOLID: u32 = 0x222C46;
+const FUT_TASKBAR_TOP: u32 = 0x3A466A;
+const FUT_TASK_FILL: u32 = 0x2E3A5C;
+const FUT_TASK_FILL_MIN: u32 = 0x28324F;
+const FUT_TASK_BORDER: u32 = 0x45537A;
+const FUT_TASK_TEXT_MIN: u32 = 0xAEB8D0;
+
+/// Paint the taskbar strip background. `w`/`h` span the whole panel.
+pub fn draw_taskbar_surface(canvas: &mut Canvas, x: i32, y: i32, w: u32, h: u32) {
+    match finish() {
+        Finish::Bevel98 => {
+            canvas.fill_rect(x, y, w, h, CLASSIC_TASKBAR);
+            canvas.horizontal_line(x, y, w, BEVEL_HIGHLIGHT);
+        }
+        Finish::GlassKd4 => {
+            canvas.fill_rect(x, y, w, h, AERO_TASKBAR);
+            canvas.horizontal_line(x, y, w, 0xFFFFFF);
+            canvas.horizontal_line(x, y + 1, w, AERO_INNER_HIGHLIGHT);
+        }
+        Finish::SoftRounded => {
+            canvas.fill_rect(x, y, w, h, FUT_TASKBAR_SOLID);
+            canvas.horizontal_line(x, y, w, FUT_TASKBAR_TOP);
+        }
+    }
+}
+
+/// Text color for taskbar-hosted chrome (tray clock, task-button labels).
+pub fn taskbar_text() -> u32 {
+    match finish() {
+        Finish::SoftRounded => 0xFFFFFF,
+        _ => palette().text,
+    }
+}
+
+/// Text color for a task button's label given its window state.
+pub fn task_button_text(state: ButtonState) -> u32 {
+    match finish() {
+        Finish::SoftRounded => {
+            if state == ButtonState::Disabled {
+                FUT_TASK_TEXT_MIN
+            } else {
+                0xFFFFFF
+            }
+        }
+        _ => button_text(state),
+    }
+}
+
+/// Paint a taskbar button (Start or a window button). `accent` marks the Start
+/// button while its menu is open. `state` carries window state
+/// (`Normal`/`Disabled` for minimized) for window buttons.
+pub fn draw_task_button(
+    canvas: &mut Canvas,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    state: ButtonState,
+    accent: bool,
+) {
+    if finish() != Finish::SoftRounded {
+        // Classic/Aero: the accent Start button reads as the default (Hot)
+        // button; window buttons use their own state.
+        let effective = if accent { ButtonState::Hot } else { state };
+        draw_button(canvas, x, y, w, h, effective);
+        return;
+    }
+    // Futurism: solid rounded pill approximating the frosted taskbar pills.
+    let (fill, border) = if accent {
+        (FUT_ACCENT, FUT_BORDER_HOT)
+    } else if state == ButtonState::Disabled {
+        (FUT_TASK_FILL_MIN, FUT_TASK_BORDER)
+    } else {
+        (FUT_TASK_FILL, FUT_TASK_BORDER)
+    };
+    if w < 8 || h < 8 {
+        canvas.fill_rect(x, y, w, h, fill);
+        canvas.rect(x, y, w, h, border);
+        return;
+    }
+    fill_rounded_rect(canvas, x, y, w, h, fill, soft_corner_inset);
+    draw_rounded_outline(canvas, x, y, w, h, border, soft_corner_inset);
+}
+
 pub fn draw_scrollbar_track(canvas: &mut Canvas, rect: gui_core::Rect) {
     canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, palette().scrollbar_track);
 }

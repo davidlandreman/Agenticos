@@ -265,6 +265,40 @@ impl Canvas {
             x += FONT_CELL_WIDTH;
         }
     }
+
+    /// Draw `text` rotated 90° so it reads bottom-to-top inside a vertical
+    /// banner strip at `x` spanning `[y, y + height)`. Mirrors the kernel Start
+    /// menu's `AgenticOS` banner. Characters advance by the fixed cell width.
+    pub fn draw_vertical_banner(&mut self, x: i32, y: i32, height: i32, text: &str, color: u32) {
+        let font = font::canvas_font();
+        let total_advance = text.chars().count() as i32 * FONT_CELL_WIDTH;
+        let bottom = y + height - 6;
+        let text_top = bottom - total_advance;
+        let baseline = font.ascent();
+        let mut pen = 0i32;
+        for character in text.chars() {
+            if let Some(glyph) = font.glyph(character) {
+                for row in 0..glyph.height as i32 {
+                    for col in 0..glyph.width as i32 {
+                        let alpha =
+                            glyph.coverage[row as usize * glyph.width as usize + col as usize];
+                        if alpha == 0 {
+                            continue;
+                        }
+                        let source_x = pen + glyph.x_offset as i32 + col;
+                        let source_y = baseline + glyph.y_offset as i32 + row;
+                        let dst_x = x + 4 + source_y;
+                        let dst_y = bottom - source_x;
+                        if dst_y < text_top || dst_y > bottom {
+                            continue;
+                        }
+                        self.blend_pixel(dst_x, dst_y, color, alpha);
+                    }
+                }
+            }
+            pen += FONT_CELL_WIDTH;
+        }
+    }
 }
 
 pub struct Window {
@@ -300,6 +334,58 @@ impl Window {
             GUI_WINDOW_FIXED_SIZE
         };
         let result = runtime::gui_win_create(width, height, title, flags);
+        if result < 0 {
+            return Err(result);
+        }
+        Ok(Self {
+            handle: result as u32,
+            canvas: Canvas::new(width, height),
+        })
+    }
+
+    /// Create a bottom-docked, full-width panel surface (the taskbar strut).
+    /// Desktop-shell only. `width` should be the screen width; the kernel docks
+    /// the panel and reserves work area above it.
+    pub fn new_panel(width: u32, height: u32) -> Result<Self, i64> {
+        let result =
+            runtime::gui_win_create_at(width, height, "", runtime::GUI_WINDOW_PANEL, 0, 0);
+        if result < 0 {
+            return Err(result);
+        }
+        Ok(Self {
+            handle: result as u32,
+            canvas: Canvas::new(width, height),
+        })
+    }
+
+    /// Create a bare, caller-positioned surface with no title bar or borders
+    /// (shell chrome such as the Start menu or Run prompt). Desktop-shell only.
+    pub fn new_undecorated(width: u32, height: u32, x: i32, y: i32) -> Result<Self, i64> {
+        Self::new_undecorated_flags(width, height, x, y, 0)
+    }
+
+    /// Like [`new_undecorated`](Self::new_undecorated) but the surface does not
+    /// take focus on creation — for a Start-menu fly-out that must not close
+    /// its parent popup by stealing focus.
+    pub fn new_undecorated_unfocused(width: u32, height: u32, x: i32, y: i32) -> Result<Self, i64> {
+        Self::new_undecorated_flags(width, height, x, y, runtime::GUI_WINDOW_NO_FOCUS)
+    }
+
+    fn new_undecorated_flags(
+        width: u32,
+        height: u32,
+        x: i32,
+        y: i32,
+        extra: u64,
+    ) -> Result<Self, i64> {
+        let result = runtime::gui_win_create_at(
+            width,
+            height,
+            "",
+            runtime::GUI_WINDOW_UNDECORATED | extra,
+            x,
+            y,
+        );
         if result < 0 {
             return Err(result);
         }
