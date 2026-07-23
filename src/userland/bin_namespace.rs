@@ -49,6 +49,8 @@ pub const NOTEPAD_HOST_PATH: &str = "/host/NOTEPAD.ELF";
 
 pub const TASKMGR_HOST_PATH: &str = "/host/TASKMGR.ELF";
 
+pub const TERMINAL_HOST_PATH: &str = "/host/TERMINAL.ELF";
+
 pub const PAINTING_HOST_PATH: &str = "/host/PAINTING.ELF";
 
 pub const CALC_HOST_PATH: &str = "/host/CALC.ELF";
@@ -170,6 +172,7 @@ pub const DIRECT_APPLETS: &[&str] = &[
     "taskmgr",
     "tasks",
     "tcc",
+    "terminal",
 ];
 
 /// Sorted list of BusyBox applets the kernel recognizes as
@@ -483,6 +486,7 @@ pub fn lookup_direct(name: &str) -> Option<(&'static str, &'static str)> {
         "painting" => PAINTING_HOST_PATH,
         "pbcopy" | "pbpaste" => CLIPBOARD_HOST_PATH,
         "taskmgr" | "tasks" => TASKMGR_HOST_PATH,
+        "terminal" => TERMINAL_HOST_PATH,
         _ => binutils_host_path(canonical)?,
     };
     Some((path, canonical))

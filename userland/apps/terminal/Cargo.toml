@@ -1,0 +1,18 @@
+[package]
+name = "terminal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "terminal"
+path = "src/main.rs"
+
+[dependencies]
+runtime = { path = "../../runtime" }
+vte = { path = "../../libs/vte" }
+termgrid = { path = "../../libs/termgrid" }
+
+[build-dependencies]
+userland-build-support = { path = "../../build-support" }

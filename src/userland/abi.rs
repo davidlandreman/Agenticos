@@ -349,6 +349,11 @@ pub mod nr {
     pub const SYSTEM_CONTROL: u64 = 5010;
     pub const GUI_EVENT_OPEN: u64 = 5011;
     pub const CLIPBOARD: u64 = 5012;
+    /// Open the master end of a pty for the caller's GUI window
+    /// (`TERMINAL.ELF`). Returns a `FdSlot::PtyMaster` descriptor.
+    pub const PTY_OPEN: u64 = 5013;
+    /// Update a pty master's winsize and raise SIGWINCH on the child.
+    pub const PTY_SET_WINSIZE: u64 = 5014;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -495,6 +500,8 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         nr::GUI_GL_CONTEXT_DESTROY => crate::userland::gui_gl::context_destroy_handler(args),
         nr::SYSTEM_CONTROL => crate::system_control::syscall_handler(args),
         nr::GUI_EVENT_OPEN => crate::userland::gui_syscalls::gui_event_open_handler(args),
+        nr::PTY_OPEN => crate::userland::pty_syscalls::pty_open_handler(args),
+        nr::PTY_SET_WINSIZE => crate::userland::pty_syscalls::pty_set_winsize_handler(args),
         nr::CLIPBOARD => crate::clipboard::syscall_handler(args),
         // Phase B: namespace mutations
         nr::MKDIR => syscalls::mkdir_handler(args),

@@ -62,6 +62,12 @@ pub fn queued_len_for_current_process() -> usize {
     current_slave().map(|slave| slave.readable()).unwrap_or(0)
 }
 
+/// Consume a pending canonical-mode EOF (VEOF typed on an empty line).
+/// True exactly once per EOF; the caller's `read(0)` returns 0.
+pub fn take_eof_for_current_process() -> bool {
+    current_slave().map(|slave| slave.take_eof()).unwrap_or(false)
+}
+
 fn current_slave() -> Option<pty::PtySlave> {
     let tid = crate::userland::lifecycle::with_current_group(|p| p.terminal_id)?;
     pty::slave_for_terminal(tid)
