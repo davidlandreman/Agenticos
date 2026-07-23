@@ -22,6 +22,8 @@ pub const NSIG: usize = 64;
 // ---- well-known signal numbers (subset Linux exposes) ----
 #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
 pub const SIGHUP: i32 = 1;
+pub const SIGINT: i32 = 2;
+pub const SIGQUIT: i32 = 3;
 pub const SIGILL: i32 = 4;
 pub const SIGFPE: i32 = 8;
 pub const SIGKILL: i32 = 9;

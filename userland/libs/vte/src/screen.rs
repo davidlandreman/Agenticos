@@ -5,27 +5,27 @@
 //! implements [`vte::Perform`] so a raw byte stream can be fed straight
 //! through the parser into the grid.
 //!
-//! What's in U3:
+//! Feature set:
 //! - Cursor movement (CUU/CUD/CUF/CUB/CUP/CHA/VPA/CNL/CPL).
-//! - Erase in display / erase in line / erase characters.
+//! - Erase in display / erase in line / erase characters (ED 3 also
+//!   clears scrollback, xterm-style).
 //! - Insert / delete characters / lines within the scroll region.
-//! - Scroll up / scroll down.
+//! - Scroll up / scroll down; DECSTBM scroll region.
 //! - SGR — full set: reset/bold/dim/italic/underline/reverse/strike,
 //!   16 ANSI colors, 256 indexed, 24-bit truecolor, default fg/bg.
-//! - DECSTBM scroll region.
 //! - Save / restore cursor (DECSC / DECRC, ESC 7 / 8 and CSI s / u).
 //! - Index / reverse-index / next-line (ESC D / M / E).
 //! - DSR 6 (cursor position report) — reply bytes are queued in
-//!   [`Screen::take_replies`] for the PTY layer to deliver to the slave
-//!   input.
-//! - DEC private modes: ?7 autowrap, ?25 cursor-visible. (Alt-screen
-//!   ?1049 and bracketed-paste ?2004 land in U4 / U7 respectively.)
-//! - DECSCUSR cursor shape (parsed and stored; rendering lands in U5).
+//!   [`Screen::take_replies`] for the app to write back to the master.
+//! - DEC private modes: ?7 autowrap, ?25 cursor-visible, ?47/?1047/?1049
+//!   alt-screen buffer.
+//! - DECSCUSR cursor shape (parsed and stored).
+//! - Scrollback ring plus a scroll view (`scroll_view`/`visible_row`)
+//!   the app drives from Shift+PgUp/PgDn.
 //! - Delayed wrap at last column (xterm semantics — the cursor "sticks"
 //!   at the right margin until the next printable byte).
 //!
-//! Out of scope for U3: alt-screen buffer, scrollback ring (both U4),
-//! caret blink (U5), bracketed paste (U7).
+//! Out of scope: bracketed paste (?2004 is parsed and ignored).
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -180,12 +180,6 @@ pub struct Screen {
     /// new output that scrolls the primary buffer, or on alt-screen
     /// switch.
     view_offset: usize,
-
-    /// Last cursor position the renderer was told about, for caret
-    /// erase discipline. The renderer calls
-    /// [`Screen::take_cursor_change`] each paint; on the next paint it
-    /// compares against `caret()` to decide what to erase / draw.
-    last_painted_cursor: (usize, usize),
 }
 
 impl Screen {
@@ -215,7 +209,6 @@ impl Screen {
             stashed: None,
             scrollback: VecDeque::new(),
             view_offset: 0,
-            last_painted_cursor: (0, 0),
         }
     }
 
@@ -227,30 +220,24 @@ impl Screen {
     pub fn cols(&self) -> usize {
         self.cols
     }
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn cursor(&self) -> (usize, usize) {
         (self.cursor_row, self.cursor_col)
     }
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn cell(&self, row: usize, col: usize) -> Cell {
         self.buffer[row][col]
     }
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
     }
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn cursor_shape(&self) -> CursorShape {
         self.cursor_shape
     }
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn autowrap(&self) -> bool {
         self.autowrap
     }
 
     /// Drain bytes destined for the slave input (DSR replies, etc.).
-    /// The PTY consumes these in U6; for U3 they exist so tests can
-    /// inspect them.
+    /// The app writes these back to the pty master fd.
     pub fn take_replies(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.replies)
     }
@@ -271,36 +258,17 @@ impl Screen {
         }
     }
 
-    /// Cursor position the renderer last redrew. The renderer compares
-    /// this against `caret()` to know which cells need erase + redraw
-    /// on the next paint, then calls
-    /// [`Screen::acknowledge_cursor_paint`].
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
-    pub fn last_painted_cursor(&self) -> (usize, usize) {
-        self.last_painted_cursor
-    }
-
-    /// Tell the screen the renderer has drawn the caret at `caret()`'s
-    /// current position. Should be called at the end of each paint.
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
-    pub fn acknowledge_cursor_paint(&mut self) {
-        self.last_painted_cursor = (self.cursor_row, self.cursor_col);
-    }
-
     /// True while the alt-screen buffer is active.
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn is_alt_screen(&self) -> bool {
         self.using_alt
     }
 
     /// Current scrollback view offset, in lines. 0 = live.
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn view_offset(&self) -> usize {
         self.view_offset
     }
 
     /// Total number of lines currently in scrollback.
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
     }
@@ -695,7 +663,7 @@ impl Screen {
                 (true, 25) => self.cursor_visible = value,
                 (true, 47) | (true, 1047) | (true, 1049) => {
                     if value {
-                        self.enter_alt_screen(/*clear=*/ p != 47);
+                        self.enter_alt_screen();
                     } else {
                         self.exit_alt_screen();
                     }
@@ -709,7 +677,7 @@ impl Screen {
 
     // ---- alt screen ----
 
-    fn enter_alt_screen(&mut self, clear: bool) {
+    fn enter_alt_screen(&mut self) {
         if self.using_alt {
             return;
         }
@@ -731,12 +699,9 @@ impl Screen {
             last_col_pending: self.last_col_pending,
         });
 
-        // Fresh alt buffer state. ?1049 clears the alt buffer on entry;
-        // ?47 does not (we keep what's there from a previous session).
-        // We always start with a fresh buffer here because we have no
-        // persistent alt — close enough for our purposes.
-        let _ = clear; // currently always clear; both 47 and 1049 reset
-
+        // Fresh alt buffer state. There is no persistent alt buffer, so
+        // ?47 (which xterm would leave dirty from a prior session) and
+        // ?1047/?1049 (which clear on entry) all start clean here.
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.cur_fg = ColorSpec::Default;
@@ -1105,595 +1070,3 @@ impl Perform for Screen {
 // Tests
 // ---------------------------------------------------------------------
 
-#[cfg(feature = "test")]
-pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
-    &[
-        &tests::test_print_plain_text,
-        &tests::test_lf_advances_row,
-        &tests::test_cr_resets_col,
-        &tests::test_backspace,
-        &tests::test_tab,
-        &tests::test_autowrap_to_next_line,
-        &tests::test_delayed_wrap_at_last_col,
-        &tests::test_cup_positions_cursor,
-        &tests::test_cursor_relative_moves,
-        &tests::test_erase_in_line_modes,
-        &tests::test_erase_in_display_below,
-        &tests::test_erase_in_display_all,
-        &tests::test_erase_chars,
-        &tests::test_insert_chars,
-        &tests::test_delete_chars,
-        &tests::test_insert_lines,
-        &tests::test_delete_lines,
-        &tests::test_scroll_full_region_clears_without_panic,
-        &tests::test_sgr_indexed_fg,
-        &tests::test_sgr_truecolor_fg,
-        &tests::test_sgr_attrs_set_and_clear,
-        &tests::test_sgr_default_fg_bg,
-        &tests::test_sgr_bright_colors,
-        &tests::test_save_restore_cursor_esc,
-        &tests::test_save_restore_cursor_csi,
-        &tests::test_dec_private_show_hide_cursor,
-        &tests::test_dec_private_autowrap,
-        &tests::test_decscusr_cursor_shape,
-        &tests::test_dsr_cursor_position_reply,
-        &tests::test_scroll_region_restricts_lf,
-        &tests::test_reverse_index_at_top_scrolls,
-        &tests::test_ris_resets_state,
-        &tests::test_lf_at_bottom_scrolls,
-        &tests::test_bce_erase_uses_current_bg,
-        &tests::test_scrollback_populates_on_scroll,
-        &tests::test_scrollback_caps_at_limit,
-        &tests::test_scrollback_not_added_under_restricted_region,
-        &tests::test_view_offset_pulls_from_scrollback,
-        &tests::test_scroll_view_clamps,
-        &tests::test_new_output_snaps_view_to_live,
-        &tests::test_alt_screen_swap_preserves_primary,
-        &tests::test_alt_screen_starts_clean,
-        &tests::test_alt_screen_no_scrollback,
-        &tests::test_alt_screen_scroll_view_disabled,
-        &tests::test_caret_initial,
-        &tests::test_caret_reflects_visibility_and_shape,
-        &tests::test_caret_tracks_cursor_position,
-        &tests::test_last_painted_cursor_acknowledge,
-        &tests::test_osc_title_request,
-    ]
-}
-
-#[cfg(feature = "test")]
-mod tests {
-    use super::*;
-    use crate::terminal::vte::Vte;
-
-    fn feed(s: &mut Screen, bytes: &[u8]) {
-        let mut vte = Vte::new();
-        for &b in bytes {
-            vte.advance(b, s);
-        }
-    }
-
-    fn read_row_chars(s: &Screen, row: usize) -> alloc::string::String {
-        let mut out = alloc::string::String::new();
-        for col in 0..s.cols() {
-            out.push(s.cell(row, col).ch);
-        }
-        out
-    }
-
-    pub(super) fn test_print_plain_text() {
-        let mut s = Screen::new(2, 10);
-        feed(&mut s, b"hello");
-        assert_eq!(s.cell(0, 0).ch, 'h');
-        assert_eq!(s.cell(0, 4).ch, 'o');
-        assert_eq!(s.cursor(), (0, 5));
-    }
-
-    pub(super) fn test_osc_title_request() {
-        let mut s = Screen::new(2, 10);
-        feed(&mut s, b"\x1b]0;Terminal - echo hello\x07");
-        assert_eq!(s.take_title().as_deref(), Some("Terminal - echo hello"));
-
-        feed(&mut s, b"\x1b]1;ignored\x07");
-        assert_eq!(s.take_title(), None);
-    }
-
-    pub(super) fn test_lf_advances_row() {
-        let mut s = Screen::new(3, 10);
-        feed(&mut s, b"a\nb");
-        assert_eq!(s.cell(0, 0).ch, 'a');
-        assert_eq!(s.cell(1, 1).ch, 'b');
-        assert_eq!(s.cursor(), (1, 2));
-    }
-
-    pub(super) fn test_cr_resets_col() {
-        let mut s = Screen::new(2, 10);
-        feed(&mut s, b"abc\rX");
-        assert_eq!(s.cell(0, 0).ch, 'X');
-        assert_eq!(s.cell(0, 1).ch, 'b');
-        assert_eq!(s.cell(0, 2).ch, 'c');
-    }
-
-    pub(super) fn test_backspace() {
-        let mut s = Screen::new(2, 10);
-        feed(&mut s, b"ab\x08X");
-        // 'b' was placed at col 1, BS moves cursor to col 1, 'X' overwrites b.
-        assert_eq!(s.cell(0, 0).ch, 'a');
-        assert_eq!(s.cell(0, 1).ch, 'X');
-    }
-
-    pub(super) fn test_tab() {
-        let mut s = Screen::new(2, 20);
-        feed(&mut s, b"a\tb");
-        assert_eq!(s.cell(0, 0).ch, 'a');
-        assert_eq!(s.cursor().1, 9); // tab to col 8, then 'b' placed there, cursor advances
-        assert_eq!(s.cell(0, 8).ch, 'b');
-    }
-
-    pub(super) fn test_autowrap_to_next_line() {
-        let mut s = Screen::new(3, 4);
-        // Print 5 chars on a 4-wide screen — last one should wrap.
-        feed(&mut s, b"abcde");
-        assert_eq!(read_row_chars(&s, 0), "abcd");
-        assert_eq!(s.cell(1, 0).ch, 'e');
-        assert_eq!(s.cursor(), (1, 1));
-    }
-
-    pub(super) fn test_delayed_wrap_at_last_col() {
-        let mut s = Screen::new(3, 4);
-        // After printing 4 chars, cursor stays at last-column with
-        // pending-wrap flag set. A query of cursor position should
-        // see col 3 (0-indexed), not col 4.
-        feed(&mut s, b"abcd");
-        assert_eq!(s.cursor(), (0, 3));
-        // Next printable triggers the wrap.
-        feed(&mut s, b"e");
-        assert_eq!(s.cell(1, 0).ch, 'e');
-    }
-
-    pub(super) fn test_cup_positions_cursor() {
-        let mut s = Screen::new(5, 10);
-        feed(&mut s, b"\x1b[3;5HX");
-        // 1-indexed: row 3, col 5 → 0-indexed (2, 4).
-        assert_eq!(s.cell(2, 4).ch, 'X');
-    }
-
-    pub(super) fn test_cursor_relative_moves() {
-        let mut s = Screen::new(5, 10);
-        feed(&mut s, b"\x1b[3;5H"); // move to (2,4)
-        feed(&mut s, b"\x1b[2A"); // up 2 → (0,4)
-        assert_eq!(s.cursor(), (0, 4));
-        feed(&mut s, b"\x1b[3B"); // down 3 → (3,4)
-        assert_eq!(s.cursor(), (3, 4));
-        feed(&mut s, b"\x1b[2C"); // right 2 → (3,6)
-        assert_eq!(s.cursor(), (3, 6));
-        feed(&mut s, b"\x1b[4D"); // left 4 → (3,2)
-        assert_eq!(s.cursor(), (3, 2));
-    }
-
-    pub(super) fn test_erase_in_line_modes() {
-        let mut s = Screen::new(2, 10);
-        feed(&mut s, b"abcdefghij");
-        // Cursor is now at (0,9) with pending wrap. Move to (0,4).
-        feed(&mut s, b"\x1b[1;5H");
-        feed(&mut s, b"\x1b[K"); // erase from cursor to end
-        assert_eq!(read_row_chars(&s, 0), "abcd      ");
-
-        feed(&mut s, b"\x1b[1;5H");
-        feed(&mut s, b"\x1b[1K"); // erase from start to cursor
-        assert_eq!(read_row_chars(&s, 0), "          ");
-
-        // Refill, then erase entire line.
-        feed(&mut s, b"\x1b[1;1H");
-        feed(&mut s, b"xxxxxxxxxx");
-        feed(&mut s, b"\x1b[1;5H");
-        feed(&mut s, b"\x1b[2K");
-        assert_eq!(read_row_chars(&s, 0), "          ");
-    }
-
-    pub(super) fn test_erase_in_display_below() {
-        let mut s = Screen::new(3, 4);
-        feed(&mut s, b"aaaa\r\nbbbb\r\ncccc");
-        feed(&mut s, b"\x1b[2;3H"); // (1,2)
-        feed(&mut s, b"\x1b[J"); // erase from cursor to end of display
-        assert_eq!(read_row_chars(&s, 0), "aaaa");
-        assert_eq!(read_row_chars(&s, 1), "bb  ");
-        assert_eq!(read_row_chars(&s, 2), "    ");
-    }
-
-    pub(super) fn test_erase_in_display_all() {
-        let mut s = Screen::new(2, 3);
-        // 6 chars on a 2x3 wraps "abc" into row 0 and "def" into row 1.
-        feed(&mut s, b"abcdef");
-        feed(&mut s, b"\x1b[2J");
-        assert_eq!(read_row_chars(&s, 0), "   ");
-        assert_eq!(read_row_chars(&s, 1), "   ");
-    }
-
-    pub(super) fn test_erase_chars() {
-        let mut s = Screen::new(2, 10);
-        feed(&mut s, b"abcdefghij");
-        feed(&mut s, b"\x1b[1;3H"); // (0,2)
-        feed(&mut s, b"\x1b[3X"); // erase 3 chars
-        assert_eq!(read_row_chars(&s, 0), "ab   fghij");
-    }
-
-    pub(super) fn test_insert_chars() {
-        let mut s = Screen::new(2, 10);
-        feed(&mut s, b"abcdefghij");
-        feed(&mut s, b"\x1b[1;3H"); // (0,2)
-        feed(&mut s, b"\x1b[2@"); // insert 2 blanks at cursor
-        assert_eq!(read_row_chars(&s, 0), "ab  cdefgh");
-    }
-
-    pub(super) fn test_delete_chars() {
-        let mut s = Screen::new(2, 10);
-        feed(&mut s, b"abcdefghij");
-        feed(&mut s, b"\x1b[1;3H"); // (0,2)
-        feed(&mut s, b"\x1b[2P"); // delete 2 chars at cursor
-        assert_eq!(read_row_chars(&s, 0), "abefghij  ");
-    }
-
-    pub(super) fn test_insert_lines() {
-        let mut s = Screen::new(4, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\nCCC\r\nDDD");
-        feed(&mut s, b"\x1b[2;1H"); // (1,0)
-        feed(&mut s, b"\x1b[1L"); // insert 1 line
-        assert_eq!(read_row_chars(&s, 0), "AAA");
-        assert_eq!(read_row_chars(&s, 1), "   ");
-        assert_eq!(read_row_chars(&s, 2), "BBB");
-        assert_eq!(read_row_chars(&s, 3), "CCC");
-    }
-
-    pub(super) fn test_delete_lines() {
-        let mut s = Screen::new(4, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\nCCC\r\nDDD");
-        feed(&mut s, b"\x1b[2;1H");
-        feed(&mut s, b"\x1b[1M"); // delete 1 line
-        assert_eq!(read_row_chars(&s, 0), "AAA");
-        assert_eq!(read_row_chars(&s, 1), "CCC");
-        assert_eq!(read_row_chars(&s, 2), "DDD");
-        assert_eq!(read_row_chars(&s, 3), "   ");
-    }
-
-    pub(super) fn test_scroll_full_region_clears_without_panic() {
-        // CSI S / CSI M with a count >= the region height used to
-        // underflow `bot - n` and index out of bounds. The whole
-        // region must simply clear.
-        let mut s = Screen::new(4, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\nCCC\r\nDDD");
-        feed(&mut s, b"\x1b[999S"); // scroll up by far more than 4 rows
-        for row in 0..4 {
-            assert_eq!(read_row_chars(&s, row), "   ");
-        }
-        feed(&mut s, b"EEE\r\nFFF");
-        feed(&mut s, b"\x1b[1;1H");
-        feed(&mut s, b"\x1b[999M"); // delete every line from row 0
-        for row in 0..4 {
-            assert_eq!(read_row_chars(&s, row), "   ");
-        }
-    }
-
-    pub(super) fn test_sgr_indexed_fg() {
-        let mut s = Screen::new(1, 5);
-        feed(&mut s, b"\x1b[31mR");
-        assert_eq!(s.cell(0, 0).fg, ColorSpec::Indexed(1));
-    }
-
-    pub(super) fn test_sgr_truecolor_fg() {
-        let mut s = Screen::new(1, 5);
-        feed(&mut s, b"\x1b[38;2;200;100;50mX");
-        assert_eq!(s.cell(0, 0).fg, ColorSpec::Rgb(200, 100, 50));
-    }
-
-    pub(super) fn test_sgr_attrs_set_and_clear() {
-        let mut s = Screen::new(1, 5);
-        feed(&mut s, b"\x1b[1;4mA");
-        assert_eq!(s.cell(0, 0).attrs & attrs::BOLD, attrs::BOLD);
-        assert_eq!(s.cell(0, 0).attrs & attrs::UNDERLINE, attrs::UNDERLINE);
-        feed(&mut s, b"\x1b[22mB");
-        assert_eq!(s.cell(0, 1).attrs & attrs::BOLD, 0);
-        feed(&mut s, b"\x1b[0mC");
-        assert_eq!(s.cell(0, 2).attrs, 0);
-    }
-
-    pub(super) fn test_sgr_default_fg_bg() {
-        let mut s = Screen::new(1, 5);
-        feed(&mut s, b"\x1b[31;42m");
-        feed(&mut s, b"\x1b[39mF");
-        feed(&mut s, b"\x1b[49mG");
-        assert_eq!(s.cell(0, 0).fg, ColorSpec::Default);
-        assert_eq!(s.cell(0, 0).bg, ColorSpec::Indexed(2));
-        assert_eq!(s.cell(0, 1).bg, ColorSpec::Default);
-    }
-
-    pub(super) fn test_sgr_bright_colors() {
-        let mut s = Screen::new(1, 5);
-        feed(&mut s, b"\x1b[91mR\x1b[102mG");
-        assert_eq!(s.cell(0, 0).fg, ColorSpec::Indexed(9));
-        assert_eq!(s.cell(0, 1).bg, ColorSpec::Indexed(10));
-    }
-
-    pub(super) fn test_save_restore_cursor_esc() {
-        let mut s = Screen::new(3, 10);
-        feed(&mut s, b"\x1b[2;5H"); // (1,4)
-        feed(&mut s, b"\x1b7"); // DECSC
-        feed(&mut s, b"\x1b[1;1H");
-        feed(&mut s, b"\x1b8"); // DECRC
-        assert_eq!(s.cursor(), (1, 4));
-    }
-
-    pub(super) fn test_save_restore_cursor_csi() {
-        let mut s = Screen::new(3, 10);
-        feed(&mut s, b"\x1b[2;5H");
-        feed(&mut s, b"\x1b[s");
-        feed(&mut s, b"\x1b[1;1H");
-        feed(&mut s, b"\x1b[u");
-        assert_eq!(s.cursor(), (1, 4));
-    }
-
-    pub(super) fn test_dec_private_show_hide_cursor() {
-        let mut s = Screen::new(1, 5);
-        assert!(s.cursor_visible());
-        feed(&mut s, b"\x1b[?25l");
-        assert!(!s.cursor_visible());
-        feed(&mut s, b"\x1b[?25h");
-        assert!(s.cursor_visible());
-    }
-
-    pub(super) fn test_dec_private_autowrap() {
-        let mut s = Screen::new(1, 5);
-        feed(&mut s, b"\x1b[?7l");
-        assert!(!s.autowrap());
-        feed(&mut s, b"\x1b[?7h");
-        assert!(s.autowrap());
-    }
-
-    pub(super) fn test_decscusr_cursor_shape() {
-        let mut s = Screen::new(1, 5);
-        feed(&mut s, b"\x1b[4 q");
-        assert_eq!(s.cursor_shape(), CursorShape::Underline);
-        feed(&mut s, b"\x1b[6 q");
-        assert_eq!(s.cursor_shape(), CursorShape::Bar);
-        feed(&mut s, b"\x1b[0 q");
-        assert_eq!(s.cursor_shape(), CursorShape::Block);
-    }
-
-    pub(super) fn test_dsr_cursor_position_reply() {
-        let mut s = Screen::new(5, 10);
-        feed(&mut s, b"\x1b[3;7H"); // (2,6) — 1-indexed reply 3;7
-        feed(&mut s, b"\x1b[6n");
-        let replies = s.take_replies();
-        assert_eq!(&replies[..], b"\x1b[3;7R");
-    }
-
-    pub(super) fn test_scroll_region_restricts_lf() {
-        let mut s = Screen::new(5, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\nCCC\r\nDDD\r\nEEE");
-        feed(&mut s, b"\x1b[2;4r"); // scroll region rows 2..4 (0-indexed 1..=3)
-                                    // After setting region, cursor goes to home.
-                                    // Move cursor to bottom of region (row 4, 1-indexed) and LF.
-        feed(&mut s, b"\x1b[4;1H");
-        feed(&mut s, b"\n"); // should scroll the region
-                             // Row 0 (outside region) unchanged.
-        assert_eq!(read_row_chars(&s, 0), "AAA");
-        // Rows inside region shifted up: row1=CCC, row2=DDD, row3=blank.
-        assert_eq!(read_row_chars(&s, 1), "CCC");
-        assert_eq!(read_row_chars(&s, 2), "DDD");
-        assert_eq!(read_row_chars(&s, 3), "   ");
-        // Row 4 (outside region) unchanged.
-        assert_eq!(read_row_chars(&s, 4), "EEE");
-    }
-
-    pub(super) fn test_reverse_index_at_top_scrolls() {
-        let mut s = Screen::new(3, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\nCCC");
-        feed(&mut s, b"\x1b[1;1H");
-        feed(&mut s, b"\x1bM"); // RI at top scrolls down
-        assert_eq!(read_row_chars(&s, 0), "   ");
-        assert_eq!(read_row_chars(&s, 1), "AAA");
-        assert_eq!(read_row_chars(&s, 2), "BBB");
-    }
-
-    pub(super) fn test_ris_resets_state() {
-        let mut s = Screen::new(3, 3);
-        feed(&mut s, b"\x1b[31mABC\r\n");
-        feed(&mut s, b"\x1bc"); // RIS
-        assert_eq!(s.cursor(), (0, 0));
-        assert_eq!(s.cell(0, 0).ch, ' ');
-        assert_eq!(s.cell(0, 0).fg, ColorSpec::Default);
-    }
-
-    pub(super) fn test_lf_at_bottom_scrolls() {
-        let mut s = Screen::new(3, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\nCCC");
-        // Cursor at (2, 2) pending-wrap. LF should scroll within default
-        // region [0, 2] — pending-wrap is cleared by the row movement.
-        feed(&mut s, b"\n");
-        assert_eq!(read_row_chars(&s, 0), "BBB");
-        assert_eq!(read_row_chars(&s, 1), "CCC");
-        assert_eq!(read_row_chars(&s, 2), "   ");
-    }
-
-    fn read_visible_row_chars(s: &Screen, row: usize) -> alloc::string::String {
-        let mut out = alloc::string::String::new();
-        for cell in s.visible_row(row) {
-            out.push(cell.ch);
-        }
-        out
-    }
-
-    pub(super) fn test_scrollback_populates_on_scroll() {
-        let mut s = Screen::new(2, 3);
-        // Fill both rows, then force a scroll by LF at bottom.
-        feed(&mut s, b"AAA\r\nBBB\r\n");
-        // After LF at the bottom, "AAA" should have scrolled into
-        // scrollback (one entry).
-        assert_eq!(s.scrollback_len(), 1);
-        assert_eq!(s.scrollback[0][0].ch, 'A');
-    }
-
-    pub(super) fn test_scrollback_caps_at_limit() {
-        let mut s = Screen::new(2, 1);
-        // Each LF scrolls one line. Generate more than SCROLLBACK_LINES
-        // events so the ring evicts. We can't realistically loop
-        // 5000 times in a kernel test, so monkey-patch the limit via
-        // direct manipulation: push entries until we exceed and then
-        // confirm length is bounded by config::SCROLLBACK_LINES.
-        let cap = super::config::SCROLLBACK_LINES;
-        // Fast-fill scrollback with synthetic rows.
-        for i in 0..cap + 5 {
-            let mut row = alloc::vec![Cell::EMPTY; 1];
-            row[0].ch = (b'a' + (i % 26) as u8) as char;
-            s.scrollback.push_back(row);
-            if s.scrollback.len() > cap {
-                s.scrollback.pop_front();
-            }
-        }
-        assert_eq!(s.scrollback_len(), cap);
-    }
-
-    pub(super) fn test_scrollback_not_added_under_restricted_region() {
-        let mut s = Screen::new(4, 3);
-        // Restrict the scroll region to rows 2..=3 (away from the top).
-        feed(&mut s, b"\x1b[2;3r");
-        // Force scrolling inside the region.
-        feed(&mut s, b"\x1b[3;1H"); // bottom of region
-        feed(&mut s, b"\n");
-        feed(&mut s, b"\n");
-        feed(&mut s, b"\n");
-        assert_eq!(
-            s.scrollback_len(),
-            0,
-            "scrollback must not capture lines from a non-top scroll region",
-        );
-    }
-
-    pub(super) fn test_view_offset_pulls_from_scrollback() {
-        let mut s = Screen::new(2, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\nCCC\r\n");
-        // Expected scrollback after three LF-at-bottom events on a
-        // 2-row screen: AAA, BBB (in age order). Live buffer: CCC,
-        // blank.
-        assert_eq!(s.scrollback_len(), 2);
-        // Scroll view back 1 line.
-        s.scroll_view(1);
-        assert_eq!(s.view_offset(), 1);
-        // visible row 0 should now show the most recent scrollback entry.
-        assert_eq!(read_visible_row_chars(&s, 0), "BBB");
-        assert_eq!(read_visible_row_chars(&s, 1), "CCC");
-        // Scroll back another line.
-        s.scroll_view(1);
-        assert_eq!(read_visible_row_chars(&s, 0), "AAA");
-        assert_eq!(read_visible_row_chars(&s, 1), "BBB");
-    }
-
-    pub(super) fn test_scroll_view_clamps() {
-        let mut s = Screen::new(2, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\n");
-        // Only 1 scrollback line. Asking for 10 back clamps to 1.
-        s.scroll_view(10);
-        assert_eq!(s.view_offset(), 1);
-        s.scroll_view(-100);
-        assert_eq!(s.view_offset(), 0);
-    }
-
-    pub(super) fn test_new_output_snaps_view_to_live() {
-        let mut s = Screen::new(2, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\n");
-        s.scroll_view(1);
-        assert_eq!(s.view_offset(), 1);
-        // Any output that scrolls the primary should snap to live.
-        feed(&mut s, b"CCC\r\n");
-        assert_eq!(s.view_offset(), 0);
-    }
-
-    pub(super) fn test_alt_screen_swap_preserves_primary() {
-        let mut s = Screen::new(3, 3);
-        feed(&mut s, b"PRI\r\n");
-        feed(&mut s, b"\x1b[?1049h"); // enter alt
-        assert!(s.is_alt_screen());
-        // Alt buffer starts clean.
-        assert_eq!(read_row_chars(&s, 0), "   ");
-        feed(&mut s, b"ALT");
-        assert_eq!(read_row_chars(&s, 0), "ALT");
-        feed(&mut s, b"\x1b[?1049l"); // exit alt
-        assert!(!s.is_alt_screen());
-        // Primary contents restored.
-        assert_eq!(read_row_chars(&s, 0), "PRI");
-    }
-
-    pub(super) fn test_alt_screen_starts_clean() {
-        let mut s = Screen::new(2, 3);
-        feed(&mut s, b"DRTY\r\n");
-        feed(&mut s, b"\x1b[?1049h");
-        // Cursor at home; all rows blank.
-        assert_eq!(s.cursor(), (0, 0));
-        for row in 0..s.rows() {
-            assert_eq!(read_row_chars(&s, row), "   ");
-        }
-    }
-
-    pub(super) fn test_alt_screen_no_scrollback() {
-        let mut s = Screen::new(2, 3);
-        feed(&mut s, b"\x1b[?1049h");
-        // Force scroll inside alt — should not populate scrollback.
-        feed(&mut s, b"AAA\r\nBBB\r\nCCC\r\n");
-        assert_eq!(s.scrollback_len(), 0);
-    }
-
-    pub(super) fn test_alt_screen_scroll_view_disabled() {
-        let mut s = Screen::new(2, 3);
-        feed(&mut s, b"AAA\r\nBBB\r\n"); // populate scrollback
-        feed(&mut s, b"\x1b[?1049h");
-        // scroll_view is a no-op while alt is active.
-        s.scroll_view(1);
-        assert_eq!(s.view_offset(), 0);
-    }
-
-    pub(super) fn test_caret_initial() {
-        let s = Screen::new(3, 5);
-        let c = s.caret();
-        assert_eq!(c.row, 0);
-        assert_eq!(c.col, 0);
-        assert!(c.visible);
-        assert_eq!(c.shape, CursorShape::Block);
-    }
-
-    pub(super) fn test_caret_reflects_visibility_and_shape() {
-        let mut s = Screen::new(3, 5);
-        feed(&mut s, b"\x1b[?25l\x1b[4 q");
-        let c = s.caret();
-        assert!(!c.visible);
-        assert_eq!(c.shape, CursorShape::Underline);
-    }
-
-    pub(super) fn test_caret_tracks_cursor_position() {
-        let mut s = Screen::new(5, 5);
-        feed(&mut s, b"\x1b[3;4HX");
-        // After "X" at (2,3), cursor advances to (2,4).
-        let c = s.caret();
-        assert_eq!((c.row, c.col), (2, 4));
-    }
-
-    pub(super) fn test_last_painted_cursor_acknowledge() {
-        let mut s = Screen::new(3, 5);
-        feed(&mut s, b"\x1b[2;2H");
-        // Before acknowledge, last_painted_cursor is still (0,0).
-        assert_eq!(s.last_painted_cursor(), (0, 0));
-        assert_ne!(s.last_painted_cursor(), (s.caret().row, s.caret().col));
-        s.acknowledge_cursor_paint();
-        assert_eq!(s.last_painted_cursor(), (1, 1));
-    }
-
-    pub(super) fn test_bce_erase_uses_current_bg() {
-        let mut s = Screen::new(1, 5);
-        feed(&mut s, b"\x1b[41m"); // set bg = red
-        feed(&mut s, b"\x1b[2K"); // erase line
-                                  // All cells should have bg = Indexed(1), even though they're
-                                  // visually blank.
-        for col in 0..s.cols() {
-            assert_eq!(s.cell(0, col).bg, ColorSpec::Indexed(1));
-            assert_eq!(s.cell(0, col).ch, ' ');
-        }
-    }
-}

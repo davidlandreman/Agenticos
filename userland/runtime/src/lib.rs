@@ -115,10 +115,15 @@ const NR_GUI_GL_CONTEXT_DESTROY: u64 = 5009;
 const NR_SYSTEM_CONTROL: u64 = 5010;
 const NR_GUI_EVENT_OPEN: u64 = 5011;
 const NR_CLIPBOARD: u64 = 5012;
-const NR_GUI_SHELL_REGISTER: u64 = 5013;
-const NR_GUI_SHELL_LIST_WINDOWS: u64 = 5014;
-const NR_GUI_SHELL_WINDOW_ACTION: u64 = 5015;
-const NR_GUI_SHELL_SPAWN_TERMINAL: u64 = 5016;
+const NR_PTY_OPEN: u64 = 5013;
+const NR_PTY_SET_WINSIZE: u64 = 5014;
+const NR_GUI_SHELL_REGISTER: u64 = 5015;
+const NR_GUI_SHELL_LIST_WINDOWS: u64 = 5016;
+const NR_GUI_SHELL_WINDOW_ACTION: u64 = 5017;
+const NR_GUI_SHELL_SPAWN_TERMINAL: u64 = 5018;
+
+/// `pty_open` flag: set FD_CLOEXEC on the returned master descriptor.
+pub const PTY_OPEN_CLOEXEC: u64 = 0x80000;
 
 /// Taskbar action codes for [`gui_shell_window_action`].
 pub const SHELL_WINDOW_ACTIVATE: u32 = 0;
@@ -561,6 +566,26 @@ pub fn gui_next_event(event: &mut GuiEvent, flags: u64) -> i64 {
 /// Open a poll/select-compatible descriptor for the process GUI queue.
 pub fn gui_event_open(flags: u64) -> i64 {
     unsafe { syscall1(NR_GUI_EVENT_OPEN, flags) }
+}
+
+/// Open the pty master for a GUI window the caller owns. Binds the caller's
+/// `terminal_id` to the window so a subsequently-`fork`ed child inherits the
+/// slave. Returns the master fd, or `-errno`.
+pub fn pty_open(window_handle: u32, rows: u16, cols: u16, flags: u64) -> i64 {
+    unsafe {
+        syscall4(
+            NR_PTY_OPEN,
+            window_handle as u64,
+            rows as u64,
+            cols as u64,
+            flags,
+        )
+    }
+}
+
+/// Update a pty master's winsize (and raise SIGWINCH on the child).
+pub fn pty_set_winsize(fd: i32, rows: u16, cols: u16) -> i64 {
+    unsafe { syscall3(NR_PTY_SET_WINSIZE, fd as u64, rows as u64, cols as u64) }
 }
 
 pub fn gui_win_destroy(handle: u32) -> i64 {

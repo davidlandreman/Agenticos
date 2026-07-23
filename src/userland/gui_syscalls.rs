@@ -310,10 +310,12 @@ pub fn gui_win_destroy_handler(args: &mut SyscallArgs) -> i64 {
         Some(record) => record,
         None => return ENOENT,
     };
-    match crate::window::with_window_manager(|wm| wm.destroy_window(record.frame_id)) {
+    let result = match crate::window::with_window_manager(|wm| wm.destroy_window(record.frame_id)) {
         Some(()) => 0,
         None => EIO,
-    }
+    };
+    gui::release_window_pty(record.surface_id);
+    result
 }
 
 /// `(handle, title_ptr, title_len) -> 0 | -errno`.

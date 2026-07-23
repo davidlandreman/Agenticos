@@ -326,10 +326,27 @@ pub fn cleanup_process(pid: u32) {
         return;
     }
     let _ = crate::window::with_window_manager(|wm| {
-        for record in records {
+        for record in &records {
             wm.destroy_window(record.frame_id);
         }
     });
+    for record in records {
+        release_window_pty(record.surface_id);
+    }
+}
+
+/// A destroyed ring-3 window may carry a pty (`pty_open` keys one on the
+/// window's content-well `WindowId`). Drop the registry entry and wake any
+/// process blocked in `read(0)` on it: with the pty gone, their read
+/// returns 0 (EOF), so an attached shell exits instead of parking forever
+/// — including when the emulator crashed without killing its child.
+/// No-op for windows without a pty.
+pub fn release_window_pty(surface_id: WindowId) {
+    if !crate::terminal::pty::is_active_for_terminal(surface_id) {
+        return;
+    }
+    crate::terminal::pty::clear_for_terminal(surface_id);
+    crate::userland::lifecycle::wake_ring3_blocked_on_input(Some(surface_id));
 }
 
 pub fn encode_window_event(handle: u32, event: &Event) -> Option<GuiEvent> {

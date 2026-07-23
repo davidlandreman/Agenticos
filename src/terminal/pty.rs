@@ -20,11 +20,12 @@
 //! per-pty (fork) is handled the same way the WindowId queues handled
 //! it: every process with the same `terminal_id` shares the pty.
 //!
-//! Line discipline lives here. Today the in-pty discipline is minimal —
-//! the [`PtyMaster::push_input`] path leaves canonical-mode line
-//! buffering, echo, and signal generation to the caller (which today
-//! is `TerminalWindow`). That coupling will be tightened in a follow-up
-//! once U9 lets the screen render echoes through the parser.
+//! Line discipline lives here. [`PtyInner::push_slave_input`] applies
+//! canonical-mode editing (echo, VERASE/VKILL erase, a `MAX_CANON` line
+//! cap), VEOF end-of-file delivery, and ISIG signal generation for the
+//! ring-3 emulator's master-fd writes. The in-kernel `TerminalWindow`
+//! instead uses the raw [`PtyMaster::push_input`] path and does its own
+//! ICANON/ECHO editing.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -142,6 +143,27 @@ impl Winsize {
 /// from holding the kernel heap hostage.
 const MAX_QUEUED_BYTES: usize = 64 * 1024;
 
+/// Canonical-mode line length cap, matching Linux's `MAX_CANON`. Bytes
+/// typed past this on a single line are dropped (Linux beeps; we stay
+/// silent) so `canon_line` can never grow the kernel heap unboundedly.
+const MAX_CANON: usize = 4096;
+
+/// Outcome of pushing master-side bytes through the line discipline.
+/// The caller acts on it *after* releasing the pty lock.
+#[derive(Default, Clone, Copy)]
+pub struct SlaveInput {
+    /// Input bytes consumed (raw mode: bytes accepted by the bounded
+    /// slave queue; canonical mode: every byte is consumed — editing
+    /// characters mutate the line buffer rather than pass through).
+    pub consumed: usize,
+    /// Data (or an EOF) became available to the slave — wake any process
+    /// blocked in `read(0)` on this terminal.
+    pub wake_reader: bool,
+    /// ISIG line-discipline signal (SIGINT/SIGQUIT) to raise on every
+    /// process bound to this terminal.
+    pub signal: Option<i32>,
+}
+
 pub struct PtyInner {
     /// Bytes ready for the slave's `read(0)`.
     slave_queue: VecDeque<u8>,
@@ -153,6 +175,17 @@ pub struct PtyInner {
 
     pub termios: Termios,
     pub winsize: Winsize,
+
+    /// Canonical-mode line accumulator. Bytes typed in ICANON mode collect
+    /// here (with local echo to `master_queue`, capped at `MAX_CANON`) and
+    /// are delivered to `slave_queue` as a whole line when a line
+    /// terminator arrives.
+    canon_line: Vec<u8>,
+
+    /// Set when VEOF (Ctrl-D) is typed on an empty canonical line. Once
+    /// the slave queue drains, the next slave read consumes this and
+    /// returns 0 — POSIX end-of-file.
+    pending_eof: bool,
 
     /// `WindowId` of the hosting terminal window. Held for the
     /// SIGWINCH-on-resize path and for waker keys.
@@ -166,19 +199,134 @@ impl PtyInner {
             master_queue: VecDeque::new(),
             termios: Termios::default_tty(),
             winsize: Winsize::new(rows, cols),
+            canon_line: Vec::new(),
+            pending_eof: false,
             terminal_id,
         }
     }
 
-    /// Push raw bytes onto the slave's input queue. The caller is
-    /// responsible for any line-discipline transformation (today's
-    /// TerminalWindow does its own ICANON / ECHO handling). Returns
-    /// the number of bytes accepted; remainder dropped on overflow.
-    pub fn push_slave_input(&mut self, bytes: &[u8]) -> usize {
+    /// Push raw bytes directly onto the slave's input queue, bypassing line
+    /// discipline. Used by the in-kernel `TerminalWindow`, which does its own
+    /// ICANON/ECHO handling and injects its program-generated replies
+    /// (DSR/DA) here. A ring-3 emulator has no raw path: its replies go
+    /// through `write(master_fd)` → `push_slave_input` and traverse the
+    /// slave's line discipline, exactly as on Linux (realistic queriers put
+    /// the tty in raw mode first, where the two paths coincide).
+    /// Returns the number of bytes accepted; remainder dropped on overflow.
+    pub fn push_slave_raw(&mut self, bytes: &[u8]) -> usize {
         let room = MAX_QUEUED_BYTES.saturating_sub(self.slave_queue.len());
         let take = core::cmp::min(room, bytes.len());
         self.slave_queue.extend(bytes[..take].iter().copied());
         take
+    }
+
+    /// Push echo bytes onto the master output queue (what the emulator reads
+    /// and renders). Honors the queue cap.
+    fn echo(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if self.master_queue.len() >= MAX_QUEUED_BYTES {
+                break;
+            }
+            self.master_queue.push_back(b);
+        }
+    }
+
+    /// Push typed input from a ring-3 terminal emulator (the pty master),
+    /// applying kernel line discipline:
+    ///
+    /// - **Raw mode** (ICANON clear): bytes pass straight to the slave; the
+    ///   program (e.g. zsh's zle) does its own echo and `^C` handling.
+    /// - **Canonical mode** (ICANON set): characters accumulate into a line
+    ///   buffer (capped at `MAX_CANON`) with local echo when ECHO is set.
+    ///   VERASE/backspace erases one character (`\b \b`), VKILL erases the
+    ///   whole line, and a line terminator (LF, or CR mapped to LF under
+    ///   ICRNL) flushes the line — terminator included — to the slave's
+    ///   read queue. VEOF flushes a partial line without a terminator; on
+    ///   an empty line it marks EOF so the slave's `read` returns 0. With
+    ///   ISIG set, VINTR/VQUIT discard the partial line and report the
+    ///   signal for the caller to raise once the pty lock is released.
+    pub fn push_slave_input(&mut self, bytes: &[u8]) -> SlaveInput {
+        if !self.termios.is_canonical() {
+            let consumed = self.push_slave_raw(bytes);
+            return SlaveInput {
+                consumed,
+                wake_reader: consumed > 0,
+                signal: None,
+            };
+        }
+        let echo = self.termios.is_echo();
+        let icrnl = self.termios.c_iflag & ICRNL != 0;
+        let isig = self.termios.c_lflag & ISIG != 0;
+        let cc = self.termios.c_cc;
+        let mut result = SlaveInput::default();
+        for &raw in bytes {
+            let b = if icrnl && raw == b'\r' { b'\n' } else { raw };
+            if isig && raw != 0 && (raw == cc[VINTR] || raw == cc[VQUIT]) {
+                self.canon_line.clear();
+                if echo {
+                    let caret: &[u8] = if raw == cc[VINTR] { b"^C\r\n" } else { b"^\\\r\n" };
+                    self.echo(caret);
+                }
+                result.signal = Some(if raw == cc[VINTR] {
+                    crate::userland::signal::SIGINT
+                } else {
+                    crate::userland::signal::SIGQUIT
+                });
+            } else if b == b'\n' {
+                if echo {
+                    self.echo(b"\r\n");
+                }
+                self.canon_line.push(b'\n');
+                let line: Vec<u8> = core::mem::take(&mut self.canon_line);
+                result.wake_reader |= self.push_slave_raw(&line) > 0;
+            } else if raw != 0 && raw == cc[VEOF] {
+                if self.canon_line.is_empty() {
+                    self.pending_eof = true;
+                    result.wake_reader = true;
+                } else {
+                    let line: Vec<u8> = core::mem::take(&mut self.canon_line);
+                    result.wake_reader |= self.push_slave_raw(&line) > 0;
+                }
+            } else if raw != 0 && raw == cc[VKILL] {
+                let erased = self.canon_line.len();
+                self.canon_line.clear();
+                if echo {
+                    for _ in 0..erased {
+                        self.echo(b"\x08 \x08");
+                    }
+                }
+            } else if (raw != 0 && raw == cc[VERASE]) || raw == 0x08 {
+                if self.canon_line.pop().is_some() && echo {
+                    self.echo(b"\x08 \x08");
+                }
+            } else if self.canon_line.len() < MAX_CANON {
+                self.canon_line.push(b);
+                if echo {
+                    self.echo(&[b]);
+                }
+            }
+            // A byte past MAX_CANON on one line is dropped but still
+            // counts as consumed, like every other canonical byte.
+            result.consumed += 1;
+        }
+        result
+    }
+
+    /// Consume a pending canonical-mode EOF once the input queue has
+    /// drained. Returns true exactly once per VEOF; the slave's `read`
+    /// then returns 0.
+    pub fn take_pending_eof(&mut self) -> bool {
+        if self.slave_queue.is_empty() && self.pending_eof {
+            self.pending_eof = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The `WindowId` this pty is keyed on.
+    pub fn terminal_id(&self) -> WindowId {
+        self.terminal_id
     }
 
     /// Drain bytes from the slave's input queue into `dst`. Returns
@@ -191,9 +339,11 @@ impl PtyInner {
         n
     }
 
-    /// Number of bytes ready for the slave to read.
+    /// Number of readable "tokens" for the slave: queued bytes, plus one
+    /// for a pending canonical-mode EOF so poll/select report readable
+    /// (the read that follows returns 0).
     pub fn slave_readable(&self) -> usize {
-        self.slave_queue.len()
+        self.slave_queue.len() + usize::from(self.pending_eof)
     }
 
     /// Slave called `write` — append bytes to the master's output
@@ -235,6 +385,18 @@ impl PtyInner {
         consumed
     }
 
+    /// Drain up to `dst.len()` bytes the slave wrote into `dst`. Used by a
+    /// ring-3 emulator's bounded `read(master_fd)` (unlike `drain_master_output`
+    /// which drains the whole queue for the in-kernel compositor). Returns the
+    /// number copied.
+    pub fn read_master_output(&mut self, dst: &mut [u8]) -> usize {
+        let n = core::cmp::min(dst.len(), self.master_queue.len());
+        for slot in dst.iter_mut().take(n) {
+            *slot = self.master_queue.pop_front().unwrap();
+        }
+        n
+    }
+
     /// Drain all bytes the slave wrote — the compositor calls this
     /// once per frame and feeds the result into the Vte parser. Returns
     /// an empty `Vec` when there's nothing to drain.
@@ -259,7 +421,6 @@ pub struct PtyMaster {
 }
 
 impl PtyMaster {
-    #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
     pub fn terminal_id(&self) -> WindowId {
         self.inner.lock().terminal_id
     }
@@ -268,16 +429,40 @@ impl PtyMaster {
         f(&mut self.inner.lock())
     }
 
-    /// Push input bytes to the slave's read queue. Returns true if any
-    /// bytes were enqueued (the caller wakes blocked readers).
+    /// Push input bytes straight to the slave's read queue, bypassing line
+    /// discipline — the in-kernel `TerminalWindow`'s path (it does its own
+    /// ICANON/ECHO editing and injects its DSR/DA replies here). Returns
+    /// true if any bytes were enqueued (the caller wakes blocked readers).
+    /// The ring-3 emulator's master-fd write path instead calls
+    /// `push_slave_input`, which applies kernel line discipline to
+    /// everything it carries — keystrokes and emulator-generated replies
+    /// alike, matching Linux master-write semantics.
     pub fn push_input(&self, bytes: &[u8]) -> bool {
-        let pushed = self.with(|p| p.push_slave_input(bytes));
+        let pushed = self.with(|p| p.push_slave_raw(bytes));
         pushed > 0
     }
 
     /// Drain pending slave→master output. Cheap when empty.
     pub fn drain_output(&self) -> Vec<u8> {
         self.with(|p| p.drain_master_output())
+    }
+
+    /// Number of bytes the slave has written and the master hasn't drained.
+    /// Used by `select`/`poll` readiness for a ring-3 master fd.
+    pub fn output_ready(&self) -> usize {
+        self.with(|p| p.master_queue.len())
+    }
+
+    /// Bounded drain of the slave's output into `dst` for a ring-3
+    /// `read(master_fd)`. Returns the number of bytes copied.
+    pub fn read_output(&self, dst: &mut [u8]) -> usize {
+        self.with(|p| p.read_master_output(dst))
+    }
+
+    /// True iff both handles reference the same underlying pty (dup/fork
+    /// share one open-file description).
+    pub fn same_master(&self, other: &PtyMaster) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     #[cfg_attr(not(feature = "test"), expect(dead_code, reason = "QEMU test API"))]
@@ -328,12 +513,26 @@ impl PtySlave {
         self.with(|p| p.slave_read(dst))
     }
 
+    /// Consume a pending canonical-mode EOF (VEOF typed on an empty
+    /// line). True exactly once per EOF; the caller returns 0 from
+    /// `read`.
+    pub fn take_eof(&self) -> bool {
+        self.with(|p| p.take_pending_eof())
+    }
+
     pub fn readable(&self) -> usize {
         self.with(|p| p.slave_readable())
     }
 
     pub fn write(&self, src: &[u8]) -> usize {
-        self.with(|p| p.slave_write(src))
+        let consumed = self.with(|p| p.slave_write(src));
+        if consumed > 0 {
+            // A ring-3 emulator may be parked in select/poll on the
+            // master fd; bump the readiness sequence (after releasing
+            // the pty lock) so its readable-scan re-runs.
+            crate::userland::readiness::notify_changed();
+        }
+        consumed
     }
 
     pub fn termios(&self) -> Termios {
@@ -459,6 +658,13 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &tests::test_slave_write_translates_lf_to_crlf_under_onlcr,
         &tests::test_slave_write_passes_through_when_opost_off,
         &tests::test_slave_write_preserves_existing_cr,
+        &tests::test_canonical_buffers_until_newline_and_echoes,
+        &tests::test_raw_mode_passes_through_without_echo,
+        &tests::test_canonical_backspace_erases,
+        &tests::test_canonical_line_caps_at_max_canon,
+        &tests::test_veof_flushes_partial_line_and_signals_eof,
+        &tests::test_vintr_discards_line_and_reports_sigint,
+        &tests::test_vkill_erases_whole_line,
     ]
 }
 
@@ -469,6 +675,133 @@ mod tests {
     fn fresh_master() -> PtyMaster {
         let id = WindowId::new();
         install_for_terminal(id, 24, 80)
+    }
+
+    // Line discipline: the ring-3 emulator's `push_slave_input` applies
+    // canonical-mode editing (echo + line buffering) so a userland terminal
+    // needn't reimplement N_TTY. See `docs/plans/...terminal-emulator-userland`.
+
+    pub(super) fn test_canonical_buffers_until_newline_and_echoes() {
+        // Default termios is canonical + echo + ICRNL.
+        let m = fresh_master();
+        let id = m.terminal_id();
+        let s = slave_for_terminal(id).unwrap();
+        // Typing "ls" buffers (no delivery to the slave) and echoes.
+        m.with(|p| p.push_slave_input(b"ls"));
+        let mut buf = [0u8; 16];
+        assert_eq!(s.read(&mut buf), 0, "canonical mode holds the line");
+        assert_eq!(&m.drain_output()[..], b"ls", "each char echoes");
+        // Enter (CR mapped to LF via ICRNL) flushes the whole line.
+        m.with(|p| p.push_slave_input(b"\r"));
+        let n = s.read(&mut buf);
+        assert_eq!(&buf[..n], b"ls\n", "the completed line is delivered");
+        assert_eq!(&m.drain_output()[..], b"\r\n", "newline echoes as CRLF");
+        clear_for_terminal(id);
+    }
+
+    pub(super) fn test_raw_mode_passes_through_without_echo() {
+        let m = fresh_master();
+        let id = m.terminal_id();
+        let s = slave_for_terminal(id).unwrap();
+        let mut t = m.termios();
+        t.c_lflag &= !ICANON;
+        m.set_termios(t);
+        m.with(|p| p.push_slave_input(b"ls"));
+        let mut buf = [0u8; 16];
+        let n = s.read(&mut buf);
+        assert_eq!(&buf[..n], b"ls", "raw mode delivers immediately");
+        assert!(m.drain_output().is_empty(), "raw mode does not echo");
+        clear_for_terminal(id);
+    }
+
+    pub(super) fn test_canonical_backspace_erases() {
+        let m = fresh_master();
+        let id = m.terminal_id();
+        let s = slave_for_terminal(id).unwrap();
+        m.with(|p| p.push_slave_input(b"lx"));
+        let _ = m.drain_output();
+        // VERASE (0x7F) erases the last buffered char and echoes `\b \b`.
+        m.with(|p| p.push_slave_input(b"\x7f"));
+        assert_eq!(&m.drain_output()[..], b"\x08 \x08");
+        m.with(|p| p.push_slave_input(b"s\r"));
+        let mut buf = [0u8; 16];
+        let n = s.read(&mut buf);
+        assert_eq!(&buf[..n], b"ls\n", "erased char is not in the delivered line");
+        clear_for_terminal(id);
+    }
+
+    pub(super) fn test_canonical_line_caps_at_max_canon() {
+        let m = fresh_master();
+        let id = m.terminal_id();
+        let s = slave_for_terminal(id).unwrap();
+        // Feed 2x MAX_CANON without a newline: only MAX_CANON buffer.
+        let blob = alloc::vec![b'x'; MAX_CANON * 2];
+        let r = m.with(|p| p.push_slave_input(&blob));
+        assert_eq!(r.consumed, MAX_CANON * 2, "overflow bytes still consumed");
+        m.with(|p| p.push_slave_input(b"\n"));
+        let mut total = 0usize;
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = s.read(&mut buf);
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        assert_eq!(total, MAX_CANON + 1, "line capped at MAX_CANON + newline");
+        clear_for_terminal(id);
+    }
+
+    pub(super) fn test_veof_flushes_partial_line_and_signals_eof() {
+        let m = fresh_master();
+        let id = m.terminal_id();
+        let s = slave_for_terminal(id).unwrap();
+        // ^D after a partial line flushes it without a terminator.
+        let r = m.with(|p| p.push_slave_input(b"hi\x04"));
+        assert!(r.wake_reader);
+        let mut buf = [0u8; 16];
+        let n = s.read(&mut buf);
+        assert_eq!(&buf[..n], b"hi", "VEOF delivers the partial line as-is");
+        assert!(!s.take_eof(), "a flushed line is not an EOF");
+        // ^D on an empty line marks EOF: readable, then read-as-zero once.
+        let r = m.with(|p| p.push_slave_input(b"\x04"));
+        assert!(r.wake_reader);
+        assert_eq!(s.readable(), 1, "pending EOF reports readable");
+        assert_eq!(s.read(&mut buf), 0);
+        assert!(s.take_eof(), "EOF consumed exactly once");
+        assert!(!s.take_eof());
+        clear_for_terminal(id);
+    }
+
+    pub(super) fn test_vintr_discards_line_and_reports_sigint() {
+        let m = fresh_master();
+        let id = m.terminal_id();
+        let s = slave_for_terminal(id).unwrap();
+        let r = m.with(|p| p.push_slave_input(b"doomed\x03"));
+        assert_eq!(r.signal, Some(crate::userland::signal::SIGINT));
+        let _ = m.drain_output();
+        // The partial line is gone: Enter delivers just the newline.
+        m.with(|p| p.push_slave_input(b"\n"));
+        let mut buf = [0u8; 16];
+        let n = s.read(&mut buf);
+        assert_eq!(&buf[..n], b"\n", "VINTR discarded the buffered line");
+        clear_for_terminal(id);
+    }
+
+    pub(super) fn test_vkill_erases_whole_line() {
+        let m = fresh_master();
+        let id = m.terminal_id();
+        let s = slave_for_terminal(id).unwrap();
+        m.with(|p| p.push_slave_input(b"junk"));
+        let _ = m.drain_output();
+        // ^U erases all four chars, echoing a rubout per char.
+        m.with(|p| p.push_slave_input(b"\x15"));
+        assert_eq!(&m.drain_output()[..], b"\x08 \x08\x08 \x08\x08 \x08\x08 \x08");
+        m.with(|p| p.push_slave_input(b"ok\n"));
+        let mut buf = [0u8; 16];
+        let n = s.read(&mut buf);
+        assert_eq!(&buf[..n], b"ok\n");
+        clear_for_terminal(id);
     }
 
     pub(super) fn test_termios_size_matches_linux() {
