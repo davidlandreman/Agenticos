@@ -181,8 +181,14 @@ pub fn init(boot_info: &'static mut BootInfo) {
             crate::drivers::mouse::init();
         }
 
-        debug_info!("[boot] guishell");
-        init_guishell_desktop();
+        if ring3_desktop_shell_requested() {
+            debug_info!("[boot] desktop root (ring-3 shell mode)");
+            crate::commands::guishell::init_desktop_root_only();
+            window::render_frame();
+        } else {
+            debug_info!("[boot] guishell");
+            init_guishell_desktop();
+        }
 
         debug_info!("[boot] mcp-bridge");
         init_mcp_bridge();
@@ -599,6 +605,18 @@ fn force_dirty_mount_requested() -> bool {
     matches!(core::str::from_utf8(&value[..length]), Ok("1"))
 }
 
+/// Whether the desktop shell should run as the ring-3 `DESKTOP.ELF` process
+/// rather than the in-kernel `guishell`. The ring-3 shell is now the default;
+/// only an explicit `AGENTICOS_SHELL=ring0` (fw_cfg `opt/agenticos/shell`)
+/// selects the legacy in-kernel shell.
+fn ring3_desktop_shell_requested() -> bool {
+    let mut value = [0u8; 8];
+    let Some(length) = crate::drivers::fw_cfg::read_file("opt/agenticos/shell", &mut value) else {
+        return true;
+    };
+    !matches!(core::str::from_utf8(&value[..length]), Ok("ring0"))
+}
+
 /// Probe the `agenticos-data` VirtIO device and mount its whole-disk ext2/FAT image at
 /// `/data`. Failures are non-fatal so the kernel can still boot without a
 /// persistent disk.
@@ -803,9 +821,17 @@ pub fn run() -> ! {
     debug_info!("Spawning user process service...");
     crate::userland::process_service::start();
 
-    // Start the GUIShell background process (handles taskbar + start menu)
-    debug_info!("Spawning GUIShell background process...");
-    crate::commands::guishell::spawn_guishell_process();
+    // Start the desktop shell. The default in-kernel GUIShell owns the taskbar
+    // and Start menu directly; AGENTICOS_SHELL=ring3 instead launches the
+    // ring-3 DESKTOP.ELF, which claims the shell role and drives the taskbar
+    // through the desktop-shell protocol syscalls.
+    if ring3_desktop_shell_requested() {
+        debug_info!("Launching ring-3 desktop shell (DESKTOP.ELF)...");
+        crate::commands::guishell::spawn_ring3_desktop_shell();
+    } else {
+        debug_info!("Spawning GUIShell background process...");
+        crate::commands::guishell::spawn_guishell_process();
+    }
 
     // U10: spawn the compositor kernel thread that owns input
     // processing + terminal output + rendering. Pre-U10 the kernel

@@ -396,7 +396,8 @@ fn test_gui_syscall_argument_errors() {
     let mut unknown_flags = SyscallArgs::default();
     unknown_flags.rdi = 100;
     unknown_flags.rsi = 100;
-    unknown_flags.r8 = 1 << 1;
+    // Bit 3 is outside the defined flag set (fixed-size | undecorated | panel).
+    unknown_flags.r8 = 1 << 3;
     assert_eq!(
         crate::userland::gui_syscalls::gui_win_create_handler(&mut unknown_flags),
         EINVAL
@@ -539,8 +540,175 @@ fn test_gui_create_destroy_lifecycle() {
     }
 }
 
+fn test_desktop_shell_registration() {
+    use crate::userland::abi::EEXIST;
+    gui::reset_for_test();
+    let a = 4242u32;
+    let b = 4343u32;
+    assert!(!gui::is_desktop_shell(a));
+    assert_eq!(gui::register_desktop_shell(a), Ok(()));
+    assert!(gui::is_desktop_shell(a));
+    // Idempotent for the current holder.
+    assert_eq!(gui::register_desktop_shell(a), Ok(()));
+    // A different live shell is rejected while the seat is held.
+    assert_eq!(gui::register_desktop_shell(b), Err(EEXIST));
+    assert!(!gui::is_desktop_shell(b));
+    // Process exit releases the role; the seat reopens.
+    gui::cleanup_process(a);
+    assert!(!gui::is_desktop_shell(a));
+    assert_eq!(gui::register_desktop_shell(b), Ok(()));
+    assert!(gui::is_desktop_shell(b));
+    gui::reset_for_test();
+    assert!(!gui::is_desktop_shell(b));
+}
+
+fn test_shell_syscalls_require_registration() {
+    use crate::userland::abi::EPERM;
+    gui::reset_for_test();
+    let pid = crate::userland::gui_syscalls::TEST_GUI_CALLER_PID;
+    assert!(!gui::is_desktop_shell(pid));
+
+    // Chrome-surface creation is refused for non-shell callers.
+    let mut undecorated = SyscallArgs::default();
+    undecorated.rdi = 200;
+    undecorated.rsi = 40;
+    undecorated.r8 = gui::GUI_WINDOW_UNDECORATED;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_win_create_handler(&mut undecorated),
+        EPERM
+    );
+    let mut panel = SyscallArgs::default();
+    panel.rdi = 200;
+    panel.rsi = 40;
+    panel.r8 = gui::GUI_WINDOW_PANEL;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_win_create_handler(&mut panel),
+        EPERM
+    );
+
+    // The gui_shell_* syscalls are likewise refused.
+    let mut list = SyscallArgs::default();
+    list.rsi = 4096;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_shell_list_windows_handler(&mut list),
+        EPERM
+    );
+    let mut action = SyscallArgs::default();
+    action.rdi = 1;
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_shell_window_action_handler(&mut action),
+        EPERM
+    );
+    let mut terminal = SyscallArgs::default();
+    assert_eq!(
+        crate::userland::gui_syscalls::gui_shell_spawn_terminal_handler(&mut terminal),
+        EPERM
+    );
+    gui::reset_for_test();
+}
+
+fn test_shell_window_list_and_action() {
+    gui::reset_for_test();
+    let pid = crate::userland::gui_syscalls::TEST_GUI_CALLER_PID;
+
+    // Install a temporary desktop root (test boot skips the GUIShell desktop).
+    let temporary_root = crate::window::with_window_manager(|wm| {
+        if wm
+            .get_active_screen()
+            .and_then(|screen| screen.root_window)
+            .is_some()
+        {
+            return None;
+        }
+        let root_id = wm.create_window(None);
+        let (width, height) = wm.screen_dimensions();
+        wm.set_window_impl(
+            root_id,
+            alloc::boxed::Box::new(crate::window::windows::DesktopWindow::new(
+                root_id,
+                crate::window::Rect::new(0, 0, width, height),
+            )),
+        );
+        wm.get_active_screen_mut()
+            .expect("active test screen")
+            .set_root_window(root_id);
+        Some(root_id)
+    })
+    .flatten();
+
+    // Create an ordinary application frame.
+    let mut create = SyscallArgs::default();
+    create.rdi = 320;
+    create.rsi = 200;
+    let handle = crate::userland::gui_syscalls::gui_win_create_handler(&mut create);
+    assert!(handle >= 1, "create failed with errno {}", handle);
+    let record = gui::window_record(pid, handle as u32).expect("window record");
+    let frame_id = record.frame_id;
+
+    // Claim the shell role, then the frame must appear in the list at state 0.
+    assert_eq!(gui::register_desktop_shell(pid), Ok(()));
+    let listed = crate::window::with_window_manager(|wm| wm.shell_window_list()).unwrap_or_default();
+    let entry = listed
+        .iter()
+        .find(|(id, _, _)| *id == frame_id)
+        .expect("frame present in shell list");
+    assert_eq!(entry.1.as_str(), "AgenticOS Application");
+    assert_eq!(entry.2, 0);
+
+    // The list syscall copies the same record into a user buffer.
+    let mut buffer = [0u8; core::mem::size_of::<gui::ShellWindowRecord>() * 4];
+    let base = buffer.as_mut_ptr() as u64;
+    crate::userland::abi::set_user_va_bounds(UserVaBounds {
+        start: base,
+        end: base + buffer.len() as u64,
+    });
+    let mut list = SyscallArgs::default();
+    list.rdi = base;
+    list.rsi = buffer.len() as u64;
+    let count = crate::userland::gui_syscalls::gui_shell_list_windows_handler(&mut list);
+    crate::userland::abi::clear_user_va_bounds();
+    assert!(count >= 1, "list returned errno {}", count);
+    let first = &buffer[..core::mem::size_of::<gui::ShellWindowRecord>()];
+    let reported_id = u64::from_le_bytes(first[0..8].try_into().unwrap());
+    let reported_state = u32::from_le_bytes(first[8..12].try_into().unwrap());
+    assert_eq!(reported_id, frame_id.0 as u64);
+    assert_eq!(reported_state, 0);
+
+    // Minimize/activate cycle updates the reported state.
+    assert!(crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, 1))
+        .unwrap_or(false));
+    let minimized = crate::window::with_window_manager(|wm| wm.shell_window_list())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(id, _, _)| *id == frame_id)
+        .map(|(_, _, state)| state);
+    assert_eq!(minimized, Some(1));
+    assert!(crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, 0))
+        .unwrap_or(false));
+
+    // Close removes the frame entirely.
+    assert!(crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, 4))
+        .unwrap_or(false));
+    let after_close =
+        crate::window::with_window_manager(|wm| wm.shell_window_list()).unwrap_or_default();
+    assert!(after_close.iter().all(|(id, _, _)| *id != frame_id));
+
+    gui::reset_for_test();
+    if let Some(root_id) = temporary_root {
+        let _ = crate::window::with_window_manager(|wm| {
+            wm.destroy_window(root_id);
+            wm.get_active_screen_mut()
+                .expect("active test screen")
+                .root_window = None;
+        });
+    }
+}
+
 pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
     &[
+        &test_desktop_shell_registration,
+        &test_shell_syscalls_require_registration,
+        &test_shell_window_list_and_action,
         &test_gui_event_layout_and_encoding,
         &test_gui_mouse_button_encodes_timestamp_and_modifiers,
         &test_gui_queue_coalesces_mouse_moves,
