@@ -5,8 +5,10 @@ mod virgl;
 
 pub use cpu::CpuCompositionEngine;
 #[cfg(feature = "test")]
+pub use virgl::gpu_backdrop_radius_supported;
+#[cfg(feature = "test")]
 pub(crate) use virgl::stage_surface_rect_for_test;
-pub use virgl::{gpu_backdrop_radius_supported, VirglCompositionEngine};
+pub use virgl::VirglCompositionEngine;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

@@ -654,8 +654,8 @@ fn test_clean_child_outside_dirty_skips_when_parent_paints() {
     // before painting, so a parent that paints because its own bounds
     // intersected dirty cannot overdraw pixels outside the dirty union —
     // including pixels inside a child whose bounds don't intersect dirty.
-    // Such a child must therefore stay clean (skip paint), so widgets like
-    // TextWindow can keep their incremental-cells fast path.
+    // Such a child must therefore stay clean (skip paint), preserving
+    // fine-grained repaint paths in child widgets.
     let (mut wm, state) = make_manager(800, 600);
     let _ = build_simple_scene(
         &mut wm,
@@ -681,7 +681,7 @@ fn test_clean_child_outside_dirty_skips_when_parent_paints() {
         s.fills_with_color(CHILD0_COLOR).is_empty(),
         "child whose bounds don't intersect dirty must NOT paint — the \
          parent's clip prevents overdraw, so propagating dirty downward \
-         was a regression that defeated TextWindow's incremental updates"
+         would defeat fine-grained child updates"
     );
 }
 

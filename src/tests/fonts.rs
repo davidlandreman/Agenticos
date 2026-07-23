@@ -1,7 +1,7 @@
 //! Font subsystem tests. Run after `init_fonts()` so the bundled system TTF
 //! has already been parsed into the default font.
 
-use crate::graphics::fonts::core_font::{get_default_font, get_embedded_font, get_terminal_font};
+use crate::graphics::fonts::core_font::{get_default_font, get_embedded_font};
 use crate::lib::test_utils::Testable;
 
 fn test_default_font_parsed() {
@@ -91,19 +91,6 @@ fn test_powerline_glyphs_and_metrics() {
     assert_eq!(font.line_height(), 18);
 }
 
-fn test_terminal_font_is_larger_than_ui_font() {
-    let ui = get_default_font();
-    let terminal = get_terminal_font();
-    assert!(
-        terminal.cell_width() > ui.cell_width(),
-        "terminal characters should be wider than default UI characters"
-    );
-    assert!(
-        terminal.line_height() > ui.line_height(),
-        "terminal lines should be taller than default UI lines"
-    );
-}
-
 fn test_embedded_fallback_has_full_ascii() {
     // The embedded 8x8 fallback must cover printable ASCII end-to-end so a
     // TTF parse failure still leaves a usable kernel.
@@ -127,7 +114,6 @@ pub fn get_tests() -> &'static [&'static dyn Testable] {
         &test_measure_text_sums_advances,
         &test_glyph_coverage_has_antialiasing,
         &test_powerline_glyphs_and_metrics,
-        &test_terminal_font_is_larger_than_ui_font,
         &test_embedded_fallback_has_full_ascii,
     ]
 }

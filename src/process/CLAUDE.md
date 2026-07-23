@@ -91,4 +91,5 @@ metadata or reclaim the exiting process's still-active kernel stack.
 - Naked-asm context switching and timer ISR: `src/arch/x86_64/CLAUDE.md`.
 - Userland (ring-3) processes: `src/userland/CLAUDE.md` (under construction).
 - Kernel-side GUI app launchers: `src/commands/CLAUDE.md`.
-- The interactive shell runs as ring-3 zsh (`/host/ZSH.ELF`); terminal factory creates the window/PTY and submits an explicit-terminal launch request to `process-service`.
+- The interactive terminal is ring-3 `TERMINAL.ELF`. It creates its GUI
+  surface and PTY, then forks/execs zsh; there is no kernel terminal factory.

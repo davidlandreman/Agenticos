@@ -69,18 +69,6 @@ pub fn run() {
         }
         drop(g);
 
-        // U10/bugfix: invalidate terminal windows that have buffered
-        // output from ring-3 writes. The write path itself doesn't
-        // touch WINDOW_MANAGER (would deadlock against an
-        // in-progress render); the invalidation happens here under
-        // the compositor's own lock.
-        crate::window::terminal::invalidate_dirty_terminals();
-
-        // Terminal output processing keeps running so the user app's
-        // `write` syscall bytes still reach the terminal buffer; the
-        // compositing catches up after the binary exits.
-        crate::window::process_terminal_output();
-
         // Render frame (early-exit inside if compositor has no dirty regions).
         crate::window::render_frame();
         crate::system_control::drain_pending_notifications();

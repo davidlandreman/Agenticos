@@ -1,6 +1,5 @@
 //! Window Manager - Central coordinator for all windows and screens
 
-use super::console::take_pending_invalidations;
 use super::cursor::CursorRenderer;
 use super::renderer::{
     boot_request, boot_strict, invalid_boot_request, select_renderer, RendererKind,
@@ -22,7 +21,6 @@ use crate::graphics::compositor::Compositor;
 use crate::graphics::present::{BootFramebufferPresenter, Presenter};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -383,12 +381,6 @@ impl WindowManager {
 
     /// Destroy a window and all of its descendants.
     pub fn destroy_window(&mut self, id: WindowId) {
-        // If this window (or one of its descendants, via the recursion
-        // below) is a terminal, kill its ring-3 process tree first so
-        // closing the window doesn't orphan zsh and its children. No-op
-        // for non-terminal windows.
-        crate::window::terminal_factory::on_window_destroyed(id);
-
         // Snapshot children first (since registry is mutated below).
         let children: Vec<WindowId> = self
             .window_registry
@@ -950,17 +942,6 @@ impl WindowManager {
             }
         }
 
-        // A child may request a title change for its enclosing frame. Drain
-        // the request after releasing the child's mutable registry borrow,
-        // then walk upward to the nearest decorated frame.
-        let pending_title = self
-            .window_registry
-            .get_mut(&window_id)
-            .and_then(|w| w.take_pending_frame_title());
-        if let Some(title) = pending_title {
-            self.apply_frame_title_request(window_id, title);
-        }
-
         // Handle propagation
         if result == EventResult::Propagate {
             if let Some(window) = self.window_registry.get(&window_id) {
@@ -1086,14 +1067,6 @@ impl WindowManager {
 
     /// Render the current state to the graphics device
     pub fn render(&mut self) {
-        // Process any pending invalidations from deferred queue
-        let pending = take_pending_invalidations();
-        for window_id in pending {
-            if let Some(window) = self.window_registry.get_mut(&window_id) {
-                window.invalidate();
-            }
-        }
-
         // Process menu bar popup requests
         self.process_menu_bar_popups();
 
@@ -1117,18 +1090,6 @@ impl WindowManager {
                 previous_cursor_position.1.min(i32::MAX as usize) as i32,
             )
         });
-
-        // Per-frame preparation pass — run BEFORE cascade and dirty
-        // marking so any window that needs to drain external buffers
-        // (e.g. `TerminalWindow` consuming pending shell output) can
-        // populate its internal dirty tracking, which `dirty_rect_hint`
-        // then reports accurately. Without this, a window that just
-        // received output would see an empty dirty hint, the compositor
-        // would mark its full bounds dirty, and the desktop's per-region
-        // wallpaper blit would overwrite the rest of the window — only
-        // for the window's incremental paint to redraw the freshly-
-        // arrived cells, leaving older content as wallpaper.
-        self.prepare_windows_for_render();
 
         // Cascade invalidation across the z-order so that any window in
         // front of a dirty one (and overlapping it) repaints too. Without
@@ -1859,64 +1820,6 @@ impl WindowManager {
         damage: &[Rect],
     ) -> Vec<Rect> {
         Self::expand_backdrop_damage(scene, damage)
-    }
-
-    /// Walk the render-order tree and mark every invalidated window's
-    /// **absolute** bounds dirty. The render tree is the source of absolute
-    /// bounds; iterating the flat registry would mark dirty using each
-    /// window's *local* bounds, which silently aliases unrelated screen
-    /// regions for any window whose parent is at a non-zero offset.
-    /// Call `prepare_for_render` on every window in the registry. Runs
-    /// before cascade + dirty marking so windows that drain external
-    /// buffers (terminal output, console output) update their internal
-    /// dirty state in time for `dirty_rect_hint` and the cascade walk
-    /// to read it.
-    fn prepare_windows_for_render(&mut self) {
-        let ids: Vec<WindowId> = self.window_registry.keys().copied().collect();
-        for id in ids {
-            // Pull the window out so its `prepare_for_render` can route
-            // through `with_active_manager` if it ever needs to (matches
-            // the borrowing pattern in `render_window_tree_in_region`).
-            if let Some(mut window) = self.window_registry.remove(&id) {
-                let self_ptr = self as *mut WindowManager;
-                let prev = ACTIVE_MANAGER.swap(self_ptr, Ordering::SeqCst);
-                window.prepare_for_render();
-                ACTIVE_MANAGER.store(prev, Ordering::SeqCst);
-                let pending_title = window.take_pending_frame_title();
-                self.window_registry.insert(id, window);
-                if let Some(title) = pending_title {
-                    self.apply_frame_title_request(id, title);
-                }
-            }
-        }
-    }
-
-    fn apply_frame_title_request(&mut self, window_id: WindowId, title: String) {
-        let mut ancestor = self
-            .window_registry
-            .get(&window_id)
-            .and_then(|window| window.parent());
-        while let Some(id) = ancestor {
-            let is_frame = self
-                .window_registry
-                .get(&id)
-                .and_then(|window| window.window_title())
-                .is_some();
-            if is_frame {
-                if let Some(frame) = self
-                    .window_registry
-                    .get_mut(&id)
-                    .and_then(|window| window.as_frame_window_mut())
-                {
-                    frame.set_title(&title);
-                }
-                break;
-            }
-            ancestor = self
-                .window_registry
-                .get(&id)
-                .and_then(|window| window.parent());
-        }
     }
 
     fn mark_dirty_for_invalidated_windows(&mut self) {

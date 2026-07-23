@@ -19,11 +19,9 @@
 use crate::color::Color;
 
 /// Default foreground used when `ColorSpec::Default` is resolved for FG.
-/// Matches the prior `TextWindow` foreground.
 pub const DEFAULT_FG: Color = Color::WHITE;
 
 /// Default background used when `ColorSpec::Default` is resolved for BG.
-/// Matches the dark-grey terminal background painted by `TextWindow`.
 pub const DEFAULT_BG: Color = Color::new(32, 32, 32);
 
 /// A per-cell color specification. Copied/compared by value.

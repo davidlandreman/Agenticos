@@ -8,8 +8,8 @@
 // What this exercises:
 //   - argv: the kernel forwards the `run` command's tokens as argv.
 //   - envp: PATH / HOME / TERM / LANG come from `RunProcess::run_path`.
-//   - stdin: read(0, …) blocks until the focused TerminalWindow delivers
-//     a completed line on Enter; the bytes are echoed back.
+//   - stdin: read(0, …) blocks on the process's pty slave until the ring-3
+//     terminal emulator writes a completed line; the bytes are echoed back.
 //   - cwd: getcwd() reports the kernel-installed cwd ("/host").
 //   - uname: identifies as Linux x86_64 / "agenticos".
 //   - file open: --read <path> opens, slurps, and prints up to 1 KiB.

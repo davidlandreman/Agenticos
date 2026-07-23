@@ -205,14 +205,10 @@ pub struct Process {
     /// block I/O must resume the in-progress kernel operation exactly where
     /// it parked (filesystem operations may already have partial state).
     pub kernel_continuation: Option<Box<crate::process::CpuContext>>,
-    /// U8/bugfix: terminal window this process's stdout + stderr
-    /// should route to. Inherited from the launching kernel thread's
-    /// PCB.terminal_id at install time, and from the parent across
-    /// fork. `None` for synthetic test processes (output falls back
-    /// to the global CURRENT_OUTPUT_TERMINAL). Pre-fix, all ring-3
-    /// processes routed via a single global `CURRENT_OUTPUT_TERMINAL`
-    /// which the last launcher won — under multi-terminal that caused
-    /// zsh1's writes to land in terminal 2's window.
+    /// Ring-3 terminal GUI surface whose PTY carries this process's stdio.
+    /// Inherited from the launching kernel thread at install time and from the
+    /// parent across fork. `None` for processes without a controlling PTY,
+    /// whose diagnostic output falls back to the framebuffer.
     pub terminal_id: Option<crate::window::WindowId>,
 }
 
@@ -1234,72 +1230,6 @@ pub fn raise_signal_on_terminal(terminal_id: crate::window::WindowId, sig: i32) 
     for pid in raised {
         wake_ring3_for_signal(pid);
     }
-}
-
-/// Force-terminate every ring-3 process bound to `terminal_id` — a shell
-/// and everything it forked, since children inherit the parent's
-/// `terminal_id` across `fork` (`fork_handler` in `syscalls.rs`). Called
-/// by the window-close path so closing a terminal window tears down its
-/// process tree (`zsh` + `ping` + …) instead of orphaning it.
-///
-/// This deliberately bypasses the signal machinery: default-disposition
-/// signals (SIGKILL/SIGHUP) are left pending and never acted on today
-/// (see `SignalState::consume_deliverable`), and the cooperative-exit
-/// path must run on the dying process's own kernel stack. Instead we
-/// remove each `Process` from the table and drop it, which frees its
-/// `AddressSpace`, `KernelStack`, and fd table.
-///
-/// Safety: the caller runs on a kernel thread (the compositor / window
-/// manager), so none of the target ring-3 processes are executing on
-/// their kernel stacks right now — a blocked or ready ring-3 process has
-/// its live state in `saved_user_state`, and its kernel stack holds only
-/// an abandoned frame that the next SYSCALL entry would overwrite. See
-/// the U8 notes in `src/userland/CLAUDE.md`.
-///
-/// Production terminal factory first cancels the corresponding process-service
-/// record. The final compatibility wake below exists only for QEMU fixtures
-/// still blocked in `launch_user_binary`.
-pub fn kill_ring3_processes_on_terminal(terminal_id: crate::window::WindowId) {
-    // Snapshot the victim PIDs under the table lock, then release it
-    // before removing/dropping any `Process`: `remove_process` takes the
-    // lock itself, and `AddressSpace::drop` touches the global memory
-    // mapper — neither must run while we hold `PROCESS_TABLE`.
-    let victims: alloc::vec::Vec<u32> = {
-        let g = PROCESS_TABLE.lock();
-        g.by_pid
-            .iter()
-            .filter(|(pid, p)| **pid != KERNEL_PID && p.terminal_id == Some(terminal_id))
-            .map(|(pid, _)| *pid)
-            .collect()
-    };
-
-    if victims.is_empty() {
-        return;
-    }
-
-    for pid in &victims {
-        // `remove_process` yanks the PID out of `by_pid`,
-        // `ring3_ready`, and `ring3_blocked`, and clears
-        // `current_user_pid` if it matched. Dropping the returned
-        // `Process` frees its address space, kernel stack, and fds.
-        if let Some(process) = remove_process(*pid) {
-            drop(process);
-        }
-    }
-
-    // Unblock the launcher kernel thread(s) parked on these ring-3 pids'
-    // exit so they return from `launch_user_binary` instead of hanging.
-    let mut sched = crate::process::scheduler::SCHEDULER.lock();
-    for pid in &victims {
-        sched.wake_threads_waiting_for_ring3_exit(*pid);
-    }
-    drop(sched);
-
-    crate::debug_info!(
-        "kill_ring3_processes_on_terminal: terminated {} ring-3 process(es) for {:?}",
-        victims.len(),
-        terminal_id
-    );
 }
 
 /// Wake every ring-3 process blocked on a pipe read. Called when a

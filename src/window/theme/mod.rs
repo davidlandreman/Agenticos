@@ -186,25 +186,6 @@ pub const AERO_BACKDROP_RADIUS: u16 = 6;
 /// sharp glass — which panics strict-GPU boots.
 pub const FUTURISM_BACKDROP_RADIUS: u16 = 6;
 
-/// Theme material for the terminal's default background. Explicit ANSI cell
-/// backgrounds remain opaque; only the default content well uses this alpha.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalWellMaterial {
-    pub tint: Color,
-    pub alpha: u8,
-}
-
-const CLASSIC_TERMINAL_WELL: TerminalWellMaterial = TerminalWellMaterial {
-    tint: Color::new(32, 32, 32),
-    alpha: u8::MAX,
-};
-
-pub const MODERN_TERMINAL_WELL_ALPHA: u8 = 232;
-const MODERN_TERMINAL_WELL: TerminalWellMaterial = TerminalWellMaterial {
-    tint: Color::new(32, 32, 32),
-    alpha: MODERN_TERMINAL_WELL_ALPHA,
-};
-
 /// Everything the window system needs to know about one theme. (Display
 /// names live ring-3-side in Control Center's theme table.)
 pub struct ThemeSpec {
@@ -217,8 +198,6 @@ pub struct ThemeSpec {
     pub metrics: FrameMetrics,
     /// Compositor effect for frame-window layers.
     pub frame_effect: LayerEffect,
-    /// Default background material for terminal content wells.
-    pub terminal_well: TerminalWellMaterial,
     draw_frame: fn(&FrameChrome<'_>, &mut dyn GraphicsDevice),
     /// Post-children pass over the frame layer, for themes whose content
     /// runs flush to the window edge and needs its corners re-carved after
@@ -232,7 +211,6 @@ const CLASSIC_SPEC: ThemeSpec = ThemeSpec {
     fallback_reason: "",
     metrics: CLASSIC_METRICS,
     frame_effect: LayerEffect::None,
-    terminal_well: CLASSIC_TERMINAL_WELL,
     draw_frame: classic::draw,
     draw_frame_overlay: None,
 };
@@ -245,7 +223,6 @@ const AERO_SPEC: ThemeSpec = ThemeSpec {
     frame_effect: LayerEffect::BackdropSample {
         radius: AERO_BACKDROP_RADIUS,
     },
-    terminal_well: MODERN_TERMINAL_WELL,
     draw_frame: aero::draw,
     draw_frame_overlay: None,
 };
@@ -258,7 +235,6 @@ const FUTURISM_SPEC: ThemeSpec = ThemeSpec {
     frame_effect: LayerEffect::BackdropSample {
         radius: FUTURISM_BACKDROP_RADIUS,
     },
-    terminal_well: MODERN_TERMINAL_WELL,
     draw_frame: futurism::draw,
     draw_frame_overlay: Some(futurism::draw_overlay),
 };
@@ -390,14 +366,6 @@ pub const fn frame_effect_for(kind: ThemeKind) -> LayerEffect {
 
 pub fn frame_effect() -> LayerEffect {
     frame_effect_for(active())
-}
-
-pub const fn terminal_well_for(kind: ThemeKind) -> TerminalWellMaterial {
-    spec_for(kind).terminal_well
-}
-
-pub fn terminal_well() -> TerminalWellMaterial {
-    terminal_well_for(active())
 }
 
 pub const fn metrics_for(kind: ThemeKind) -> FrameMetrics {

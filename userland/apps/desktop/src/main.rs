@@ -8,10 +8,10 @@
 //! the application launcher. It talks to the kernel compositor purely through
 //! the desktop-shell protocol syscalls (`gui_shell_register`,
 //! `gui_shell_list_windows`, `gui_shell_window_action`,
-//! `gui_shell_spawn_terminal`) plus the `GUI_WINDOW_PANEL` /
-//! `GUI_WINDOW_UNDECORATED` chrome flags, and launches applications with plain
-//! POSIX `fork`+`execve`. The kernel keeps the compositor, the desktop-root
-//! wallpaper, and the terminal/PTY service.
+//! plus the `GUI_WINDOW_PANEL` / `GUI_WINDOW_UNDECORATED` chrome flags, and
+//! launches applications — including `TERMINAL.ELF` — with plain POSIX
+//! `fork`+`execve`. The kernel keeps the compositor, desktop-root wallpaper,
+//! and PTY service.
 //!
 //! The Start menu mirrors the old kernel `guishell`: an "AgenticOS" banner, a
 //! two-column Programs fly-out, per-item icons, and a Win95-style layout.
@@ -49,6 +49,7 @@ const TASK_BTN_GAP: i32 = 4;
 const CLOCK_REALTIME: i32 = 0;
 const MAX_TASK_WINDOWS: usize = 32;
 const ZSH_PATH: &str = "/host/ZSH.ELF";
+const TERMINAL_PATH: &str = "/host/TERMINAL.ELF";
 
 // Start-menu geometry, mirroring the kernel `start_menu.rs`.
 const BANNER_W: i32 = 28;
@@ -751,7 +752,7 @@ impl Shell {
     fn activate(&mut self, action: MenuAction) {
         match action {
             MenuAction::Terminal => {
-                runtime::gui_shell_spawn_terminal();
+                self.spawn(TERMINAL_PATH, &["terminal"]);
             }
             MenuAction::FileManager => self.spawn("/host/FILEMAN.ELF", &["explorer"]),
             MenuAction::WebBrowser => self.spawn(

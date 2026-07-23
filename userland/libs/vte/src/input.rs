@@ -5,7 +5,7 @@
 //! `payload[0]` is the kernel's `encode_key_code` value (0 = Unknown, 1..=80
 //! for the named keys, in the order below). [`decode_key_code`] is the inverse
 //! of that mapping. `keys::encode_keystroke` then consumes the decoded
-//! [`KeyCode`] + [`KeyModifiers`] exactly as the kernel `TerminalWindow` did.
+//! [`KeyCode`] + [`KeyModifiers`].
 //!
 //! The [`KeyCode`] variant order here is load-bearing: it must match the
 //! kernel's `src/userland/gui.rs::encode_key_code` numbering.

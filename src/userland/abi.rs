@@ -360,7 +360,6 @@ pub mod nr {
     pub const GUI_SHELL_REGISTER: u64 = 5015;
     pub const GUI_SHELL_LIST_WINDOWS: u64 = 5016;
     pub const GUI_SHELL_WINDOW_ACTION: u64 = 5017;
-    pub const GUI_SHELL_SPAWN_TERMINAL: u64 = 5018;
 }
 
 /// Central syscall dispatcher. Called from the naked SYSCALL entry stub in
@@ -517,9 +516,6 @@ pub fn syscall_dispatch(args: &mut SyscallArgs) -> i64 {
         }
         nr::GUI_SHELL_WINDOW_ACTION => {
             crate::userland::gui_syscalls::gui_shell_window_action_handler(args)
-        }
-        nr::GUI_SHELL_SPAWN_TERMINAL => {
-            crate::userland::gui_syscalls::gui_shell_spawn_terminal_handler(args)
         }
         // Phase B: namespace mutations
         nr::MKDIR => syscalls::mkdir_handler(args),

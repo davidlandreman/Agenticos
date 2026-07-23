@@ -1,5 +1,15 @@
 # Window System Design Document
 
+> **Historical design record.** The hierarchical window-manager concepts
+> remain useful, but the `TextWindow`/`TerminalWindow`, inline terminal
+> graphics, and kernel-owned shell sections below are not current
+> architecture. The interactive terminal is now `/host/TERMINAL.ELF`: its VT
+> parser, grid, key encoder, and font renderer run in ring 3 and appear to the
+> kernel as an ordinary `RemoteSurface`. The kernel retains only the PTY,
+> termios, winsize, and line discipline. See
+> `docs/plans/2026-07-22-002-refactor-remove-kernel-terminal-emulator-plan.md`
+> and `src/window/CLAUDE.md`.
+
 ## Executive Summary
 
 This document outlines the design for AgenticOS's new window-based graphics system. The system will provide a unified abstraction for both GUI and text-based interfaces through a hierarchical window model, supporting multiple virtual screens, event routing, and flexible rendering capabilities. A key differentiator is the sophisticated text mode that seamlessly embeds real graphics within primarily text-based interfaces.

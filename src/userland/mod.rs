@@ -16,7 +16,6 @@ pub mod futex;
 pub mod gui;
 pub mod gui_gl;
 pub mod gui_syscalls;
-pub mod pty_syscalls;
 pub mod image;
 pub mod kernel_stack;
 pub mod launcher;
@@ -28,6 +27,7 @@ pub mod path;
 pub mod pipe;
 pub mod process_service;
 pub mod procfs;
+pub mod pty_syscalls;
 pub mod readiness;
 pub mod record_lock;
 pub mod signal;
@@ -550,12 +550,9 @@ pub fn release_active_image() -> (
                     (img, aspace)
                 }
                 None => {
-                    // The process was already force-removed out of band —
-                    // e.g. the window-close path
-                    // (`kill_ring3_processes_on_terminal`) tore down this
-                    // terminal's tree while its launcher thread was blocked.
-                    // Its AddressSpace / KernelStack were already reclaimed
-                    // there; just clear the dangling current pointer.
+                    // The process was already removed out of band. Its
+                    // AddressSpace / KernelStack were reclaimed there; just
+                    // clear the dangling current pointer.
                     crate::userland::lifecycle::set_current_user_pid(None);
                     (None, None)
                 }

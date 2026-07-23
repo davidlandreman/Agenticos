@@ -1,6 +1,6 @@
 use crate::arch::x86_64::syscall::SyscallArgs;
 use crate::graphics::composition::{ClientGlDraw, ClientGlVertex, CLIENT_GL_DRAW_DEPTH_TEST};
-use crate::userland::abi::{UserVaBounds, EAGAIN, EFAULT, EINVAL, ENOENT};
+use crate::userland::abi::{UserVaBounds, EAGAIN, EFAULT, EINVAL, ENOENT, ENOSYS};
 use crate::userland::fdtable::{FdSlot, FdTable, GuiEventHandle};
 use crate::userland::gui::{
     self, GuiEvent, GuiWindowRecord, GUI_EVENT_KEY, GUI_EVENT_MOUSE, GUI_EVENT_QUEUE_CAPACITY,
@@ -335,18 +335,28 @@ fn test_gui_cleanup_releases_pid_state() {
     gui::reset_for_test();
     let pid = 44;
     let handle = gui::allocate_handle(pid).expect("handle");
+    let surface_id = WindowId::new();
     gui::register_window(
         pid,
         handle,
         GuiWindowRecord {
             frame_id: WindowId::new(),
-            surface_id: WindowId::new(),
+            surface_id,
         },
     )
     .expect("register");
+    let _master = crate::terminal::pty::install_for_terminal(surface_id, 24, 80);
+    assert!(crate::terminal::pty::is_active_for_terminal(surface_id));
     assert_eq!(gui::window_count_for_test(pid), 1);
     gui::cleanup_process(pid);
     assert_eq!(gui::window_count_for_test(pid), 0);
+    assert!(!crate::terminal::pty::is_active_for_terminal(surface_id));
+}
+
+fn test_retired_terminal_spawn_syscall_is_enosys() {
+    let mut args = SyscallArgs::default();
+    args.rax = 5018;
+    assert_eq!(crate::userland::abi::syscall_dispatch(&mut args), ENOSYS);
 }
 
 fn test_gui_next_event_nonblocking_and_bad_pointer() {
@@ -598,11 +608,6 @@ fn test_shell_syscalls_require_registration() {
         crate::userland::gui_syscalls::gui_shell_window_action_handler(&mut action),
         EPERM
     );
-    let mut terminal = SyscallArgs::default();
-    assert_eq!(
-        crate::userland::gui_syscalls::gui_shell_spawn_terminal_handler(&mut terminal),
-        EPERM
-    );
     gui::reset_for_test();
 }
 
@@ -646,7 +651,8 @@ fn test_shell_window_list_and_action() {
 
     // Claim the shell role, then the frame must appear in the list at state 0.
     assert_eq!(gui::register_desktop_shell(pid), Ok(()));
-    let listed = crate::window::with_window_manager(|wm| wm.shell_window_list()).unwrap_or_default();
+    let listed =
+        crate::window::with_window_manager(|wm| wm.shell_window_list()).unwrap_or_default();
     let entry = listed
         .iter()
         .find(|(id, _, _)| *id == frame_id)
@@ -674,20 +680,26 @@ fn test_shell_window_list_and_action() {
     assert_eq!(reported_state, 0);
 
     // Minimize/activate cycle updates the reported state.
-    assert!(crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, 1))
-        .unwrap_or(false));
+    assert!(
+        crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, 1))
+            .unwrap_or(false)
+    );
     let minimized = crate::window::with_window_manager(|wm| wm.shell_window_list())
         .unwrap_or_default()
         .into_iter()
         .find(|(id, _, _)| *id == frame_id)
         .map(|(_, _, state)| state);
     assert_eq!(minimized, Some(1));
-    assert!(crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, 0))
-        .unwrap_or(false));
+    assert!(
+        crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, 0))
+            .unwrap_or(false)
+    );
 
     // Close removes the frame entirely.
-    assert!(crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, 4))
-        .unwrap_or(false));
+    assert!(
+        crate::window::with_window_manager(|wm| wm.shell_window_action(frame_id, 4))
+            .unwrap_or(false)
+    );
     let after_close =
         crate::window::with_window_manager(|wm| wm.shell_window_list()).unwrap_or_default();
     assert!(after_close.iter().all(|(id, _, _)| *id != frame_id));
@@ -717,6 +729,7 @@ pub fn get_tests() -> &'static [&'static dyn crate::lib::test_utils::Testable] {
         &test_theme_broadcast_targets_gui_owners_and_coalesces,
         &test_settings_broadcast_targets_gui_owners_and_coalesces,
         &test_gui_cleanup_releases_pid_state,
+        &test_retired_terminal_spawn_syscall_is_enosys,
         &test_gui_next_event_nonblocking_and_bad_pointer,
         &test_gui_syscall_argument_errors,
         &test_gui_create_destroy_lifecycle,

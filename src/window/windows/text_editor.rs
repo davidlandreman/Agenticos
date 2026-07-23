@@ -1,7 +1,7 @@
 //! Multi-line text editor widget with full cursor navigation
 //!
-//! Unlike TextWindow (grid-based), TextEditor uses Vec<String> for lines
-//! and supports full cursor movement, text insertion, and editing.
+//! Uses `Vec<String>` lines and supports full cursor movement, insertion, and
+//! editing.
 //!
 //! Per U7, `TextEditor` no longer manages its own scroll state. Callers
 //! wrap it in a [`ScrollView`](super::scroll_view::ScrollView) and feed

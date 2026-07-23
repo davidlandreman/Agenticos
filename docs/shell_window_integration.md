@@ -1,12 +1,12 @@
 # Shell Window Integration Plan
 
-> **Historical.** This document described the integration of the
-> kernel-side `ShellProcess` (since deleted) with the window system.
-> As of 2026-05-16 the terminal launches ring-3 zsh
-> (`/host/ZSH.ELF`) directly — see
-> `docs/plans/2026-05-16-004-feat-zsh-default-terminal-and-gui-launchers-plan.md`
-> and `src/window/terminal_factory.rs::spawn_zsh_for_terminal`. Kept
-> for context on the prior design.
+> **Historical.** This document describes the deleted kernel
+> `ShellProcess`/`TerminalWindow` design. The current terminal is
+> `/host/TERMINAL.ELF`: the emulator and renderer run in ring 3, it opens a
+> kernel PTY master, and it forks/execs zsh on the slave. Start and
+> `/bin/terminal` both launch that ELF. See
+> `docs/plans/2026-07-22-002-refactor-remove-kernel-terminal-emulator-plan.md`.
+> Everything below is retained only as prior-design context.
 
 ## Overview
 

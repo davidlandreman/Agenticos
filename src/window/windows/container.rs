@@ -29,7 +29,6 @@ impl ContainerWindow {
             background_color: crate::window::theme::controls::palette().content_bg,
         }
     }
-
 }
 
 impl Window for ContainerWindow {

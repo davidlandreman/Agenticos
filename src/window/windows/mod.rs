@@ -26,8 +26,6 @@ pub mod remote_surface;
 pub mod scroll_view;
 pub mod splitter;
 pub mod status_bar;
-pub mod terminal;
-pub mod text;
 #[allow(dead_code)]
 pub mod text_editor;
 #[allow(dead_code)]
@@ -55,7 +53,6 @@ pub use scroll_view::ScrollView;
 pub use splitter::{Splitter, SplitterOrientation};
 #[allow(unused_imports)]
 pub use status_bar::StatusBar;
-pub use terminal::TerminalWindow;
 #[allow(unused_imports)]
 pub use text_editor::TextEditor;
 #[allow(unused_imports)]

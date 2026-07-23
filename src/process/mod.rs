@@ -150,7 +150,7 @@ pub fn block_current_kernel_thread_on_io(token: u64) {
 ///
 /// # Arguments
 /// * `name` - Human-readable name for the process
-/// * `terminal_id` - Optional terminal window for I/O
+/// * `terminal_id` - Optional controlling terminal surface for I/O
 /// * `entry_fn` - The function to run as the process entry point
 ///
 /// # Returns

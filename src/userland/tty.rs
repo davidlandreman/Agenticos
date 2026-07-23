@@ -61,9 +61,8 @@ pub fn is_echo() -> bool {
     snapshot().is_echo()
 }
 
-/// Winsize for the current process's pty. Derived from the
-/// hosting TerminalWindow's grid when that window is bound; falls back
-/// to the legacy pty's defaults otherwise.
+/// Winsize for the current process's pty. `TERMINAL.ELF` seeds and updates it
+/// through the master-side PTY ABI; callers without a pty receive defaults.
 pub fn winsize() -> Winsize {
     if let Some(slave) = current_process_slave() {
         return slave.winsize();
@@ -72,29 +71,12 @@ pub fn winsize() -> Winsize {
         return slave.winsize();
     }
     Winsize::new(
-        crate::terminal::config::DEFAULT_ROWS,
-        crate::terminal::config::DEFAULT_COLS,
+        crate::terminal::pty::DEFAULT_ROWS,
+        crate::terminal::pty::DEFAULT_COLS,
     )
 }
 
 fn current_process_slave() -> Option<pty::PtySlave> {
     let tid = crate::userland::lifecycle::with_current_group(|p| p.terminal_id)?;
     pty::slave_for_terminal(tid)
-}
-
-/// Per-terminal termios accessors. Use these from contexts that run
-/// outside a ring-3 process (the compositor kernel thread, input
-/// handlers, etc.) where `current_process_slave` would resolve to the
-/// wrong pty — or fall back to the legacy default and lie about the
-/// mode.
-pub fn is_canonical_for_terminal(terminal_id: crate::window::WindowId) -> bool {
-    pty::slave_for_terminal(terminal_id)
-        .map(|s| s.termios().is_canonical())
-        .unwrap_or(true)
-}
-
-pub fn is_echo_for_terminal(terminal_id: crate::window::WindowId) -> bool {
-    pty::slave_for_terminal(terminal_id)
-        .map(|s| s.termios().is_echo())
-        .unwrap_or(true)
 }

@@ -32,11 +32,11 @@ shell. At boot `src/kernel.rs` unconditionally calls
 desktop-root wallpaper window — no kernel taskbar chrome) and
 `commands::desktop::spawn_ring3_desktop_shell` (`/host/DESKTOP.ELF`).
 
-`DESKTOP.ELF` drives the compositor purely through the **desktop-shell protocol
-syscalls** (5013–5016) plus the `GUI_WINDOW_PANEL`/`GUI_WINDOW_UNDECORATED`
-chrome flags, and launches apps with ordinary `fork`+`execve` (Terminal uses
-`gui_shell_spawn_terminal`). The kernel keeps the compositor, desktop-root
-wallpaper, and terminal/PTY service. Its taskbar/Start menu/Run prompt follow
+`DESKTOP.ELF` drives the compositor through the **desktop-shell protocol
+syscalls** (5015–5017) plus the `GUI_WINDOW_PANEL`/`GUI_WINDOW_UNDECORATED`
+chrome flags, and launches every app — including `/host/TERMINAL.ELF` — with
+ordinary `fork`+`execve`. The kernel keeps the compositor, desktop-root
+wallpaper, and PTY service. Its taskbar/Start menu/Run prompt follow
 the active Classic/Aero/Futurism theme through the ring-3
 `userland/libs/gui::theme` helpers (`draw_taskbar_surface`, `draw_task_button`,
 `taskbar_text`, `draw_menu_surface`, `draw_field`) — full parity for the solid
@@ -60,13 +60,12 @@ See `docs/plans/2026-07-21-001-feat-ring3-desktop-shell-plan.md` and
 ## Desktop launch paths
 
 Launch policy lives in the ring-3 shell (`userland/apps/desktop/`), not the
-kernel. The kernel side only provides the process/terminal services the shell
-calls into.
+kernel.
 
 - Start → Programs contains Terminal, File Manager, Web Browser, Notepad,
   Painting, Calc, GL Arena, and Task Manager. The shell launches standalone
-  apps with ordinary ring-3 `fork` + `execve`; Terminal uses the
-  `gui_shell_spawn_terminal` syscall.
+  apps with ordinary ring-3 `fork` + `execve`; Terminal executes
+  `/host/TERMINAL.ELF`.
 - Start → Run opens the shell's own ring-3 Run window. Submitted text is passed
   unchanged as the single command argument to `/host/ZSH.ELF -c`, using the same
   `/bin:/host` PATH as interactive terminals.

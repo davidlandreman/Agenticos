@@ -126,7 +126,7 @@ pub struct ProcessControlBlock {
     /// Size of the stack in bytes
     pub stack_size: usize,
 
-    /// Associated terminal window (for I/O routing)
+    /// Associated controlling terminal surface (for I/O routing)
     pub terminal_id: Option<WindowId>,
 
     /// Input buffer for stdin (lines from terminal)

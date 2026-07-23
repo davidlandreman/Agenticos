@@ -120,7 +120,6 @@ const NR_PTY_SET_WINSIZE: u64 = 5014;
 const NR_GUI_SHELL_REGISTER: u64 = 5015;
 const NR_GUI_SHELL_LIST_WINDOWS: u64 = 5016;
 const NR_GUI_SHELL_WINDOW_ACTION: u64 = 5017;
-const NR_GUI_SHELL_SPAWN_TERMINAL: u64 = 5018;
 
 /// `pty_open` flag: set FD_CLOEXEC on the returned master descriptor.
 pub const PTY_OPEN_CLOEXEC: u64 = 0x80000;
@@ -531,12 +530,6 @@ pub fn gui_shell_list_windows(records: &mut [ShellWindowRecord]) -> i64 {
 /// own. Desktop-shell only.
 pub fn gui_shell_window_action(frame_id: u64, action: u32) -> i64 {
     unsafe { syscall2(NR_GUI_SHELL_WINDOW_ACTION, frame_id, action as u64) }
-}
-
-/// Create a terminal window bound to a fresh zsh; returns its frame id or a
-/// negative errno. Desktop-shell only.
-pub fn gui_shell_spawn_terminal() -> i64 {
-    unsafe { syscall0(NR_GUI_SHELL_SPAWN_TERMINAL) }
 }
 
 pub fn gui_win_present(handle: u32, pixels: &[u32], width: u32, height: u32) -> i64 {

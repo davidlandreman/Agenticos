@@ -77,7 +77,9 @@ These have been measured; treat them as constraints, not preferences:
 - **Scrolling = `memmove`.** Don't redraw all rows when shifting; move them in memory.
 - **Static allocation** for the back buffer avoids heap fragmentation in a critical path.
 - **Legacy cursor uses direct-framebuffer.** The double-buffer path's full-frame copy is too slow for cursor latency (see `src/window/CLAUDE.md`).
-- **`TextWindow` is incremental.** Dirty-cell tracking avoids redrawing all glyphs on every keystroke.
+- **Terminal glyph rendering is userland-owned.** `TERMINAL.ELF` and
+  `userland/libs/termgrid` own terminal cell rasterization; do not add a second
+  kernel terminal-font/grid path.
 
 ## Known architecture issues (open work)
 

@@ -19,6 +19,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MAX_PENDING_LAUNCHES: usize = 32;
 
+#[cfg(feature = "test")]
 pub const ZSH_HOST_PATH: &str = "/host/ZSH.ELF";
 
 /// Baseline environment for kernel-launched user programs.
@@ -37,13 +38,21 @@ pub const DEFAULT_USER_ENV: [&str; 8] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LaunchId(pub u64);
 
-/// Terminal result delivered outside every process/scheduler/service lock.
+/// Final result delivered outside every process/scheduler/service lock.
 pub enum LaunchOutcome {
     Failed {
+        #[expect(
+            dead_code,
+            reason = "launch identity is part of the completion contract"
+        )]
         id: LaunchId,
         error: String,
     },
     Exited {
+        #[expect(
+            dead_code,
+            reason = "launch identity is part of the completion contract"
+        )]
         id: LaunchId,
         pid: u32,
         kind: ExitKind,
@@ -75,6 +84,10 @@ impl LaunchSpec {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "test"),
+        expect(dead_code, reason = "explicit-terminal launch regression API")
+    )]
     pub fn with_terminal(mut self, terminal_id: WindowId) -> Self {
         self.terminal_id = Some(terminal_id);
         self
@@ -121,8 +134,6 @@ struct LaunchRequest {
 
 struct LaunchRecord {
     pid: Option<u32>,
-    terminal_id: Option<WindowId>,
-    cancelled: bool,
     completion: Option<CompletionHandler>,
 }
 
@@ -153,8 +164,6 @@ impl ServiceState {
             id,
             LaunchRecord {
                 pid: None,
-                terminal_id: spec.terminal_id,
-                cancelled: false,
                 completion: spec.completion,
             },
         );
@@ -206,23 +215,6 @@ pub fn submit(spec: LaunchSpec) -> Result<LaunchId, SubmitError> {
     Ok(id)
 }
 
-/// Cancel queued/in-flight launches for a terminal and stop any installed
-/// process tree associated with it.
-pub fn cancel_for_terminal(terminal_id: WindowId) {
-    {
-        let mut state = STATE.lock();
-        for record in state.records.values_mut() {
-            if record.terminal_id == Some(terminal_id) {
-                record.cancelled = true;
-                // A terminal that no longer exists cannot consume a callback.
-                record.completion = None;
-            }
-        }
-    }
-    crate::userland::lifecycle::kill_ring3_processes_on_terminal(terminal_id);
-    publish_work();
-}
-
 /// Called from the divergent ring-3 exit path. The Process entry remains the
 /// durable work item, so this path performs no allocation.
 pub fn notify_process_exit(pid: u32) {
@@ -249,7 +241,7 @@ fn service_main() {
         while reap_one() {}
 
         // Keep the service-state guard out of `process_request`: that path
-        // publishes the PID and checks cancellation by taking STATE again.
+        // publishes the PID by taking STATE again.
         // A lock temporary in the `if let` scrutinee otherwise lives through
         // the branch and self-deadlocks with interrupts disabled.
         let request = { STATE.lock().queue.pop_front() };
@@ -269,8 +261,6 @@ fn adopt_one_orphan() -> bool {
     let Some(pid) = crate::userland::lifecycle::adopt_one_orphan_for_kernel_reaper() else {
         return false;
     };
-    let terminal_id =
-        crate::userland::lifecycle::with_process(pid, |process| process.terminal_id).flatten();
     let mut state = STATE.lock();
     let id = LaunchId(state.next_id);
     state.next_id = state.next_id.saturating_add(1);
@@ -278,8 +268,6 @@ fn adopt_one_orphan() -> bool {
         id,
         LaunchRecord {
             pid: Some(pid),
-            terminal_id,
-            cancelled: false,
             completion: None,
         },
     );
@@ -292,17 +280,6 @@ fn adopt_one_orphan() -> bool {
 }
 
 fn process_request(request: LaunchRequest) {
-    let cancelled = STATE
-        .lock()
-        .records
-        .get(&request.id)
-        .map(|record| record.cancelled)
-        .unwrap_or(true);
-    if cancelled {
-        STATE.lock().records.remove(&request.id);
-        return;
-    }
-
     let argv_refs: Vec<&str> = request.argv.iter().map(String::as_str).collect();
     let envp_refs: Vec<&str> = request.envp.iter().map(String::as_str).collect();
     let prepared = crate::userland::launcher::prepare_user_binary_unstarted(
@@ -317,19 +294,18 @@ fn process_request(request: LaunchRequest) {
             let _ = crate::userland::lifecycle::with_process(pid, |process| {
                 process.cwd = request.cwd;
             });
-            let cancelled = {
+            let published = {
                 let mut state = STATE.lock();
                 match state.records.get_mut(&request.id) {
                     Some(record) => {
                         record.pid = Some(pid);
-                        record.cancelled
+                        true
                     }
-                    None => true,
+                    None => false,
                 }
             };
-            if cancelled {
+            if !published {
                 drop(crate::userland::lifecycle::remove_process(pid));
-                STATE.lock().records.remove(&request.id);
                 return;
             }
             crate::userland::lifecycle::mark_ring3_ready(pid);
@@ -376,14 +352,10 @@ fn reap_one() -> bool {
                     Some((process.exit_kind, process.exit_code))
                 }
             });
-            match status {
-                Some(Some((kind, code))) => Some((*id, pid, Some((kind, code)))),
-                None if record.cancelled => Some((*id, pid, None)),
-                _ => None,
-            }
+            status.flatten().map(|(kind, code)| (*id, pid, kind, code))
         })
     };
-    let Some((id, pid, status)) = candidate else {
+    let Some((id, pid, kind, code)) = candidate else {
         return false;
     };
 
@@ -394,7 +366,7 @@ fn reap_one() -> bool {
         .records
         .remove(&id)
         .and_then(|mut record| record.completion.take());
-    if let (Some((kind, code)), Some(completion)) = (status, completion) {
+    if let Some(completion) = completion {
         completion(LaunchOutcome::Exited {
             id,
             pid,

@@ -225,10 +225,6 @@ fn init_mcp_bridge() {
         debug_info!("Registered {} kernel tools", reg.enumerate().len());
     }
 
-    // Synthetic terminal id used by shell_run to capture stdout. Must be
-    // registered explicitly; otherwise write_to_terminal_id silently drops.
-    crate::window::terminal::register_terminal(crate::tools::shell_run::RPC_TERMINAL_ID);
-
     // Spawn the dispatcher loop as a kernel process so long tool calls don't
     // stall the main event loop or input.
     crate::process::spawn_process(String::from("rpc-dispatcher"), None, || {
